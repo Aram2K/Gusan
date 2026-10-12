@@ -1,9 +1,21 @@
-; ─── Transcribe — Inno Setup installer ──────────────────────────────────────
+; ─── Gusan — Inno Setup installer ───────────────────────────────────────────
 ; Builds a single TranscribeApp-Setup.exe that installs the app, registers it
 ; in Add/Remove Programs, optionally creates a desktop shortcut + start-at-login entry, and
 ; closes any running instance during silent updates.
+;
+; Gusan was called Transcribe until 2.0.0. Everything people see says Gusan
+; (MyAppName). What existing installs depend on keeps its old name: AppId,
+; TranscribeApp.exe, the task names, the data folders {userappdata}\Transcribe
+; and {localappdata}\Transcribe (storage.APP_DIR_NAME) and the start-at-login
+; Run value (MyRunValueName).
 
-#define MyAppName "Transcribe"
+#define MyAppName "Gusan"
+; The HKCU Run value name - must equal autostart.VALUE_NAME, the value the app
+; itself writes and removes. Never rename it: a second name would start the
+; app twice and lose a Task Manager "Disabled" switch.
+#define MyRunValueName "Transcribe"
+; The name 1.x installers gave the shortcuts (removed in [InstallDelete]).
+#define MyOldAppName "Transcribe"
 #define MyAppPublisher "Aram Adamyan"
 #define MyAppPublisherURL "https://aibuben.xyz"
 #define MyAppURL "https://github.com/Aram2K/transcribe-app"
@@ -22,8 +34,13 @@ AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppPublisherURL}
 AppSupportURL={#MyAppURL}/issues
 AppUpdatesURL={#MyAppURL}/releases
+; New installs go to ...\Gusan; an upgrade keeps its folder (...\Transcribe).
 DefaultDirName={autopf}\{#MyAppName}
+UsePreviousAppDir=yes
+; The Start Menu folder becomes "Gusan" on upgrades too; the 1.x "Transcribe"
+; folder and its shortcuts are removed in [InstallDelete].
 DefaultGroupName={#MyAppName}
+UsePreviousGroup=no
 DisableProgramGroupPage=yes
 DisableDirPage=auto
 ArchitecturesAllowed=x64compatible
@@ -54,6 +71,20 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 ; setting, and an update's wizard must not silently re-tick or untick it.
 Name: "startup";     Description: "Start {#MyAppName} automatically when Windows starts"; GroupDescription: "Startup options:"; Check: not IsUpgrade
 
+[InstallDelete]
+; Upgrades from 1.x: the shortcuts were called "Transcribe". The new ones are
+; called "Gusan" ([Icons]), so without this the Start Menu and the desktop
+; would show both. {autoprograms}\Transcribe was the 1.x {group}.
+Type: files; Name: "{autoprograms}\{#MyOldAppName}\{#MyOldAppName}.lnk"
+Type: files; Name: "{autoprograms}\{#MyOldAppName}\Uninstall {#MyOldAppName}.lnk"
+Type: dirifempty; Name: "{autoprograms}\{#MyOldAppName}"
+Type: files; Name: "{autodesktop}\{#MyOldAppName}.lnk"
+; Deliberately NOT the Startup-folder shortcut that installers before 1.9.4
+; made ({userstartup}\Transcribe.lnk): the app moves it to the Run value on
+; its first launch and keeps Task Manager's on/off switch with it
+; (autostart.LEGACY_SHORTCUT). Deleting it here would quietly turn start at
+; login off for those users. This installer never creates a startup shortcut.
+
 [Files]
 Source: "..\dist\TranscribeApp\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
@@ -71,7 +102,9 @@ Name: "{autodesktop}\{#MyAppName}";  Filename: "{app}\{#MyAppExeName}"; Paramete
 ; be; there each user's first launch registers from {app}\autostart.default.
 ; The old Startup-folder shortcut (installers before 1.9.4) is migrated by the
 ; app, which first reads whether Task Manager had it switched off.
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "{#MyAppName}"; ValueData: """{app}\{#MyAppExeName}"" --background"; Tasks: startup; Check: not IsAdminInstallMode
+; The value keeps its 1.x name (MyRunValueName = autostart.VALUE_NAME); Task
+; Manager shows "Gusan" from the exe's version info.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "{#MyRunValueName}"; ValueData: """{app}\{#MyAppExeName}"" --background"; Tasks: startup; Check: not IsAdminInstallMode
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--show-settings"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
@@ -124,7 +157,7 @@ begin
     wpSelectTasks,
     'Privacy',
     'Anonymous usage analytics',
-    'Help improve Transcribe by sharing safe usage events. Analytics is optional. It never includes audio, transcription text, clipboard content, API keys, file paths, microphone names, or window titles.',
+    'Help improve {#MyAppName} by sharing safe usage events. Analytics is optional. It never includes audio, transcription text, clipboard content, API keys, file paths, microphone names, or window titles.',
     False,
     False
   );
@@ -151,7 +184,7 @@ begin
     // Ticked on purpose: no stale Task Manager switch-off (e.g. from the
     // portable zip) may keep the fresh entry disabled.
     if (Choice = 'on') and (not IsAdminInstallMode) then
-      RegDeleteValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run', '{#MyAppName}');
+      RegDeleteValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run', '{#MyRunValueName}');
   end;
   if (CurStep = ssPostInstall) and (not WizardSilent) then
   begin
@@ -182,11 +215,11 @@ begin
   // own HKCU; only the uninstalling account's is removed here. Others are left
   // pointing at the removed exe, which Windows simply skips at sign-in.
   if (CurUninstallStep = usUninstall) and
-     RegQueryStringValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Run', '{#MyAppName}', RunValue) and
+     RegQueryStringValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Run', '{#MyRunValueName}', RunValue) and
      (Pos(Lowercase(ExpandConstant('{app}\{#MyAppExeName}')), Lowercase(RunValue)) > 0) then
   begin
-    RegDeleteValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Run', '{#MyAppName}');
-    RegDeleteValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run', '{#MyAppName}');
+    RegDeleteValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Run', '{#MyRunValueName}');
+    RegDeleteValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run', '{#MyRunValueName}');
   end;
 end;
 

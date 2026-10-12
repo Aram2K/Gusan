@@ -1,4 +1,58 @@
-"""Live Assistance: a private, liquid-glass copilot overlay for live calls.
+"""Live Assistant: a private, liquid-glass copilot card for live calls.
+
+Integration notes for Wave 4 (Gusan 2.0; this module is the card, not the page)
+* Kept identifiers: ACTION_LIVE_ASSIST "live_assist", telemetry
+  live_prompter_opened / _started / _suggestion, IPC action "live_prompter",
+  every live_assist_* config key, objectName laPrivate. Only words changed.
+* Show-only path for the page, the tray and the reminder toast:
+  ``card.open_card()`` (show + raise, tracks live_prompter_opened when it was
+  hidden). ``toggle()`` stays for the hotkey. Done (Wave 4): the controller's
+  ``show_live_assist()`` builds the card like toggle_live_assist does (fed by
+  app.meeting_session.sig_chunk / sig_summary), then open_card(). Start /
+  Stop drive app.meeting_session (start(source="live_assist") / stop()).
+* Languages: live_assist_language "" = the dictation language;
+  live_assist_output_language "" = the call's own (no "Respond in" hint).
+* Public setters - each updates the card at once, writes the cfg key in place,
+  schedules the debounced save (app.schedule_config_save, else save_config)
+  and emits app.sig_setting_changed(key) when the value changed:
+      set_private(on)        live_assist_private   (Hide from screen share)
+      set_auto_answer(on)    live_assist_auto_answer
+      set_screen_auto(on)    live_assist_screen_auto (Let it see my screen)
+      set_theme(name)        live_assist_theme ("light" | "dark")
+      set_context(text)      live_assist_context (About my calls)
+      set_opacity(value)     live_assist_opacity (0.55-1.0)
+      reset_position()       live_assist_pos -> None, back to the default spot
+  (dragging the card saves live_assist_pos = [x, y] the same way). The sync
+  only normalises: a value the card can't take (opacity out of range, an
+  unknown theme, an over-long context) is written back clamped once.
+  Signals: ``settings_changed(key, value)`` whenever the card's own state for
+  one of those keys changes (its buttons, a drag, a setter, or a cfg sync), and
+  ``hide_status_changed(key)`` when the chip's truthful state changes.
+* The card follows cfg by itself: it connects app.sig_setting_changed to
+  ``on_setting_changed(key)`` when the app has that signal (theme, private,
+  auto_answer, screen_auto, context, opacity; live_assist_pos set to None
+  re-centres it). So a page may just call app.set_setting(key, value) - or the
+  card setter when the card exists; both end in the same place, and the sync
+  never writes a valid value back. settings_apply already forwards live_assist_private to
+  set_private (no change needed there).
+* The answer footer names who wrote it ("Gusan Cloud", "<local model> on this
+  computer", "your Cerebras key"). engine_choice.runs_on(app,
+  "live_assistant") has the page's longer label (e.g. "Gusan Cloud · DeepSeek
+  V4.1 Flash") if the two should match.
+* Hidden status without the card open: ``live_context.hide_status(wanted)``
+  (Qt-free; key/text/tone/icon/headline/tip). With the card open, prefer
+  ``card.hide_state()`` - it reflects what the window really got. Page hero:
+  status.headline ("Hidden on screen share"); chip: status.text + status.tone
+  + status.icon ("incognito" | "eye" | "eye_off"; ui/components/icons has no
+  "eye" yet - add it or use ui.icons.eye_icon). Settings › Privacy can ask
+  hide_status(cfg["overlay_private"]) for the dictation bar too.
+* Done (Wave 4, main.py): the tray (ui/tray_menu.py) and toggle_live_assist's
+  failure hint say "Live Assistant". The card calls _pro_upsell("Live
+  Assistant"); main.PRO_FEATURE_EVENT keeps paywall_viewed's feature
+  property at the 1.9 value "Live Assistance", and the Pro window shows
+  "Live Assistant". The calendar's "Record + Live Assistant" is
+  AppController.record_from_calendar(m, with_assist=True): the meeting session
+  starts, then show_live_assist().
 
 What it is (product contract):
 * Floats above Zoom/Teams/Meet/anything, always on top, draggable, with a
@@ -11,10 +65,12 @@ What it is (product contract):
 * A session context: before (or during) a call the user writes what it is
   about - who they are, who they're talking to, what they want. It's locked
   in for the session: every answer is shaped by it.
-* PRIVATE by default: excluded from screen capture (ui/glass.py) so it never
-  appears on a shared screen or in a recording while staying visible on the
-  user's own monitor. A privacy feature for the user's private notes - never
-  marketed as a way to deceive anyone; recording-consent guidance applies.
+* HIDDEN on screen share by default: excluded from screen capture
+  (ui/glass.py) so it never appears on a shared screen or in a recording while
+  staying visible on the user's own monitor. The chip says "Hidden" only when
+  that is true (live_context.hide_status). A privacy feature for the user's
+  private notes - never marketed as a way to deceive anyone; recording-consent
+  guidance applies.
 * An image can go with a question: a screenshot cropped inside the card
   itself (nothing new appears on the screen) or one pasted with Ctrl+V.
 * Liquid glass: because the window is excluded from capture, the pixels
@@ -49,8 +105,9 @@ from PySide6.QtWidgets import (
 
 import actions
 from live_context import (  # noqa: F401 - re-exported for callers of this module
-    CONTEXT_CHARS, HISTORY_TURNS, SOLVE_SCREEN, TAIL_CHARS, clip_context, last_question,
-    looks_like_question, rolling_context, should_attach_screen,
+    CONTEXT_CHARS, HISTORY_TURNS, SOLVE_SCREEN, TAIL_CHARS, HideStatus, clip_context,
+    hide_status, last_question, looks_like_question, mac_partial_tip, private_state,
+    rolling_context, should_attach_screen,
 )
 from ui import glass
 
@@ -94,6 +151,8 @@ USER_ANSWER_HOLD_S = 12
 
 ASK_PLACEHOLDER = "Ask anything about the call or your screen…"
 ASK_SENT = "✓ Sent - answering…"
+TRANSCRIPT_PLACEHOLDER = "Press Start. What's said shows up here."
+ANSWER_PLACEHOLDER = "Answers appear here the moment someone asks you something."
 
 # Sent with an image and no typed question.
 SNIP_QUESTION = "Answer or solve what's in the attached image. Give the answer directly."
@@ -112,6 +171,11 @@ QUICK_ACTIONS = (
                    "one line each."),
     ("Solve screen", SOLVE_SCREEN),
 )
+QUICK_TIPS = {
+    "Answer": "Answer the latest question of the call again.",
+    "Follow-ups": "Three follow-up questions you could ask now.",
+    "Solve screen": "Solve or answer what's on your screen.",
+}
 
 
 def clamp_to_rects(x, y, w, h, rects, margin=8):
@@ -128,39 +192,51 @@ def clamp_to_rects(x, y, w, h, rects, margin=8):
             max(t + margin, min(y, b - h - margin)))
 
 
-def mac_partial_tip(macos26=False):
-    """The macOS badge tooltip: the sharingType flag (what Electron's
-    setContentProtection sets) is honoured by some capture paths, not all -
-    see glass.capture_exclusion_supported. Never claims more."""
-    caveat = "Not yet verified on macOS 26." if macos26 else "Apple doesn't guarantee it."
-    return ("Uses macOS's private-window setting. Screenshots skip it, and so do some "
-            "screen shares (reportedly Zoom's \u201c\u2026with window filtering\u201d capture "
-            "modes), but QuickTime and \u2318\u21e75 recordings show it, and so can other "
-            "apps and settings. " + caveat + " Test from a second device before relying on "
-            "it, or share a single window. Click to make it visible.")
+# The Hidden chip's colours (background, text, border) per card theme: the
+# light glass takes the deep tints, the dark glass the bright ones (#15803d
+# is unreadable on dark glass). The green also colours the live timer.
+_CHIP_COLORS = {
+    "light": {
+        "ok": ("rgba(34,197,94,0.16)", "#15803d", "rgba(34,197,94,0.45)"),
+        "red": ("rgba(239,68,68,0.14)", "#b91c1c", "rgba(239,68,68,0.45)"),
+        "amber": ("rgba(245,158,11,0.16)", "#b45309", "rgba(245,158,11,0.5)"),
+    },
+    "dark": {
+        "ok": ("rgba(34,197,94,0.16)", "#4ade80", "rgba(34,197,94,0.45)"),
+        "red": ("rgba(239,68,68,0.18)", "#fca5a5", "rgba(239,68,68,0.5)"),
+        "amber": ("rgba(245,158,11,0.18)", "#fcd34d", "rgba(245,158,11,0.5)"),
+    },
+}
+
+# What a click on the chip does, after its explanation.
+_CHIP_CLICK = {
+    "on": "Click to show it in shares - e.g. for your own recording.",
+    "off": "Click to hide it from shares.",
+    "partial": "Click to make it visible.",
+}
 
 
-def private_state(wanted, supported, remote, excluded, partial=False):
-    """(key, chip text) - always TRUTHFUL about what the OS actually did. The
-    badge is the whole privacy promise; it must never say hidden when the
-    window is in fact capturable (macOS, old Windows, RDP, API refusal).
+def chip_colors(tone, theme="light"):
+    """(background, text, border) of the Hidden chip for a tone and card theme."""
+    colors = _CHIP_COLORS.get(theme, _CHIP_COLORS["light"])
+    return colors.get(tone, colors["amber"])
 
-    ``partial``: macOS, where the window's sharingType is set to none and
-    reads back so - some capture paths honour it, some don't (QuickTime,
-    Zoom's default capture mode), and Apple promises nothing. Never "Private"."""
-    # Short on purpose: the chip shares the header with Listen/Stop and three
-    # icon buttons; the full explanation lives in its tooltip.
-    if not wanted:
-        return "off", "VISIBLE in share"
-    if remote:
-        return "unavailable", "PRIVATE n/a · remote"
-    if not supported:
-        if partial:
-            return "partial", "MAY be hidden"
-        return "unavailable", "PRIVATE n/a here"
-    if excluded:
-        return "on", "PRIVATE · not in share"
-    return "failed", "NOT PRIVATE · visible"
+
+def _engine_label(engine):
+    """Who wrote the answer, in plain words for the footer: Gusan Cloud, the
+    local model's name, or the user's own key ("" when unknown)."""
+    info = actions.ACTION_MODELS.get(engine or "", {})
+    kind = info.get("kind")
+    if kind == "managed":
+        return "Gusan Cloud"
+    if kind == "local_llm":
+        return f"{info.get('label', engine)} on this computer"
+    if kind == "cloud":
+        short = {actions.API_CEREBRAS_ID: "Cerebras", actions.API_GEMINI_ID: "Gemini",
+                 actions.API_ANTHROPIC_ID: "Anthropic",
+                 actions.API_MISTRAL_ID: "Mistral"}.get(engine, "API")
+        return f"your {short} key"
+    return ""
 
 
 def _looks_like_capture_hole(small_img, black_max=12, band_frac=0.14):
@@ -202,6 +278,23 @@ def render_markdown(text_edit, md):
         text_edit.setHtml(html)
     except Exception:
         text_edit.setPlainText(md or "")
+
+
+STREAM_RENDER_MS = 120      # a streaming answer is re-rendered at most this often
+
+
+def streaming_markdown(md):
+    """An answer that is still streaming, safe to render: an open ``` fence
+    is closed, and a half-written ** or ` is left out until its pair arrives,
+    so Markdown markers never flash as raw characters."""
+    s = md or ""
+    if s.count("```") % 2:
+        return s + "\n```"
+    for mark in ("**", "`"):
+        if s.count(mark) % 2:
+            i = s.rfind(mark)
+            s = s[:i] + s[i + len(mark):]
+    return s
 
 
 def jpeg_b64(img, max_w=1600, quality=80):
@@ -805,11 +898,17 @@ class LiveAssistOverlay(QWidget):
     sig_status = Signal(str)                 # short footer note from the worker
     sig_partial = Signal(str, int)           # streamed text so far, generation
     sig_export_done = Signal(str, str)       # saved path, error
+    # The card's own state for a live_assist_* key changed (its buttons, a
+    # public setter or a cfg sync): (config key, new value). Pages listen.
+    settings_changed = Signal(str, object)
+    # The Hidden chip's truthful state changed: on | off | failed | partial | unavailable.
+    hide_status_changed = Signal(str)
 
     def __init__(self, main_app=None):
         super().__init__()
         self.app = main_app
         cfg = self.app.cfg if self.app else {}
+        self._hide = None                  # the chip's HideStatus (hide_state())
         self._theme_name = cfg.get("live_assist_theme", "light")
         if self._theme_name not in _THEMES:
             self._theme_name = "light"
@@ -854,7 +953,7 @@ class LiveAssistOverlay(QWidget):
         # macOS hides Qt.Tool windows when the app loses focus - which is
         # exactly when the user is in Zoom. No-op elsewhere.
         self.setAttribute(Qt.WA_MacAlwaysShowToolWindow, True)
-        self.setWindowTitle("Live Assistance")
+        self.setWindowTitle("Live Assistant")
         self.setFixedSize(EXPANDED_W, EXPANDED_H)
 
         self.sig_suggestion.connect(self._on_suggestion)
@@ -890,6 +989,15 @@ class LiveAssistOverlay(QWidget):
         self._spec_timer.timeout.connect(self._track_specular)
         self._spec_timer.setInterval(60)
 
+        # A page or Settings changed one of our keys through app.set_setting:
+        # follow it (on_setting_changed never writes back).
+        sig = getattr(self.app, "sig_setting_changed", None) if self.app else None
+        if sig is not None:
+            try:
+                sig.connect(self.on_setting_changed)
+            except Exception:
+                logger.debug("Live Assistant: no settings sync", exc_info=True)
+
     # ── build ──
     def _build(self):
         root = QVBoxLayout(self)
@@ -900,13 +1008,22 @@ class LiveAssistOverlay(QWidget):
         bl = QHBoxLayout(self.bar)
         bl.setContentsMargins(4, 2, 0, 2)
         bl.setSpacing(8)
-        self.lbl_title = _ElidedLabel("Live Assistance", self.bar)
+        self.lbl_title = _ElidedLabel("Live Assistant", self.bar)
         bl.addWidget(self.lbl_title)
-        # Idle: a solid Start button. Live: a green timer + a red stop button.
+        # Idle: a solid Start button with its PRO tag (the card's Pro action).
+        # Live: a green timer + a red stop button.
         self.btn_start = QPushButton("Start", self.bar)
         self.btn_start.setObjectName("laStart")
         self.btn_start.setCursor(Qt.PointingHandCursor)
-        self.btn_start.setToolTip("Start live transcription of this call (system audio + "
+        try:
+            from ui.icons import pro_pill_icon
+            self.btn_start.setIcon(pro_pill_icon(30, 16))
+            self.btn_start.setIconSize(QSize(30, 16))
+            # Right to left puts the tag after the word, as in the mockups.
+            self.btn_start.setLayoutDirection(Qt.RightToLeft)
+        except Exception:
+            logger.debug("PRO tag on Start unavailable", exc_info=True)
+        self.btn_start.setToolTip("Start listening to this call (its sound and your "
                                   "microphone).")
         self.btn_start.clicked.connect(self._start_listening)
         bl.addWidget(self.btn_start)
@@ -918,8 +1035,9 @@ class LiveAssistOverlay(QWidget):
         self.btn_stop.clicked.connect(self._stop_listening)
         self.btn_stop.hide()
         bl.addWidget(self.btn_stop)
-        # Private toggle: eye-off + "Private" when hidden from screen share,
-        # eye + "Visible" when not. Always truthful (see private_state).
+        # Hide toggle: the incognito mark + "Hidden" when hidden from screen
+        # share, an eye + "Visible" when not, amber when it can't be promised.
+        # Always truthful (live_context.hide_status).
         self.btn_private = QPushButton("", self.bar)
         self.btn_private.setObjectName("laPrivate")
         self.btn_private.setCursor(Qt.PointingHandCursor)
@@ -1014,7 +1132,7 @@ class LiveAssistOverlay(QWidget):
         self.txt_summary.setReadOnly(True)
         self.txt_summary.setObjectName("laCard")
         self.txt_summary.setMaximumHeight(110)
-        self.txt_summary.setPlaceholderText("Press Start - what's said appears here.")
+        self.txt_summary.setPlaceholderText(TRANSCRIPT_PLACEHOLDER)
         body.addWidget(self.txt_summary)
 
         head_row = QHBoxLayout()
@@ -1028,6 +1146,7 @@ class LiveAssistOverlay(QWidget):
             b = QPushButton(label, self.body)
             b.setFixedHeight(22)
             b.setCursor(Qt.PointingHandCursor)
+            b.setToolTip(QUICK_TIPS.get(label, ""))
             b.clicked.connect(lambda _=False, q=question: self.suggest(
                 q, force_screen=(q == SOLVE_SCREEN)))
             head_row.addWidget(b)
@@ -1043,10 +1162,7 @@ class LiveAssistOverlay(QWidget):
         self.txt_suggestion = QTextEdit(self.body)
         self.txt_suggestion.setReadOnly(True)
         self.txt_suggestion.setObjectName("laCard")
-        self.txt_suggestion.setPlaceholderText(
-            "Answers appear here the moment someone asks you something. Answer "
-            "re-answers the latest question, Solve screen solves what's on your "
-            "screen - or type your own question below.")
+        self.txt_suggestion.setPlaceholderText(ANSWER_PLACEHOLDER)
         body.addWidget(self.txt_suggestion, 1)
 
         ask_row = QHBoxLayout()
@@ -1095,7 +1211,7 @@ class LiveAssistOverlay(QWidget):
         self.btn_audio.setFixedHeight(22)
         self.btn_audio.setCursor(Qt.PointingHandCursor)
         self.btn_audio.setToolTip("Save this session's recording (MP3 or WAV). It's also "
-                                  "kept with the meeting in History.")
+                                  "kept with the meeting in Meetings.")
         self.btn_audio.clicked.connect(self._save_audio)
         self.btn_audio.hide()
         foot_row.addWidget(self.btn_audio)
@@ -1148,9 +1264,10 @@ class LiveAssistOverlay(QWidget):
 
         cfg = self.app.cfg if self.app else {}
         try:
-            self.setWindowOpacity(min(1.0, max(0.55, float(cfg.get("live_assist_opacity", 0.96)))))
+            self._opacity = min(1.0, max(0.55, float(cfg.get("live_assist_opacity", 0.96))))
         except (TypeError, ValueError):
-            self.setWindowOpacity(0.96)
+            self._opacity = 0.96
+        self.setWindowOpacity(self._opacity)
 
     def _richify_tooltips(self):
         """Qt word-wraps rich-text tooltips but not plain ones: a long plain
@@ -1165,6 +1282,7 @@ class LiveAssistOverlay(QWidget):
     def _apply_theme(self):
         t = _THEMES[self._theme_name]
         accent = t["accent"]
+        ok_bg, ok_fg, ok_line = chip_colors("ok", self._theme_name)
         self.setStyleSheet(f"""
             QLabel {{ color: {t['text']}; background: transparent; font-size: 12px; }}
             QToolTip {{
@@ -1203,7 +1321,7 @@ class LiveAssistOverlay(QWidget):
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2563eb, stop:1 #4f46e5);
             }}
             QLabel#laTimer {{
-                color: #15803d; background: rgba(34,197,94,0.16); border: 1px solid rgba(34,197,94,0.45);
+                color: {ok_fg}; background: {ok_bg}; border: 1px solid {ok_line};
                 border-radius: 11px; padding: 2px 10px; font-size: 12px; font-weight: 700;
             }}
             QLabel#laFoot {{ color: {t['faint']}; font-size: 11px; }}
@@ -1241,12 +1359,125 @@ class LiveAssistOverlay(QWidget):
         self.update()
 
     def _toggle_theme(self):
-        self._theme_name = "dark" if self._theme_name == "light" else "light"
-        if self.app:
-            self.app.cfg["live_assist_theme"] = self._theme_name
-            self.app.save_config()
-        self._apply_theme()
-        self._apply_glass()
+        self.set_theme("dark" if self._theme_name == "light" else "light")
+
+    # ── public settings (the Live Assistant page, Settings, the card itself) ──
+    def _store(self, key, value):
+        """Write one live_assist_* key in place and save it (debounced when the
+        app can), then announce it on app.sig_setting_changed. Nothing happens
+        when cfg already holds the value - so a cfg sync never writes back."""
+        app = self.app
+        if not app:
+            return False
+        cfg = app.cfg
+        if key in cfg and cfg.get(key) == value:
+            return False
+        cfg[key] = value
+        save = getattr(app, "schedule_config_save", None)
+        try:
+            (save if callable(save) else app.save_config)()
+        except Exception:
+            logger.warning("Saving %s failed", key, exc_info=True)
+        sig = getattr(app, "sig_setting_changed", None)
+        if sig is not None:
+            try:
+                sig.emit(key)
+            except Exception:
+                logger.debug("announcing %s failed", key, exc_info=True)
+        return True
+
+    def set_theme(self, name):
+        """Card look: "light" or "dark" (anything else is light)."""
+        name = name if name in _THEMES else "light"
+        if name != self._theme_name:
+            self._theme_name = name
+            self._apply_theme()
+            self._apply_glass()
+            self.settings_changed.emit("live_assist_theme", name)
+        self._store("live_assist_theme", name)
+
+    def set_auto_answer(self, on):
+        """Answer questions by itself (the Auto button)."""
+        on = bool(on)
+        if self.btn_auto.isChecked() != on:
+            self.btn_auto.setChecked(on)       # -> _on_auto_toggled
+        else:
+            self._on_auto_toggled(on)
+
+    def set_screen_auto(self, on):
+        """Let it see my screen (the screen button)."""
+        on = bool(on)
+        if self.btn_screen.isChecked() != on:
+            self.btn_screen.setChecked(on)     # -> _on_screen_toggled
+        else:
+            self._store("live_assist_screen_auto", on)
+
+    def set_context(self, text):
+        """About my calls: what every answer is told about the call."""
+        if not self.ctx_panel.isHidden():
+            # The editor is open: what's typed there would overwrite this on Done.
+            self.ctx_edit.blockSignals(True)
+            self.ctx_edit.setPlainText(clip_context(text))
+            self.ctx_edit.blockSignals(False)
+        self._set_context(text)
+
+    def set_opacity(self, value):
+        """Card opacity, 0.55-1.0 (live_assist_opacity)."""
+        try:
+            value = min(1.0, max(0.55, float(value)))
+        except (TypeError, ValueError):
+            value = 0.96
+        # Compared with what was set, not windowOpacity(): Qt keeps it in 1/255
+        # steps, so 0.96 reads back as 0.957 and would look changed every time.
+        if abs(getattr(self, "_opacity", -1.0) - value) > 1e-6:
+            self._opacity = value
+            self.setWindowOpacity(value)
+            self.settings_changed.emit("live_assist_opacity", value)
+        self._store("live_assist_opacity", value)
+
+    def reset_position(self):
+        """Back to the default spot (top right of the main screen)."""
+        if getattr(self, "_resetting", False):
+            return                             # our own announcement coming back
+        self._resetting = True
+        try:
+            self._default_position()
+            self.settings_changed.emit("live_assist_pos", None)
+            self._store("live_assist_pos", None)
+        finally:
+            self._resetting = False
+
+    def on_setting_changed(self, key):
+        """app.sig_setting_changed: a page or Settings changed ``key`` in cfg.
+        Follow it; never writes back (the value is already there)."""
+        if not self.app or not str(key).startswith("live_assist_"):
+            return
+        cfg = self.app.cfg
+        try:
+            if key == "live_assist_theme":
+                self.set_theme(cfg.get(key, "light"))
+            elif key == "live_assist_private":
+                if bool(cfg.get(key, True)) != self._private:
+                    self.set_private(cfg.get(key, True))
+            elif key == "live_assist_auto_answer":
+                self.set_auto_answer(cfg.get(key, True))
+            elif key == "live_assist_screen_auto":
+                self.set_screen_auto(cfg.get(key, True))
+            elif key == "live_assist_context":
+                if clip_context(str(cfg.get(key) or "")) != self._context:
+                    self.set_context(str(cfg.get(key) or ""))
+            elif key == "live_assist_opacity":
+                self.set_opacity(cfg.get(key, 0.96))
+            elif key == "live_assist_pos" and cfg.get(key) is None:
+                self.reset_position()          # "Reset card position" on the page
+        except Exception:
+            logger.warning("Live Assistant: couldn't follow %s", key, exc_info=True)
+
+    def hide_state(self):
+        """The chip's truthful HideStatus (what this window really got)."""
+        if self._hide is None:
+            self._refresh_private_chip()
+        return self._hide
 
     def _apply_glass(self):
         """Capture exclusion first (it decides whether sampling the backdrop is
@@ -1324,70 +1555,59 @@ class LiveAssistOverlay(QWidget):
                 self._guard_popup(w)
 
     def set_private(self, on):
-        self._private = bool(on)
-        if self.app:
-            self.app.cfg["live_assist_private"] = self._private
-            self.app.save_config()
+        """Hide from screen share (live_assist_private). Always re-applies the
+        exclusion: settings_apply calls this right after writing cfg."""
+        on = bool(on)
+        changed = on != self._private
+        self._private = on
+        self._store("live_assist_private", on)
         # Sampling is only safe while excluded, so the glass tier may change.
         self._apply_glass()
-
-    _CHIP_COLORS = {
-        "on": ("rgba(34,197,94,0.16)", "#15803d", "rgba(34,197,94,0.45)"),
-        "off": ("rgba(239,68,68,0.14)", "#b91c1c", "rgba(239,68,68,0.45)"),
-        "failed": ("rgba(239,68,68,0.14)", "#b91c1c", "rgba(239,68,68,0.45)"),
-        "unavailable": ("rgba(245,158,11,0.16)", "#b45309", "rgba(245,158,11,0.5)"),
-        "partial": ("rgba(245,158,11,0.16)", "#b45309", "rgba(245,158,11,0.5)"),
-    }
+        if not self.isVisible():
+            self._refresh_private_chip()        # what showing it will do
+        if changed:
+            self.settings_changed.emit("live_assist_private", on)
 
     def _refresh_private_chip(self, remote=None, supported=None, excluded=None):
         if remote is None:
             remote = glass.is_remote_session()
         if supported is None:
             supported = glass.capture_exclusion_supported()
-        if excluded is None:
-            excluded = glass.is_excluded_from_capture(self) if self.isVisible() \
-                else self._exclusion_ok
+        if excluded is None and self.isVisible():
+            excluded = glass.is_excluded_from_capture(self)
         mac = sys.platform == "darwin"
-        # macOS: hiding can't be promised, but the flag may well be set.
-        partial = mac and not supported and bool(excluded or self._mac_partial)
-        key, _ = private_state(self._private, supported, remote, excluded, partial=partial)
-        text = {"on": "Private", "off": "Visible", "failed": "Not private",
-                "partial": "May be hidden",
-                "unavailable": "Not hidden" if mac else "Private n/a"}[key]
-        bg, fg, border = self._CHIP_COLORS[key]
+        partial = None                          # hidden card: hide_status predicts
+        if excluded is not None:
+            # macOS: hiding can't be promised, but the flag may well be set.
+            partial = mac and not supported and bool(excluded or self._mac_partial)
+        st = hide_status(self._private, excluded=excluded, partial=partial,
+                         supported=supported, remote=remote, mac=mac)
+        bg, fg, border = chip_colors(st.tone, self._theme_name)
         try:
-            from ui.icons import eye_icon
-            from PySide6.QtCore import QSize
-            # Eye-off while hidden from the share, open eye when it shows.
-            self.btn_private.setIcon(eye_icon(open_=(key not in ("on", "partial")), size=16,
-                                              color=QColor(fg)))
+            from ui.icons import eye_icon, incognito_icon
+            # The incognito mark while hidden, an eye (slashed: maybe) otherwise.
+            if st.icon == "incognito":
+                icon = incognito_icon(16, QColor(fg))
+            else:
+                icon = eye_icon(open_=(st.icon == "eye"), size=16, color=QColor(fg))
+            self.btn_private.setIcon(icon)
             self.btn_private.setIconSize(QSize(16, 16))
         except Exception:
-            pass
-        self.btn_private.setText(text)
+            logger.debug("chip icon failed", exc_info=True)
+        self.btn_private.setText(st.text)
+        self.btn_private.setAccessibleName(st.headline)
         self.btn_private.setStyleSheet(
             f"QPushButton#laPrivate {{ background: {bg}; color: {fg}; border: 1px solid "
-            f"{border}; border-radius: 11px; padding: 2px 10px 2px 8px; font-size: 12px; "
+            f"{border}; border-radius: 11px; padding: 2px 10px 2px 7px; font-size: 12px; "
             "font-weight: 600; }")
-        tips = {
-            "on": ("Hidden from Zoom/Teams/Meet shares, recordings and screenshots on "
-                   "this PC (not from phone cameras). Click to make it visible - e.g. "
-                   "to include it in your own recording."),
-            "off": "This card WILL show on a shared screen. Click to hide it from shares.",
-            "failed": ("macOS" if mac else "Windows") + " refused to hide this window - "
-                      "assume it is visible in a share.",
-            "partial": mac_partial_tip(glass.macos_26_or_later()),
-            "unavailable": ("macOS didn't take the private-window setting for this "
-                            "card, so assume it shows in screen shares and recordings. "
-                            "Share a single window - your browser or the document - to "
-                            "keep it out." if mac else
-                            "Screen-share privacy needs Windows 10 2004+ and a local "
-                            "(non-remote) session."),
-        }
+        tip = st.tip + (" " + _CHIP_CLICK[st.key] if st.key in _CHIP_CLICK else "")
         # Rich text so Qt wraps it (a plain tooltip is one ~1000 px line).
         import html as html_mod
         self.btn_private.setToolTip("<p style='white-space:normal'>"
-                                    + html_mod.escape(tips[key], quote=False) + "</p>")
+                                    + html_mod.escape(tip, quote=False) + "</p>")
+        old, self._hide = self._hide, st
+        if old is None or old.key != st.key:
+            self.hide_status_changed.emit(st.key)
 
     def _refresh_live_controls(self):
         live = self._meeting_active
@@ -1429,8 +1649,12 @@ class LiveAssistOverlay(QWidget):
     def _drag_ended(self):
         self._guard_crop_screen()
         if self.app:
-            self.app.cfg["live_assist_pos"] = [self.x(), self.y()]
-            self.app.save_config()
+            # The same path as the setters: saved (debounced) and announced, so
+            # the page's "Reset card position" knows the card was moved.
+            pos = [self.x(), self.y()]
+            if self.app.cfg.get("live_assist_pos") != pos:
+                self.settings_changed.emit("live_assist_pos", pos)
+            self._store("live_assist_pos", pos)
         if self._glass_mode == "liquid":
             self._sample_timer.setInterval(SAMPLE_MS_REST)
             self._sample_backdrop()
@@ -1647,9 +1871,15 @@ class LiveAssistOverlay(QWidget):
         if self.isVisible():
             self.hide_overlay()
         else:
-            self.show_overlay()
-            if self.app:
-                self.app.track("live_prompter_opened")
+            self.open_card()
+
+    def open_card(self):
+        """Show the card, never hide it (the page's Open, the tray, a calendar
+        reminder). Tracks live_prompter_opened only when it was hidden."""
+        was_hidden = not self.isVisible()
+        self.show_overlay()
+        if was_hidden and self.app and hasattr(self.app, "track"):
+            self.app.track("live_prompter_opened")
 
     def hideEvent(self, event):
         self._end_snip()                       # no stale screenshot next time
@@ -1751,9 +1981,8 @@ class LiveAssistOverlay(QWidget):
         if text == self._context:
             return
         self._context = text
-        if self.app:
-            self.app.cfg["live_assist_context"] = text
-            self.app.save_config()
+        self.settings_changed.emit("live_assist_context", text)
+        self._store("live_assist_context", text)
         self._refresh_context_chip()
         if not text:
             self._set_status("Context cleared.")
@@ -1763,34 +1992,57 @@ class LiveAssistOverlay(QWidget):
             self._set_status("✓ Context saved - every answer uses it.")
 
     # ── start / stop (drives the meeting recorder) ──
+    def _meeting_session(self):
+        """The app's meeting recorder (meeting_session.MeetingSession) - the
+        one the Meetings page and the calendar reminder drive too - or None."""
+        app = self.app
+        if app is None:
+            return None
+        s = getattr(app, "meeting_session", None)
+        if s is None and getattr(app, "recorder", None) is not None:
+            try:
+                import meeting_session
+                s = meeting_session.get_session(app)
+            except Exception:
+                logger.debug("No meeting session", exc_info=True)
+                s = None
+        return s
+
+    def _call_language(self):
+        """This session's transcription language: Call language, or "" =
+        the dictation language (the saved settings are never touched)."""
+        cfg = self.app.cfg if self.app else {}
+        return (cfg.get("live_assist_language") or cfg.get("language") or "auto").strip() or "auto"
+
+    def _answer_language(self):
+        """Answer in: a language, or "" = the call's own ("auto": no hint)."""
+        cfg = self.app.cfg if self.app else {}
+        return (cfg.get("live_assist_output_language") or "auto").strip() or "auto"
+
     def _start_listening(self):
         # An open context editor: what's typed is this session's context.
         self._finish_context_edit()
-        mw = getattr(self.app, "meetings_win", None) if self.app else None
-        if mw is None:
+        session = self._meeting_session()
+        if session is None:
             self._set_status("Meeting recorder isn't available.")
             return
         try:
-            state = getattr(mw, "state", None)
-            if state == mw.STATE_RECORDING:
+            state = getattr(session, "state", None)
+            if state == "recording":
                 return
-            if state == getattr(mw, "STATE_PROCESSING", "processing"):
+            if state == "processing":
                 # Restarting the shared recorder now would lose the last recording.
                 self._set_status("Still saving the last session - try again in a moment.")
                 return
             if hasattr(self.app, "is_pro") and not self.app.is_pro():
                 if hasattr(self.app, "_pro_upsell"):
-                    self.app._pro_upsell("Live Assistance")
+                    self.app._pro_upsell("Live Assistant")
                 return
-            if state == getattr(mw, "STATE_DONE", "done") and hasattr(mw, "_reset"):
-                # The last session's Done page: its title, attendees and any
-                # resume state belong to THAT meeting, not this one.
-                mw._reset()
-            if hasattr(mw, "input_title") and not mw.input_title.text().strip():
-                mw.input_title.setText("Live session " + time.strftime("%H:%M"))
-            # Transcription language for this session (default English), passed
-            # to the meeting - the saved dictation language is never touched.
-            lang = (self.app.cfg.get("live_assist_language") or "en").strip()
+            # The one-time recording notice (the same as Meetings').
+            from ui.recording_prompts import ensure_recording_consent
+            if not ensure_recording_consent(self, self.app):
+                return
+            lang = self._call_language()
             # Answers can only be as live as the transcript: short speech pieces
             # for this session (the meeting's final transcript is redone in
             # full afterwards, so accuracy of the notes is unaffected).
@@ -1798,13 +2050,19 @@ class LiveAssistOverlay(QWidget):
             # Wake the answer engine now, so the first question isn't a cold start.
             threading.Thread(target=self._warm_up_engine, daemon=True).start()
             # Both sides of the call, as the Start button promises: mic +
-            # system sound, whatever Record Meeting is set to (when this
-            # system can capture both).
-            mw._start_meeting(language=lang if lang and lang != "auto" else None,
-                              audio_mode="smart_meeting")
-            if getattr(mw, "state", None) != mw.STATE_RECORDING:
+            # system sound, whatever Meetings is set to record (when this
+            # system can capture both). Always a new meeting.
+            ok, code, msg = session.start(
+                title="Live session " + time.strftime("%H:%M"), audio_mode="smart_meeting",
+                language=lang, source="live_assist")
+            if not ok:
                 self._set_fast_chunks(False)
-                self._set_status("Couldn't start listening - see Record Meeting.")
+                if code == "device":
+                    first = ("Couldn't open the microphone or the call's sound - close "
+                             "other apps using them and try again.")
+                else:
+                    first = (msg or "").strip().split("\n", 1)[0].strip()
+                self._set_status(first[:140] or "Couldn't start listening - see Meetings.")
             else:
                 self.app.track("live_prompter_started", {
                     "language": lang or "auto",
@@ -1813,7 +2071,7 @@ class LiveAssistOverlay(QWidget):
                     "context": bool(self._context),
                 })
         except Exception as e:
-            logger.warning("Live Assistance start failed: %s", e, exc_info=True)
+            logger.warning("Live Assistant start failed: %s", e, exc_info=True)
             self._set_fast_chunks(False)
             self._set_status(f"Couldn't start: {str(e)[:80]}")
 
@@ -1833,21 +2091,21 @@ class LiveAssistOverlay(QWidget):
             logger.debug("engine warm-up failed", exc_info=True)
 
     def _stop_listening(self):
-        mw = getattr(self.app, "meetings_win", None) if self.app else None
-        if mw is None or getattr(mw, "state", None) != mw.STATE_RECORDING:
+        session = self._meeting_session()
+        if session is None or getattr(session, "state", None) != "recording":
             return
         try:
-            mw._stop_meeting()
-            self._set_status("Stopped - the notes are generated in Record Meeting.")
+            session.stop()
+            self._set_status("Stopped - your notes will be in Meetings.")
         except Exception as e:
-            logger.warning("Live Assistance stop failed: %s", e, exc_info=True)
+            logger.warning("Live Assistant stop failed: %s", e, exc_info=True)
             self._set_status(f"Couldn't stop: {str(e)[:80]}")
 
     # ── data feed (GUI thread) ──
     def set_meeting_active(self, active, title="", attendees=""):
         self._meeting_active = bool(active)
         if active:
-            # Started from Record Meeting with the editor open: what's typed
+            # Started from Meetings with the editor open: what's typed
             # is this session's context.
             self._finish_context_edit()
             self._live_since = time.time()
@@ -1868,8 +2126,8 @@ class LiveAssistOverlay(QWidget):
             # _on_tick shows Download audio once THIS session's part is fully
             # written - a resumed meeting already has earlier parts, so count
             # them now (the save worker hasn't started yet).
-            mw = getattr(self.app, "meetings_win", None) if self.app else None
-            self._audio_folder = getattr(mw, "_meeting_dir", None)
+            session = getattr(self.app, "meeting_session", None) if self.app else None
+            self._audio_folder = getattr(session, "meeting_dir", None)
             self._audio_base = len(self._audio_parts()) if self._audio_folder else 0
             self._audio_polls, self._audio_size = 0, -1
             self.lbl_status.setText("Stopped - saving the recording and the notes…")
@@ -2139,7 +2397,7 @@ class LiveAssistOverlay(QWidget):
         context = rolling_context(
             self._live_text, question, self._title, self._attendees,
             screen="snip" if attached else bool(image_b64),
-            output_lang=(self.app.cfg.get("live_assist_output_language") or "en"),
+            output_lang=self._answer_language(),
             history=self._qa_history, session_context=self._context)
         threading.Thread(target=self._suggest_worker, args=(context, image_b64, gen),
                          daemon=True).start()
@@ -2157,8 +2415,11 @@ class LiveAssistOverlay(QWidget):
         try:
             engine, cfg = self._resolve_engine()
             if engine is None:
-                self.sig_suggestion.emit("", actions.NO_ENGINE_MESSAGE, gen)
+                # "This computer" (or Privacy Mode) with no local model: say
+                # which download answers here, not sign-in / API-key advice.
+                self.sig_suggestion.emit("", actions.no_live_engine_message(cfg), gen)
                 return
+            self._answer_engine = (gen, engine)    # named in this answer's footer
             kind = actions.ACTION_MODELS.get(engine, {}).get("kind")
             cfg = dict(cfg or {})
             image_status = {}
@@ -2233,14 +2494,45 @@ class LiveAssistOverlay(QWidget):
         if not self._suggesting or (gen is not None and gen != self._gen):
             return
         # (_first_token_at is set by the worker, from answer text only.)
-        self.txt_suggestion.setPlainText(text)
+        # The streamed answer is shown as rendered Markdown (no ** or "- "
+        # flashing), at most every STREAM_RENDER_MS: rendering a whole
+        # document per token would cost CPU on a long answer.
+        self._stream_pending = (text, self._gen if gen is None else gen)
+        wait = STREAM_RENDER_MS - (time.monotonic() - getattr(self, "_stream_rendered_at", 0.0)) * 1000.0
+        if wait <= 0:
+            self._render_stream()
+            return
+        timer = getattr(self, "_stream_timer", None)
+        if timer is None:
+            timer = self._stream_timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._render_stream)
+        if not timer.isActive():
+            timer.start(int(wait) + 1)
+
+    def _render_stream(self):
+        pending, self._stream_pending = getattr(self, "_stream_pending", None), None
+        if pending is None:
+            return
+        text, gen = pending
+        if not self._suggesting or gen != self._gen:
+            return          # the answer ended or a newer question took over
+        self._stream_rendered_at = time.monotonic()
+        render_markdown(self.txt_suggestion, streaming_markdown(text))
         sb = self.txt_suggestion.verticalScrollBar()
         sb.setValue(sb.maximum())
+
+    def _stop_stream_render(self):
+        self._stream_pending = None
+        timer = getattr(self, "_stream_timer", None)
+        if timer is not None:
+            timer.stop()
 
     def _on_suggestion(self, text, error, gen=None):
         if gen is not None and gen != self._gen:
             return      # the answer to an older question - superseded
         self._suggesting = False
+        self._stop_stream_render()          # the final answer replaces the streamed one
         self.input_ask.setPlaceholderText(ASK_PLACEHOLDER)
         sent, self._sent_question = getattr(self, "_sent_question", ""), ""
         self._last_suggest_at = time.time()
@@ -2277,18 +2569,31 @@ class LiveAssistOverlay(QWidget):
         if note:
             self.lbl_status.setText(note)
         else:
-            first = (f"first words {self._first_token_at - self._suggest_started:.1f}s · "
-                     if self._first_token_at else "")
-            shot = "screen seen · " if getattr(self, "_last_attached_screen", False) else ""
-            self.lbl_status.setText(
-                f"Answered {time.strftime('%H:%M:%S')} · {first}done {took:.1f}s · {shot}"
-                "AI can be wrong - check facts")
+            self.lbl_status.setText(self._footer_text(gen, took))
+
+    def _footer_text(self, gen, took):
+        """"Answered 14:31:07 · Gusan Cloud · first words 0.8s · AI can be wrong
+        - check facts": when, who wrote it, how fast."""
+        parts = [f"Answered {time.strftime('%H:%M:%S')}"]
+        answered_gen, engine = getattr(self, "_answer_engine", (None, None))
+        who = _engine_label(engine) if gen is None or answered_gen == gen else ""
+        if who:
+            parts.append(who)
+        if self._first_token_at:
+            parts.append(f"first words {self._first_token_at - self._suggest_started:.1f}s")
+        else:
+            parts.append(f"done {took:.1f}s")
+        if getattr(self, "_last_attached_screen", False):
+            parts.append("screen seen")
+        parts.append("AI can be wrong - check facts")
+        return " · ".join(parts)
 
     def _on_auto_toggled(self, on):
-        self._auto = bool(on)
-        if self.app:
-            self.app.cfg["live_assist_auto_answer"] = self._auto
-            self.app.save_config()
+        on = bool(on)
+        if on != self._auto:
+            self._auto = on
+            self.settings_changed.emit("live_assist_auto_answer", on)
+        self._store("live_assist_auto_answer", on)
 
     def _set_screen_tooltip(self, on):
         self.btn_screen.setToolTip(
@@ -2302,9 +2607,8 @@ class LiveAssistOverlay(QWidget):
         self.btn_screen.update()
         self._set_screen_tooltip(on)
         self._richify_tooltips()
-        if self.app:
-            self.app.cfg["live_assist_screen_auto"] = bool(on)
-            self.app.save_config()
+        self.settings_changed.emit("live_assist_screen_auto", bool(on))
+        self._store("live_assist_screen_auto", bool(on))
 
     # ── the session's recording ──
     def _audio_parts(self):
@@ -2336,7 +2640,7 @@ class LiveAssistOverlay(QWidget):
 
     def _save_audio(self):
         import meeting_store
-        from ui.meeting_detail import recording_save_path
+        from ui.recording_prompts import recording_save_path
         parts = meeting_store.audio_parts(self._audio_folder) if self._audio_folder else []
         if not parts:
             self._set_status("No recording found for this session.")

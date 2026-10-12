@@ -43,7 +43,7 @@ class TestErrorHint(unittest.TestCase):
         self.assertIn("API key", _error_hint("401 Unauthorized"))
         self.assertIn("microphone", _error_hint("Microphone error: device busy"))
         self.assertIn("shorter clip", _error_hint("Request timed out"))
-        self.assertEqual(_error_hint("something odd"), "Try again or restart Transcribe")
+        self.assertEqual(_error_hint("something odd"), "Try again or restart Gusan")
 
 
 @unittest.skipUnless(_real_qt(), "real PySide6 not importable (stubbed)")
@@ -256,7 +256,7 @@ class TestOverlay(unittest.TestCase):
     def test_short_error_gets_a_contextual_hint(self):
         title, detail = self._lines("Only background noise was detected.")
         self.assertEqual(title, "Only background noise was detected.")
-        self.assertEqual(detail, "Try again or restart Transcribe")
+        self.assertEqual(detail, "Try again or restart Gusan")
 
     def test_long_error_splits_at_its_own_dash_instead_of_repeating_a_hint(self):
         title, detail = self._lines("Transcription timed out after 120s - try a shorter clip "
@@ -295,6 +295,16 @@ class TestOverlay(unittest.TestCase):
         self.cfg["overlay_theme"] = "neon"                         # unknown -> auto
         self.assertEqual(self.hud._pick_theme(), "dark")
 
+    def test_apply_prefs_repicks_the_theme_only_while_on_screen(self):
+        # Gusan 2.0 settings apply at once (settings_apply -> overlay.apply_prefs).
+        self.hud._theme = "light"
+        self.cfg["overlay_theme"] = "dark"
+        self.hud.apply_prefs()                                     # hidden: nothing to do
+        self.assertEqual(self.hud._theme, "light")
+        with mock.patch.object(self.hud, "isVisible", return_value=True):   # on screen
+            self.hud.apply_prefs()
+        self.assertEqual(self.hud._theme, "dark")
+
     # ── voice levels ──
     def test_levels_gate_the_noise_floor(self):
         self.hud.update_levels([0.02] * 20)
@@ -323,6 +333,392 @@ class TestOverlay(unittest.TestCase):
         corner = img.pixelColor(2, 2)
         return centre, corner
 
+    # ── a Smart Action take (D4) ──
+    def test_a_smart_take_is_marked_and_every_show_resets_it(self):
+        ov = self.ov
+        self.hud.show_overlay(ov.RECORDING, smart=True)
+        self.assertTrue(self.hud._smart)
+        self.hud._rec_started = time.monotonic() - ov.HINT_S - 0.1
+        self.assertEqual(self.hud._target_size(), (float(ov.REC_W + ov.SMART_W), float(ov.PILL_H)))
+        self.hud.set_state(ov.PROCESSING)                  # still the same take
+        self.assertTrue(self.hud._smart)
+        self.hud.show_overlay(ov.RECORDING)                # the next take: plain dictation
+        self.assertFalse(self.hud._smart)
+        self.hud._rec_started = time.monotonic() - ov.HINT_S - 0.1
+        self.assertEqual(self.hud._target_size(), (float(ov.REC_W), float(ov.PILL_H)))
+
+    def _purple_pixels(self):
+        from PySide6.QtGui import QImage
+        from PySide6.QtCore import Qt
+        hud = self.hud
+        hud._show, hud._xfade, hud._from_vis = 1.0, 1.0, None
+        hud._cur_vis = hud._visual()
+        hud._pw, hud._ph = hud._target_size()
+        img = QImage(hud.size(), QImage.Format_ARGB32_Premultiplied)
+        img.fill(Qt.transparent)
+        hud.render(img)
+        n = 0
+        for y in range(0, img.height(), 2):
+            for x in range(0, img.width(), 2):
+                c = img.pixelColor(x, y)
+                if c.alpha() > 200 and c.blue() - c.green() > 70 and c.red() - c.green() > 30:
+                    n += 1
+        return n
+
+    def test_the_smart_mark_is_purple_and_only_on_a_smart_take(self):
+        ov = self.ov
+        for theme in ("dark", "light"):
+            for smart in (True, False):
+                self.hud.show_overlay(ov.RECORDING, smart=smart)
+                self.hud._theme = theme
+                self.hud._bars = [0.6] * ov.N_BARS         # some voice
+                n = self._purple_pixels()
+                if smart:
+                    self.assertGreater(n, 10, theme)
+                else:
+                    self.assertEqual(n, 0, theme)
+
+    # ── what it says (pill_copy) ──
+    CLOUD = {"writer": "Gusan Cloud", "writer_local": False}
+
+    def _smart_take(self, kind=None, detail="", info=None):
+        ov = self.ov
+        self.hud.show_overlay(ov.RECORDING, smart=True)
+        self.hud.set_speech({"speech": "Whisper Small", "speech_local": True})
+        self.hud.set_state(ov.TRANSCRIBING)
+        self.hud.set_task(kind, detail, self.CLOUD if info is None else info)
+        self.hud.set_state(ov.PROCESSING)
+
+    def test_a_smart_action_says_what_it_writes(self):
+        ov, hud = self.ov, self.hud
+        hud.show_overlay(ov.RECORDING, smart=True)
+        hud.set_speech({"speech": "Whisper Small", "speech_local": True})
+        hud.set_state(ov.TRANSCRIBING)
+        self.assertEqual(hud._busy_label("transcribing"), ("Transcribing", "Whisper Small"))
+        hud.set_task("email", "", self.CLOUD)
+        hud.set_state(ov.PROCESSING)
+        self.assertEqual(hud._busy_label("processing"), ("Writing your email", "Gusan Cloud"))
+        hud._state_at -= 4.5                                   # a slow writer
+        self.assertEqual(hud._busy_label("processing"), ("Writing your email", "Still writing"))
+        hud.show_done(True, kind="email")
+        self.assertEqual(hud._done_msg, "Email pasted")
+        self._smart_take("translate", "Spanish")
+        self.assertEqual(hud._busy_label("processing"), ("Translating to Spanish", "Gusan Cloud"))
+        self._smart_take(None, "Spanish", {"writer": "Qwen 1.5B", "writer_local": True})
+        self.assertEqual(hud._busy_label("processing"), ("Thinking", "Qwen 1.5B · on this computer"))
+        hud._state_at -= 10.5
+        self.assertEqual(hud._busy_label("processing")[1], "This computer is working on it")
+        self._smart_take("poem")                               # unknown: just thinking
+        self.assertEqual(hud._task_kind, None)
+        self.assertEqual(hud._busy_label("processing")[0], "Thinking")
+
+    def test_done_lines(self):
+        import pill_copy
+        ov, hud = self.ov, self.hud
+        hud.show_overlay(ov.RECORDING)
+        hud.show_done(True)
+        self.assertEqual(hud._done_msg, "Pasted")
+        hud.show_overlay(ov.RECORDING)
+        hud.show_done(False)
+        self.assertEqual(hud._done_msg, pill_copy.done(None, False))
+        self.assertIn("press", hud._done_msg)
+        self._smart_take(None)                                 # a Smart Action, no clear ask
+        hud.show_done(True)
+        self.assertEqual(hud._done_msg, "Done · pasted")
+        self._smart_take("translate", "Spanish")
+        hud.show_done(False, kind="translate")
+        self.assertEqual(hud._done_msg, pill_copy.done("translate", False))
+        # Smart take whose free tries ran out: the exact words, plainly.
+        hud.show_overlay(ov.RECORDING, smart=True)
+        hud.set_state(ov.TRANSCRIBING)
+        hud.show_done(True)
+        self.assertEqual(hud._done_msg, "Pasted")
+
+    def test_transcribing_names_the_model_language_and_length(self):
+        ov, hud = self.ov, self.hud
+        self.cfg["whisper_model"] = "small"
+        hud.show_overlay(ov.RECORDING)
+        hud.set_state(ov.TRANSCRIBING)                         # main didn't say: the configured one
+        self.assertEqual(hud._busy_label("transcribing"), ("Transcribing", "Whisper Small"))
+        hud.set_lang("English")
+        self.assertEqual(hud._busy_label("transcribing"), ("Transcribing", "English"))
+        # The take's length comes from the recording clock.
+        hud.show_overlay(ov.RECORDING)
+        hud._rec_started = time.monotonic() - 70.0
+        hud.set_state(ov.TRANSCRIBING)
+        self.assertAlmostEqual(hud._audio_s, 70.0, delta=1.0)
+        self.assertEqual(hud._busy_label("transcribing"), ("Transcribing", "1 min of audio"))
+        hud.set_audio_seconds(130)
+        self.assertEqual(hud._busy_label("transcribing")[1], "2 min of audio")
+        hud._state_at -= 13.0
+        self.assertEqual(hud._busy_label("transcribing"), ("Long take", "Still transcribing"))
+
+    def test_a_model_download_does_not_count_as_a_long_take(self):
+        ov, hud = self.ov, self.hud
+        hud.show_overlay(ov.RECORDING)
+        hud.set_speech({"speech": "Whisper Small", "speech_local": True})
+        hud.set_state(ov.TRANSCRIBING)
+        hud.set_state(ov.GETTING_READY)
+        hud.set_model_progress(42)
+        hud._state_at -= 60.0                                  # a minute of download
+        self.assertEqual(hud._visual(), "ready")               # its own visual: it crossfades
+        self.assertEqual(hud._busy_label("ready"), ("Getting ready", "speech model · 42%"))
+        self.assertEqual(hud._busy_label("transcribing"), ("Getting ready", "speech model · 42%"))
+        hud.set_state(ov.TRANSCRIBING)
+        self.assertEqual(hud._visual(), "transcribing")
+        self.assertEqual(hud._busy_label("transcribing"), ("Transcribing", "Whisper Small"))
+
+    def test_every_show_overlay_starts_clean(self):
+        ov, hud = self.ov, self.hud
+        self._smart_take("email")
+        hud.set_audio_seconds(80)
+        hud.show_done(True, kind="email")
+        hud._target_size()
+        hud.show_overlay(ov.RECORDING)
+        self.assertEqual((hud._task_kind, hud._task_detail, hud._writing, hud._ctx, hud._audio_s,
+                          hud._done_kind, hud._smart, hud._held_w, hud._busy_last),
+                         (None, "", False, {}, None, None, False, None, {}))
+        hud.set_state(ov.PROCESSING)
+        self.assertEqual(hud._busy_label("processing")[0], "Thinking")
+
+    def test_a_take_warms_the_names_off_the_gui_thread(self):
+        # pill_copy.warm imports engine_choice on a worker when a take starts,
+        # so neither the stop nor a frame ever waits for that import.
+        ov = self.ov
+        with mock.patch.object(ov.pill_copy, "warm") as warm:
+            self.hud.show_overlay(ov.RECORDING)
+        warm.assert_called_once_with()
+
+    def test_within_a_stage_the_capsule_does_not_breathe_in(self):
+        ov, hud = self.ov, self.hud
+        with mock.patch.object(ov, "QFontMetricsF", _FixedMetrics):
+            hud._widths.clear()
+            hud.show_overlay(ov.RECORDING)
+            hud.set_speech({"speech": "Whisper Small", "speech_local": True})
+            hud.set_state(ov.TRANSCRIBING)
+            hud.set_audio_seconds(30)
+            first, _ = hud._target_size()                      # "Transcribing · Whisper Small"
+            hud._state_at -= 4.5                               # "· Almost there": a little shorter
+            self.assertEqual(hud._busy_label("transcribing")[1], "Almost there")
+            self.assertLess(hud._measure(hud._f_small, "Almost there"),
+                            hud._measure(hud._f_small, "Whisper Small"))
+            self.assertEqual(hud._target_size()[0], first)
+            hud._state_at -= 8.0                               # "Long take · Still transcribing"
+            longer, _ = hud._target_size()
+            self.assertGreater(longer, first)                  # it grows
+            hud.show_done(True)                                # a new stage: its own width
+            done_w, _ = hud._target_size()
+            # A big change within a stage still moves (the download ring -> words).
+            hud.show_overlay(ov.RECORDING)
+            hud.set_state(ov.TRANSCRIBING)
+            hud.set_partial("hello there, this is a much longer line of live words")
+            wide, _ = hud._target_size()
+            hud.set_partial("hi")
+            narrow, _ = hud._target_size()
+            hud._widths.clear()
+        self.assertLess(done_w, longer)
+        self.assertLess(narrow, wide)
+
+    def test_a_stage_fading_out_keeps_its_words(self):
+        ov, hud = self.ov, self.hud
+        hud.show_overlay(ov.RECORDING, smart=True)
+        hud.set_speech({"speech": "Whisper Small", "speech_local": True})
+        hud.set_state(ov.TRANSCRIBING)
+        hud.set_audio_seconds(70)
+        hud._state_at -= 13.0
+        self._frame(0.5)                                       # painted: "Long take · Still transcribing"
+        hud.set_task("email", "", self.CLOUD)
+        hud.set_state(ov.PROCESSING)
+        hud._from_vis, hud._cur_vis, hud._xfade = "transcribing", "processing", 0.1
+        hud._from_at = hud._vis_at = time.monotonic()
+        seen = []
+        real = hud._busy_label
+        with mock.patch.object(hud, "_busy_label", side_effect=lambda vis: seen.append(vis) or real(vis)):
+            from PySide6.QtGui import QImage
+            img = QImage(hud.size(), QImage.Format_ARGB32_Premultiplied)
+            hud._show = 1.0
+            hud.render(img)
+        self.assertNotIn("transcribing", seen)                 # not re-guessed while it fades
+        self.assertEqual(hud._busy_last["transcribing"], ("Long take", "Still transcribing"))
+
+    def test_the_capsule_grows_for_longer_words_up_to_the_cap(self):
+        ov, hud = self.ov, self.hud
+        with mock.patch.object(ov, "QFontMetricsF", _FixedMetrics):
+            hud._widths.clear()
+            self._smart_take(None)
+            thinking, _ = hud._target_size()
+            self._smart_take("translate", "Portuguese")
+            portuguese, h = hud._target_size()
+            self._smart_take("translate", "Portuguese", {"writer": "A very long writer name " * 6,
+                                                         "writer_local": True})
+            capped, _ = hud._target_size()
+            hud.show_done(False, kind="polish")
+            done_w, _ = hud._target_size()
+            hud._widths.clear()
+        self.assertGreater(portuguese, thinking)
+        self.assertEqual(h, float(ov.PILL_H))
+        self.assertEqual(capped, float(ov.PILL_MAX_W))
+        self.assertLessEqual(done_w, float(ov.PILL_MAX_W))
+
+    # ── the icons ──
+    def _frame(self, t, motion=True, theme="dark"):
+        from PySide6.QtGui import QImage
+        from PySide6.QtCore import Qt
+        hud = self.hud
+        hud._theme, hud._motion = theme, motion
+        hud._show, hud._xfade, hud._from_vis = 1.0, 1.0, None
+        hud._cur_vis = hud._visual()
+        hud._vis_at = time.monotonic() - t
+        hud._pw, hud._ph = hud._target_size()
+        img = QImage(hud.size(), QImage.Format_ARGB32_Premultiplied)
+        img.fill(Qt.transparent)
+        hud.render(img)
+        return img
+
+    def _icon_slot(self, img):
+        from PySide6.QtCore import QRect
+        ov, hud = self.ov, self.hud
+        cap = hud._capsule(float(round(hud._pw)), float(round(hud._ph)))
+        return img.copy(QRect(int(cap.left() + ov.ICON_X - 11), int(cap.center().y() - 11), 22, 22))
+
+    def _cases(self):
+        ov, hud = self.ov, self.hud
+
+        def transcribing(smart):
+            hud.show_overlay(ov.RECORDING, smart=smart)
+            hud.set_state(ov.TRANSCRIBING)
+
+        def ready(smart):
+            transcribing(smart)
+            hud.set_state(ov.GETTING_READY)
+            hud.set_model_progress(None)
+
+        def ready_pct(smart):
+            ready(smart)
+            hud.set_model_progress(42)
+
+        def writing(kind, detail=""):
+            def setup(smart):
+                self._smart_take(kind, detail)
+                hud._smart = smart
+            return setup
+
+        def done(kind):
+            def setup(smart):
+                writing(kind)(smart)
+                hud.show_done(True, kind=kind)
+            return setup
+
+        cases = [("rec", lambda smart: hud.show_overlay(ov.RECORDING, smart=smart)),
+                 ("transcribing", transcribing), ("ready", ready), ("ready 42%", ready_pct),
+                 ("words", lambda smart: (transcribing(smart), hud.set_partial("hello there"))),
+                 ("done", done(None)), ("done email", done("email")),
+                 ("error", lambda smart: hud.show_error("Microphone error: device unavailable"))]
+        cases += [("writing %s" % k, writing(k, "Spanish" if k == "translate" else ""))
+                  for k in (None, "email", "list", "translate", "summary", "polish", "notes", "reply")]
+        cases += [("message", writing("message"))]           # the reply's bubble: not in the icon check
+        return cases
+
+    def test_every_case_paints_in_both_themes_with_and_without_motion(self):
+        ov = self.ov
+        for name, setup in self._cases():
+            for smart in (True, False):
+                for motion in (True, False):
+                    for theme in ("dark", "light"):
+                        for t in (0.05, 0.7, 1.9, 4.6):
+                            setup(smart)
+                            img = self._frame(t, motion, theme)
+                            ph = self.hud._ph
+                            centre = img.pixelColor(ov.WIN_W // 2, int(ov.WIN_H - ov.BOTTOM_PAD - ph / 2))
+                            where = (name, smart, motion, theme, t)
+                            self.assertGreater(centre.alpha(), 200, where)
+                            self.assertEqual(img.pixelColor(2, 2).alpha(), 0, where)
+
+    def test_every_handoff_crossfades_cleanly(self):
+        # Mid-crossfade both visuals paint, each on its own clock and words
+        # (a paint exception would take the whole app down).
+        from PySide6.QtGui import QImage
+        from PySide6.QtCore import Qt
+        ov, hud = self.ov, self.hud
+
+        def ready():
+            hud.show_overlay(ov.RECORDING)
+            hud.set_state(ov.TRANSCRIBING)
+            hud.set_state(ov.GETTING_READY)
+            hud.set_model_progress(42)
+
+        def frame(t):
+            img = QImage(hud.size(), QImage.Format_ARGB32_Premultiplied)
+            img.fill(Qt.transparent)
+            hud._show = 1.0
+            hud._vis_at = time.monotonic() - t
+            hud._from_at = hud._vis_at - 1.0
+            hud.render(img)
+            return img
+
+        handoffs = [("ready", ready, lambda: hud.set_state(ov.TRANSCRIBING))]
+        for kind in (None,) + tuple(__import__("pill_copy").KINDS):
+            handoffs.append(("transcribing", lambda k=kind: self._smart_take(k) or hud.set_state(ov.TRANSCRIBING),
+                             lambda: hud.set_state(ov.PROCESSING)))
+            handoffs.append(("processing", lambda k=kind: self._smart_take(k),
+                             lambda k=kind: hud.show_done(False, kind=k)))
+        handoffs.append(("processing", lambda: self._smart_take("email"),
+                         lambda: hud.show_error("The writer timed out")))
+        for theme in ("dark", "light"):
+            for motion in (True, False):
+                for old, before, after in handoffs:
+                    before()
+                    hud._theme, hud._motion = theme, motion
+                    hud._cur_vis, hud._from_vis, hud._xfade = hud._visual(), None, 1.0
+                    hud._pw, hud._ph = hud._target_size()
+                    frame(0.6)                                  # the old stage, painted
+                    self.assertEqual(hud._cur_vis, old)
+                    after()
+                    hud._from_vis, hud._cur_vis = hud._cur_vis, hud._visual()
+                    self.assertNotEqual(hud._from_vis, hud._cur_vis)
+                    for x in (0.1, 0.3, 0.6):
+                        hud._xfade = x
+                        img = frame(0.05)
+                        centre = img.pixelColor(ov.WIN_W // 2, int(ov.WIN_H - ov.BOTTOM_PAD - hud._ph / 2))
+                        self.assertGreater(centre.alpha(), 200, (old, hud._cur_vis, theme, motion, x))
+
+    def test_each_case_has_its_own_icon(self):
+        icons = {}
+        for name, setup in self._cases():
+            if name.startswith(("writing", "transcribing", "ready")):
+                setup(True)
+                icons[name] = self._icon_slot(self._frame(0.5, motion=False))
+        names = sorted(icons)
+        for i, a in enumerate(names):
+            for b in names[i + 1:]:
+                self.assertNotEqual(icons[a], icons[b], (a, b))
+
+    def test_without_motion_the_icon_stands_still(self):
+        for kind in (None, "email", "list", "translate", "summary", "polish", "notes", "reply"):
+            self._smart_take(kind)
+            a = self._frame(0.4, motion=False)
+            b = self._frame(1.3, motion=False)
+            self.assertEqual(self._icon_slot(a), self._icon_slot(b), kind)
+            self.assertEqual(a, b, kind)                       # the words too (no shimmer)
+            moving = [self._icon_slot(self._frame(t)) for t in (0.3, 0.9, 1.5)]
+            self.assertTrue(moving[0] != moving[1] or moving[1] != moving[2], kind)
+
+    def test_smart_work_is_purple_and_dictation_is_not(self):
+        ov, hud = self.ov, self.hud
+        for theme in ("dark", "light"):
+            hud.show_overlay(ov.RECORDING)
+            hud.set_state(ov.TRANSCRIBING)
+            hud._theme = theme
+            self.assertEqual(self._purple_pixels(), 0, theme)
+            for kind in (None, "email", "list"):
+                self._smart_take(kind)
+                hud._theme = theme
+                self.assertGreater(self._purple_pixels(), 10, (theme, kind))
+            hud.show_overlay(ov.RECORDING, smart=True)          # a Smart take, transcribing
+            hud.set_state(ov.TRANSCRIBING)
+            hud._theme = theme
+            self.assertGreater(self._purple_pixels(), 10, theme)
+
     def test_every_state_paints_a_capsule_on_a_clear_window(self):
         ov = self.ov
         states = [
@@ -333,6 +729,8 @@ class TestOverlay(unittest.TestCase):
             lambda: self.hud.show_done(True),
             lambda: self.hud.show_done(False),
             lambda: self.hud.show_error("Microphone error: device unavailable"),
+            lambda: self.hud.show_overlay(ov.RECORDING, smart=True),     # a Smart Action take
+            lambda: self.hud.set_state(ov.PROCESSING),
         ]
         for theme in ("dark", "light"):
             self.hud._theme = theme

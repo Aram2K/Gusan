@@ -531,9 +531,10 @@ class _Inline:
 
 class TestAppSweep(unittest.TestCase):
     def _app(self, state="idle", **kw):
-        mw = SimpleNamespace(state=state, STATE_RECORDING="recording",
-                             STATE_PROCESSING="processing")
-        return SimpleNamespace(meetings_win=mw, is_rec=False, _busy=False,
+        # The meeting recorder is app.meeting_session (Gusan 2.0): busy while
+        # recording (a pause included) or writing the notes.
+        session = SimpleNamespace(state=state, is_busy=state in ("recording", "processing"))
+        return SimpleNamespace(meeting_session=session, is_rec=False, _busy=False,
                                _file_job_running=False, recorder=mock.MagicMock(),
                                cfg=main.cfg, **kw)
 
@@ -567,10 +568,20 @@ class TestAppSweep(unittest.TestCase):
         llm.assert_not_called()
         app.recorder.maybe_unload_idle.assert_not_called()
 
-    def test_after_a_session_the_ai_model_goes_unless_dictation_uses_it(self):
-        for mode, keep in (("transcribe_only", None), ("smart_auto", "qwen_3b"),
-                           ("write_email", "qwen_3b")):
-            app = SimpleNamespace(cfg={"output_action": mode, "action_model": "qwen_3b"})
+    def test_after_a_session_the_ai_model_goes_unless_a_smart_action_runs(self):
+        # 1.9.x's output_action no longer keeps it (Alt+S is always armed:
+        # that would pin the model forever); a Smart take that is recording
+        # or being written right now keeps its writer.
+        smart = actions.ACTION_SMART_AUTO
+        for kw, keep in (({"output_action": "smart_auto"}, None),
+                         ({"output_action": "write_email"}, None),
+                         ({"_oneshot_action": smart}, None),                  # finished
+                         ({"_oneshot_action": smart, "is_rec": True}, "qwen_3b"),
+                         ({"_oneshot_action": smart, "_busy": True}, "qwen_3b"),
+                         ({"_oneshot_action": None, "is_rec": True}, None)):  # Alt+R
+            cfg = {"action_model": "qwen_3b"}
+            cfg.update({k: v for k, v in kw.items() if k == "output_action"})
+            app = SimpleNamespace(cfg=cfg, **{k: v for k, v in kw.items() if k != "output_action"})
             with mock.patch.object(main.threading, "Thread", _Inline), \
                     mock.patch.object(main.local_llm, "unload_idle") as llm, \
                     mock.patch.dict(main.cfg, {"llm_idle_unload_min": 5}):
@@ -578,8 +589,9 @@ class TestAppSweep(unittest.TestCase):
             llm.assert_called_once_with(0, keep=keep)
 
     def test_meetings_prewarm_the_speech_model_and_free_the_ai_model(self):
-        src = Path(main.__file__).with_name("ui").joinpath("meetings.py").read_text(encoding="utf-8")
-        start = src.index("self.app.recorder.start_recording(capture_mode=meeting_mode")
+        # The meeting recorder moved from ui/meetings.py into meeting_session.py.
+        src = Path(main.__file__).with_name("meeting_session.py").read_text(encoding="utf-8")
+        start = src.index("rec.start_recording(capture_mode=meeting_mode")
         self.assertIn("prewarm_speech_model", src[start:start + 600])
         done = src.index("def _on_processing_finished")
         self.assertIn("release_models_after_session", src[done:done + 400])

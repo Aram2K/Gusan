@@ -130,47 +130,57 @@ class TestMacCapturePrivacy(unittest.TestCase):
 
 @unittest.skipUnless(_real_qt(), "real PySide6 not importable (stubbed)")
 class TestSettingsCapture(unittest.TestCase):
-    """The real Settings.keyPressEvent / event, on a minimal stand-in."""
+    """Shortcut capture (2.0: ui/components/hotkey_capture.HotkeyCaptureButton,
+    which every page uses; it replaced the 1.x Settings.keyPressEvent)."""
 
     def setUp(self):
         _ensure_app()
-        from PySide6.QtWidgets import QPushButton
-        from ui.settings import Settings
-        self.S = Settings
-        self.me = SimpleNamespace(capturing=True, _capture_target="dictation", app=object(),
-                                  cfg_working={"hotkey": "alt+r"}, btn_hotkey=QPushButton(),
-                                  _fmt_hotkey=Settings._fmt_hotkey,
-                                  _toggle_capture=MagicMock(), _toggle_lp_capture=MagicMock(),
-                                  _apply_lp_hotkey=MagicMock())
+        from ui.components.hotkey_capture import HotkeyCaptureButton
+        self.btn = HotkeyCaptureButton("alt+r", accessible_name="Dictation shortcut")
+        self.got = {"captured": [], "refused": [], "cancelled": 0}
+        self.btn.captured.connect(self.got["captured"].append)
+        self.btn.refused.connect(self.got["refused"].append)
+        self.btn.cancelled.connect(lambda: self.got.__setitem__("cancelled", self.got["cancelled"] + 1))
+        self.btn.start_capture()
+
+    def tearDown(self):
+        self.btn.cancel_capture()
+        self.btn.deleteLater()
 
     def _press(self, key, mods):
         from PySide6.QtCore import QEvent
         from PySide6.QtGui import QKeyEvent
-        self.S.keyPressEvent(self.me, QKeyEvent(QEvent.KeyPress, key, mods))
+        return self.btn._filter(self.btn.button, QKeyEvent(QEvent.KeyPress, key, mods))
 
     def test_records_a_combination(self):
         from PySide6.QtCore import Qt
         with mock.patch("hotkeys.IS_MAC", False):
-            self._press(Qt.Key_D, Qt.ControlModifier | Qt.ShiftModifier)
-        self.assertEqual(self.me.cfg_working["hotkey"], "ctrl+shift+d")
-        self.assertFalse(self.me.capturing)
+            self.assertTrue(self._press(Qt.Key_D, Qt.ControlModifier | Qt.ShiftModifier))
+        self.assertEqual(self.got["captured"], ["ctrl+shift+d"])
+        self.assertEqual(self.btn.hotkey(), "ctrl+shift+d")
+        self.assertFalse(self.btn.is_capturing())
 
     def test_esc_cancels_and_a_bare_key_is_refused(self):
         from PySide6.QtCore import Qt
+        self._press(Qt.Key_Space, Qt.NoModifier)                   # a bare typing key
+        self.assertEqual(len(self.got["refused"]), 1)
+        self.assertTrue(self.btn.is_capturing())                   # still waiting for a real one
         self._press(Qt.Key_Escape, Qt.NoModifier)
-        self.me._toggle_capture.assert_called_once()
-        with mock.patch("ui.settings.QMessageBox.warning") as warn:
-            self._press(Qt.Key_Space, Qt.NoModifier)
-        warn.assert_called_once()
-        self.assertEqual(self.me.cfg_working["hotkey"], "alt+r")    # unchanged
+        self.assertEqual(self.got["cancelled"], 1)
+        self.assertEqual(self.got["captured"], [])
+        self.assertEqual(self.btn.hotkey(), "alt+r")               # unchanged
 
     def test_shortcuts_are_held_off_only_while_capturing(self):
         from PySide6.QtCore import QEvent, Qt
         from PySide6.QtGui import QKeyEvent
         ev = QKeyEvent(QEvent.ShortcutOverride, Qt.Key_Q, Qt.ControlModifier)
         ev.ignore()
-        self.assertTrue(self.S.event(self.me, ev))                 # consumed: no ⌘Q quit
+        self.assertTrue(self.btn._filter(self.btn.button, ev))     # consumed: no ⌘Q quit
         self.assertTrue(ev.isAccepted())
+        self.btn.cancel_capture()
+        ev = QKeyEvent(QEvent.ShortcutOverride, Qt.Key_Q, Qt.ControlModifier)
+        ev.ignore()
+        self.assertFalse(self.btn._filter(self.btn.button, ev))    # not capturing: shortcuts work
 
 
 @unittest.skipUnless(_real_qt(), "real PySide6 not importable (stubbed)")

@@ -89,6 +89,80 @@ class TestBuildDocx(unittest.TestCase):
         self.assertIn("Բարեւ ձեզ", doc)
 
 
+NOTES = """## Summary
+The team agreed on **14 October**.
+
+**Decisions:**
+1. Launch on 14 October.
+- Keep the *beta* price
+
+## Action items
+- [ ] Fix speaker-label drift (Owner: David, Due: Wed)
+- [x] Confirm the date (Owner: Aram)
+> Ask legal first
+"""
+
+
+class TestStyledNotes(unittest.TestCase):
+    """Meeting notes in Word (Gusan 2.0): real headings and list items, no
+    Markdown symbols."""
+
+    def test_notes_paragraphs_are_typed_blocks(self):
+        paras = dx.notes_paragraphs(NOTES)
+        self.assertEqual([p["style"] for p in paras],
+                         ["heading", "body", "subheading", "num", "bullet", "heading", "task", "task", "quote"])
+        self.assertEqual(paras[3]["n"], 1)
+        task = paras[6]
+        self.assertEqual((task["text"], task["after"], task["done"]),
+                         ("Fix speaker-label drift", "(David · by Wed)", False))
+        self.assertTrue(paras[7]["done"])
+
+    def test_word_xml_has_bold_headings_glyphs_and_runs(self):
+        doc = _parts(dx.build_docx("Q4 roadmap", dx.notes_paragraphs(NOTES),
+                                   include_timestamps=False))["word/document.xml"]
+        minidom.parseString(doc)
+        for raw in ("##", "**", "- [ ]", "[x]", "> Ask"):
+            self.assertNotIn(raw, doc)
+        # A heading: bold 14 pt, kept with what follows.
+        self.assertIn('<w:keepNext/>', doc)
+        self.assertIn('<w:sz w:val="28"/><w:szCs w:val="28"/><w:b/></w:rPr>'
+                      '<w:t xml:space="preserve">Summary</w:t>', doc)
+        # **bold** inside a sentence is a bold run of its own.
+        self.assertIn('<w:b/></w:rPr><w:t xml:space="preserve">14 October</w:t>', doc)
+        # *italic* too.
+        self.assertIn('<w:i/></w:rPr><w:t xml:space="preserve">beta</w:t>', doc)
+        # Items hang their glyph: •, 1., ☐ and ☑, the owner muted after the task.
+        self.assertEqual(doc.count('w:hanging="280"'), 4)
+        for glyph in ("•", "1.", "☐", "☑"):
+            self.assertIn('<w:t xml:space="preserve">%s</w:t></w:r><w:r><w:tab/></w:r>' % glyph, doc)
+        self.assertIn("(David · by Wed)", doc)
+        self.assertIn("Ask legal first", doc)
+
+    def test_labels_markers_and_line_breaks(self):
+        paras = [{"start": 0, "speaker": None, "label": "Anna", "text": "Hello."},
+                 {"style": "marker", "text": "— Resumed at 11:20 —"},
+                 {"style": "code", "text": "a = 1\nb = 2"}]
+        doc = _parts(dx.build_docx("T", paras, include_timestamps=False))["word/document.xml"]
+        minidom.parseString(doc)
+        self.assertIn(">Anna:  <", doc)
+        self.assertIn('<w:i/><w:color w:val="64748B"/></w:rPr><w:t xml:space="preserve">— Resumed at 11:20 —', doc)
+        self.assertIn('<w:r><w:br/></w:r>', doc)
+        self.assertIn('w:ascii="Consolas"', doc)
+
+    def test_plain_transcripts_look_as_before(self):
+        # Audio to text's paragraphs (no style keys): one run per part, as before.
+        doc = _parts(dx.build_docx("T", [{"start": 0, "speaker": 0, "text": "**not bold** here"}],
+                                   include_timestamps=False))["word/document.xml"]
+        self.assertIn(">**not bold** here<", doc)       # no "md": the words exactly as said
+        self.assertNotIn("<w:br/>", doc)
+
+    def test_inline_runs(self):
+        self.assertEqual(dx.inline_runs("**Fix** the *drift* & `x`"),
+                         [("Fix", True, False), (" the ", False, False), ("drift", False, True),
+                          (" & x", False, False)])
+        self.assertEqual(dx.inline_runs("<b>not a tag</b>"), [("<b>not a tag</b>", False, False)])
+
+
 class TestGroupSegments(unittest.TestCase):
     def _seg(self, start, end, text, speaker=None):
         return {"start": start, "end": end, "text": text, "speaker": speaker}

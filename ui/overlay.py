@@ -12,7 +12,21 @@ typing):
 * Bottom-centre of the screen the user is typing on, just above the taskbar -
   or wherever the user dragged it (remembered; double-click to send it home).
 * Colour means status only: red recording, green done, red error. Glyphs
-  and spinners are neutral ink.
+  are neutral ink - except a Smart Action take (the Smart Actions shortcut,
+  show_overlay(..., smart=True)): purple bars and a small wand while
+  recording, purple icons and words after.
+* While it works it says what is happening (pill_copy): "Transcribing ·
+  Whisper Small", "Almost there", "Long take · Still transcribing"; for a
+  Smart Action what it writes ("Writing your email · Gusan Cloud",
+  "Translating to Spanish") - main tells it with set_task() - and "Email
+  pasted" at the end. A small icon per case moves in the icon slot: voice
+  bars turning into lines of text, an envelope being written, a list
+  ticking, two scripts swapping, lines folding into one, a sparkle
+  polishing, a page filling, typing dots, the wand's sparkles. Each is a few
+  cached sprites plus a handful of strokes a frame; a still icon when
+  Windows animation effects are off. Within a stage the capsule only grows
+  (a shorter sub line doesn't make it breathe in), and a stage that fades
+  out keeps its own words.
 * Glass that adapts to what is behind it, as Apple's does ("auto", the
   default): frosted light glass over bright content, smoked dark glass over
   dark content, picked per dictation; the system light/dark theme when there
@@ -23,7 +37,7 @@ typing):
   the capsule itself being dragged, would leave it showing the wrong picture
   (it read as a foggy grey rim). Once visible, Windows includes this window in
   every screen grab (checked on this project's Win11 build: BitBlt with and
-  without CAPTUREBLT, and QScreen.grabWindow), so - like Live Assistance - the
+  without CAPTUREBLT, and QScreen.grabWindow), so - like the Live Assistant - the
   HUD is excluded from screen capture while it samples ("overlay_private",
   on by default: it stays out of shares and recordings). A worker thread does
   the grabbing; a grab waits for the next DWM frame (~17 ms) and would stutter
@@ -53,6 +67,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QWidget, QApplication
 
+import pill_copy
 from ui import glass
 
 logger = logging.getLogger("transcribe")
@@ -62,6 +77,10 @@ RECORDING = "recording"
 TRANSCRIBING = "transcribing"
 PROCESSING = "processing"   # smart action / LLM running after transcription
 DONE = "done"
+# A stopped dictation waits for its speech model's download (model_manager):
+# a ring that fills with the percent, saying "Getting ready · 42%"; it
+# crossfades into "transcribing" once the model is there.
+GETTING_READY = "getting_ready"
 
 
 GOOGLE_STT_DEFAULT = "gemini-2.5-flash"
@@ -76,6 +95,8 @@ def _configured_model_name(cfg, key, fallback):
 
 
 def _transcription_ai_label(cfg):
+    """1.x's raw engine line ("gemini-2.5-flash AI" / "Local AI"). The pill
+    now says the model's real name (pill_copy.speech_info)."""
     cfg = cfg or {}
     backend = cfg.get("backend", "local")
 
@@ -102,12 +123,12 @@ def _error_hint(msg):
     if "model.bin" in low or "model" in low and "open" in low:
         return "Whisper cache issue - restart app or redownload model"
     if "api" in low or "key" in low or "auth" in low or "401" in low or "403" in low:
-        return "Check Settings → API key"
+        return "Check your API key in Settings"
     if "microphone" in low or "input" in low or "audio" in low:
         return "Check microphone access / device"
     if "timeout" in low or "timed out" in low:
         return "Try a shorter clip or smaller model"
-    return "Try again or restart Transcribe"
+    return "Try again or restart Gusan"
 
 
 # ── geometry (logical px) ──
@@ -117,6 +138,7 @@ PILL_H_ERROR = 54
 PILL_MAX_W = WIN_W - 40
 REC_W_HINT = 204               # recording, while the Enter/Esc keycaps show
 REC_W = 180                    # recording, once the timer has taken their place
+SMART_W = 20                   # a Smart Action take is this much wider (its wand mark)
 BOTTOM_PAD = 20                # window room under the capsule (its shadow)
 TASKBAR_GAP = 16               # capsule bottom above the work area's bottom edge
 ICON_X = 21                    # centre of the leading icon, from the capsule's left
@@ -126,11 +148,11 @@ BAR_W, BAR_GAP = 3.0, 3.0
 SAMPLE_MARGIN = 32             # backdrop sampled this far around the window, so the
                                # glass stays pinned to the world between samples
 DRAG_SLOP = 3                  # a press must travel this far to become a drag
+HOLD_SHRINK_PX = 48            # a busy capsule doesn't shrink by less than this within a stage
 
 # ── timing (s) ──
 HINT_S = 2.6                   # the keycaps show this long...
 HINT_RUNS = 5                  # ...on this many dictations per app run
-SLOW_S = 4.0                   # busy this long -> "still working…"
 DONE_S = 1.4                   # "Pasted to cursor"
 COPIED_S = 2.6                 # "Copied to clipboard": the user still has to paste
 ERROR_S = 4.5
@@ -160,6 +182,7 @@ _PALETTES = {
         "ink": (255, 255, 255),
         # Apple's 2025 system colours (dark).
         "rec": "#FF4245", "ok": "#30D158", "err": "#FF4245",
+        "smart": "#C084FC",            # a Smart Action take (bright on the smoked glass)
         "edge": (46, 14),              # crisp inner edge: white alpha at the top, the bottom
         "hairline": QColor(0, 0, 0, 80),
         "shadow": QColor(0, 0, 0, 110),
@@ -174,6 +197,7 @@ _PALETTES = {
         # Deeper red and green: >= 3:1 against the light glass (Apple's
         # standard ones fall to 2-2.5:1 there).
         "rec": "#E9152D", "ok": "#16A34A", "err": "#C42B1C",
+        "smart": "#9333EA",            # the app's Pro purple, >= 4.5:1 on the light glass
         "edge": (230, 90),
         "hairline": QColor(15, 23, 42, 38),
         "shadow": QColor(15, 23, 42, 70),
@@ -182,6 +206,7 @@ _PALETTES = {
 }
 
 AUTO_LIGHT_LUMA = 0.62         # "auto": light glass above this backdrop brightness
+_WHITE = QColor(255, 255, 255)
 
 
 def _system_prefers_light():
@@ -331,9 +356,20 @@ class Overlay(QWidget):
         self._hide_at = None
         self._err_split = None
         self._runs = 0                    # dictations shown this app run
+        self._smart = False               # this take is a Smart Action (show_overlay)
+        # What the words say (pill_copy); every show_overlay() clears it.
+        self._task_kind = None            # what a Smart Action writes (pill_copy.KINDS) or None
+        self._task_detail = ""            # e.g. the language of a translation
+        self._writing = False             # set_task() came: a Smart Action writes this take
+        self._ctx = {}                    # speech model / writer names (pill_copy.busy's ctx)
+        self._audio_s = None              # how long the take was (s)
+        self._done_kind = None
+        self._held_w = None               # (visual, width): no small shrinks within a stage
+        self._busy_last = {}              # visual -> its last (title, sub), kept while it fades out
 
         # Animation state
         now = time.monotonic()
+        self._state_at = now              # when overlay_state last changed
         self._motion = True
         self._show = 0.0                  # appear spring: 0 hidden .. 1 shown
         self._show_v = 0.0
@@ -343,6 +379,7 @@ class Overlay(QWidget):
         self._from_vis = None
         self._xfade = 1.0
         self._vis_at = now
+        self._from_at = now               # when the outgoing visual had started
         self._rec_started = now
         self._last_frame = now
         self._level = 0.0                 # smoothed loudness 0..1
@@ -370,6 +407,7 @@ class Overlay(QWidget):
         self._widths = {}                 # text widths
         self._last_box = None             # last frame's repaint area
         self._bar_inks = {}
+        self._pens = {}                   # the busy icons' pens
         self._fit_w = {}                  # final capsule width per state, for text fitting
 
         # Moving it
@@ -446,10 +484,24 @@ class Overlay(QWidget):
         self.move(self._home(screen))
 
     # ── public API (main thread; workers go through call_soon) ──
-    def show_overlay(self, state=RECORDING):
+    def show_overlay(self, state=RECORDING, smart=False):
+        """Show the capsule in ``state``. ``smart``: this take is a Smart
+        Action (purple accent and a wand while recording, purple after);
+        every call sets it again, so a plain dictation is never marked - and
+        clears what the last take said (set_task / set_speech)."""
         self._lang = ""
         self._hide_at = None
-        self.overlay_state = state
+        self._smart = bool(smart)
+        self._task_kind, self._task_detail, self._writing = None, "", False
+        self._ctx = {}
+        self._audio_s = None
+        self._done_kind = None
+        self._held_w = None
+        self._busy_last = {}
+        # The names the pill shows come from engine_choice: import it now,
+        # off this thread, so the stop never waits for it (once per run).
+        pill_copy.warm()
+        self._set_overlay_state(state)
         if state == RECORDING:
             self._runs += 1
             self._rec_started = time.monotonic()
@@ -463,11 +515,57 @@ class Overlay(QWidget):
         self._kick()
 
     def set_state(self, s):
+        if (self.overlay_state == RECORDING and s in (TRANSCRIBING, GETTING_READY)
+                and self._audio_s is None):
+            # The take's length, from the recording clock (free).
+            self._audio_s = max(0.0, time.monotonic() - self._rec_started)
+        self._set_overlay_state(s)
+        self._kick()
+
+    def _set_overlay_state(self, s):
+        if s != self.overlay_state:
+            self._state_at = time.monotonic()
         self.overlay_state = s
+
+    def set_task(self, kind=None, detail="", info=None):
+        """A Smart Action is about to write (call it before set_state(
+        PROCESSING)): ``kind`` is what (pill_copy.KINDS; None = no clear
+        ask: "Thinking"), ``detail`` the language of a translation
+        ("Spanish"), ``info`` the writer - {"writer": "Gusan Cloud",
+        "writer_local": False} (pill_copy.task builds all three)."""
+        self._task_kind = kind if kind in pill_copy.KINDS else None
+        self._task_detail = str(detail or "").strip() if self._task_kind else ""
+        self._writing = True
+        if isinstance(info, dict):
+            self._ctx.update(info)
+        self._kick()
+
+    def set_speech(self, info):
+        """What transcribes this take: {"speech": "Whisper Small",
+        "speech_local": True} (pill_copy.speech_info)."""
+        if isinstance(info, dict):
+            self._ctx.update(info)
+            self._kick()
+
+    def set_audio_seconds(self, sec):
+        """The take's length, when the caller knows better than the
+        recording clock (which set_state reads at the stop)."""
+        try:
+            self._audio_s = max(0.0, float(sec))
+        except (TypeError, ValueError):
+            self._audio_s = None
         self._kick()
 
     def set_lang(self, lang_name):
         self._lang = lang_name
+        self._kick()
+
+    def set_model_progress(self, pct):
+        """GETTING_READY: the speech model's download, 0-100 (None = not known yet)."""
+        try:
+            self._model_pct = None if pct is None else max(0, min(100, int(pct)))
+        except (TypeError, ValueError):
+            self._model_pct = None
         self._kick()
 
     def set_partial(self, text):
@@ -489,11 +587,15 @@ class Overlay(QWidget):
         n, inv = len(self.levels), 1.0 / (peak + 1e-6)
         self._tex = [self.levels[min(n - 1, i * n // N_BARS)] * inv for i in range(N_BARS)]
 
-    def show_done(self, pasted: bool):
+    def show_done(self, pasted: bool, kind=None):
+        """Done: "Pasted" / "Copied · press Ctrl+V"; for a Smart Action
+        (``kind``: what it wrote, pill_copy.KINDS) "Email pasted"."""
         self._done_pasted = pasted
         self._done_error = False
-        self._done_msg = "Pasted to cursor" if pasted else "Copied to clipboard"
-        self.overlay_state = DONE
+        self._done_kind = kind if kind in pill_copy.KINDS else None
+        self._done_msg = pill_copy.done(self._done_kind, pasted,
+                                        smart=self._writing or self._done_kind is not None)
+        self._set_overlay_state(DONE)
         self._hide_at = time.monotonic() + (DONE_S if pasted else COPIED_S)
         self._appear()
 
@@ -501,7 +603,7 @@ class Overlay(QWidget):
         self._done_error = True
         self._done_pasted = False
         self._done_msg = msg
-        self.overlay_state = DONE
+        self._set_overlay_state(DONE)
         self._hide_at = time.monotonic() + ERROR_S
         self._appear()
 
@@ -526,6 +628,8 @@ class Overlay(QWidget):
             return "rec"
         if s == PROCESSING:
             return "processing"
+        if s == GETTING_READY:
+            return "ready"            # its own visual: crossfades into "transcribing"
         return "transcribing"
 
     def _appear(self):
@@ -576,7 +680,7 @@ class Overlay(QWidget):
         if vis != self._cur_vis:
             self._from_vis, self._cur_vis = self._cur_vis, vis
             self._xfade = 0.0
-            self._vis_at = now
+            self._from_at, self._vis_at = self._vis_at, now
         self._xfade = min(1.0, self._xfade + dt / 0.32)
 
         if self._visible:
@@ -797,21 +901,38 @@ class Overlay(QWidget):
         return self._runs <= HINT_RUNS and time.monotonic() - self._rec_started < HINT_S
 
     def _busy_label(self, vis):
-        slow = time.monotonic() - self._vis_at >= SLOW_S and self._cur_vis == vis
-        if vis == "processing":
-            return "Thinking", ("still working…" if slow else "")
-        cfg = self.app.cfg if self.app else {}
-        return "Transcribing", ("still working…" if slow else
-                                (self._lang or _transcription_ai_label(cfg)))
+        """(title, sub) while it works - the words come from pill_copy."""
+        if vis == "ready" or (vis == "transcribing" and self.overlay_state == GETTING_READY):
+            # (Asked for "transcribing" while the model downloads: the same words.)
+            pct = getattr(self, "_model_pct", None)
+            return "Getting ready", (f"speech model · {pct}%" if pct else "speech model")
+        writing = vis == "processing"
+        # Time in THIS stage (a model download before it doesn't count).
+        now_state = PROCESSING if writing else TRANSCRIBING
+        elapsed = time.monotonic() - self._state_at if self.overlay_state == now_state else 0.0
+        if writing:
+            ctx = dict(self._ctx, smart=True, elapsed=elapsed)
+            return pill_copy.busy(pill_copy.WRITING, self._task_kind, self._task_detail, ctx)
+        if "speech" not in self._ctx:
+            # main didn't say (set_speech): the configured model, once per take.
+            cfg = self.app.cfg if self.app else {}
+            self._ctx.update(pill_copy.speech_info(cfg.get("backend"), cfg.get("whisper_model"), cfg))
+            self._ctx.setdefault("speech", "")
+        ctx = dict(self._ctx, smart=self._smart, elapsed=elapsed, seconds=self._audio_s,
+                   language=self._lang)
+        return pill_copy.busy(pill_copy.TRANSCRIBING, ctx=ctx)
 
     def _partial_line(self):
+        if self.overlay_state == GETTING_READY:
+            return ""               # the label (and its percent) instead of words
         return " ".join(self._partial.split())
 
     def _target_size(self):
         vis = self._visual()
         if vis == "rec":
-            return float(REC_W_HINT if self._hint_phase() else REC_W), float(PILL_H)
-        if vis in ("transcribing", "processing"):
+            w = REC_W_HINT if self._hint_phase() else REC_W
+            return float(w + (SMART_W if self._smart else 0)), float(PILL_H)
+        if vis in ("transcribing", "processing", "ready"):
             line = self._partial_line() if vis == "transcribing" else ""
             if line:
                 w = self._measure(self._f_body, line)
@@ -820,10 +941,19 @@ class Overlay(QWidget):
                 w = self._measure(self._f_title, label)
                 if suffix:
                     w += self._measure(self._f_small, "  ·  " + suffix)
-            return float(max(164.0, min(PILL_MAX_W, TEXT_X + w + 18))), float(PILL_H)
+            w = float(max(164.0, min(PILL_MAX_W, TEXT_X + w + 18)))
+            # Within a stage a shorter line ("Gusan Cloud" -> "Still writing")
+            # doesn't make the capsule breathe in; it only grows, or moves
+            # for a real change.
+            held = self._held_w
+            if held is not None and held[0] == vis and held[1] - HOLD_SHRINK_PX < w < held[1]:
+                w = held[1]
+            else:
+                self._held_w = (vis, w)
+            return w, float(PILL_H)
         if vis == "done":
             w = self._measure(self._f_title, self._done_msg)
-            return float(max(150.0, TEXT_X + w + 20)), float(PILL_H)
+            return float(max(150.0, min(PILL_MAX_W, TEXT_X + w + 20))), float(PILL_H)
         title, detail = self._error_lines()
         tw = self._measure(self._f_title, title)
         hw = self._measure(self._f_small, detail)
@@ -955,6 +1085,16 @@ class Overlay(QWidget):
         if not wr:
             return QPointF(-SAMPLE_MARGIN, -SAMPLE_MARGIN)
         return QPointF((sx - wr[0]) / d, (sy - wr[1]) / d)
+
+    def apply_prefs(self):
+        """overlay_theme / overlay_private just changed (Gusan 2.0 settings
+        apply at once). A bar on screen re-picks its theme now; hiding from
+        screen share is set each time the bar appears (_start_glass), and it
+        is only on screen while you dictate."""
+        if not self.isVisible():
+            return
+        self._theme = self._pick_theme()
+        self.update()
 
     def _pick_theme(self):
         """"dark" / "light" pin the glass; anything else is "auto" (the
@@ -1176,8 +1316,10 @@ class Overlay(QWidget):
     def _paint_content(self, p, vis, rect, pal, now, fit_w):
         if vis == "rec":
             self._paint_recording(p, rect, pal, now)
-        elif vis in ("transcribing", "processing"):
-            self._paint_busy(p, rect, pal, now, vis, fit_w)
+        elif vis in ("transcribing", "processing", "ready"):
+            # Its own clock: the outgoing content keeps moving while it fades.
+            t0 = self._vis_at if vis == self._cur_vis else self._from_at
+            self._paint_busy(p, rect, pal, now, vis, fit_w, t0)
         elif vis == "done":
             self._paint_done(p, rect, pal, now, fit_w)
         else:
@@ -1259,23 +1401,81 @@ class Overlay(QWidget):
             sp.drawPath(arrow)
         return self._sprite(("keys",), 51, 17, draw)
 
+    # The Smart Actions magic wand, on the app icon's 24-unit grid (ui/
+    # components/icons.py "wand"): a rounded wand with a band near its tip and
+    # three outline sparkles.
+    _WAND_C = (9.5, 14.5)                         # the wand's centre; it lies at 45 degrees
+    _WAND_LEN, _WAND_W = 17.0, 3.2
+    _WAND_BAND = ((12.1, 9.6), (14.4, 11.9))
+    # x, y, radius, how far the sides curve in, stroke on the 24 grid, twinkle phase
+    _WAND_SPARKS = ((18.8, 4.6, 2.8, 0.55, 1.7, 0.0),
+                    (6.6, 5.4, 1.9, 0.38, 1.5, 0.37),
+                    (20.6, 12.4, 1.5, 0.30, 1.4, 0.68))
+
+    def _draw_wand_body(self, sp, k, ox, oy):
+        """The wand and its band, grid units * k, the grid's origin at (ox, oy)."""
+        cx, cy = self._WAND_C
+        sp.save()
+        sp.translate(ox + cx * k, oy + cy * k)
+        sp.rotate(45.0)
+        L, W = self._WAND_LEN * k, self._WAND_W * k
+        sp.drawRoundedRect(QRectF(-W / 2.0, -L / 2.0, W, L), W / 2.0, W / 2.0)
+        sp.restore()
+        (ax, ay), (bx, by) = self._WAND_BAND
+        sp.drawLine(QPointF(ox + ax * k, oy + ay * k), QPointF(ox + bx * k, oy + by * k))
+
+    @staticmethod
+    def _sparkle_path(x, y, r, f):
+        """A four-point sparkle with curved sides, centre (x, y), radius r."""
+        path = QPainterPath(QPointF(x, y - r))
+        path.quadTo(x + f, y - f, x + r, y)
+        path.quadTo(x + f, y + f, x, y + r)
+        path.quadTo(x - f, y + f, x - r, y)
+        path.quadTo(x - f, y - f, x, y - r)
+        path.closeSubpath()
+        return path
+
+    def _wand(self, pal):
+        """The Smart Actions wand (the app's icon), 14 x 14, in purple."""
+        def draw(sp):
+            k = 14.0 / 24.0
+            col = QColor(pal["smart"])
+            sp.setBrush(Qt.NoBrush)
+            sp.setPen(QPen(col, 1.25, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            self._draw_wand_body(sp, k, 0.0, 0.0)
+            for x, y, r, f, sw, _ph in self._WAND_SPARKS:
+                sp.setPen(QPen(col, max(0.9, sw * 0.68), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                sp.drawPath(self._sparkle_path(x * k, y * k, r * k, f * k))
+        return self._sprite(("wand3", pal["smart"]), 14, 14, draw)
+
     def _paint_recording(self, p, rect, pal, now):
         cy = rect.center().y()
         self._paint_rec_dot(p, QPointF(rect.left() + ICON_X, cy), pal, now)
 
         x0 = rect.left() + TEXT_X
         max_h = rect.height() - 18.0
-        inks = self._bar_inks.get(self._theme)
+        smart = self._smart
+        inks = self._bar_inks.get((self._theme, smart))
         if inks is None:
-            # Louder bars are brighter: 12 steps from 55 % to full ink.
-            inks = self._bar_inks[self._theme] = [
-                QBrush(_ink(pal, 255 * (0.55 + 0.45 * k / 11))) for k in range(12)]
+            # Louder bars are brighter: 12 steps from 55 % to full ink
+            # (the Smart Action purple for a Smart take).
+            if smart:
+                base = QColor(pal["smart"])
+                inks = [QBrush(QColor(base.red(), base.green(), base.blue(),
+                                      int(255 * (0.55 + 0.45 * k / 11)))) for k in range(12)]
+            else:
+                inks = [QBrush(_ink(pal, 255 * (0.55 + 0.45 * k / 11))) for k in range(12)]
+            self._bar_inks[(self._theme, smart)] = inks
         p.setPen(Qt.NoPen)
         for i, v in enumerate(self._bars):
             bh = 3.0 + v * (max_h - 3.0)
             p.setBrush(inks[int(min(1.0, v * 1.8) * 11 + 0.5)])
             p.drawRoundedRect(QRectF(x0 + i * (BAR_W + BAR_GAP), cy - bh / 2.0, BAR_W, bh),
                               BAR_W / 2.0, BAR_W / 2.0)
+        if smart:
+            # The wand: "this take runs as a Smart Action", right after the bars.
+            wx = x0 + (N_BARS - 1) * (BAR_W + BAR_GAP) + BAR_W + 6.0
+            self._blit(p, wx, cy - 7.0, self._wand(pal))
 
         # Right zone: the keycaps first (early dictations), then the timer.
         # The keycaps are gone before the capsule settles narrower at HINT_S,
@@ -1298,20 +1498,14 @@ class Overlay(QWidget):
                                   Qt.AlignRight | Qt.AlignVCenter))
         p.setOpacity(op)
 
-    def _paint_busy(self, p, rect, pal, now, vis, fit_w):
+    def _paint_busy(self, p, rect, pal, now, vis, fit_w, t0=None):
         cy = rect.center().y()
-        c = QPointF(rect.left() + ICON_X, cy)
-        # Spinner: a faint track and a comet arc with a fading tail, in ink.
-        p.setPen(QPen(_ink(pal, 40), 2.2))
-        p.setBrush(Qt.NoBrush)
-        p.drawEllipse(c, 7.5, 7.5)
-        head = -(now * 380.0) % 360.0
-        comet = QConicalGradient(c, head)
-        comet.setColorAt(0.0, _ink(pal, 240))
-        comet.setColorAt(0.72, _ink(pal, 0))
-        comet.setColorAt(1.0, _ink(pal, 0))
-        p.setPen(QPen(QBrush(comet), 2.2, Qt.SolidLine, Qt.RoundCap))
-        p.drawArc(QRectF(c.x() - 7.5, c.y() - 7.5, 15.0, 15.0), int(head * 16), int(260 * 16))
+        cx = rect.left() + ICON_X
+        # A Smart Action works in its purple; a dictation in ink.
+        purple = self._smart or self._writing
+        col = self._accent(pal, purple)
+        t = (now - (self._vis_at if t0 is None else t0)) if self._motion else None
+        self._paint_icon(p, self._busy_icon(vis), cx, cy, pal, col, t)
 
         x = rect.left() + TEXT_X
         avail = max(0.0, fit_w - TEXT_X - 16.0)
@@ -1328,18 +1522,35 @@ class Overlay(QWidget):
                                                     rect.height(), fade=cut))
             return
 
-        label, suffix = self._busy_label(vis)
+        if vis == self._cur_vis or vis not in self._busy_last:
+            label, suffix = self._busy_label(vis)
+            self._busy_last[vis] = (label, suffix)
+        else:
+            # Fading out: keep the words it had, not the next stage's guess.
+            label, suffix = self._busy_last[vis]
         lw = self._measure(self._f_title, label)
-        # Shimmer: a highlight sweeping across the label while we wait.
-        ph = ((now - self._vis_at) % 1.8) / 1.8
-        bx = x - 30.0 + (lw + 60.0) * ph
-        shimmer = QLinearGradient(QPointF(bx - 30.0, 0), QPointF(bx + 30.0, 0))
-        shimmer.setColorAt(0.0, _ink(pal, 150))
-        shimmer.setColorAt(0.5, _ink(pal, 255))
-        shimmer.setColorAt(1.0, _ink(pal, 150))
-        p.setFont(self._f_title)
-        p.setPen(QPen(QBrush(shimmer), 1.0))
-        p.drawText(QRectF(x, rect.top(), lw + 2.0, rect.height()), Qt.AlignLeft | Qt.AlignVCenter, label)
+        if t is None:
+            # No motion: the words stand still too.
+            ink = QColor(col) if purple else _ink(pal, 240)
+            self._blit(p, x, rect.top(), self._text(label, self._f_title, ink, lw + 2.0, rect.height()))
+        else:
+            # Shimmer: a highlight sweeping across the label while we wait.
+            ph = (t % 1.8) / 1.8
+            bx = x - 30.0 + (lw + 60.0) * ph
+            shimmer = QLinearGradient(QPointF(bx - 30.0, 0), QPointF(bx + 30.0, 0))
+            if purple:
+                # Purple is lighter than the ink: a gentler dip keeps the
+                # words readable (>= 4:1 on the light glass) between sweeps.
+                base, hi = QColor(col), QColor(col)
+                base.setAlpha(215)
+            else:
+                base, hi = _ink(pal, 150), _ink(pal, 255)
+            shimmer.setColorAt(0.0, base)
+            shimmer.setColorAt(0.5, hi)
+            shimmer.setColorAt(1.0, base)
+            p.setFont(self._f_title)
+            p.setPen(QPen(QBrush(shimmer), 1.0))
+            p.drawText(QRectF(x, rect.top(), lw + 2.0, rect.height()), Qt.AlignLeft | Qt.AlignVCenter, label)
         if suffix:
             sw = max(0.0, avail - lw)
             text = "  ·  " + suffix
@@ -1347,6 +1558,355 @@ class Overlay(QWidget):
                 text = QFontMetricsF(self._f_small).elidedText(text, Qt.ElideRight, sw)
             self._blit(p, x + lw, rect.top(), self._text(text, self._f_small, _ink(pal, 135), sw + 4.0,
                                                          rect.height()))
+
+    # ── the busy icons: one per case, in the icon slot (about 18 px) ──
+    # Static parts are cached sprites (22 x 22, drawn round their centre);
+    # the moving parts are a few strokes a frame. ``t``: seconds into the
+    # state, or None for a still icon (Windows animation effects off).
+    def _accent(self, pal, purple):
+        """The icon colour: the Smart Action purple, or the glyph ink."""
+        key = ("accent", self._theme, bool(purple))
+        c = self._pens.get(key)
+        if c is None:
+            c = self._pens[key] = QColor(pal["smart"]) if purple else _ink(pal, 235)
+        return c
+
+    def _pen(self, color, width):
+        key = (color.rgba(), width)
+        pen = self._pens.get(key)
+        if pen is None:
+            if len(self._pens) > 64:
+                self._pens.clear()
+            pen = self._pens[key] = QPen(color, width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        return pen
+
+    def _icon_sprite(self, name, col, draw):
+        def paint(sp):
+            sp.translate(11.0, 11.0)
+            sp.setBrush(Qt.NoBrush)
+            draw(sp)
+        return self._sprite(("icon", name, col.rgba()), 22, 22, paint)
+
+    def _blit_icon(self, p, cx, cy, img):
+        self._blit(p, cx - 11.0, cy - 11.0, img)
+
+    def _spark(self, col):
+        """A four-point sparkle, 16 x 16 (drawn scaled)."""
+        def draw(sp):
+            k = 1.3
+            path = QPainterPath(QPointF(8.0, 0.0))
+            path.quadTo(8.0 + k, 8.0 - k, 16.0, 8.0)
+            path.quadTo(8.0 + k, 8.0 + k, 8.0, 16.0)
+            path.quadTo(8.0 - k, 8.0 + k, 0.0, 8.0)
+            path.quadTo(8.0 - k, 8.0 - k, 8.0, 0.0)
+            sp.setPen(Qt.NoPen)
+            sp.setBrush(col)
+            sp.drawPath(path)
+        return self._sprite(("spark", col.rgba()), 16, 16, draw)
+
+    def _busy_icon(self, vis):
+        if vis == "processing":
+            return self._task_kind or "think"
+        if vis == "ready":
+            return "ready"
+        return "wave"
+
+    def _paint_icon(self, p, icon, cx, cy, pal, col, t):
+        d = self._dpr
+        # On the device-pixel grid, so the sprites and the strokes line up.
+        cx, cy = round(cx * d) / d, round(cy * d) / d
+        draw = getattr(self, "_icon_" + str(icon), None) or self._icon_think
+        draw(p, cx, cy, pal, col, t)
+
+    _WAVE_X = (-7.0, -4.0, -1.0, 2.0, 5.0)        # bar left edges: 2 px bars, 3 px pitch
+    _WAVE_STILL = (4.0, 7.0, 10.0, 7.0, 4.0)
+    _WAVE_ENV = (0.62, 0.85, 1.0, 0.85, 0.62)     # the middle bars reach highest
+
+    def _icon_wave(self, p, cx, cy, pal, col, t):
+        """Transcribing: five small voice bars - the same upright bars as the
+        recording, now in one calm wave rolling left to right."""
+        p.setPen(Qt.NoPen)
+        p.setBrush(col)
+        d = self._dpr
+        for i, bx in enumerate(self._WAVE_X):
+            if t is None:
+                h = self._WAVE_STILL[i]
+            else:
+                h = 3.0 + 8.0 * self._WAVE_ENV[i] * (0.5 + 0.5 * math.sin(t * 6.0 - i * 0.95))
+            # Whole device pixels: crisp bars at 100 % and 200 % scaling.
+            h = max(2.0, round(h * d) / d)
+            y = round((cy - h / 2.0) * d) / d
+            p.drawRoundedRect(QRectF(cx + bx, y, 2.0, h), 1.0, 1.0)
+
+    _THINK_K = 18.0 / 24.0                         # the app's wand at 18 px
+
+    def _icon_think(self, p, cx, cy, pal, col, t):
+        """No clear ask: the Smart Actions wand (the app's icon), its three
+        sparkles twinkling one after another."""
+        k = self._THINK_K
+        o = -12.0 * k                              # the grid's centre on (cx, cy)
+
+        def body(sp):
+            sp.setPen(self._pen(col, 1.5))
+            self._draw_wand_body(sp, k, o, o)
+        self._blit_icon(p, cx, cy, self._icon_sprite("wand_body", col, body))
+        op = p.opacity()
+        p.setBrush(Qt.NoBrush)
+        for x, y, r, f, sw, phase in self._WAND_SPARKS:
+            if t is None:
+                s, a = 1.0, 1.0
+            else:
+                tw = 0.5 + 0.5 * math.sin((t / 1.5 + phase) * 2.0 * math.pi)
+                s, a = 0.55 + 0.45 * tw, 0.35 + 0.65 * tw
+            sx, sy = cx + o + x * k, cy + o + y * k
+            p.setOpacity(op * a)
+            p.setPen(self._pen(col, round(sw * 0.8, 2)))
+            p.drawPath(self._sparkle_path(sx, sy, r * k * s, f * k * s))
+        p.setOpacity(op)
+
+    def _icon_email(self, p, cx, cy, pal, col, t):
+        """An email: a letter in its envelope, its lines writing themselves."""
+        def env(sp):
+            sp.setPen(self._pen(col, 1.5))
+            sheet = QPainterPath(QPointF(-5.4, -1.6))
+            sheet.lineTo(-5.4, -7.0)
+            sheet.quadTo(-5.4, -8.6, -3.8, -8.6)
+            sheet.lineTo(3.8, -8.6)
+            sheet.quadTo(5.4, -8.6, 5.4, -7.0)
+            sheet.lineTo(5.4, -1.6)
+            sp.drawPath(sheet)
+            sp.drawRoundedRect(QRectF(-8.2, -1.6, 16.4, 8.8), 1.8, 1.8)
+            flap = QPainterPath(QPointF(-7.4, -0.8))
+            flap.lineTo(0.0, 3.8)
+            flap.lineTo(7.4, -0.8)
+            sp.drawPath(flap)
+        self._blit_icon(p, cx, cy, self._icon_sprite("email", col, env))
+        if t is None:
+            l1 = l2 = a = 1.0
+        else:
+            ph = (t / 2.0) % 1.0
+            l1 = _smoothstep(0.04, 0.36, ph)
+            l2 = _smoothstep(0.36, 0.62, ph)
+            a = 1.0 - _smoothstep(0.84, 1.0, ph)
+        op = p.opacity()
+        p.setOpacity(op * a)
+        p.setPen(self._pen(col, 1.4))
+        x0 = cx - 3.0
+        if l1 > 0.02:
+            p.drawLine(QPointF(x0, cy - 5.9), QPointF(x0 + 6.0 * l1, cy - 5.9))
+        if l2 > 0.02:
+            p.drawLine(QPointF(x0, cy - 3.7), QPointF(x0 + 4.0 * l2, cy - 3.7))
+        p.setOpacity(op)
+
+    _LIST_ROWS = ((-5.6, 9.2), (0.0, 7.0), (5.6, 8.2))
+
+    def _icon_list(self, p, cx, cy, pal, col, t):
+        """A list: three boxes, ticked one by one."""
+        def rows(sp):
+            dim = QColor(col)
+            dim.setAlpha(int(col.alpha() * 0.45))
+            for y, ln in self._LIST_ROWS:
+                sp.setPen(self._pen(col, 1.3))
+                sp.drawRoundedRect(QRectF(-8.6, y - 2.2, 4.4, 4.4), 1.3, 1.3)
+                sp.setPen(self._pen(dim, 1.6))
+                sp.drawLine(QPointF(-1.4, y), QPointF(-1.4 + ln, y))
+        self._blit_icon(p, cx, cy, self._icon_sprite("list", col, rows))
+        op = p.opacity()
+        for i, (y, ln) in enumerate(self._LIST_ROWS):
+            if t is None:
+                k = 1.0 if i < 2 else 0.0
+            else:
+                ph = (t / 2.6) % 1.0
+                s = 0.1 + 0.24 * i
+                k = _smoothstep(s, s + 0.1, ph) * (1.0 - _smoothstep(0.86, 1.0, ph))
+            if k <= 0.01:
+                continue
+            p.setOpacity(op * k)
+            b = 2.2 * (0.6 + 0.4 * k)
+            p.setPen(Qt.NoPen)
+            p.setBrush(col)
+            p.drawRoundedRect(QRectF(cx - 6.4 - b, cy + y - b, 2.0 * b, 2.0 * b), 1.3, 1.3)
+            p.setPen(self._pen(_WHITE, 1.2))
+            p.drawPolyline([QPointF(cx - 7.6, cy + y + 0.1), QPointF(cx - 6.7, cy + y + 1.1),
+                            QPointF(cx - 5.0, cy + y - 1.0)])
+            p.setPen(self._pen(col, 1.6))
+            p.drawLine(QPointF(cx - 1.4, cy + y), QPointF(cx - 1.4 + ln, cy + y))
+        p.setOpacity(op)
+
+    # The "languages" glyph on a 24-unit grid: a script, then an "A".
+    _SCRIPT = (((5, 8), (11, 14)), ((4, 14), (10, 8)), ((10, 8), (12, 5)),
+               ((2, 5), (14, 5)), ((7, 2), (8, 2)))
+    _LETTER_A = (((22, 22), (17, 12)), ((17, 12), (12, 22)), ((14, 18), (20, 18)))
+
+    def _icon_translate(self, p, cx, cy, pal, col, t):
+        """A translation: a script and an "A", taking turns."""
+        def glyph(segments):
+            def draw(sp):
+                k = 0.78
+                sp.setPen(self._pen(col, 1.5))
+                for (ax, ay), (bx, by) in segments:
+                    sp.drawLine(QPointF((ax - 12) * k, (ay - 12) * k),
+                                QPointF((bx - 12) * k, (by - 12) * k))
+            return draw
+        if t is None:
+            a1 = a2 = 1.0
+        else:
+            w = 0.5 + 0.5 * math.cos(t * 2.0 * math.pi / 2.4)
+            a1, a2 = 0.3 + 0.7 * w, 0.3 + 0.7 * (1.0 - w)
+        op = p.opacity()
+        p.setOpacity(op * a1)
+        self._blit_icon(p, cx, cy, self._icon_sprite("script", col, glyph(self._SCRIPT)))
+        p.setOpacity(op * a2)
+        self._blit_icon(p, cx, cy, self._icon_sprite("letter-a", col, glyph(self._LETTER_A)))
+        p.setOpacity(op)
+
+    _SUM_LINES = ((-6.0, 16.0), (-2.0, 12.5), (2.0, 14.5), (6.0, 9.0))
+
+    def _icon_summary(self, p, cx, cy, pal, col, t):
+        """A summary: four lines folding into one (two small arrows point
+        at it while it holds, so the one line never reads as a minus)."""
+        ph = 0.34 if t is None else (t / 2.4) % 1.0
+        e = _smoothstep(0.12, 0.5, ph)            # folding
+        back = _smoothstep(0.82, 1.0, ph)         # the lines come back
+        op = p.opacity()
+        squeeze = _smoothstep(0.4, 0.56, ph) * (1.0 - back)
+        if squeeze > 0.02:
+            def arrows(sp):
+                sp.setPen(self._pen(col, 1.4))
+                sp.drawPolyline([QPointF(-2.6, -7.2), QPointF(0.0, -4.4), QPointF(2.6, -7.2)])
+                sp.drawPolyline([QPointF(-2.6, 7.2), QPointF(0.0, 4.4), QPointF(2.6, 7.2)])
+            p.setOpacity(op * squeeze)
+            self._blit_icon(p, cx, cy, self._icon_sprite("sum-arrows", col, arrows))
+        x0 = cx - 8.0
+        for i, (y, ln) in enumerate(self._SUM_LINES):
+            # The folding lines fade early, so they never pile into a block.
+            a = (1.0 if i == 0 else (1.0 - e) ** 2.4) * (1.0 - back)
+            if a > 0.02:
+                width = round(1.6 + 0.5 * e, 1) if i == 0 else 1.6
+                xs = x0 + 2.5 * e
+                p.setOpacity(op * a)
+                p.setPen(self._pen(col, width))
+                p.drawLine(QPointF(xs, cy + y * (1.0 - e)),
+                           QPointF(xs + ln + (11.0 - ln) * e, cy + y * (1.0 - e)))
+            if back > 0.02:
+                p.setOpacity(op * back)
+                p.setPen(self._pen(col, 1.6))
+                p.drawLine(QPointF(x0, cy + y), QPointF(x0 + ln, cy + y))
+        p.setOpacity(op)
+
+    def _icon_polish(self, p, cx, cy, pal, col, t):
+        """Polishing: a sparkle sweeps over the words and leaves them bright."""
+        def lines(sp):
+            dim = QColor(col)
+            dim.setAlpha(int(col.alpha() * 0.4))
+            sp.setPen(self._pen(dim, 1.6))
+            sp.drawLine(QPointF(-8.0, 0.8), QPointF(6.0, 0.8))
+            sp.drawLine(QPointF(-8.0, 5.4), QPointF(1.6, 5.4))
+        self._blit_icon(p, cx, cy, self._icon_sprite("polish", col, lines))
+        ph = 0.66 if t is None else (t / 1.9) % 1.0
+        sx = -9.0 + 17.0 * _smoothstep(0.0, 0.66, ph)
+        fade = 1.0 - _smoothstep(0.84, 1.0, ph)
+        op = p.opacity()
+        if fade > 0.02 and sx > -8.0:
+            p.setOpacity(op * fade)
+            p.setPen(self._pen(col, 1.6))
+            p.drawLine(QPointF(cx - 8.0, cy + 0.8), QPointF(cx + min(6.0, sx), cy + 0.8))
+            p.drawLine(QPointF(cx - 8.0, cy + 5.4), QPointF(cx + min(1.6, sx), cy + 5.4))
+        spark = self._spark(col)
+        if t is None:
+            a, a2, r = 1.0, 1.0, 3.6
+        else:
+            a = _smoothstep(0.0, 0.08, ph) * (1.0 - _smoothstep(0.6, 0.74, ph))
+            a2 = a * _smoothstep(0.14, 0.3, ph)
+            r = 3.6 * (0.86 + 0.14 * math.sin(t * 9.0))
+        if a > 0.02:
+            p.setOpacity(op * a)
+            p.drawImage(QRectF(cx + sx - r, cy - 4.4 - r, 2.0 * r, 2.0 * r), spark)
+        if a2 > 0.02:
+            p.setOpacity(op * a2)
+            p.drawImage(QRectF(cx + sx - 6.0, cy - 8.6, 3.6, 3.6), spark)
+        p.setOpacity(op)
+
+    _NOTE_ROWS = ((-0.9, 5.0), (2.3, 3.8), (5.5, 4.6))
+
+    def _icon_notes(self, p, cx, cy, pal, col, t):
+        """Notes: a page whose points fill in under a heading."""
+        def page(sp):
+            sp.setPen(self._pen(col, 1.4))
+            sp.drawRoundedRect(QRectF(-6.6, -8.4, 13.2, 16.8), 2.2, 2.2)
+            sp.setPen(self._pen(col, 2.0))
+            sp.drawLine(QPointF(-3.5, -4.6), QPointF(1.6, -4.6))
+        self._blit_icon(p, cx, cy, self._icon_sprite("notes", col, page))
+        op = p.opacity()
+        for i, (y, ln) in enumerate(self._NOTE_ROWS):
+            if t is None:
+                k = 1.0
+            else:
+                ph = (t / 2.6) % 1.0
+                s = 0.1 + 0.22 * i
+                k = _smoothstep(s, s + 0.18, ph) * (1.0 - _smoothstep(0.86, 1.0, ph))
+            if k <= 0.02:
+                continue
+            p.setOpacity(op * min(1.0, k * 3.0))
+            p.setPen(Qt.NoPen)
+            p.setBrush(col)
+            p.drawEllipse(QPointF(cx - 3.4, cy + y), 0.9, 0.9)
+            p.setOpacity(op)
+            p.setPen(self._pen(col, 1.4))
+            p.drawLine(QPointF(cx - 1.6, cy + y), QPointF(cx - 1.6 + ln * k, cy + y))
+        p.setOpacity(op)
+
+    def _icon_reply(self, p, cx, cy, pal, col, t):
+        """A reply: a chat bubble, typing."""
+        def bubble(sp):
+            path = QPainterPath()
+            path.addRoundedRect(QRectF(-8.4, -7.2, 16.8, 11.8), 5.2, 5.2)
+            tail = QPainterPath(QPointF(-5.8, 3.0))
+            tail.lineTo(-7.2, 8.0)
+            tail.lineTo(-1.4, 4.4)
+            tail.closeSubpath()
+            sp.setPen(self._pen(col, 1.5))
+            sp.drawPath(path.united(tail))
+        self._blit_icon(p, cx, cy, self._icon_sprite("reply", col, bubble))
+        op = p.opacity()
+        p.setPen(Qt.NoPen)
+        p.setBrush(col)
+        for i, x in enumerate((-3.8, 0.0, 3.8)):
+            b = 0.0 if t is None else max(0.0, math.sin(t * 2.0 * math.pi / 1.2 - i * 0.9)) ** 1.5
+            p.setOpacity(op * (1.0 if t is None else 0.45 + 0.55 * b))
+            p.drawEllipse(QPointF(cx + x, cy - 1.3 - 1.6 * b), 1.3, 1.3)
+        p.setOpacity(op)
+
+    _icon_message = _icon_reply           # a message: the same chat bubble, typing
+
+    def _icon_ready(self, p, cx, cy, pal, col, t):
+        """Getting ready: the speech model's download - a ring that fills
+        with its percent (a comet until it is known) round an arrow."""
+        c = QPointF(cx, cy)
+        box = QRectF(cx - 7.5, cy - 7.5, 15.0, 15.0)
+        p.setBrush(Qt.NoBrush)
+        p.setPen(self._pen(_ink(pal, 40), 2.2))
+        p.drawEllipse(c, 7.5, 7.5)
+        pct = getattr(self, "_model_pct", None)
+        if pct:
+            p.setPen(self._pen(col, 2.2))
+            p.drawArc(box, 90 * 16, -int(min(100, pct) * 3.6 * 16))
+        elif t is not None:
+            head = -(t * 380.0) % 360.0
+            comet = QConicalGradient(c, head)
+            clear = QColor(col)
+            clear.setAlpha(0)
+            comet.setColorAt(0.0, col)
+            comet.setColorAt(0.72, clear)
+            comet.setColorAt(1.0, clear)
+            p.setPen(QPen(QBrush(comet), 2.2, Qt.SolidLine, Qt.RoundCap))
+            p.drawArc(box, int(head * 16), int(260 * 16))
+
+        def arrow(sp):
+            sp.setPen(self._pen(col, 1.5))
+            sp.drawLine(QPointF(0.0, -3.4), QPointF(0.0, 2.4))
+            sp.drawPolyline([QPointF(-2.4, 0.2), QPointF(0.0, 2.6), QPointF(2.4, 0.2)])
+        self._blit_icon(p, cx, cy, self._icon_sprite("arrow", col, arrow))
 
     def _paint_done(self, p, rect, pal, now, fit_w):
         cy = rect.center().y()

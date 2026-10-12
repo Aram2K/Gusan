@@ -8,6 +8,11 @@ import os
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
 import gc
 import sys
+if __name__ == "__main__":
+    # The app runs this file as __main__. Services do `import main` /
+    # `from main import ...` (file jobs, model checks): they
+    # must get THIS module - a second copy would load its own config.
+    sys.modules.setdefault("main", sys.modules["__main__"])
 import threading
 import time
 import json
@@ -33,7 +38,7 @@ import ctypes
 import psutil
 from PIL import Image, ImageDraw
 
-from PySide6.QtCore import Qt, QTimer, QObject, Signal
+from PySide6.QtCore import Qt, QTimer, QObject, Signal, QEvent
 from PySide6.QtGui import QIcon, QPixmap, QImage, QAction
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox
 
@@ -45,6 +50,7 @@ import local_llm
 import telemetry
 import auth
 import entitlements
+import pill_copy
 import text_cleanup
 import vocabulary
 import hotkeys
@@ -52,8 +58,16 @@ import speech_langs
 import autostart
 import gpu_accel
 
-# ── Version ───────────────────────────────────────────────────────────────────
-APP_VERSION = "1.9.4"
+# ── Name and version ──────────────────────────────────────────────────────────
+# Defined in app_info.py (no Qt) so pages and services can read them without
+# importing this module. main.APP_VERSION / main.resource_path stay available
+# (and patchable) for existing callers and tests.
+from app_info import APP_NAME, APP_VERSION, resource_path
+import settings_apply
+import updater
+# Gusan 2.0 services' config defaults (both modules are Qt-free at import).
+from file_jobs import FILE_DEFAULTS
+from calendar_service import DEFAULTS as CALENDAR_DEFAULTS
 
 # ── Managed cloud transcription (Pro moat) ────────────────────────────────────
 MANAGED_PROXY_URL = "https://hftcelxzfoubheqeoool.supabase.co/functions/v1/transcribe-proxy"
@@ -70,6 +84,11 @@ PRO_ANNUAL_URL  = "https://buy.stripe.com/fZuaEW0SF4Aq1UMh1R0Ba01"
 # Billing → Customer portal → Login link) - the fallback for an account the
 # function can't match to a Stripe customer. Blank while that link is off.
 STRIPE_PORTAL_URL = ""
+# The Pro window's feature names (AppController._pro_upsell). paywall_viewed's
+# "feature" keeps the 1.9 value, so dashboards stay continuous; the window
+# shows today's name.
+PRO_FEATURE_EVENT = {"Live Assistant": "Live Assistance"}
+PRO_FEATURE_SHOWN = {"Live Assistance": "Live Assistant"}
 PROJECT_GITHUB_URL = "https://github.com/Aram2K/transcribe-app"
 RELEASES_URL = "https://github.com/Aram2K/transcribe-app/releases/latest"
 RELEASES_API = "https://api.github.com/repos/Aram2K/transcribe-app/releases/latest"
@@ -92,6 +111,9 @@ LEGACY_CONFIG_PATH = "config.json"
 ANALYTICS_CONSENT_PATH = storage.path_for("analytics_consent.accepted")
 ANALYTICS_DECLINED_PATH = storage.path_for("analytics_consent.declined")
 
+# The Smart Actions shortcut a new (or schema-2) config gets (D2).
+SMART_ACTIONS_HOTKEY_DEFAULT = "alt+s"
+
 DEFAULT = {
     "hotkey":        "alt+r",
     "whisper_model": "base",
@@ -112,6 +134,9 @@ DEFAULT = {
     "google_api_key": "",
     "mistral_api_key": "",
     "initial_prompt": "",
+    # 1.9.x's dictation mode switch. Kept (a 1.9.x copy may read this file)
+    # but read by nothing in 2.0: Alt+R always pastes the exact words and a
+    # Smart Action runs from its own shortcut (smart_actions_hotkey).
     "output_action": "transcribe_only",
     "action_model": "rule_based",
     "action_api_provider": "openai_compatible",
@@ -168,8 +193,13 @@ DEFAULT = {
     # default) in every config.json, which would keep this off after updating.
     "live_assist_auto_answer": True,
     "live_assist_pos": None,
-    "live_assist_language": "en",         # transcription language for prompter sessions
-    "live_assist_output_language": "en",  # language of the suggestions
+    # Transcription language of a Live Assistant session ("" = the dictation
+    # language) and of its answers ("" = the call's language). 1.9.x saved
+    # "en" in every config, and those keep English.
+    "live_assist_language": "",
+    "live_assist_output_language": "",
+    # Who writes the answers: "" automatic, "cloud" (Gusan Cloud), "local".
+    "live_assist_writer": "",
     "live_assist_screen_auto": True,      # attach a screenshot when the talk refers to the screen
     # What the user wrote about the call (the overlay's Context line): every
     # answer is shaped by it until they change or clear it.
@@ -181,9 +211,68 @@ DEFAULT = {
     # this (it samples what is behind it); off, it paints a smoked plate.
     "overlay_private": True,
     "overlay_pos": None,                  # where the user dragged the HUD
-    # Bumped when the config shape changes in a way that needs migration.
-    "config_schema_version": 1,
+    # ── Gusan 2.0 ──
+    # Audio to text rail (file_jobs.FILE_DEFAULTS): file_model, file_language,
+    # file_speakers, file_timestamps, file_save_word, notify_when_ready.
+    **FILE_DEFAULTS,
+    # Google Calendar reminders (calendar_service): calendar_ask_to_record,
+    # calendar_only_with_link.
+    **CALENDAR_DEFAULTS,
+    "meeting_language": "",               # "" = the dictation language
+    "meeting_notes_model": "",            # "" = action_model (meeting_session picks a real engine)
+    "meeting_consent_reminder": True,     # the consent line on the Meetings start card
+    # The Smart Actions shortcut: one take runs as a Smart Action (Option+S
+    # on a Mac). "" = not set (Alt+S was another shortcut's at migration).
+    "smart_actions_hotkey": SMART_ACTIONS_HOTKEY_DEFAULT,
+    # What transcribes a Smart Action: "" = same as Dictation | "cloud" =
+    # Gusan Cloud (Pro, never in Privacy mode) | a Whisper id (hardware.MODEL_INFO).
+    "smart_actions_speech_model": "",
+    "app_theme": "system",               # Settings > General > App look (row hidden in 2.0: light only)
+    "install_updates_on_quit": True,      # download a found update, run it at Quit
+    # One quiet line on Home for 1.x upgraders ("Transcribe is now Gusan…"):
+    # set by _migrate_config, cleared once Home has shown it (or it was closed).
+    "rename_note_pending": False,
+    # Bumped when the config shape changes in a way that needs migration
+    # (_migrate_config). 2 = Gusan 2.0; 3 = the Smart Actions shortcut (Alt+S).
+    "config_schema_version": 3,
 }
+
+CONFIG_SCHEMA_VERSION = DEFAULT["config_schema_version"]
+
+
+def _migrate_config(loaded, on_disk):
+    """Bring an older config up to CONFIG_SCHEMA_VERSION, in place. Only adds
+    or fills keys - never drops one (a 1.9.x copy may read this file again).
+    ``on_disk`` is what the file held (the DEFAULT itself when there is none)."""
+    try:
+        version = int(on_disk.get("config_schema_version", 1) or 1)
+    except (TypeError, ValueError):
+        version = 1
+    if version >= CONFIG_SCHEMA_VERSION:
+        return
+    if version < 2 and on_disk:
+        # A 1.x install's settings (a real file - a fresh install reads the
+        # DEFAULT, already schema 2): Home says once that Transcribe is now
+        # Gusan and everything was kept. Never a modal.
+        loaded["rename_note_pending"] = True
+    if version < 2:
+        # 1.9 file jobs used the dictation language: keep it for Audio to text
+        # (a user who dictates in Russian keeps getting Russian files).
+        if "file_language" not in on_disk:
+            lang = on_disk.get("language") or loaded.get("language") or "auto"
+            loaded["file_language"] = lang if isinstance(lang, str) and lang else "auto"
+    if version < 3:
+        # Smart Actions run from their own shortcut now (Alt+R always pastes
+        # the exact words). A 1.9.x file has no key and an early 2.0 one saved
+        # "" (= none): both get Alt+S - unless Alt+S is already the dictation
+        # or Live Assistant key, then it stays "" (the page shows "Set
+        # shortcut"). A shortcut the user picked is kept.
+        if not settings_apply.norm_hotkey(on_disk.get("smart_actions_hotkey", "")):
+            taken = {settings_apply.norm_hotkey(loaded.get("hotkey")),
+                     settings_apply.norm_hotkey(loaded.get("live_assist_hotkey"))}
+            loaded["smart_actions_hotkey"] = ("" if SMART_ACTIONS_HOTKEY_DEFAULT in taken
+                                              else SMART_ACTIONS_HOTKEY_DEFAULT)
+    loaded["config_schema_version"] = CONFIG_SCHEMA_VERSION
 
 storage.migrate_legacy_file(LEGACY_CONFIG_PATH, CONFIG_PATH)
 
@@ -203,6 +292,42 @@ def normalize_mistral_model(model):
 # BYO key fields that must never sit in plaintext config.json (they live in the
 # OS keyring; config keeps "" once migrated).
 _SECRET_CFG_KEYS = ("google_api_key", "action_api_key", "mistral_api_key")
+
+# What the OS keyring is known to hold ({secret name: value}), from this run's
+# reads and successful writes. save_config runs after every instant-apply burst
+# (and on macOS each keyring write is a `security` subprocess), so it writes a
+# secret only when its value changed. Tied to the writer it was learned with:
+# another writer (a test's stand-in, a keyring swap) starts from nothing.
+_KEYRING_KNOWN = {}
+_KEYRING_KNOWN_FOR = [None]
+
+
+def _keyring_known():
+    if _KEYRING_KNOWN_FOR[0] is not storage.write_secret:
+        _KEYRING_KNOWN.clear()
+        _KEYRING_KNOWN_FOR[0] = storage.write_secret
+    return _KEYRING_KNOWN
+
+
+def _note_keyring_value(name, value):
+    """A secret read from (or written to) the keyring this run. Only a value
+    actually found counts: "" can also mean the keyring couldn't be read."""
+    if value:
+        _keyring_known()[name] = value
+
+
+def _store_secret(name, value):
+    """Put one secret in the OS keyring unless it already holds that value.
+    True = the keyring holds ``value`` (config.json may then keep "")."""
+    known = _keyring_known()
+    if name in known and known[name] == value:
+        return True
+    ok = storage.write_secret(name, value)
+    if ok:
+        known[name] = value
+    else:
+        known.pop(name, None)
+    return ok
 
 
 def _strip_user_secret_keys(store):
@@ -234,13 +359,14 @@ def load_config():
     if not isinstance(data, dict):
         data = {}
     loaded = {**DEFAULT, **data}
+    _migrate_config(loaded, data)
     # Keep initial_prompt in step with the structured vocabulary list, so a
     # hand-edited or older config self-heals on load.
     vocabulary.sync_config(loaded)
 
     key = (loaded.get("google_api_key") or "").strip()
     if key:
-        if storage.write_secret(storage.GOOGLE_API_KEY_SECRET, key):
+        if _store_secret(storage.GOOGLE_API_KEY_SECRET, key):
             loaded["google_api_key"] = key
             disk = {**loaded, "google_api_key": ""}
             try:
@@ -249,6 +375,7 @@ def load_config():
                 logger.warning("Could not sanitize API key in config: %s", e)
     else:
         loaded["google_api_key"] = storage.read_secret(storage.GOOGLE_API_KEY_SECRET)
+        _note_keyring_value(storage.GOOGLE_API_KEY_SECRET, loaded["google_api_key"])
 
     if loaded.get("privacy_mode"):
         loaded["backend"] = "local"
@@ -261,12 +388,12 @@ def load_config():
     if loaded.get("mistral_stt_model"):
         loaded["mistral_stt_model"] = normalize_mistral_model(loaded["mistral_stt_model"])
 
-    # Output mode stays on "transcribe_only" by default. Smart Actions are a
-    # Pro feature and must be turned on explicitly - we never auto-enable them.
+    # output_action is 1.9.x's (kept as it is): dictation never reads it.
+    # A Smart Action runs only from its own shortcut (smart_actions_hotkey).
 
     action_key = (loaded.get("action_api_key") or "").strip()
     if action_key:
-        if storage.write_secret(storage.ACTION_API_KEY_SECRET, action_key):
+        if _store_secret(storage.ACTION_API_KEY_SECRET, action_key):
             loaded["action_api_key"] = action_key
             disk = {**loaded, "google_api_key": "", "action_api_key": ""}
             try:
@@ -275,11 +402,12 @@ def load_config():
                 logger.warning("Could not sanitize action API key in config: %s", e)
     else:
         loaded["action_api_key"] = storage.read_secret(storage.ACTION_API_KEY_SECRET)
+        _note_keyring_value(storage.ACTION_API_KEY_SECRET, loaded["action_api_key"])
 
     mistral_key = (loaded.get("mistral_api_key") or "").strip()
     if mistral_key:
         # Migrate a plaintext Mistral key from config.json into the OS keyring.
-        if storage.write_secret(storage.MISTRAL_API_KEY_SECRET, mistral_key):
+        if _store_secret(storage.MISTRAL_API_KEY_SECRET, mistral_key):
             loaded["mistral_api_key"] = mistral_key
             disk = {**loaded, "google_api_key": "", "action_api_key": "", "mistral_api_key": ""}
             try:
@@ -288,11 +416,13 @@ def load_config():
                 logger.warning("Could not sanitize Mistral API key in config: %s", e)
     else:
         loaded["mistral_api_key"] = storage.read_secret(storage.MISTRAL_API_KEY_SECRET)
+        _note_keyring_value(storage.MISTRAL_API_KEY_SECRET, loaded["mistral_api_key"])
 
     # Per-user stashed keys (account switching) live in the keyring as one JSON
     # blob; merge them back over the sanitized on-disk snapshots.
     try:
         blob_raw = storage.read_secret(storage.USER_SECRETS_SECRET)
+        _note_keyring_value(storage.USER_SECRETS_SECRET, blob_raw)
         if blob_raw:
             blob = json.loads(blob_raw)
             store = loaded.get("user_secrets")
@@ -325,20 +455,21 @@ def save_config(c):
         # Local history is independent of Privacy Mode (it never leaves the device).
         if actions.ACTION_MODELS.get(actions.normalize_action_model(disk.get("action_model")), {}).get("kind") == "cloud":
             disk["action_model"] = actions.RULE_BASED_ID
+    # Each secret is written only when it changed (_store_secret).
     key = (disk.get("google_api_key") or "").strip()
-    if storage.write_secret(storage.GOOGLE_API_KEY_SECRET, key):
+    if _store_secret(storage.GOOGLE_API_KEY_SECRET, key):
         disk["google_api_key"] = ""
     action_key = (disk.get("action_api_key") or "").strip()
-    if storage.write_secret(storage.ACTION_API_KEY_SECRET, action_key):
+    if _store_secret(storage.ACTION_API_KEY_SECRET, action_key):
         disk["action_api_key"] = ""
     mistral_key = (disk.get("mistral_api_key") or "").strip()
-    if storage.write_secret(storage.MISTRAL_API_KEY_SECRET, mistral_key):
+    if _store_secret(storage.MISTRAL_API_KEY_SECRET, mistral_key):
         disk["mistral_api_key"] = ""
     # Per-user stashed keys (account switching) go to the keyring too - the
     # on-disk store keeps only the non-secret engine config per user.
     sanitized_store, keys_blob = _strip_user_secret_keys(disk.get("user_secrets"))
     try:
-        if storage.write_secret(storage.USER_SECRETS_SECRET, json.dumps(keys_blob)):
+        if _store_secret(storage.USER_SECRETS_SECRET, json.dumps(keys_blob, sort_keys=True)):
             disk["user_secrets"] = sanitized_store
     except Exception:
         logger.debug("Could not stash user secrets in keyring", exc_info=True)
@@ -346,12 +477,7 @@ def save_config(c):
 
 cfg = load_config()
 
-def resource_path(*parts):
-    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-    candidate = base.joinpath(*parts)
-    if candidate.exists():
-        return str(candidate)
-    return str(Path(__file__).resolve().parent.joinpath(*parts))
+# resource_path comes from app_info (imported at the top).
 
 # ── Single-instance IPC ──────────────────────────────────────────────────────
 def acquire_single_instance_lock():
@@ -370,7 +496,8 @@ IPC_ACTIONS = ("show_settings", "show_onboarding", "show_meeting", "live_prompte
 def launch_action(argv):
     """What a second launch asks the running instance to do: the action named
     on the command line, nothing for the quiet Windows-startup launch (the app
-    is already running), otherwise open Settings."""
+    is already running), otherwise "show_settings" - which opens the app (the
+    name is kept for 1.9.x compatibility)."""
     for arg in argv[1:]:
         if arg in IPC_ACTIONS:
             return arg
@@ -387,6 +514,28 @@ def signal_running_instance(action="show_settings"):
             return s.recv(32) == b"transcribe-ok"
     except OSError:
         return False
+
+def dispatch_ipc_action(controller, action):
+    """What the running app does with a second launch's action (GUI thread):
+    "show_settings" (the default, and the installer's --show-settings) opens
+    the app, "show_onboarding" the welcome wizard (first run only - else the
+    app), "show_meeting" the Meetings page, "live_prompter" toggles the Live
+    Assistant card. Anything else
+    opens the app - or, while the first-run wizard is on screen, brings the
+    wizard forward (never the app behind it). The names never change: a 1.9.x
+    copy may be the one asking."""
+    if action == "live_prompter":
+        controller.toggle_live_assist()
+    elif action == "show_meeting":
+        controller.show_meeting()
+    elif action == "show_onboarding":
+        controller.show_onboarding()
+    else:
+        front = getattr(controller, "front_first_run_wizard", None)
+        if callable(front) and front() is True:
+            return
+        controller.show_main()
+
 
 def start_ipc_server(server_sock, on_action):
     def _accept():
@@ -524,7 +673,7 @@ def _looks_like_whisper_cache_error(err):
 def _friendly_transcription_error(err):
     if _looks_like_whisper_cache_error(err):
         return (
-            "Local Whisper model files are incomplete. Open Settings > Models "
+            "Local Whisper model files are incomplete. Open Settings › Speech & AI "
             "and redownload the selected Whisper model."
         )
     return str(err)
@@ -843,9 +992,54 @@ class AudioRecorder:
         # Per-session language override (the meeting window's language
         # selector). None = use the global cfg["language"] default.
         self.language_override = None
+        # Per-take speech engine (a Smart Action's own pick, start_recording
+        # speech=): backend "local"/"managed" and a Whisper id. None = the
+        # global cfg["backend"] / cfg["whisper_model"]. Every start resets them.
+        self.backend_override = None
+        self.model_override = None
         self._capture_mode = None     # smart_meeting/system_only/default_mic; None = dictation
         self.fast_live_chunks = False  # Live Assistance session: short pieces (see _record_loop)
         self._loopback_peak = 0.0     # loudest loopback sample this session (0 = no system audio)
+        # Meeting Pause (set_paused): the record thread keeps reading - and so
+        # draining - the streams, but keeps nothing while this is set.
+        self.paused           = False
+        # Meetings only: loudness of the mic and of the call (system sound)
+        # BEFORE they are mixed, as on_source_levels(mic_rms, call_rms) from
+        # the record thread. None = nobody listens (dictation).
+        self.on_source_levels = None
+        # Mic + system sound meetings: (mic energy, call energy) of each chunk,
+        # by chunk index - a hint at who spoke (chunk_source_energy).
+        self._chunk_sources   = {}
+        # model_fetcher(name): called on a worker before a Whisper model is
+        # built, so a missing model comes through the app's one download
+        # manager (progress, no duplicate download) - AppController sets it.
+        # None: the build downloads it itself (local_files_only=False).
+        self.model_fetcher    = None
+        self._fetching_model  = False
+        # The language the last transcribe_segments() decode detected (file
+        # jobs show it for Detect automatically / Mixed languages).
+        self._last_segments_language = None
+
+    def set_paused(self, paused):
+        """Pause or resume a meeting recording. Only a flag: the record thread
+        keeps reading the streams (they are never stopped or closed from
+        another thread) and keeps nothing while paused - no speech detection,
+        no chunk, no full-audio frame. The speech pending at Pause is cut as one
+        chunk right away. One recording stays ONE segment, so the notes, the
+        speaker pass and the 2-hour cap work as without a pause."""
+        self.paused = bool(paused)
+
+    def chunk_source_energy(self, idx):
+        """(mic energy, call energy) of chunk ``idx`` in a mic + system sound
+        meeting, or None (other modes, or not cut yet)."""
+        with self._chunk_lock:
+            return self._chunk_sources.get(idx)
+
+    @staticmethod
+    def _samples_rms(samples):
+        if samples is None or len(samples) == 0:
+            return 0.0
+        return float(np.sqrt(np.mean(np.square(samples))))
 
     @staticmethod
     def _whisper_device():
@@ -930,6 +1124,15 @@ class AudioRecorder:
             # up), so local chunks are about to wait on it.
             self._building_model = True
             try:
+                fetch = getattr(self, "model_fetcher", None)
+                if fetch is not None:
+                    # Not on disk yet: wait for the shared download (it raises
+                    # model_manager.DownloadError with a plain sentence).
+                    self._fetching_model = True
+                    try:
+                        fetch(name)
+                    finally:
+                        self._fetching_model = False
                 self._build_model_locked(name)
             finally:
                 self._building_model = False
@@ -1272,23 +1475,33 @@ class AudioRecorder:
         read_n = max(cfg["chunk_size"], min(avail, sr * 2))
         return stream.read(read_n, exception_on_overflow=False)
 
-    def start_recording(self, capture_mode=None, language=None):
+    def start_recording(self, capture_mode=None, language=None, speech=None):
+        """``speech``: (backend, model) THIS take transcribes with - a Smart
+        Action's own pick (engine_choice.smart_speech_session); None = the
+        global cfg backend / whisper_model."""
         try:
-            self._start_recording_impl(capture_mode, language)
+            self._start_recording_impl(capture_mode, language, speech)
         except BaseException:
             # A device that wouldn't open is not a recording - left True, the
             # idle sweep would never free the speech model again.
             self.recording = False
             raise
 
-    def _start_recording_impl(self, capture_mode=None, language=None):
+    def _start_recording_impl(self, capture_mode=None, language=None, speech=None):
         self.recording = True
         self._last_model_use = time.monotonic()
         # Per-session language: the meeting window passes its selector value;
         # plain dictation passes nothing, which resets to the global default.
         self.language_override = language or None
+        # Per-take speech engine, the same way: set before any piece is cut
+        # (pieces transcribe while recording) and reset by every other start
+        # (Alt+R, a meeting, the Live Assistant).
+        backend, model = (tuple(speech) + (None, None))[:2] if speech else (None, None)
+        self.backend_override = backend or None
+        self.model_override = model or None
         self._capture_mode = capture_mode
         self._loopback_peak = 0.0
+        self.paused = False
         with self._chunk_lock:
             self._chunk_frames     = []
             self._chunk_results    = {}
@@ -1297,6 +1510,7 @@ class AudioRecorder:
             self._samples_in_chunk = 0
             self._chunk_errors     = []
             self._chunk_silence_before = {}
+            self._chunk_sources    = {}
         self._session_lang  = None
         self._chunk_threads = []
         self._record_error  = ""
@@ -1411,11 +1625,14 @@ class AudioRecorder:
         native crash (access violation inside PortAudio), which is exactly
         what happened when a meeting was stopped while the loopback read sat
         blocked on a silent device."""
+        # Stopped while paused: the tail is audio from after Pause - drain it,
+        # never keep it.
+        keep = not getattr(self, "paused", False)
         try:
             avail = stream.get_read_available()
             if avail > 0:
                 extra = stream.read(avail, exception_on_overflow=False)
-                if extra:
+                if extra and keep:
                     if is_loopback:
                         extra = self._loopback_to_mono16k(extra).tobytes()
                     if extra:
@@ -1428,7 +1645,7 @@ class AudioRecorder:
                 avail = mic_stream.get_read_available()
                 if avail > 0:
                     extra_mic = mic_stream.read(avail, exception_on_overflow=False)
-                    if extra_mic:
+                    if extra_mic and keep:
                         with self._chunk_lock:
                             self._chunk_frames.append(extra_mic)
             except Exception as e:
@@ -1484,10 +1701,38 @@ class AudioRecorder:
             min_speech_sec = min(min_speech_sec, 1.0)
         buffered_sec = 0.0
         chunk_peak = 0.0
+        # Mic + system sound meetings: each source's energy since the last
+        # chunk (chunk_source_energy). Pause: whether the last read was paused.
+        two_sources = is_loopback and mic_stream is not None
+        src_mic_e = 0.0
+        src_call_e = 0.0
+        was_paused = False
+        # System sound only: a silent loopback delivers no frames at all, so
+        # the meters get one zero reading when it goes quiet (not a frozen bar).
+        call_quiet = False
+
+        def cut_chunk(frames, silence_before, sources):
+            # The audio since the last chunk becomes chunk N, transcribed on
+            # its own thread.
+            with self._chunk_lock:
+                chunk_audio = np.frombuffer(
+                    b"".join(frames), dtype=np.float32).copy()
+                idx = self._chunk_idx
+                self._chunk_idx   += 1
+                self._chunk_frames = []
+                self._chunk_silence_before[idx] = float(silence_before)
+                chunk_sources = getattr(self, "_chunk_sources", None)
+                if sources is not None and chunk_sources is not None:
+                    chunk_sources[idx] = sources
+            t = threading.Thread(target=self._transcribe_chunk,
+                                 args=(chunk_audio, idx), daemon=True)
+            self._chunk_threads.append(t)
+            t.start()
 
         while self.recording or post_roll_chunks > 0:
             if self.stop_requested and post_roll_chunks == 0:
                 if (self._abort or silence_sec >= 0.3
+                        or getattr(self, "paused", False)
                         or (not meeting_cadence and speech_sec == 0.0
                             and self._chunk_idx > 0)):
                     # No syllable in flight - Esc (nothing gets transcribed),
@@ -1497,6 +1742,8 @@ class AudioRecorder:
                     # was ever detected the post-roll stays, in case the
                     # detector hasn't calibrated to this voice yet (meetings
                     # cut chunks on a timer, so a chunk proves nothing there).
+                    # A paused meeting never gets one: that audio is after
+                    # Pause.
                     self.recording = False
                     break
                 post_roll_chunks = max_post_roll
@@ -1507,6 +1754,7 @@ class AudioRecorder:
                     self.recording = False
 
             try:
+                mic_part = call_part = None
                 if is_loopback and mic_stream is not None:
                     # smart_meeting: the MIC is the loop's clock (it always
                     # delivers frames); the loopback is drained opportunistically
@@ -1518,6 +1766,7 @@ class AudioRecorder:
                     mic_data = self._read_input_draining(mic_stream, sr)
                     arr_mic = np.frombuffer(mic_data, dtype=np.float32)
                     loop_chunk = self._read_available_loopback(stream)
+                    mic_part, call_part = arr_mic, loop_chunk
                     if len(loop_chunk) > 0:
                         loop_fifo = np.concatenate([loop_fifo, loop_chunk])
                         # Clock-drift safety valve only - generous, because
@@ -1546,8 +1795,18 @@ class AudioRecorder:
                             loop_idle_sec = 0.0
                             data = np.zeros(cfg["chunk_size"], dtype=np.float32).tobytes()
                         else:
+                            if not call_quiet:
+                                call_quiet = True
+                                on_src = getattr(self, "on_source_levels", None)
+                                if (on_src is not None and meeting_cadence
+                                        and not getattr(self, "paused", False)):
+                                    try:
+                                        on_src(0.0, 0.0)
+                                    except Exception:
+                                        pass
                             continue
                     else:
+                        call_quiet = False
                         loop_idle_sec = 0.0
                         data = loop_chunk.tobytes()
                 else:
@@ -1555,12 +1814,56 @@ class AudioRecorder:
 
                 read_errors = 0
 
+                if getattr(self, "paused", False):
+                    # Paused meeting: the streams were read above (so they
+                    # never overflow, and are never touched from another
+                    # thread), but nothing is kept. On the first paused read
+                    # the speech said before Pause becomes a chunk, so it
+                    # reaches the live transcript now.
+                    if not was_paused:
+                        was_paused = True
+                        if vad_buf and (speech_sec > 0.0 or chunk_peak >= 0.01):
+                            cut_chunk(vad_buf, silence_sec,
+                                      (src_mic_e, src_call_e) if two_sources else None)
+                            vad_buf      = []
+                            speech_sec   = 0.0
+                            silence_sec  = 0.0
+                            buffered_sec = 0.0
+                            chunk_peak   = 0.0
+                            src_mic_e = src_call_e = 0.0
+                    # System sound queued for mixing is from the pause too.
+                    loop_fifo = loop_fifo[:0]
+                    loop_idle_sec = 0.0
+                    continue
+                was_paused = False
+
                 arr = np.frombuffer(data, dtype=np.float32)
                 this_dur = (len(arr) / sr) if len(arr) > 0 else frame_dur
                 buffered_sec += this_dur
                 if len(arr) > 0:
                     chunk_peak = max(chunk_peak, float(np.abs(arr).max()))
                 rms = float(np.sqrt(np.mean(arr ** 2))) if len(arr) > 0 else 0.0
+
+                if meeting_cadence:
+                    # Meetings: how loud the mic and the call are, BEFORE the
+                    # mix (the "You" / "The call" meters).
+                    if two_sources:
+                        m_part, c_part = mic_part, call_part
+                    elif is_loopback:
+                        m_part, c_part = None, arr          # system sound only
+                    else:
+                        m_part, c_part = arr, None          # microphone only
+                    mic_rms = AudioRecorder._samples_rms(m_part)
+                    call_rms = AudioRecorder._samples_rms(c_part)
+                    if two_sources:
+                        src_mic_e += mic_rms * mic_rms * len(m_part)
+                        src_call_e += call_rms * call_rms * (len(c_part) if c_part is not None else 0)
+                    on_src = getattr(self, "on_source_levels", None)
+                    if on_src is not None:
+                        try:
+                            on_src(mic_rms, call_rms)
+                        except Exception:
+                            pass
 
                 noise_hist.append(rms)
                 if len(noise_hist) > 200:
@@ -1622,22 +1925,14 @@ class AudioRecorder:
                     should_chunk = False
 
                 if should_chunk and (speech_sec >= min_speech_sec or force_chunk):
-                    with self._chunk_lock:
-                        chunk_audio = np.frombuffer(
-                            b"".join(vad_buf), dtype=np.float32).copy()
-                        idx = self._chunk_idx
-                        self._chunk_idx   += 1
-                        self._chunk_frames = []
-                        self._chunk_silence_before[idx] = float(silence_sec)
+                    cut_chunk(vad_buf, silence_sec,
+                              (src_mic_e, src_call_e) if two_sources else None)
                     vad_buf      = []
                     speech_sec   = 0.0
                     silence_sec  = 0.0
                     buffered_sec = 0.0
                     chunk_peak   = 0.0
-                    t = threading.Thread(target=self._transcribe_chunk,
-                                         args=(chunk_audio, idx), daemon=True)
-                    self._chunk_threads.append(t)
-                    t.start()
+                    src_mic_e = src_call_e = 0.0
 
             except Exception as e:
                 read_errors += 1
@@ -1652,11 +1947,12 @@ class AudioRecorder:
 
     def _transcribe_chunk(self, audio, idx):
         try:
-            if cfg["backend"] == "managed":
+            backend = AudioRecorder._backend(self)
+            if backend == "managed":
                 text, lang = self._run_managed(audio)
-            elif cfg["backend"] == "google" and cfg["google_api_key"]:
+            elif backend == "google" and cfg["google_api_key"]:
                 text, lang = self._run_google(audio)
-            elif cfg["backend"] == "mistral" and cfg.get("mistral_api_key"):
+            elif backend == "mistral" and cfg.get("mistral_api_key"):
                 text, lang = self._run_mistral(audio)
             else:
                 text, lang = self._run_local(audio)
@@ -1716,8 +2012,11 @@ class AudioRecorder:
         # or a slow load would silently drop the first sentences.
         load_wait = time.time()
         if getattr(self, "_building_model", False) and AudioRecorder._runs_locally(self):
+            # A model still downloading (model_fetcher) has no time limit
+            # here: the pieces wait for it instead of being dropped.
             while (getattr(self, "_building_model", False)
-                   and time.time() - load_wait < 90 and not getattr(self, "_abort", False)):
+                   and (time.time() - load_wait < 90 or getattr(self, "_fetching_model", False))
+                   and not getattr(self, "_abort", False)):
                 time.sleep(0.05)
         self._last_load_wait = time.time() - load_wait
         budget = max(30, min(180, 5 * len(pending)))
@@ -1753,7 +2052,8 @@ class AudioRecorder:
         remaining = np.frombuffer(b"".join(self._chunk_frames), dtype=np.float32).copy()
         last_text, detected = "", ""
 
-        is_cloud = (cfg["backend"] in ("managed", "google", "mistral"))
+        backend = AudioRecorder._backend(self)       # this take's (a Smart Action's own pick)
+        is_cloud = (backend in ("managed", "google", "mistral"))
         min_samples = cfg["sample_rate"] // 4 if is_cloud else cfg["sample_rate"] // 2
 
         # Smart Audio Padding: Pad short final audio snippets with silence (zeros)
@@ -1774,11 +2074,11 @@ class AudioRecorder:
                        and getattr(self, "_tail_speech_sec", None) == 0.0)
         if (not silent_tail and len(remaining) >= min_samples
                 and float(np.abs(remaining).max()) >= 0.004):
-            if cfg["backend"] == "managed":
+            if backend == "managed":
                 last_text, detected = self._run_managed(remaining)
-            elif cfg["backend"] == "google" and cfg["google_api_key"]:
+            elif backend == "google" and cfg["google_api_key"]:
                 last_text, detected = self._run_google(remaining)
-            elif cfg["backend"] == "mistral" and cfg.get("mistral_api_key"):
+            elif backend == "mistral" and cfg.get("mistral_api_key"):
                 last_text, detected = self._run_mistral(remaining)
             else:
                 last_text, detected = self._run_local(remaining)
@@ -1861,17 +2161,23 @@ class AudioRecorder:
 
     def _segments_with(self, model, audio, sr, language, on_progress, should_cancel,
                        gpu_errors=False):
+        # An explicit language (a file job always passes its own, "auto"
+        # included) wins; only None / "" falls back to this session's.
         lang_setting = language or self._lang_setting()
         lang_arg = None if lang_setting in ("auto", "multi", "", None) else lang_setting
+        # Mixed languages: faster-whisper re-detects the language per window
+        # instead of locking onto the first one it heard.
+        extra = {"multilingual": True} if lang_setting == "multi" else {}
         # No glossary prompt on long audio: with condition_on_previous_text off
         # it only ever reached the first 30 s window - where it could write the
         # terms into silence or unclear speech. Instead every segment gets its
         # near-miss spellings snapped to the terms, from start to finish.
         terms = vocabulary.load_terms(cfg)
+        self._last_segments_language = None
         try:
             with self._infer_lock:
-                segs, _info = model.transcribe(
-                    audio, language=lang_arg, initial_prompt=None,
+                kwargs = dict(
+                    language=lang_arg, initial_prompt=None,
                     beam_size=4,
                     # Anti-hallucination (meeting re-transcription): VAD + restored
                     # confidence/no-speech thresholds + no carry-over context, so
@@ -1884,6 +2190,15 @@ class AudioRecorder:
                     no_speech_threshold=0.6,
                     repetition_penalty=1.3, no_repeat_ngram_size=5,
                     temperature=[0.0, 0.2, 0.4, 0.6, 0.8])
+                try:
+                    segs, _info = model.transcribe(audio, **kwargs, **extra)
+                except TypeError:
+                    if not extra:
+                        raise
+                    # An older faster-whisper without multilingual=.
+                    segs, _info = model.transcribe(audio, **kwargs)
+                detected = getattr(_info, "language", None)
+                self._last_segments_language = detected if isinstance(detected, str) and detected else None
                 total = len(audio) / float(sr)
                 out = []
                 for s in segs:
@@ -1909,7 +2224,7 @@ class AudioRecorder:
         The local backend, or a cloud backend without its key (it records with
         the local model). A cloud backend that fell back once may well work
         again - it doesn't wait for a local model it probably won't use."""
-        b = cfg.get("backend") or "local"
+        b = AudioRecorder._backend(self)
         if b == "local":
             return True
         if b == "mistral" and not (cfg.get("mistral_api_key") or "").strip():
@@ -1921,12 +2236,31 @@ class AudioRecorder:
         override (the meeting window's selector) wins over the global default."""
         return self.language_override or cfg.get("language", "auto")
 
+    def _backend(self):
+        """The speech backend of THIS take: a Smart Action's own pick
+        (start_recording speech=) wins over the global cfg["backend"] -
+        except a cloud pick once Privacy mode is on (turned on mid-take):
+        the rest of the take stays on this computer."""
+        override = getattr(self, "backend_override", None)
+        if isinstance(override, str) and override and (
+                override == "local" or not cfg.get("privacy_mode")):
+            return override
+        return cfg.get("backend") or "local"
+
+    def _speech_model(self):
+        """The local Whisper model of THIS take (a Smart Action's own pick, or
+        the global cfg["whisper_model"])."""
+        override = getattr(self, "model_override", None)
+        if isinstance(override, str) and override:
+            return override
+        return cfg.get("whisper_model") or "base"
+
     def _run_local(self, audio):
         sr = cfg["sample_rate"]
         if len(audio) < sr // 2:
             return "", "en"
         out = self._run_local_once(audio)
-        if (cfg.get("backend") or "local") != "local":
+        if AudioRecorder._backend(self) != "local":
             # A cloud backend ran locally (no key, cap, offline) - and it
             # worked: the next dictation loads the model early too.
             self._local_fallback_at = time.monotonic()
@@ -1944,7 +2278,7 @@ class AudioRecorder:
             return "", f"!{backend}:{reason} Local fallback is unavailable: {friendly}"
 
     def _run_local_once(self, audio):
-        name = cfg["whisper_model"]
+        name = AudioRecorder._speech_model(self)
         with self.use_model(name) as model:
             try:
                 return self._run_local_with(model, audio)
@@ -1959,7 +2293,7 @@ class AudioRecorder:
         model = None
         self._gpu_failed_mid_use(failed, name, err)
         del failed                            # gone before the CPU model is built
-        with self.use_model() as model:
+        with self.use_model(name) as model:   # the same model, now on the processor
             return self._run_local_with(model, audio)
 
     def _run_local_with(self, model, audio):
@@ -2283,6 +2617,47 @@ def make_qicon(color="#3b82f6"):
     qimg = QImage(data, img.size[0], img.size[1], QImage.Format_RGBA8888)
     return QIcon(QPixmap.fromImage(qimg))
 
+
+class GusanApplication(QApplication):
+    """The app's QApplication. Every Quit Qt itself starts - macOS Cmd+Q, the
+    app menu's or the Dock's Quit, a log-out, and qApp.quit() - arrives here
+    as QEvent.Quit first; ``quit_filter`` (AppController._on_quit_event) says
+    whether Qt may quit now (False swallows it - quit_app runs instead).
+    Overriding event() costs only the app object's own events, unlike an
+    application-wide event filter that would see every event of every widget."""
+
+    def __init__(self, argv):
+        super().__init__(argv)
+        self.quit_filter = None
+
+    def event(self, e):
+        try:
+            is_quit = e.type() == QEvent.Quit
+        except Exception:
+            is_quit = False
+        if is_quit:
+            allow = True
+            flt = getattr(self, "quit_filter", None)
+            if flt is not None:
+                try:
+                    allow = bool(flt())
+                except Exception:
+                    logger.warning("Quit handler failed - quitting anyway", exc_info=True)
+            if not allow:
+                e.ignore()
+                return True
+        return QApplication.event(self, e)
+
+
+# Meeting notes a Quit left for later are written this long after startup
+# (the speech model preload and the update check go first).
+PENDING_NOTES_DELAY_MS = 20_000
+PENDING_NOTES_RETRY_MS = 60_000
+# A meeting started right after launch may run for hours: keep waiting for it
+# (one check a minute) rather than leave the notes for the launch after.
+PENDING_NOTES_MAX_TRIES = 240
+
+
 # ── Main PySide6 Application Controller ───────────────────────────────────────
 class AppController(QObject):
     # Cross-thread Signals - emitted from background hotkey-listener threads
@@ -2291,6 +2666,7 @@ class AppController(QObject):
     # silently no-ops because those threads have no Qt event loop.
     sig_hotkey = Signal()
     sig_assist_hotkey = Signal()
+    sig_smart_hotkey = Signal()         # the Smart Actions shortcut (one dictation as a Smart Action)
     sig_enter = Signal()
     sig_escape = Signal()
     sig_update_available = Signal(str)  # tag of newer version
@@ -2301,22 +2677,80 @@ class AppController(QObject):
     sig_gpu_done = Signal(str, str)     # GPU download: state ("ok"/"gpu_failed"/"failed"/"cancelled"), message
     sig_gpu_wait = Signal(str, str, float)  # a local transcription made the user wait: context, model, seconds
     sig_gpu_runtime_failed = Signal(str)  # the GPU failed while transcribing (worker thread)
+    sig_setting_changed = Signal(str)   # set_setting changed this config key (GUI thread)
+    # A dictation, meeting or transcript was saved, or history was cleared
+    # (GUI thread) - Home, Dictation, Smart Actions refresh their lists on it.
+    sig_history_changed = Signal()
+    # Dictation started (True) / stopped recording (False) - GUI thread.
+    sig_recording_changed = Signal(bool)
+    _sig_update_checked = Signal(str, str)  # the startup update check (worker) -> GUI thread
+
+    # How long a stopped dictation waits for its speech model's download.
+    SPEECH_MODEL_WAIT_S = 30 * 60
+
+    # ── dictation state ──
+    @property
+    def is_rec(self):
+        """True while a dictation records. Setting it announces the change
+        (sig_recording_changed, on the GUI thread) - any thread may set it."""
+        return getattr(self, "_is_rec", False)
+
+    @is_rec.setter
+    def is_rec(self, value):
+        value = bool(value)
+        self._is_rec = value
+        if value != getattr(self, "_rec_announced", False):
+            self._run_on_gui(self._announce_recording)
+
+    def _announce_recording(self):
+        # GUI thread: announce the state as it is NOW, so a worker's change
+        # delivered late can never leave listeners with a stale value.
+        now = getattr(self, "_is_rec", False)
+        if now != getattr(self, "_rec_announced", False):
+            self._rec_announced = now
+            self.sig_recording_changed.emit(now)
+
+    def _run_on_gui(self, fn, *args):
+        """fn(*args) on the GUI thread: now when already there, else queued
+        (through the dictation bar's call_soon, which every worker uses)."""
+        if threading.current_thread() is threading.main_thread():
+            fn(*args)
+            return
+        ov = getattr(self, "overlay", None)
+        if ov is not None:
+            ov.call_soon(fn, *args)
+
+    def notify_history_changed(self):
+        """Any thread: something was saved to (or cleared from) history -
+        sig_history_changed on the GUI thread."""
+        self._run_on_gui(self.sig_history_changed.emit)
 
     def __init__(self, qapp):
         super().__init__()
         self.qapp = qapp
         self.cfg = cfg
 
-        # Smart Actions is opt-in PER SESSION: every fresh app start begins in
-        # plain transcribe-only mode, so dictation always does the predictable
-        # thing after a restart; the user re-enables Smart mode when they want
-        # it for the session.
+        # output_action is 1.9.x's dictation mode (nothing in 2.0 reads it:
+        # Alt+R always pastes the exact words, Smart Actions have their own
+        # shortcut). Still reset at launch so a 1.9.x copy reading this file
+        # starts in plain dictation too.
         try:
             if actions.normalize_action_mode(self.cfg.get("output_action")) != actions.ACTION_TRANSCRIBE_ONLY:
                 self.cfg["output_action"] = actions.ACTION_TRANSCRIBE_ONLY
                 save_config(self.cfg)  # module-level: UI/tray don't exist yet
         except Exception:
             logger.debug("could not reset output_action", exc_info=True)
+
+        # Every meeting records Both sides of the call unless its start card
+        # picks another for that one meeting (never saved in 2.0). A 1.x pick
+        # saved here goes back to the default; meeting_session heals it on a
+        # system that can't capture the call's sound.
+        try:
+            if self.cfg.get("meeting_audio_mode") != DEFAULT["meeting_audio_mode"]:
+                self.cfg["meeting_audio_mode"] = DEFAULT["meeting_audio_mode"]
+                save_config(self.cfg)
+        except Exception:
+            logger.debug("could not reset meeting_audio_mode", exc_info=True)
 
         # Load stylesheet. Resolve the checkbox tick asset to an absolute path
         # so it renders regardless of the process working directory (packaged
@@ -2343,7 +2777,18 @@ class AppController(QObject):
         self._registered_kbd_hotkey = None
         self._registered_assist_hotkey = None
         self._assist_listener = None
+        # The Smart Actions shortcut (smart_actions_hotkey): its hook, and the
+        # action the take it started runs (_start / _stop_impl).
+        self._registered_smart_hotkey = None
+        self._smart_listener = None
+        self._smart_next = False
+        self._oneshot_action = None
+        # A Smart take transcribed with its own speech model: load Dictation's
+        # again once it is done (_restore_dictation_speech).
+        self._smart_speech_restore = False
+        self._quitting = False
         self.live_assist = None          # created on first use
+        self.main_win = None             # the Gusan window (ui/shell.py), built on first open
         self._transient_kbd_handles = []
 
         # Auth + Pro entitlement (Supabase). All network calls run on worker
@@ -2356,22 +2801,54 @@ class AppController(QObject):
         telemetry.set_context_provider(self._analytics_context)
         self._tracked_settings = self._settings_snapshot()
 
-        # Initialize UI Dialog Windows (modularly split!)
+        # ── Gusan 2.0 services (GUI thread, before any window or page) ──
+        self._file_job_running = False
+        self._model_wait = None              # {"name", "pct"} while a dictation waits on its model
+        self._update_notice_shown = None     # the release a notice was shown for this run
+        self._update_ready = None            # (tag, installer path) for "Install updates when I quit"
+        self._update_fetching = None
+        self._update_installing = False
+        self._hotkeys_suspended = False
+        # One download manager for speech and local AI models: Settings,
+        # onboarding, Audio to text and dictation all share its downloads.
+        from model_manager import ModelDownloads
+        self.downloads = ModelDownloads(self)
+        self.recorder.model_fetcher = self._fetch_speech_model
+        # The meeting recorder: the Meetings page, Live Assistant and the
+        # calendar reminder all drive this one session.
+        from meeting_session import MeetingSession
+        self.meeting_session = MeetingSession(self)
+        self.meeting_session.finished.connect(self._on_meeting_finished)
+        # Audio to text's one job queue; it owns _file_job_running. A missing
+        # model comes through self.downloads (one download, shared progress).
+        import file_jobs
+        self.file_jobs = file_jobs.FileJobController(self, downloader=self.downloads.fetch)
+        self.file_jobs.finished.connect(self._on_file_job_finished)
+        # The mic check of Settings and onboarding (opens nothing until start()).
+        try:
+            from mic_monitor import MicMonitor
+            self.mic_monitor = MicMonitor(pa=self.recorder.audio, parent=self)
+        except Exception:
+            logger.warning("Microphone check unavailable", exc_info=True)
+            self.mic_monitor = None
+        self.calendar = None                 # calendar_service.CalendarService when configured
+        self._reminder = None                # the calendar reminder toast, once shown
+
+        # The dictation bar is the only window built at startup: it is the
+        # HUD and the workers' call_soon trampoline to the GUI thread. The
+        # Gusan window (show_main) and every page are built on first open.
         from ui.overlay import Overlay
-        from ui.settings import Settings
-        from ui.history import HistoryWindow
-        from ui.meetings import MeetingsWindow
-        from ui.onboarding import Onboarding
-        
         self.overlay = Overlay(main_app=self)
-        self.settings_win = Settings(main_app=self)
-        self.history_win = HistoryWindow(main_app=self)
-        self.meetings_win = MeetingsWindow(main_app=self)
-        self.onboarding_win = Onboarding(main_app=self)
-        # When onboarding completes (guest or signed in), land the user in the
-        # app panel instead of silently minimizing to the tray - first-run
-        # users otherwise think the app closed.
-        self.onboarding_win.accepted.connect(self.show_settings)
+        # The rich clipboard's GUI-thread bridge: a Smart Action's paste puts
+        # HTML + nice plain text on the clipboard from the paste worker.
+        try:
+            from ui.components import clipboard as rich_clipboard
+            rich_clipboard.install()
+        except Exception:
+            logger.warning("Rich clipboard unavailable", exc_info=True)
+        # The 5-step welcome (ui/onboarding_v2), built only when a first run
+        # opens it (show_onboarding) - an onboarded user never pays for it.
+        self.onboarding_win = None
 
         # Wire Signals to main-thread handlers. QueuedConnection guarantees the
         # slot runs on this QObject's owning thread (the Qt main thread),
@@ -2379,13 +2856,17 @@ class AppController(QObject):
         self.sig_hotkey.connect(self._on_hotkey, Qt.QueuedConnection)
         self.sig_assist_hotkey.connect(self.toggle_live_assist, Qt.QueuedConnection)
         self._setup_assist_hotkey(self.cfg.get("live_assist_hotkey", ""))
+        self.sig_smart_hotkey.connect(self._on_smart_hotkey, Qt.QueuedConnection)
+        self._setup_smart_hotkey(self.cfg.get("smart_actions_hotkey", ""))
         self.sig_enter.connect(self._on_enter, Qt.QueuedConnection)
         self.sig_escape.connect(self._on_escape, Qt.QueuedConnection)
         self.sig_update_available.connect(self._prompt_update, Qt.QueuedConnection)
+        self._sig_update_checked.connect(self._on_update_checked, Qt.QueuedConnection)
+        self.sig_setting_changed.connect(self._on_own_setting_changed)
         self.sig_auth_changed.connect(self._on_auth_changed, Qt.QueuedConnection)
-        # A QTimer started on a plain thread never fires: the updater hops here.
-        self.sig_quit.connect(self.qapp.quit, Qt.QueuedConnection)
-        self._update_prompt_open = False
+        # A QTimer started on a plain thread never fires: the updater hops here
+        # - through quit_app, so services shut down like any other Quit.
+        self.sig_quit.connect(self.quit_app, Qt.QueuedConnection)
 
         # Register the configured hotkey (keyboard combo or mouse button).
         self._setup_hotkey(self.cfg["hotkey"])
@@ -2398,6 +2879,7 @@ class AppController(QObject):
         self._gpu_thread = None
         self._gpu_phase = None                         # "download" / "verify" while working
         self._gpu_cancel = False
+        self._gpu_removing = False                     # Settings' Remove is running
         self._tray_click = None
         self.sig_gpu_done.connect(self._on_gpu_done, Qt.QueuedConnection)
         self.sig_gpu_wait.connect(self._on_gpu_wait, Qt.QueuedConnection)
@@ -2407,9 +2889,39 @@ class AppController(QObject):
         self._idle_timer = QTimer(self)
         self._idle_timer.timeout.connect(self._idle_sweep)
         self._idle_timer.start(60_000)
+        # Instant-apply settings (set_setting): a burst of changes is written
+        # to disk once, 250 ms after the last one.
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(250)
+        self._save_timer.timeout.connect(self.flush_config_save)
+        # Any way out saves a pending change first, and a meeting being
+        # recorded (tray Quit already did both; this covers the rest, e.g. a
+        # Windows log-off or shutdown, where Qt emits aboutToQuit and the
+        # process ends right after).
+        self.qapp.aboutToQuit.connect(self._on_about_to_quit)
+        # Windows log-off / shutdown asks first (WM_QUERYENDSESSION): no
+        # question can be shown then - save the meeting and settings quietly.
+        try:
+            self.qapp.commitDataRequest.connect(self._on_session_ending)
+        except Exception:
+            logger.debug("session-end signal unavailable", exc_info=True)
+        # macOS Cmd+Q, the app menu's / Dock's Quit (and any qApp.quit()) go
+        # through quit_app: it asks first and services shut down, instead of
+        # Qt just hiding the windows (GusanApplication.event).
+        if hasattr(self.qapp, "quit_filter"):
+            self.qapp.quit_filter = self._on_quit_event
+        # Meeting notes a Quit left for later: written once startup work is done.
+        self._pending_notes_queue = []
+        QTimer.singleShot(PENDING_NOTES_DELAY_MS, self._write_pending_notes)
 
         # Setup System Tray
         self._setup_tray()
+
+        # Google Calendar (only in a build with a Google OAuth client).
+        self._setup_calendar()
+        # Which models are on disk - off the GUI thread, after startup work.
+        QTimer.singleShot(1500, self.downloads.scan)
 
         # Restore any saved login + Pro entitlement in the background.
         threading.Thread(target=self._restore_session, daemon=True).start()
@@ -2417,27 +2929,28 @@ class AppController(QObject):
         # Check updates in background
         threading.Thread(target=self._background_check_updates, daemon=True).start()
 
-        # Onboarding wizard trigger on first launch. Existing users (already
-        # onboarded before accounts existed) get a one-time account gate instead.
+        # The welcome wizard on the first launch only. Existing users (every
+        # 1.9 upgrader) never see it, and get no automatic account gate either:
+        # Sign in is one click away (sidebar, tray, Account & plan).
         if not self.cfg.get("onboarding_done", False):
             QTimer.singleShot(500, self.show_onboarding)
-        elif not self.cfg.get("account_gate_seen", False):
-            QTimer.singleShot(900, self.show_account_gate)
 
         # macOS needs explicit permission grants (mic / Accessibility / Input
         # Monitoring) or dictation looks silently broken. One-time guided setup.
         if sys.platform == "darwin" and not self.cfg.get("macos_perms_guide_shown", False):
             QTimer.singleShot(1200, self.show_macos_permissions_guide)
 
-        # If a previous session already detected an update, prompt at startup
-        # immediately - don't wait for the network check to confirm. (The
-        # background check still runs and will clear the flag if no update.)
+        # If a previous session already detected an update, say so at startup
+        # - one quiet notice, not waiting for the network check (which still
+        # runs and clears the flag if there is no update). Never for a release
+        # the user said "Not now" to (updater.should_prompt).
         cached_pending = self.cfg.get("pending_update_version", "")
         if cached_pending and not self._is_newer(cached_pending):
             # Declined the popup, then installed that version another way.
             self.cfg["pending_update_version"] = cached_pending = ""
             self.save_config()
-        if cached_pending and self.cfg.get("onboarding_done", False):
+        if (cached_pending and self.cfg.get("onboarding_done", False)
+                and updater.should_prompt(self.cfg, cached_pending, APP_VERSION)):
             QTimer.singleShot(1500, lambda: self.sig_update_available.emit(cached_pending))
 
     def _setup_tray(self):
@@ -2446,100 +2959,46 @@ class AppController(QObject):
         self._build_tray_menu()
         self.tray_icon.show()
 
-        # Single click tray icon wakes settings window
+        # A click on the tray icon opens the app (_on_tray_activated).
         self.tray_icon.activated.connect(self._on_tray_activated)
         # A click on a notification runs the action it was shown with, if any.
         self.tray_icon.messageClicked.connect(self._on_tray_message_clicked)
 
     def _build_tray_menu(self):
-        """(Re)build the tray context menu. Called again on auth changes so the
-        Pro badge + account section stay current."""
-        is_pro = self.is_pro()
+        """The tray menu (ui/tray_menu.py): built once, then refreshed in place
+        (plan, account rows, hotkeys, privacy, the calendar's Next row) - on
+        auth and privacy changes, and by the menu itself when it opens."""
+        tm = getattr(self, "tray_menu", None)
+        try:
+            if tm is None:
+                from ui.tray_menu import build_tray_menu
+                tm = build_tray_menu(self, QMenu())
+                self.tray_menu = tm
+                self.tray_icon.setContextMenu(tm.menu)
+                self.sig_setting_changed.connect(tm.on_setting_changed)
+                if getattr(self, "calendar", None) is not None:
+                    tm.attach_calendar(self.calendar)
+            else:
+                tm.refresh()
+            self.tray_icon.setToolTip(tm.tooltip())
+        except Exception:
+            logger.warning("Tray menu failed - using a plain one", exc_info=True)
+            if getattr(self, "tray_menu", None) is None:
+                self._plain_tray_menu()
+
+    def _plain_tray_menu(self):
+        """Open and Quit only: never leave the tray icon without a way out."""
         menu = QMenu()
-
-        title_text = f"Transcribe  v{APP_VERSION}" + ("   ·  PRO" if is_pro else "")
-        action_title = QAction(title_text, self)
-        action_title.setEnabled(False)
-        menu.addAction(action_title)
-
-        # The #1 thing people open the menu for - first, bold, one click.
-        action_open = QAction("Open Settings", self)
-        _f = action_open.font()
-        _f.setBold(True)
-        action_open.setFont(_f)
-        action_open.setIcon(self._dot_icon(self._tier_color()))
-        action_open.triggered.connect(self.show_settings)
+        action_open = QAction(f"Open {APP_NAME}", menu)
+        action_open.triggered.connect(lambda: self.show_main())
         menu.addAction(action_open)
         menu.setDefaultAction(action_open)
-
-        menu.addSeparator()
-
-        # ── Account section ──
-        if self.auth.is_authenticated:
-            who = self.auth.user_email or "Account"
-            acct = QAction(f"{who}  ·  {'Pro' if is_pro else 'Free'}", self)
-            acct.setEnabled(False)
-            menu.addAction(acct)
-            if is_pro:
-                manage = QAction("Manage subscription…", self)
-                manage.triggered.connect(lambda: self.open_billing())
-                menu.addAction(manage)
-            else:
-                upgrade = QAction("Upgrade to Pro…", self)
-                upgrade.triggered.connect(lambda: self._pro_upsell())
-                menu.addAction(upgrade)
-            signout = QAction("Sign out", self)
-            signout.triggered.connect(lambda: self.sign_out())
-            menu.addAction(signout)
-        else:
-            signin = QAction("Sign in / Sign up (free)…", self)
-            signin.triggered.connect(lambda: self.show_auth_gate())
-            menu.addAction(signin)
-
-        menu.addSeparator()
-
-        action_rec_meet = QAction("Record Meeting..." + ("" if is_pro else "   (Pro)"), self)
-        action_rec_meet.triggered.connect(self.show_meeting)
-        menu.addAction(action_rec_meet)
-
-        # Audio file -> Word document. Free and Pro alike (the tab applies the
-        # per-plan length limits), so no Pro badge here.
-        action_files = QAction("Transcribe Files...", self)
-        action_files.triggered.connect(self.show_file_transcribe)
-        menu.addAction(action_files)
-
-        # Label shows the hotkey only if it actually registered (it is skipped
-        # when it collides with the dictation hotkey).
-        assist_key = self._registered_assist_hotkey or ""
-        action_assist = QAction(
-            "Live Assistance overlay" + (f"   ({assist_key})" if assist_key else ""), self)
-        action_assist.triggered.connect(self.toggle_live_assist)
-        menu.addAction(action_assist)
-
-        action_history = QAction("History Log", self)
-        action_history.triggered.connect(self.show_history)
-        menu.addAction(action_history)
-
-        # Privacy Mode toggle - accessible from anywhere, not just Settings.
-        action_privacy = QAction("Privacy Mode (on-device only)", self)
-        action_privacy.setCheckable(True)
-        action_privacy.setChecked(bool(self.cfg.get("privacy_mode", False)))
-        action_privacy.triggered.connect(lambda: self.toggle_privacy_mode())
-        menu.addAction(action_privacy)
-
-        menu.addSeparator()
-
-        action_quit = QAction("Quit", self)
+        action_quit = QAction(f"Quit {APP_NAME}", menu)
         action_quit.triggered.connect(self.quit_app)
         menu.addAction(action_quit)
-
         self._tray_menu = menu  # keep a reference so Qt doesn't GC it
         self.tray_icon.setContextMenu(menu)
-
-        tip = "Transcribe - Pro" if is_pro else "Transcribe"
-        if self.auth.is_authenticated and self.auth.user_email:
-            tip += f"\n{self.auth.user_email}"
-        self.tray_icon.setToolTip(tip)
+        self.tray_icon.setToolTip(APP_NAME)
 
     # ── Auth / Pro helpers ────────────────────────────────────────────────────
     def is_pro(self):
@@ -2558,12 +3017,15 @@ class AppController(QObject):
 
     # ── Usage analytics ──────────────────────────────────────────────────────
     # Settings whose changes are reported. Their values are engines, models,
-    # languages and switches - never keys, paths or text.
+    # languages and switches - never keys, paths or text. The Smart Actions
+    # shortcut is reported as set or not (True/False), never its keys.
     _TRACKED_SETTINGS = (
-        "backend", "whisper_model", "action_model", "output_action", "language",
+        "backend", "whisper_model", "action_model", "language",
         "translate_target", "meeting_audio_mode", "save_history",
         "cleanup_enabled", "restore_clipboard",
+        "smart_actions_hotkey", "smart_actions_speech_model",
     )
+    _TRACKED_AS_SET = ("smart_actions_hotkey",)
 
     def track(self, event, props=None):
         """Record an anonymous usage event (a no-op when analytics is off)."""
@@ -2597,11 +3059,13 @@ class AppController(QObject):
         self.track("app_started", {
             "privacy_mode": self.cfg.get("privacy_mode", False),
             "backend": self.cfg.get("backend", "local"),
-            "output_action": self.cfg.get("output_action", "transcribe_only"),
+            "smart_actions_hotkey": bool(self.cfg.get("smart_actions_hotkey")),
+            "smart_actions_speech_model": self.cfg.get("smart_actions_speech_model") or "",
         })
 
     def _settings_snapshot(self):
-        return {k: self.cfg.get(k) for k in self._TRACKED_SETTINGS}
+        return {k: (bool(self.cfg.get(k)) if k in self._TRACKED_AS_SET else self.cfg.get(k))
+                for k in self._TRACKED_SETTINGS}
 
     def _track_setting_changes(self):
         prev = getattr(self, "_tracked_settings", None)
@@ -2636,27 +3100,6 @@ class AppController(QObject):
         switched = entitlements.reconcile_user_secrets(self.cfg, current)
         self.save_config()
         return switched
-
-    def _tier_color(self):
-        """Green = Free, Purple = Pro, Gray = Guest."""
-        return {
-            entitlements.TIER_PRO:   "#a855f7",
-            entitlements.TIER_FREE:  "#22c55e",
-            entitlements.TIER_GUEST: "#94a3b8",
-        }.get(self.current_tier(), "#94a3b8")
-
-    def _dot_icon(self, color_hex):
-        """A small filled circle QIcon used as the tier indicator."""
-        from PySide6.QtGui import QPixmap, QPainter, QColor, QBrush
-        pm = QPixmap(14, 14)
-        pm.fill(Qt.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setBrush(QBrush(QColor(color_hex)))
-        p.setPen(Qt.NoPen)
-        p.drawEllipse(2, 2, 10, 10)
-        p.end()
-        return QIcon(pm)
 
     def set_admin_tier_override(self, value):
         """Super-admin only: force a tier locally (auto|guest|free|pro)."""
@@ -2713,9 +3156,8 @@ class AppController(QObject):
         # Runs on the GUI thread (QueuedConnection). Refresh tray + any open UI.
         # First: swap in/out the per-user API keys if the signed-in user changed,
         # so we never expose the previous account's keys on a shared computer.
-        switched = False
         try:
-            switched = self._reconcile_user_secrets()
+            self._reconcile_user_secrets()
         except Exception:
             logger.debug("user secret reconcile failed", exc_info=True)
         # Track the moment a user becomes Pro (trial or paid) for the funnel.
@@ -2739,6 +3181,14 @@ class AppController(QObject):
             if self.cfg.get("action_model") == actions.API_MANAGED_ID:
                 self.cfg["action_model"] = actions.RULE_BASED_ID
                 _changed = True
+            if self.cfg.get("meeting_notes_model") == actions.API_MANAGED_ID:
+                # Meetings pick their own engine again (a downloaded local one).
+                self.cfg["meeting_notes_model"] = ""
+                _changed = True
+            if self.cfg.get("smart_actions_speech_model") == "cloud":
+                # Smart Actions transcribe like Dictation again.
+                self.cfg["smart_actions_speech_model"] = ""
+                _changed = True
             if _changed:
                 # An automatic fallback, not a user choice: keep it out of the
                 # backend_selected / settings_saved analytics.
@@ -2758,18 +3208,27 @@ class AppController(QObject):
                 self.save_config()
         except Exception:
             logger.debug("could not remember email", exc_info=True)
+        # A Google Calendar connected by another Gusan account is disconnected;
+        # one connected as a guest is adopted by the account that signs in.
+        cal = getattr(self, "calendar", None)
+        if cal is not None:
+            try:
+                cal.set_owner(getattr(self.auth, "user_id", None))
+            except Exception:
+                logger.debug("calendar owner check failed", exc_info=True)
         try:
             self._build_tray_menu()
         except Exception:
             logger.debug("tray rebuild failed", exc_info=True)
-        sw = getattr(self, "settings_win", None)
-        if sw is not None and hasattr(sw, "refresh_pro_state"):
+        # The Gusan window: sidebar plan badge + every built page (Settings
+        # re-reads the API keys here, so an account switch shows the new
+        # account's keys).
+        mw = getattr(self, "main_win", None)
+        if mw is not None:
             try:
-                if switched and hasattr(sw, "reload_secret_fields"):
-                    sw.reload_secret_fields()  # pull the swapped-in user's keys
-                sw.refresh_pro_state()
+                mw.refresh_account()
             except Exception:
-                pass
+                logger.debug("main window account refresh failed", exc_info=True)
 
     def start_google_login(self):
         def _run():
@@ -2827,7 +3286,7 @@ class AppController(QObject):
         else:
             text = ("Couldn't open your subscription page right now. Check your connection "
                     f"and try again, or write to {SUPPORT_EMAIL}.")
-        QMessageBox.information(None, "Manage subscription", text)
+        QMessageBox.information(self._dialog_parent(), "Manage subscription", text)
 
     def set_privacy_mode(self, on, notify=True):
         """Apply Privacy Mode globally and immediately. Privacy forces everything
@@ -2855,26 +3314,50 @@ class AppController(QObject):
             pass
 
     def toggle_privacy_mode(self):
-        """Flip Privacy Mode from the tray."""
-        self.set_privacy_mode(not self.cfg.get("privacy_mode", False))
+        """Flip Privacy Mode from the tray - through set_setting, so the pages
+        and the calendar hear it (sig_setting_changed) like any other change."""
+        on = not self.cfg.get("privacy_mode", False)
+        if self.set_setting("privacy_mode", on):
+            self.show_tray_hint(
+                "Privacy Mode ON" if on else "Privacy Mode OFF",
+                "Everything stays on your device - cloud features are disabled."
+                if on else "Cloud features are available again.")
+
+    def _dialog_parent(self):
+        """The Gusan window while it is on screen (a dialog then opens over it,
+        never behind it), else None."""
+        mw = getattr(self, "main_win", None)
+        try:
+            if mw is not None and mw.isVisible() and not mw.isMinimized():
+                return mw
+        except RuntimeError:
+            pass
+        return None
 
     def _pro_upsell(self, feature=None):
+        """The Pro window. ``feature`` names what was tapped ("Meeting
+        recording", "Live Assistance", "Smart Actions", "Fast cloud
+        transcription"); paywall_viewed keeps the 1.9 names (PRO_FEATURE_EVENT),
+        the window shows today's (PRO_FEATURE_SHOWN)."""
+        tracked = PRO_FEATURE_EVENT.get(feature, feature)
+        shown = PRO_FEATURE_SHOWN.get(feature, feature)
         try:
-            telemetry.track("paywall_viewed", {"feature": feature or ""}, self.cfg, APP_VERSION)
+            telemetry.track("paywall_viewed", {"feature": tracked or ""}, self.cfg, APP_VERSION)
         except Exception:
             pass
+        parent = self._dialog_parent()
         try:
             from ui.pro_dialog import ProDialog
-            dlg = ProDialog(main_app=self, feature=feature)
+            dlg = ProDialog(main_app=self, feature=shown, parent=parent)
             dlg.exec()
             return
         except Exception as e:
             logger.warning("Pro dialog failed, using fallback: %s", e)
 
         # Fallback: simple prompt if the rich dialog can't be shown.
-        box = QMessageBox()
-        box.setWindowTitle("Transcribe Pro")
-        feat = f"{feature} is a Pro feature.\n\n" if feature else ""
+        box = QMessageBox(parent)
+        box.setWindowTitle(f"{APP_NAME} Pro")
+        feat = f"{shown} is a Pro feature.\n\n" if shown else ""
         box.setText(feat + "Upgrade to unlock Meetings, Smart Actions, and fast cloud transcription.")
         if not self.auth.is_authenticated:
             signin_btn = box.addButton("Create account", QMessageBox.AcceptRole)
@@ -2912,12 +3395,25 @@ class AppController(QObject):
             return base
 
     def _on_tray_activated(self, reason):
-        # Any direct click on the tray icon opens the panel - single, double,
+        # Any direct click on the tray icon opens the app - single, double,
         # or middle click. (Right-click shows the menu, whose first item is
-        # also "Open Settings".)
+        # also "Open Gusan".)
         if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick,
                       QSystemTrayIcon.MiddleClick):
-            self.show_settings()
+            # First run with the welcome wizard on screen: bring IT forward,
+            # never the app over it (closing it with X lets the app open).
+            if self.front_first_run_wizard():
+                return
+            self.show_main()
+            # A calendar reminder on screen never takes focus by itself: the
+            # tray icon is the keyboard's way in (Win+B, Enter), so it gets
+            # the focus after the window opens (Esc = Not this one).
+            toast = getattr(self, "_reminder", None)
+            try:
+                if toast is not None and toast.isVisible():
+                    QTimer.singleShot(0, toast.take_focus)
+            except RuntimeError:
+                pass
 
     def update_tray_icon(self):
         color = self.cfg.get("accent_color", "#3b82f6")
@@ -2982,8 +3478,8 @@ class AppController(QObject):
         if not self._can_verify_gpu():
             # Nothing to test it with right now: keep the recorded failure.
             self.show_tray_hint("GPU acceleration",
-                                "Choose a downloaded local Whisper model in Settings > "
-                                "Models first - the GPU is tested with it.")
+                                "Choose a downloaded local Whisper model in Settings › "
+                                "Speech & AI first - the GPU is tested with it.")
             return False
         previous = self.cfg.pop(gpu_accel.CFG_FAILED, None)   # let it try the GPU
         self._gpu_phase = "verify"
@@ -3004,6 +3500,59 @@ class AppController(QObject):
     def cancel_gpu_download(self):
         self._gpu_cancel = True
 
+    def gpu_removable(self):
+        """Gusan's own GPU download is on disk (not a CUDA Toolkit of this PC)
+        and not already going away - Settings shows Remove then."""
+        try:
+            return (not getattr(self, "_gpu_removing", False) and not gpu_accel.removal_pending()
+                    and gpu_accel.own_download_present())
+        except Exception:
+            return False
+
+    def remove_gpu_download(self):
+        """Settings' Remove: delete the downloaded GPU libraries, so local speech
+        goes back to the processor (1.x Settings did this). GUI thread; the work
+        runs on a worker, then the hardware is probed again so the card shows
+        Download. False when there's nothing of ours to remove or a download
+        is running."""
+        if self.gpu_download_running() or not self.gpu_removable():
+            return False
+        self._gpu_removing = True
+        self.cfg.pop(gpu_accel.CFG_FAILED, None)
+        # Removing it is a "no" for now: no GPU reminder for the next few days.
+        self.cfg[gpu_accel.CFG_INTRO] = True
+        self.cfg[gpu_accel.CFG_LAST] = time.time()
+        self.save_config()
+        self.track("gpu_removed")
+        rec = getattr(self, "recorder", None)
+
+        def _run():
+            now = False
+            try:
+                # Off the GUI thread: unloading waits for a model load in progress.
+                if rec is not None:
+                    rec._cuda_usable = None      # re-decided at the next load
+                    rec.unload_model()
+                now = gpu_accel.remove()
+            except Exception:
+                logger.warning("Removing the GPU libraries failed", exc_info=True)
+            self._run_on_gui(self._on_gpu_removed, bool(now))
+        threading.Thread(target=_run, name="gpu-remove", daemon=True).start()
+        return True
+
+    def _on_gpu_removed(self, removed_now):
+        self._gpu_removing = False
+        if not removed_now:
+            # Windows keeps a loaded library locked: it goes at the next start.
+            self.show_tray_hint("GPU acceleration removed",
+                                f"The files are deleted the next time {APP_NAME} starts.")
+        dl = getattr(self, "downloads", None)
+        if dl is not None:
+            try:
+                dl.probe_hardware(force=True)
+            except Exception:
+                logger.debug("hardware re-probe failed", exc_info=True)
+
     def _verify_gpu(self):
         """Worker thread, right after the download: load the speech model on
         the GPU now, so the user learns at once whether it runs (an old driver
@@ -3018,6 +3567,10 @@ class AppController(QObject):
         name = self.cfg.get("whisper_model") or "base"
         if not self._can_verify_gpu():
             return "pending", ""                      # tried at the next local transcription
+        if getattr(self, "_file_job_running", False) is True:
+            # A file job holds the speech model: reloading it now would stall
+            # (or evict) that job. Tried at the next local transcription.
+            return "pending", ""
         try:
             # A transcription still running keeps its own (CPU) model; the
             # next one gets the GPU model loaded here.
@@ -3075,26 +3628,34 @@ class AppController(QObject):
                 "GPU acceleration couldn't start",
                 "Your graphics card couldn't run it, so transcription stays on the "
                 "processor. Updating your NVIDIA driver usually fixes this - then "
-                "Settings > Models > GPU acceleration > Try again.",
+                "Settings › Speech & AI › GPU acceleration › Try again.",
                 on_click=self.show_gpu_settings)
         elif state == "failed":
             self.show_tray_hint("GPU acceleration download failed",
                                 message or "Please try again.", on_click=self.show_gpu_settings)
         self.save_config()
+        # The GPU state changed: "Best for your computer" and the GPU card
+        # follow the fresh hardware snapshot.
+        dl = getattr(self, "downloads", None)
+        if dl is not None and state not in ("cancelled",):
+            try:
+                dl.probe_hardware(force=True)
+            except Exception:
+                logger.debug("hardware re-probe failed", exc_info=True)
 
     def show_gpu_settings(self):
-        self.show_settings()
-        win = getattr(self, "settings_win", None)
-        if win is not None and hasattr(win, "focus_gpu_card"):
-            win.focus_gpu_card()
+        """Settings › Speech & AI, on the GPU acceleration card (the GPU
+        notifications' click)."""
+        return self.show_main("settings", section="speech", focus="gpu")
 
-    def _note_local_wait(self, context, seconds, model=None):
+    def _note_local_wait(self, context, seconds, model=None, backend=None):
         """Any thread: the user just waited ``seconds`` on a local transcription
         - maybe the moment to suggest GPU acceleration (decided on the GUI
         thread, rarely; see gpu_accel.should_offer_now). File jobs always run
-        locally, whatever the dictation backend."""
+        locally, whatever the dictation backend. ``backend``: the take's own
+        (a Smart Action may transcribe differently from Dictation)."""
         try:
-            if context != "file" and (self.cfg.get("backend") or "local") != "local":
+            if context != "file" and (backend or self.cfg.get("backend") or "local") != "local":
                 return
             self.sig_gpu_wait.emit(context, str(model or self.cfg.get("whisper_model") or ""),
                                    float(seconds))
@@ -3127,97 +3688,204 @@ class AppController(QObject):
             f"{gpu_accel.DOWNLOAD_MB} MB download from NVIDIA).",
             on_click=self.show_gpu_settings)
 
+    # ── Updates (updater.py: the same GitHub release, tag and installer name
+    #    every 1.9.x install updates through) ──
     def _background_check_updates(self):
-        import requests
+        """Worker: the one automatic update check of a launch. The answer is
+        handled on the GUI thread (_on_update_checked) - pending_update_version
+        is the controller's key, written there."""
         try:
-            resp = requests.get(RELEASES_API, timeout=8, proxies={"http": None, "https": None})
-            if resp.status_code == 200:
-                data = resp.json()
-                tag = data.get("tag_name", "")
-
-                from main import _parse_version
-                available = bool(tag and _parse_version(tag) > _parse_version(APP_VERSION))
-                self.track("update_check_result", {"manual": False, "available": available})
-                if available:
-                    self.cfg["pending_update_version"] = tag
-                    self.save_config()
-                    # Emit signal - handled on main thread via QueuedConnection.
-                    self.sig_update_available.emit(tag)
-                else:
-                    if self.cfg.get("pending_update_version"):
-                        self.cfg["pending_update_version"] = ""
-                        self.save_config()
-            else:
-                self.track("update_check_result", {"manual": False, "failed": True})
+            status, tag = updater.check_latest(self.cfg)
         except Exception as e:
             logger.debug("Background update check failed: %s", e)
-            self.track("update_check_result", {"manual": False, "failed": True})
+            status, tag = updater.ERROR, ""
+        if status == updater.LATEST and sys.platform == "win32":
+            updater.prune_cache()          # up to date: no installer kept in %TEMP%
+        self.track("update_check_result", updater.check_props(status, manual=False))
+        self._sig_update_checked.emit(status, tag)
+
+    def _on_update_checked(self, status, tag):
+        """GUI thread: the startup check's answer."""
+        self.note_update_check(status, tag, manual=False)
+
+    def note_update_check(self, status, tag, manual=True):
+        """An update check answered (the startup one, or Settings' Check now -
+        the page tracks its own). Stores pending_update_version (pages may not
+        write it), fetches the installer ahead for "Install updates when I
+        quit", and - for the automatic check only - asks for the quiet notice."""
+        pending = updater.pending_after_check(self.cfg, status, tag)
+        if pending is not None:
+            self.cfg["pending_update_version"] = pending
+            self.schedule_config_save()
+            self.sig_setting_changed.emit("pending_update_version")
+        if status in (updater.AVAILABLE, updater.DISMISSED) and tag:
+            self._prepare_update_on_quit(tag)
+        if not manual and status == updater.AVAILABLE and updater.should_prompt(self.cfg, tag, APP_VERSION):
+            self.sig_update_available.emit(tag)
 
     def _prompt_update(self, tag):
-        # Runs on Qt main thread. Pops up a modal asking the user to install
-        # the new version. Reentrancy guard so a second emit (e.g. another
-        # transcription finishes while the dialog is open) doesn't stack popups.
-        if self._update_prompt_open:
-            return
+        """GUI thread (sig_update_available): ONE quiet notice per run for a
+        newer release - a tray notification whose click installs it; Settings ›
+        Updates keeps "Install update" for later. Never a modal, never while
+        recording, never for a release the user said "Not now" to
+        (dismissed_update_version, updater.should_prompt)."""
         if not tag:
             return
         if not self._is_newer(tag):
             if self.cfg.get("pending_update_version") == tag:
+                # Installed that version another way: nothing pending any more.
                 self.cfg["pending_update_version"] = ""
                 self.save_config()
             return
-        # Skip if user is mid-recording - don't interrupt them.
-        if self.is_rec:
+        if (self.is_rec or AppController._is_meeting_busy(self)
+                or not updater.should_prompt(self.cfg, tag, APP_VERSION)):
+            return                              # a meeting: shown after a later dictation
+        if getattr(self, "_update_notice_shown", None) == tag:
+            return                              # once a run, not after every dictation
+        self._update_notice_shown = tag
+        self.show_tray_hint(
+            "Update available",
+            f"{APP_NAME} {tag} is ready. Click to install it now, or later in Settings.",
+            on_click=lambda t=tag: self.install_update(t, manual=False))
+
+    def _nudge_update_after_dictation(self):
+        """Any thread, after a dictation: the quiet update notice, if one is
+        due and wasn't shown this run - a moment after the "Pasted" pill, on
+        the GUI thread (the dictation worker never waits for it)."""
+        pending = self.cfg.get("pending_update_version", "")
+        if (not pending or getattr(self, "_update_notice_shown", None) == pending
+                or not updater.should_prompt(self.cfg, pending, APP_VERSION)):
             return
-        self._update_prompt_open = True
-        try:
-            reply = QMessageBox.question(
-                None, "Transcribe - Update Available",
-                f"A new version ({tag}) is available.\n"
-                f"You are running v{APP_VERSION}.\n\n"
-                "Install update now?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
-            )
-            if reply == QMessageBox.Yes:
-                self.track("update_install_started", {"manual": False, "to": tag})
-                threading.Thread(
-                    target=self._download_and_install_update,
-                    args=(tag,), daemon=True,
-                ).start()
-        finally:
-            self._update_prompt_open = False
+        self._run_on_gui(QTimer.singleShot, 2500, lambda t=pending: self._prompt_update(t))
 
     @staticmethod
     def _is_newer(tag):
         """True when release ``tag`` is newer than the running version."""
         return _parse_version(tag) > _parse_version(APP_VERSION)
 
-    def _download_and_install_update(self, tag):
-        # Background-thread installer fetch. Identical to the Settings → About
-        # button flow, lifted here so the popup works without the user
-        # opening Settings first.
-        import urllib.request, tempfile, shutil, os
-        try:
-            setup_url = (
-                f"{PROJECT_GITHUB_URL}/releases/download/{tag}/"
-                "TranscribeApp-Windows-Setup.exe"
-            )
-            dest_path = os.path.join(tempfile.gettempdir(), "TranscribeApp-Windows-Setup.exe")
-            req = urllib.request.Request(setup_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req) as response:
-                with open(dest_path, "wb") as out_file:
-                    shutil.copyfileobj(response, out_file)
-            os.startfile(dest_path)
+    def install_update(self, tag, manual=True, on_done=None):
+        """Download, check (sha256 when published) and run the installer for
+        ``tag`` on a worker (updater.install), then quit so it can replace the
+        app. On macOS (no installer to run) the release page opens instead.
+        ``on_done(ok, info)`` runs on the GUI thread when it did NOT install
+        (info: a short message) so a page can say so; without it a tray
+        notification does. False when an install is already running, or when
+        it can't install now (a recording or a file job: installing quits the
+        app) - on_done / the notification then says why."""
+        if getattr(self, "_update_installing", False):
+            return False
+        blocked = AppController._update_blocker(self)
+        if blocked:
+            if callable(on_done):
+                try:
+                    on_done(False, blocked)
+                except Exception:
+                    logger.debug("update result callback failed", exc_info=True)
+            else:
+                self.show_tray_hint("Update not installed", blocked)
+            return False
+        self._update_installing = True
+        if not manual:
+            self.track("update_install_started", {"manual": False, "to": tag})
+        ready = getattr(self, "_update_ready", None)
+
+        def _run():
+            try:
+                if ready and ready[0] == tag and os.path.isfile(ready[1]):
+                    ok, info = updater.launch(ready[1])      # fetched ahead already
+                else:
+                    ok, info = updater.install(tag)
+            except Exception as e:
+                logger.warning("Update install failed: %s", e)
+                ok, info = False, "Couldn't install the update."
+            self._run_on_gui(self._on_update_installed, tag, ok, info, manual, on_done)
+        threading.Thread(target=_run, daemon=True).start()
+        return True
+
+    def _update_blocker(self):
+        """Why an update can't install right now ("" = it can): installing
+        quits the app, which would end a recording or a file being converted."""
+        if getattr(self, "is_rec", False) is True or AppController._is_meeting_busy(self):
+            return "Finish the recording first, then install the update."
+        if getattr(self, "_file_job_running", False) is True:
+            return "Wait for the file to finish converting, then install the update."
+        return ""
+
+    def _on_update_installed(self, tag, ok, info, manual, on_done):
+        self._update_installing = False
+        self.track("update_install_result", {"manual": bool(manual), "ok": bool(ok)})
+        if ok:
+            # The installer is running: quit so it can replace the files.
+            self._update_ready = None
             self.cfg["pending_update_version"] = ""
-            self.save_config()
-            # Queued on disk, so it's delivered by the next run if not now.
-            self.track("update_install_result", {"manual": False, "ok": True})
-            # Give the installer a moment to launch before we exit.
-            time.sleep(1.5)
-            self.sig_quit.emit()
-        except Exception as e:
-            logger.warning("Update download failed: %s", e)
-            self.track("update_install_result", {"manual": False, "ok": False})
+            self.flush_config_save()
+            QTimer.singleShot(1500, self.quit_app)
+            return
+        if info == updater.UNSUPPORTED:
+            webbrowser.open(updater.release_page(tag))
+            info = ""
+        if callable(on_done):
+            try:
+                on_done(False, info)
+            except Exception:
+                logger.debug("update result callback failed", exc_info=True)
+        elif info:
+            self.show_tray_hint("Update not installed", info)
+
+    def _prepare_update_on_quit(self, tag):
+        """"Install updates when I quit" (Windows): fetch and check the
+        installer now, on a worker, so quitting only has to start it. It is
+        kept per release in %TEMP%\\gusan-update\\<tag>\\ and reused by the
+        next runs once its sha256 checks out (updater.cached_download) - not
+        ~100 MB downloaded again every launch."""
+        if sys.platform != "win32" or not self.cfg.get("install_updates_on_quit", True):
+            return
+        if not updater.should_prompt(self.cfg, tag, APP_VERSION):
+            return              # not newer, or a version the user skipped
+        ready = getattr(self, "_update_ready", None)
+        if (ready and ready[0] == tag) or getattr(self, "_update_fetching", None) == tag:
+            return
+        self._update_fetching = tag
+
+        def _run():
+            try:
+                # Its own folder: an "Install now" download never writes the same file.
+                ok, info = updater.cached_download(tag)
+            except Exception as e:
+                ok, info = False, str(e)
+            self._run_on_gui(self._on_update_fetched, tag, ok, info)
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_update_fetched(self, tag, ok, info):
+        self._update_fetching = None
+        if ok:
+            self._update_ready = (tag, info)
+        else:
+            logger.info("Update %s not fetched ahead: %s", tag, info)
+
+    def _on_own_setting_changed(self, key):
+        """sig_setting_changed for the controller's own services."""
+        if key == "install_updates_on_quit" and self.cfg.get(key, True):
+            pending = self.cfg.get("pending_update_version") or ""
+            if pending:
+                self._prepare_update_on_quit(pending)
+
+    def _run_update_on_quit(self):
+        """quit_app: start the installer fetched ahead, when the setting is on
+        and it is still newer than this version."""
+        ready, self._update_ready = getattr(self, "_update_ready", None), None
+        if not ready or not self.cfg.get("install_updates_on_quit", True):
+            return
+        tag, path = ready
+        # Still newer, not skipped meanwhile, and still on disk.
+        if not (updater.should_prompt(self.cfg, tag, APP_VERSION) and os.path.isfile(path)):
+            return
+        self.track("update_install_started", {"manual": False, "to": tag})
+        ok, _info = updater.launch(path)
+        self.track("update_install_result", {"manual": False, "ok": bool(ok)})
+        if ok:
+            self.cfg["pending_update_version"] = ""
+            self.schedule_config_save()           # quit_app flushes it right after
 
     # ── Modular Window Surface Triggers (Main thread-safe wrappers) ──
     @staticmethod
@@ -3231,33 +3899,118 @@ class AppController(QObject):
         w.raise_()
         w.activateWindow()
 
-    def show_settings(self):
-        self._bring_to_front(self.settings_win)
-        self.track("settings_opened")
+    def _ensure_main_window(self):
+        """The Gusan window (ui/shell.py), built the first time it opens -
+        never at startup before the tray, so launch stays fast."""
+        if self.main_win is None:
+            from ui.shell import MainWindow
+            win = MainWindow(main_app=self)
+            self.sig_setting_changed.connect(win.on_setting_changed)
+            self.main_win = win
+        return self.main_win
 
-    def show_file_transcribe(self):
-        """Settings, opened on the Transcribe Files tab (the tray shortcut)."""
-        tab = getattr(self.settings_win, "file_tab", None)
-        if tab is not None:
-            self.settings_win.tabs.setCurrentWidget(tab)
-        self.show_settings()
+    def show_main(self, page=None, **opts):
+        """Open the app: the Gusan window on ``page`` (a ui.shell route such as
+        "home" or "settings"; None keeps the page it was on, home the first
+        time). ``opts`` go to the page (e.g. section="speech")."""
+        try:
+            win = self._ensure_main_window()
+            win.open(page or win.current_route() or "home", **opts)
+        except Exception:
+            # The window itself couldn't be built (a page that fails shows its
+            # own error card instead). Say so rather than doing nothing.
+            logger.error("The Gusan window failed to open", exc_info=True)
+            try:
+                self.show_tray_hint(f"{APP_NAME} couldn't open its window",
+                                    "Try again from the tray. If it keeps happening, restart the app.")
+            except Exception:
+                logger.debug("tray hint failed", exc_info=True)
+            return None
+        self._bring_to_front(win)
+        self.track("settings_opened")
+        return win
+
+    # The 1.x entry points keep their names (IPC, notifications, old callers)
+    # and open their Gusan pages.
+    def show_settings(self, section=None, **opts):
+        """Settings (``section``: general | microphone | speech | privacy |
+        updates; ``focus`` e.g. "gpu")."""
+        if section:
+            opts["section"] = section
+        return self.show_main("settings", **opts)
+
+    def show_file_transcribe(self, paths=None):
+        """Audio to text (the tray, drops); ``paths`` are queued at once."""
+        if paths:
+            return self.show_main("audio_to_text", paths=paths)
+        return self.show_main("audio_to_text")
 
     def show_history(self):
-        self.history_win.refresh_list()
-        self._bring_to_front(self.history_win)
+        """Home: its Recent list is the history."""
+        win = self.show_main("home")
         self.track("history_opened")
+        return win
 
     def show_meeting(self):
-        # Meeting recording + AI notes are Pro-only.
-        if not self.is_pro():
-            self._pro_upsell("Meeting recording")
-            return
-        self._bring_to_front(self.meetings_win)
+        """Meetings, for every plan: the Record button is the Pro gate (and
+        the live view opens by itself while a meeting records)."""
+        return self.show_main("meetings")
 
     def show_onboarding(self):
-        self.onboarding_win.show()
-        self.onboarding_win.raise_()
-        self.onboarding_win.activateWindow()
+        """The 5-step welcome (ui/onboarding_v2) - first run only. An onboarded
+        user (every 1.9 upgrader) gets the app instead and never sees it.
+        Finishing opens Home; closing it with X writes nothing, so it shows
+        again at the next launch."""
+        if self.cfg.get("onboarding_done", False):
+            return self.show_main()
+        wiz = getattr(self, "onboarding_win", None)
+        try:
+            if wiz is not None:
+                wiz.isVisible()                  # still alive?
+        except RuntimeError:
+            wiz = None
+        if wiz is None:
+            # The model step's "Your computer" chips and "Best for your
+            # computer" come from the hardware probe (1-2 s on a worker).
+            dl = getattr(self, "downloads", None)
+            if dl is not None:
+                try:
+                    dl.probe_hardware()
+                except Exception:
+                    logger.debug("hardware probe failed to start", exc_info=True)
+            from ui.onboarding_v2 import OnboardingWizard
+            wiz = OnboardingWizard(self)
+            # Land in the app, not silently in the tray: first-run users
+            # otherwise think it closed.
+            wiz.accepted.connect(lambda: self.show_main("home"))
+            self.onboarding_win = wiz
+        self._bring_to_front(wiz)
+        return wiz
+
+    def front_first_run_wizard(self):
+        """The first-run wizard is on screen: bring it forward and say True
+        (a tray click or a second launch then never opens the app behind it).
+        False when there is none - closed with X, or onboarding is done."""
+        wiz = getattr(self, "onboarding_win", None)
+        try:
+            if (wiz is not None and wiz.isVisible()
+                    and not self.cfg.get("onboarding_done", False)):
+                self._bring_to_front(wiz)
+                return True
+        except RuntimeError:
+            pass                                  # the wizard was deleted
+        return False
+
+    # ── the one-time "Transcribe is now Gusan" line on Home ──
+    def rename_note_due(self):
+        """Home shows the upgrade line (settings from 1.x, not shown yet)."""
+        return bool(self.cfg.get("rename_note_pending", False))
+
+    def dismiss_rename_note(self):
+        """Home showed it (or it was closed): never again."""
+        if self.cfg.get("rename_note_pending"):
+            self.cfg["rename_note_pending"] = False
+            self.schedule_config_save()
 
     def show_macos_permissions_guide(self):
         """macOS only: a one-time walkthrough of the three permissions the app
@@ -3319,53 +4072,93 @@ class AppController(QObject):
         self.save_config()
 
     def show_auth_gate(self):
-        """Open the email-first sign in / sign up dialog. Used by the Account tab,
-        tray, and upgrade prompts when the user wants to create or access an
-        account."""
+        """Sign in / create an account (ui/auth_sheet.py): one sheet, brought
+        forward on repeated clicks. Used by the tray, the pages and the Pro
+        window. Already signed in: Account & plan instead."""
         if self.auth.is_authenticated:
-            self.show_settings()
-            return
-        # Reuse a single dialog instance so repeated clicks just bring it forward
-        # instead of stacking new windows.
-        gate = getattr(self, "_auth_gate", None)
-        if gate is None:
-            from ui.onboarding import Onboarding
-            gate = Onboarding(main_app=self, account_only=True)
-            self._auth_gate = gate
-        gate.show()
-        gate.raise_()
-        gate.activateWindow()
+            return self.show_main("account")
+        return self._show_auth_sheet("signin")
 
     def show_account_gate(self):
-        """One-time sign-in / guest gate for users who onboarded before accounts
-        existed, so the accounts update doesn't silently cap them."""
+        """The sign-up sheet once, for a user who has never seen it. Nothing
+        opens it on its own any more: new users meet sign-up in the welcome
+        wizard, and existing users are never interrupted at launch."""
         if self.cfg.get("account_gate_seen", False):
-            return
+            return None
         if self.auth.is_authenticated:
-            self.cfg["account_gate_seen"] = True
-            self.save_config()
-            return
-        from ui.onboarding import Onboarding
-        self._account_gate = Onboarding(main_app=self, account_only=True)
-        # Same as first-run onboarding: finishing the gate (guest or sign-in)
-        # opens the app panel instead of dropping the user at the tray.
-        self._account_gate.accepted.connect(self.show_settings)
-        self._account_gate.show()
-        self._account_gate.raise_()
-        self._account_gate.activateWindow()
+            self.set_setting("account_gate_seen", True)
+            return None
+        sheet = self._show_auth_sheet("signup")
+        if sheet is not None and not getattr(sheet, "_gusan_gate", False):
+            sheet._gusan_gate = True
+            sheet.finished.connect(lambda _result: self.set_setting("account_gate_seen", True))
+        return sheet
+
+    def _show_auth_sheet(self, mode):
+        try:
+            from ui.auth_sheet import show_auth_sheet
+            sheet = show_auth_sheet(self, mode, parent=self._dialog_parent())
+        except Exception:
+            logger.warning("The sign-in sheet failed to open", exc_info=True)
+            self.show_main("account")
+            return None
+        if not getattr(sheet, "_gusan_wired", False):
+            sheet._gusan_wired = True
+            # Signed in: the app, on the page it was on (Home the first time).
+            sheet.signed_in.connect(lambda: self.show_main())
+        return sheet
+
+    # ── Instant-apply settings (Gusan 2.0 pages) ──
+    def set_setting(self, key, value):
+        """Change one setting now: written in place, its side effect run
+        (hotkeys, privacy, start at login, model preload, dictation bar), saved
+        250 ms later, then sig_setting_changed(key). False when refused or when
+        its side effect failed. See settings_apply.py. GUI thread only (the
+        save timer and the hotkey hooks live there): a worker hands its change
+        over with a queued signal."""
+        return bool(self.set_settings({key: value}).get(key, False))
+
+    def set_settings(self, updates):
+        """Several settings at once (one save, each side effect once).
+        Returns {key: ok}."""
+        return settings_apply.apply(self, updates, autostart_mod=autostart)
+
+    def schedule_config_save(self):
+        """Save config.json ~250 ms after the last change of a burst."""
+        t = getattr(self, "_save_timer", None)
+        if t is None:
+            self.flush_config_save()
+        else:
+            t.start()
+
+    def _flush_pending_save(self):
+        """On quit: write a debounced save that hasn't happened yet."""
+        t = getattr(self, "_save_timer", None)
+        try:
+            if t is not None and t.isActive():
+                self.flush_config_save()
+        except Exception:
+            logger.debug("final settings save failed", exc_info=True)
+
+    def flush_config_save(self):
+        """Write the config now (the debounced save; also on quit). Lighter than
+        save_config(): no tray icon redraw, no stylesheet re-apply."""
+        t = getattr(self, "_save_timer", None)
+        if t is not None:
+            try:
+                t.stop()
+            except Exception:
+                pass
+        try:
+            save_config(self.cfg)
+            self._track_setting_changes()
+        except Exception:
+            logger.warning("Saving settings failed", exc_info=True)
 
     def save_config(self):
         save_config(self.cfg)
         self._track_setting_changes()
         self.update_tray_icon()
-        
-        # Propagate color settings to window panels
-        if hasattr(self.settings_win, "refresh_list"):
-            self.settings_win.setStyleSheet(self.style_content)
-        if hasattr(self.history_win, "refresh_list"):
-            self.history_win.setStyleSheet(self.style_content)
-        if hasattr(self.meetings_win, "txt_summary"):
-            self.meetings_win.setStyleSheet(self.style_content)
 
     # ── Hotkeys ──────────────────────────────────────────────────────────────
     # The dictation hotkey can be either a keyboard combo ("alt+r") or a mouse
@@ -3392,7 +4185,8 @@ class AppController(QObject):
             QTimer.singleShot(3000, lambda: self.show_tray_hint(
                 "Hotkey reset",
                 f"{hotkeys.display(bad)} would trigger while you type, so dictation is back "
-                f"on {hotkeys.display(hotkey)}. Pick another in Settings."))
+                f"on {hotkeys.display(hotkey)}. Pick another on the Dictation page.",
+                on_click=lambda: self.show_main("dictation", focus="hotkey")))
 
         try:
             if hotkey.startswith("mouse:"):
@@ -3488,28 +4282,142 @@ class AppController(QObject):
             logger.warning("Could not register Live Assistance hotkey %s: %s", hotkey, e)
             return False
 
-    def toggle_live_assist(self):
-        """Show/hide the private Live Assistance overlay (tray item + hotkey)."""
+    def _release_smart_hotkey(self):
+        hk = getattr(self, "_registered_smart_hotkey", None)
+        if hk is not None:
+            try:
+                import keyboard as kbd_lib
+                kbd_lib.remove_hotkey(hk)
+            except Exception:
+                pass
+            self._registered_smart_hotkey = None
+        listener = getattr(self, "_smart_listener", None)
+        if listener is not None:
+            try:
+                listener.stop()
+            except Exception:
+                pass
+            self._smart_listener = None
+
+    def _setup_smart_hotkey(self, hotkey):
+        """Third global hotkey, the Smart Actions shortcut (default Alt+S,
+        Option+S on a Mac): ONE take runs as a Smart Action (Alt+R always
+        pastes the exact words). Keyboard only, never on the dictation's or
+        the Live Assistant's keys; kept apart from both, like the Live
+        Assistant's. True when it registered."""
+        self._release_smart_hotkey()
+        hotkey = settings_apply.norm_hotkey(hotkey)
+        taken = {settings_apply.norm_hotkey(self.cfg.get("hotkey")),
+                 settings_apply.norm_hotkey(self.cfg.get("live_assist_hotkey"))}
+        if (not hotkey or hotkey in taken or hotkey.startswith("mouse:")
+                or hotkeys.is_bare_typing_key(hotkey)):
+            return False
         try:
-            if self.live_assist is None:
-                from ui.live_assist import LiveAssistOverlay
-                self.live_assist = LiveAssistOverlay(main_app=self)
-                # Feed it from the meeting window's live pipeline.
-                mw = getattr(self, "meetings_win", None)
-                if mw is not None:
-                    mw.sig_chunk.connect(self.live_assist.feed_transcript)
-                    mw.sig_summary.connect(self.live_assist.set_summary)
-                    if getattr(mw, "state", None) == getattr(mw, "STATE_RECORDING", "recording"):
-                        self.live_assist.set_meeting_active(
-                            True, getattr(mw, "_meeting_title", ""),
-                            getattr(mw, "_meeting_attendees", ""))
-                        self.live_assist.feed_transcript(getattr(mw, "_live_text", ""),
-                                                         answer=False)
-                        self.live_assist.set_summary(getattr(mw, "_live_summary_text", ""))
-            self.live_assist.toggle()
+            if sys.platform == "win32":
+                import keyboard as kbd_lib
+                kbd_lib.add_hotkey(hotkey, lambda: self.sig_smart_hotkey.emit(),
+                                   suppress=False, trigger_on_release=False)
+                self._registered_smart_hotkey = hotkey
+            else:
+                from pynput import keyboard as pynput_keyboard
+                hotkeys.prepare_pynput_listeners()
+                listener = pynput_keyboard.GlobalHotKeys({
+                    self._to_pynput_hotkey(hotkey): lambda: self.sig_smart_hotkey.emit(),
+                })
+                listener.daemon = True
+                listener.start()
+                self._smart_listener = listener
+            logger.info("Registered Smart Actions hotkey: %s", hotkey)
+            return True
         except Exception as e:
-            logger.warning("Live Assistance failed: %s", e, exc_info=True)
-            self.show_tray_hint("Live Assistance", f"Couldn't open the overlay: {e}")
+            logger.warning("Could not register Smart Actions hotkey %s: %s", hotkey, e)
+            return False
+
+    def _on_smart_hotkey(self):
+        """GUI thread: the Smart Actions shortcut. Starts ONE take that runs
+        as a Smart Action - Pro always; Free while tries are left (the try is
+        counted when it finishes, _stop_impl); Free with none left gets the
+        Pro window; a guest the sign-up sheet. Pressed while recording it
+        just stops the take, which keeps the kind it started with (so does
+        Alt+R). While a meeting records, only the quiet "paused" hint
+        (_on_hotkey) - never the Pro window or sign-up over a meeting."""
+        was_rec = self.is_rec
+        if not was_rec:
+            if getattr(self, "_hotkeys_suspended", False) is True:
+                return              # a shortcut is being captured (a late hook event)
+            if AppController._meeting_holds_recorder(self):
+                pass                # no take can start: _on_hotkey says why
+            elif not self.is_pro():
+                auth_now, cfg_now = getattr(self, "auth", None), getattr(self, "cfg", None)
+                if entitlements.tier(auth_now, cfg_now) == entitlements.TIER_GUEST:
+                    self.show_auth_gate()       # signing up gives the free tries
+                    return
+                if not entitlements.can_use_smart_action(auth_now, cfg_now):
+                    self._pro_upsell("Smart Actions")
+                    return
+            self._smart_next = True
+        try:
+            self._on_hotkey()
+        finally:
+            self._smart_next = False
+
+    def _ensure_live_assist(self):
+        """The Live Assistant card (ui/live_assist.py), built on first use and
+        fed from the meeting session's live pipeline."""
+        if self.live_assist is None:
+            from ui.live_assist import LiveAssistOverlay
+            card = LiveAssistOverlay(main_app=self)
+            s = getattr(self, "meeting_session", None)
+            if s is not None:
+                # Emitted from worker threads; the card's slots run on the GUI thread.
+                s.sig_chunk.connect(card.feed_transcript)
+                s.sig_summary.connect(card.set_summary)
+                if getattr(s, "state", None) == getattr(s, "STATE_RECORDING", "recording"):
+                    # Opened mid-meeting: catch up (no answers for old questions).
+                    card.set_meeting_active(True, getattr(s, "_meeting_title", ""),
+                                            getattr(s, "_meeting_attendees", ""))
+                    card.feed_transcript(getattr(s, "_live_text", ""), answer=False)
+                    card.set_summary(getattr(s, "_live_summary_text", ""))
+            self.live_assist = card
+        return self.live_assist
+
+    def toggle_live_assist(self):
+        """Show/hide the private Live Assistant card (its hotkey, the tray)."""
+        try:
+            self._ensure_live_assist().toggle()
+        except Exception as e:
+            logger.warning("Live Assistant failed: %s", e, exc_info=True)
+            self.show_tray_hint("Live Assistant", f"Couldn't open the Live Assistant: {e}")
+
+    def show_live_assist(self):
+        """Show the Live Assistant card - never hide it (the Live Assistant
+        page's Open, the Meetings live view, a calendar reminder)."""
+        try:
+            self._ensure_live_assist().open_card()
+        except Exception as e:
+            logger.warning("Live Assistant failed: %s", e, exc_info=True)
+            self.show_tray_hint("Live Assistant", f"Couldn't open the Live Assistant: {e}")
+
+    def suspend_hotkeys(self, on):
+        """Pause the global shortcuts while a page captures a new one (so the
+        current Alt+R doesn't start a dictation mid-capture) and put them back
+        after. Nothing in the config changes. GUI thread."""
+        on = bool(on)
+        if on == (getattr(self, "_hotkeys_suspended", False) is True):
+            return True
+        self._hotkeys_suspended = on
+        if on:
+            self._unregister_kbd_hotkey()
+            self._unregister_mouse_listener()
+            self._setup_assist_hotkey("")          # releases it, registers nothing
+            self._release_smart_hotkey()
+        else:
+            self.apply_tray_bindings()
+        return True
+
+    def toggle_dictation(self):
+        """Start or finish a dictation, as the shortcut does (the tray's Dictate)."""
+        self._on_hotkey()
 
     def _unregister_kbd_hotkey(self):
         if self._registered_kbd_hotkey is not None:
@@ -3545,6 +4453,7 @@ class AppController(QObject):
         # changed to the same combo, this drops the overlay binding instead
         # of letting both fire on one keypress.
         self._setup_assist_hotkey(self.cfg.get("live_assist_hotkey", ""))
+        self._setup_smart_hotkey(self.cfg.get("smart_actions_hotkey", ""))
 
     # ── Event Callbacks ──
     def _on_levels(self, levels):
@@ -3558,6 +4467,8 @@ class AppController(QObject):
 
     def _on_hotkey(self):
         logger.info("[main] _on_hotkey fired (is_rec=%s)", self.is_rec)
+        if getattr(self, "_hotkeys_suspended", False) is True and not self.is_rec:
+            return              # a shortcut is being captured (a late hook event)
         # A previous dictation is still transcribing/processing - ignore the
         # hotkey so we never re-enter the shared recorder mid-flight (crash).
         if getattr(self, "_busy", False):
@@ -3576,25 +4487,40 @@ class AppController(QObject):
             # Dictation and the meeting recorder share one AudioRecorder + audio
             # device. Don't let the hotkey start a dictation on top of an active
             # meeting - it would clobber the meeting's audio stream. Tell the
-            # user instead.
-            if self._is_meeting_busy():
-                self.show_tray_hint(
-                    "Meeting Recording Active",
-                    f"{hotkeys.display(self.cfg.get('hotkey', 'alt+r'))} dictation is paused while a meeting is recording so "
-                    "the two don't mix. Stop the meeting to dictate again.",
-                )
+            # user instead. (Notes written from a saved transcript don't use
+            # the recorder: dictation works meanwhile.)
+            if AppController._meeting_holds_recorder(self):
+                if getattr(self, "_smart_next", False) is True:
+                    # The Smart Actions shortcut: name it, not Alt+R.
+                    body = ("Smart Actions are paused while a meeting is recording. "
+                            "Stop the meeting to use them again.")
+                else:
+                    body = (f"{hotkeys.display(self.cfg.get('hotkey', 'alt+r'))} dictation is paused while a "
+                            "meeting is recording so the two don't mix. Stop the meeting to dictate again.")
+                self.show_tray_hint("Meeting Recording Active", body)
                 return
             self._start()
         else:
             threading.Thread(target=self._stop, daemon=True).start()
 
     def _is_meeting_busy(self):
-        """True while the meeting window is actively recording or processing -
-        i.e. while it owns the shared AudioRecorder."""
-        win = getattr(self, "meetings_win", None)
-        if win is None:
+        """True while a meeting (or a Live Assistant session) records - paused
+        included - or writes its notes, whoever started it: the meeting
+        session then owns the shared AudioRecorder."""
+        s = getattr(self, "meeting_session", None)
+        return bool(s is not None and getattr(s, "is_busy", False))
+
+    def _meeting_holds_recorder(self):
+        """The meeting session owns the shared recorder right now: recording
+        (paused included) or transcribing what it recorded. Writing notes from
+        a saved transcript (Retry, Rewrite, notes a Quit left) doesn't."""
+        s = getattr(self, "meeting_session", None)
+        if s is None:
             return False
-        return getattr(win, "state", None) in (win.STATE_RECORDING, win.STATE_PROCESSING)
+        holds = getattr(s, "holds_recorder", None)
+        if holds is None:
+            holds = getattr(s, "is_busy", False)
+        return bool(holds)
 
     def force_stop_dictation(self):
         """Cancel an in-progress Alt-R dictation (discarding it). Called when a
@@ -3612,6 +4538,7 @@ class AppController(QObject):
             self.overlay.call_soon(self.overlay.hide_overlay)
         except Exception:
             pass
+        AppController._restore_dictation_speech(self)
         return True
 
     def _on_enter(self):
@@ -3649,6 +4576,21 @@ class AppController(QObject):
             pass
         self._busy = False                  # immediately ready for the next take
         self._unregister_transient_keys()
+        # A Smart take on its own speech model: Dictation's model comes back.
+        AppController._restore_dictation_speech(self)
+
+    def _restore_dictation_speech(self):
+        """After a Smart Action that transcribed with its own speech model
+        (another Whisper model, or Gusan Cloud): load Dictation's model again
+        in the background, once, so the next Alt+R is not a cold load. The
+        one model slot holds one Whisper model at a time."""
+        if getattr(self, "_smart_speech_restore", False) is not True:
+            return
+        self._smart_speech_restore = False
+        try:
+            self._preload_speech_model()
+        except Exception:
+            logger.debug("Dictation's speech model did not reload", exc_info=True)
 
     def _idle_sweep(self):
         """Free models nobody is using: Whisper after whisper_idle_unload_min,
@@ -3656,11 +4598,8 @@ class AppController(QObject):
         dictation, meeting or Live Assistance session runs; the work itself
         runs on a worker thread, so the UI never waits on a model lock. Each
         model also guards itself - nothing in use is ever freed."""
-        mw = getattr(self, "meetings_win", None)
-        if mw is not None and getattr(mw, "state", None) in (
-                getattr(mw, "STATE_RECORDING", "recording"),
-                getattr(mw, "STATE_PROCESSING", "processing")):
-            return
+        if AppController._is_meeting_busy(self):
+            return              # a pause keeps the session busy: never swept mid-meeting
         if getattr(self, "is_rec", False) or getattr(self, "_busy", False) \
                 or getattr(self, "_file_job_running", False):
             return
@@ -3680,11 +4619,14 @@ class AppController(QObject):
     def release_models_after_session(self):
         """A meeting / Live Assistance session's notes are done: free the local
         AI model now (it held ~2 GB+ until the next sweep otherwise) - unless
-        dictation's Smart mode is about to use it. Reloads in ~1-2 s."""
+        a Smart Action is recording or being written right now (its writer
+        stays). The next Smart take pre-warms it again (_start); it reloads in
+        ~1-2 s."""
         if cfg_float("llm_idle_unload_min", 5, minimum=0) <= 0:
             return
         keep = None
-        if actions.normalize_action_mode(self.cfg.get("output_action")) != actions.ACTION_TRANSCRIBE_ONLY:
+        if (getattr(self, "_oneshot_action", None) == actions.ACTION_SMART_AUTO
+                and (getattr(self, "is_rec", False) is True or getattr(self, "_busy", False) is True)):
             keep = actions.normalize_action_model(self.cfg.get("action_model"))
 
         def _free():
@@ -3716,6 +4658,70 @@ class AppController(QObject):
                 logger.debug("Speech model preload failed: %s", e)
         threading.Thread(target=_load, daemon=True).start()
 
+    # ── a speech model that isn't on disk yet (model_manager) ──
+    def _fetch_speech_model(self, name):
+        """AudioRecorder.model_fetcher - worker threads, right before a Whisper
+        model is built. A model that isn't on disk comes through
+        self.downloads: ONE download with progress (the Speech & AI card,
+        Home and onboarding see it, and a running one is joined) instead of
+        the build fetching it silently. A stopped dictation shows "Getting
+        ready" meanwhile. Raises model_manager.DownloadError (a plain sentence)."""
+        dl = getattr(self, "downloads", None)
+        if dl is None or threading.current_thread() is threading.main_thread():
+            return                      # never block the GUI: the build decides
+        try:
+            if dl.kind(name) != "whisper" or model_downloaded(name):
+                return                  # a custom model, or on disk (a stat): the usual case
+        except Exception:
+            return
+        import model_manager
+        failed = getattr(self, "_model_fetch_failed", None)
+        if failed and failed[0] == name and time.monotonic() - failed[2] < 30:
+            # Every piece of one dictation queues behind the model: one failed
+            # download answers them all instead of restarting it per piece.
+            raise model_manager.DownloadError(failed[1])
+        self._model_wait = {"name": name, "pct": None}
+        self._run_on_gui(self._show_model_wait)
+        try:
+            dl.fetch(name, on_progress=self._on_model_wait_progress,
+                     timeout=self.SPEECH_MODEL_WAIT_S)
+            self._model_fetch_failed = None
+        except model_manager.DownloadError as e:
+            self._model_fetch_failed = (name, str(e), time.monotonic())
+            raise
+        finally:
+            self._model_wait = None
+            self._run_on_gui(self._end_model_wait)
+
+    def _on_model_wait_progress(self, pct, done=0, total=0):
+        # Worker (the manager throttles it to ~10 a second).
+        wait = getattr(self, "_model_wait", None)
+        if wait is not None:
+            wait["pct"] = pct
+            self._run_on_gui(self._show_model_wait)
+
+    def _show_model_wait(self):
+        """GUI thread: the pill says "Getting ready · 42%" while a stopped
+        dictation waits for its speech model (while recording, the recording
+        pill stays - the words are kept and wait for the model)."""
+        wait = getattr(self, "_model_wait", None)
+        ov = getattr(self, "overlay", None)
+        if wait is None or ov is None or getattr(self, "_busy", False) is not True:
+            return
+        from ui.overlay import GETTING_READY, TRANSCRIBING
+        if getattr(ov, "overlay_state", None) in (TRANSCRIBING, GETTING_READY):
+            ov.set_model_progress(wait.get("pct"))
+            if ov.overlay_state != GETTING_READY:
+                ov.set_state(GETTING_READY)
+
+    def _end_model_wait(self):
+        ov = getattr(self, "overlay", None)
+        if ov is None:
+            return
+        from ui.overlay import GETTING_READY, TRANSCRIBING
+        if getattr(ov, "overlay_state", None) == GETTING_READY:
+            ov.set_state(TRANSCRIBING)
+
     def _cloud_preflight_warn(self):
         """Immediate, friendly warning if a cloud backend is selected but clearly
         misconfigured (no key). Recording still proceeds and transcription falls
@@ -3735,12 +4741,17 @@ class AppController(QObject):
         # starting a dictation would just hang on the inference lock until the
         # whole file is done (potentially an hour of "Finalising…").
         if getattr(self, "_file_job_running", False):
-            self.show_tray_hint(
-                "File transcription running",
-                "Wait for it to finish (or cancel it in Transcribe Files) "
-                "before dictating - they share the speech model.")
+            from file_jobs import BUSY_FOR_DICTATION, BUSY_TITLE
+            self.show_tray_hint(BUSY_TITLE, BUSY_FOR_DICTATION)
             return
-        warn = self._cloud_preflight_warn()
+        # Started by the Smart Actions shortcut: THIS take runs as a Smart
+        # Action (every other start clears it, so an Esc-cancelled one never
+        # carries over). Alt+R always pastes the exact words.
+        smart = getattr(self, "_smart_next", False) is True
+        # A Smart Action may transcribe with its own speech model (the Smart
+        # Actions page's "Transcribes with"), fixed for the whole take.
+        speech = AppController._smart_speech_for_take(self) if smart else (None, None)
+        warn = None if speech[0] else self._cloud_preflight_warn()
         if warn:
             try:
                 self.show_tray_hint(*warn)
@@ -3748,28 +4759,46 @@ class AppController(QObject):
                 pass
         try:
             self.is_rec = True
+            self._oneshot_action = actions.ACTION_SMART_AUTO if smart else None
+            dictation_model = self.cfg.get("whisper_model") or "base"
+            # Dictation's model is loaded again after a take that used
+            # another one (or the cloud): _restore_dictation_speech.
+            self._smart_speech_restore = bool(
+                speech[0] == "managed" or (speech[0] == "local" and speech[1] != dictation_model))
             self.overlay.set_partial("")
             from ui.overlay import RECORDING
-            self.overlay.show_overlay(RECORDING)
-            self.recorder.start_recording()
+            self.overlay.show_overlay(RECORDING, smart=smart)
+            if speech[0]:
+                self.recorder.start_recording(speech=speech)
+            else:
+                self.recorder.start_recording()
             self._register_transient_keys()
 
             # Load the speech model while the user speaks - also when a cloud
             # backend will run on it (no key, or it fell back within the hour).
-            fell_back = time.monotonic() - getattr(self.recorder, "_local_fallback_at", -1e9) < 3600
-            local_soon = (fell_back or self._cloud_preflight_warn()) and model_downloaded(
-                self.cfg.get("whisper_model") or "base")
-            if self.cfg["backend"] == "local" or local_soon:
+            if speech[0] == "local":
+                # The Smart Action's own Whisper model (a model that isn't on
+                # disk starts, or joins, its download now - model_fetcher).
                 threading.Thread(
-                    target=self.recorder.load_model,
-                    daemon=True,
+                    target=self._load_for_dictation, args=(speech[1],), daemon=True,
                 ).start()
+            else:
+                fell_back = time.monotonic() - getattr(self.recorder, "_local_fallback_at", -1e9) < 3600
+                cloud_take = speech[0] == "managed"
+                local_soon = (fell_back or (not cloud_take and self._cloud_preflight_warn())) \
+                    and model_downloaded(dictation_model)
+                if (not cloud_take and self.cfg["backend"] == "local") or local_soon:
+                    # A model that isn't on disk starts (or joins) its download now
+                    # (model_fetcher), while the user speaks.
+                    threading.Thread(
+                        target=self._load_for_dictation,
+                        daemon=True,
+                    ).start()
 
-            # If Smart mode + local LLM, pre-warm the action model into RAM
-            # while the user is dictating, so post-Enter latency is just
-            # inference time (no cold-load wait).
-            output_mode = actions.normalize_action_mode(self.cfg.get("output_action"))
-            if output_mode == actions.ACTION_SMART_AUTO:
+            # A Smart Action with a local LLM: pre-warm the writer into RAM
+            # while the user speaks, so after the stop it is just inference
+            # time (no cold-load wait).
+            if smart:
                 action_model = actions.normalize_action_model(self.cfg.get("action_model"))
                 if action_model in local_llm.MODEL_CATALOG and local_llm.model_downloaded(action_model):
                     def _prewarm():
@@ -3782,6 +4811,30 @@ class AppController(QObject):
             self.is_rec = False
             self._unregister_transient_keys()
             self.overlay.show_error(f"Microphone error: {e}")
+
+    def _load_for_dictation(self, name=None):
+        """Worker: load the speech model while the user speaks (``name``: a
+        Smart Action's own Whisper model; None = Dictation's). A failure is
+        only logged here - the take's own pieces report it."""
+        try:
+            self.recorder.load_model(name)
+        except Exception as e:
+            logger.info("Speech model not ready for this dictation: %s", e)
+
+    def _smart_speech_for_take(self):
+        """(backend, model) a Smart Action transcribes with - cfg
+        smart_actions_speech_model through engine_choice.smart_speech_session
+        ("cloud" only for Pro and never in Privacy mode) - or (None, None):
+        like Dictation."""
+        if not str(self.cfg.get("smart_actions_speech_model") or "").strip():
+            return (None, None)
+        try:
+            import engine_choice
+            backend, model = engine_choice.smart_speech_session(self.cfg, self.is_pro())
+        except Exception:
+            logger.debug("Smart Actions speech model ignored", exc_info=True)
+            return (None, None)
+        return (backend, model) if backend else (None, None)
 
     def _cancel(self):
         self.recorder.stop_recording()
@@ -3899,8 +4952,34 @@ class AppController(QObject):
         except Exception:
             time.sleep(max_s)
 
-    def _paste_via_clipboard(self, text, restore=True):
+    @staticmethod
+    def _rich_copy(text):
+        """A Smart Action's result on the clipboard: Markdown with markup goes
+        as HTML (Word, Outlook, Gmail, Docs, Notion, Slack, Teams get real
+        lists, bold and headings) AND plain text with nice characters
+        (rich_text.to_plain: "• point", "☐ task", no ** # markers). Returns
+        the plain text actually put there, or None (no markup: copy as is)."""
+        import rich_text
+        if not rich_text.has_markup(text):
+            return None
+        plain, html = rich_text.to_plain(text), rich_text.to_html(text)
+        ok = False
+        try:
+            from ui.components import clipboard as rich_clipboard
+            # From this worker it hops to the GUI thread (Qt writes the
+            # clipboard there) and waits a moment.
+            ok = rich_clipboard.set_rich_blocking(plain, html)
+        except Exception:
+            logger.warning("Rich paste unavailable; pasting plain text", exc_info=True)
+        if not ok:
+            pyperclip.copy(plain)
+        return plain
+
+    def _paste_via_clipboard(self, text, restore=True, rich=False):
         """Copy `text`, send the paste chord, then restore the prior clipboard.
+
+        ``rich``: a Smart Action's Markdown, pasted as HTML + nice plain text
+        (_rich_copy). Plain dictation (exact words) is never changed.
 
         Returns True if the paste chord was sent. The restore is deliberately
         delayed: the target app reads the clipboard asynchronously after Ctrl+V,
@@ -3915,7 +4994,18 @@ class AppController(QObject):
             except Exception:
                 prev, prev_was_text = None, False
 
-        pyperclip.copy(text)
+        # What is on the clipboard now: the restore below puts the user's
+        # back only while it is still ours.
+        put = None
+        if rich:
+            try:
+                put = AppController._rich_copy(text)
+            except Exception:
+                logger.warning("Rich paste failed; pasting the text as is", exc_info=True)
+                put = None
+        if put is None:
+            put = text
+            pyperclip.copy(text)
 
         pasted = False
         try:
@@ -3937,7 +5027,9 @@ class AppController(QObject):
                 time.sleep(max(0, min(delay, 5000)) / 1000.0)
                 try:
                     # Someone else may have taken the clipboard meanwhile.
-                    if pyperclip.paste() == text:
+                    # (Qt writes Windows text with \r\n line ends.)
+                    now = pyperclip.paste()
+                    if isinstance(now, str) and now.replace("\r\n", "\n") == put.replace("\r\n", "\n"):
                         pyperclip.copy(prev)
                 except Exception:
                     pass
@@ -3985,8 +5077,27 @@ class AppController(QObject):
             if job == self._job_seq:  # not superseded by an Esc/new recording
                 self._busy = False
                 self._unregister_transient_keys()
+                # A Smart take on its own speech model: Dictation's model
+                # comes back now that the words are in.
+                AppController._restore_dictation_speech(self)
 
     def _stop_impl(self, job):
+        # This take's own action (the Smart Actions shortcut), read now: a
+        # later start resets it. Alt+R always pastes the exact words.
+        oneshot = getattr(self, "_oneshot_action", None)
+        if oneshot != actions.ACTION_SMART_AUTO:
+            oneshot = None
+        # What THIS take transcribes with (a Smart Action may use its own;
+        # a cloud pick stays on this computer once Privacy mode is on, as
+        # AudioRecorder._backend decides).
+        rec_backend = getattr(self.recorder, "backend_override", None)
+        if not (isinstance(rec_backend, str) and rec_backend) or (
+                rec_backend != "local" and self.cfg.get("privacy_mode")):
+            rec_backend = None
+        used_backend = rec_backend or (self.cfg.get("backend") or "local")
+        rec_model = getattr(self.recorder, "model_override", None)
+        used_model = (rec_model if isinstance(rec_model, str) and rec_model
+                      else self.cfg.get("whisper_model"))
         self.recorder.stop_recording()
         # Recording is finished now - flip is_rec immediately so Esc during the
         # transcription below is treated as "cancel processing", and a stale
@@ -3995,7 +5106,12 @@ class AppController(QObject):
         # NOTE: the Esc/Enter listener is intentionally left running here so Esc
         # can abort the transcription below; it's torn down in _stop's finally.
         from ui.overlay import TRANSCRIBING
+        # The pill names what transcribes this take ("Whisper Small").
+        self.overlay.call_soon(self.overlay.set_speech,
+                               pill_copy.speech_info(used_backend, used_model, self.cfg))
         self.overlay.call_soon(self.overlay.set_state, TRANSCRIBING)
+        # Still downloading the speech model: "Getting ready" instead.
+        self.overlay.call_soon(self._show_model_wait)
 
         TRANSCRIBE_TIMEOUT_SEC = 120
         _result = {}
@@ -4016,12 +5132,16 @@ class AppController(QObject):
                 logger.info("[main] transcription job %s cancelled", job)
                 return
             t.join(timeout=0.1)
-            waited += 0.1
+            # Waiting for the speech model's download doesn't count: the
+            # words wait for it ("Getting ready"), they aren't dropped.
+            if not getattr(self.recorder, "_fetching_model", False):
+                waited += 0.1
         if (not t.is_alive() and "exc" not in _result
                 and not str(_result.get("lang") or "").startswith("!")):
             # Minus a cold model load: the GPU wouldn't save that part.
             self._note_local_wait(
-                "dictation", max(0.0, waited - getattr(self.recorder, "_last_load_wait", 0.0)))
+                "dictation", max(0.0, waited - getattr(self.recorder, "_last_load_wait", 0.0)),
+                model=used_model, backend=used_backend)
 
         # If the managed cloud turned this one down, we transparently used the
         # local model - tell the user once so the switch isn't a mystery. Only
@@ -4087,39 +5207,43 @@ class AppController(QObject):
                 self.overlay.call_soon(self.overlay.hide_overlay)
             return
 
-        action_mode = actions.normalize_action_mode(self.cfg.get("output_action"))
+        # Only a take started by the Smart Actions shortcut runs as one: Alt+R
+        # always pastes the exact words (output_action is never read).
+        action_mode = oneshot or actions.ACTION_TRANSCRIBE_ONLY
         output_text = text
 
-        # Smart Actions: Pro = unlimited; everyone else gets 5 free tries, then it
-        # falls back to pasting raw text (and we nudge them to upgrade).
+        # Smart Actions: Pro = unlimited; everyone else gets 5 free tries. The
+        # shortcut already checked at the press (_on_smart_hotkey); this is
+        # the backstop for tries that ran out meanwhile - then the exact words
+        # are pasted. A try is counted quietly (the counter is on the Smart
+        # Actions page).
         if action_mode != actions.ACTION_TRANSCRIBE_ONLY and not self.is_pro():
             if entitlements.can_use_smart_action(self.auth, self.cfg):
                 entitlements.add_smart_action_use(self.auth)
-                rem = entitlements.smart_actions_remaining(self.auth, self.cfg)
-                self.overlay.call_soon(
-                    self.show_tray_hint,
-                    "Smart Action (free trial)",
-                    f"{rem} free Smart Action(s) left. Upgrade to Pro for unlimited.",
-                )
-                # Reflect the new count in any open Settings window.
+                # Pages redraw the tries counter (Smart Actions, Account & plan).
                 self.sig_auth_changed.emit()
             else:
                 action_mode = actions.ACTION_TRANSCRIBE_ONLY
                 if entitlements.tier(self.auth, self.cfg) == entitlements.TIER_GUEST:
                     self.overlay.call_soon(
                         self.show_tray_hint,
-                        "Smart Actions (Pro)",
-                        "Pasted your raw text. Sign up free to get 5 Smart Action trials.",
+                        "Sign up free for 5 Smart Actions",
+                        "Pasted your exact words.",
                     )
                 else:
                     self.overlay.call_soon(
                         self.show_tray_hint,
                         "Free Smart Actions used up",
-                        "Pasted your raw text. Upgrade to Transcribe Pro for unlimited Smart Actions.",
+                        "Pasted your exact words. Pro has unlimited Smart Actions.",
                     )
 
+        pill_kind = None
         if action_mode != actions.ACTION_TRANSCRIBE_ONLY:
-            # Switch the overlay to "Thinking…" while the smart action runs.
+            # The pill says what is being written while the smart action runs
+            # ("Writing your email · Gusan Cloud"): a guess from the words
+            # (regexes), never a wait.
+            pill_kind, pill_detail, pill_info = pill_copy.task(text, self)
+            self.overlay.call_soon(self.overlay.set_task, pill_kind, pill_detail, pill_info)
             from ui.overlay import PROCESSING
             self.overlay.call_soon(self.overlay.set_state, PROCESSING)
             # Pick the engine + inject the auth token for Pro managed actions.
@@ -4159,12 +5283,19 @@ class AppController(QObject):
             return
 
         if self.cfg.get("save_history", True) and not self.cfg.get("privacy_mode", False):
-            hist.save_entry(output_text, lang, self.cfg["backend"])
+            # A Smart Action keeps what was said and which action ran, so Home
+            # and Smart Actions can show "said -> pasted".
+            # The raw Markdown is kept (pages render it); the backend is the
+            # one that really transcribed this take.
+            extra = ({"action": action_mode, "said": text}
+                     if action_mode != actions.ACTION_TRANSCRIBE_ONLY else {})
+            hist.save_entry(output_text, lang, used_backend, **extra)
+            self.notify_history_changed()
 
         telemetry.track(
             "transcription_completed",
             {
-                "backend": self.cfg.get("backend", "local"),
+                "backend": used_backend,
                 "language": lang,
                 "action": action_mode,
                 "input_length_bucket": _bucket_count(len(text)),
@@ -4175,34 +5306,472 @@ class AppController(QObject):
         )
 
         self._wait_keys_released(0.35)
-        pasted = self._paste_via_clipboard(output_text)
+        if action_mode != actions.ACTION_TRANSCRIBE_ONLY:
+            # A Smart Action's Markdown: real lists / bold / headings where
+            # the app takes HTML, nice plain text everywhere else.
+            pasted = self._paste_via_clipboard(output_text, rich=True)
+            self.overlay.call_soon(self.overlay.show_done, pasted, kind=pill_kind)  # "Email pasted"
+        else:
+            pasted = self._paste_via_clipboard(output_text)   # the exact words, untouched
+            self.overlay.call_soon(self.overlay.show_done, pasted)
 
-        self.overlay.call_soon(self.overlay.show_done, pasted)
+        # A pending update: one quiet notice a run (not after every dictation),
+        # shown after the "done" pill - the next dictation never waits for it.
+        self._nudge_update_after_dictation()
 
-        # After a finished transcription, nudge the user about a pending update.
-        # Wait until the "done" overlay has had time to show before popping up.
-        pending = self.cfg.get("pending_update_version", "")
-        if pending:
-            time.sleep(2.5)
-            self.sig_update_available.emit(pending)
+    def paste_text(self, text, rich=False):
+        # Triggers cursor paste for clicked history logs. ``rich``: a Smart
+        # Action's Markdown (pasted as HTML + nice plain text).
+        if rich:
+            return self._paste_via_clipboard(text, rich=True)
+        return self._paste_via_clipboard(text)
 
-    def paste_text(self, text):
-        # Triggers cursor paste for clicked history logs
-        self._paste_via_clipboard(text)
+    def _quit_question(self):
+        """What quitting now would end, as one plain sentence ("" = nothing):
+        a meeting or Live Assistant session recording or writing its notes, or
+        a file being converted."""
+        s = getattr(self, "meeting_session", None)
+        if s is not None and getattr(s, "is_busy", False):
+            if getattr(s, "state", None) == "recording":
+                return ("A meeting is still recording. If you quit, it stops and is saved. "
+                        f"Its notes are written the next time you open {APP_NAME}.")
+            if getattr(s, "_rewrite_only", False) is True and (getattr(s, "notes", "") or "").strip():
+                # A rewrite of notes it has: save_for_quit leaves those as they were.
+                return ("Your meeting notes are being rewritten. If you quit, the earlier "
+                        "notes are kept.")
+            return ("Your meeting notes are still being written. If you quit, they're "
+                    f"written the next time you open {APP_NAME}.")
+        if getattr(self, "_file_job_running", False) is True:
+            return "A file is still being converted to text. If you quit, it stops."
+        return ""
+
+    def _confirm_quit(self):
+        """Ask before quitting ends a recording, its notes or a file job.
+        True = go ahead."""
+        text = AppController._quit_question(self)
+        if not text:
+            return True
+        box = QMessageBox(self._dialog_parent())
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle(f"Quit {APP_NAME}?")
+        box.setText(text)
+        quit_btn = box.addButton("Quit", QMessageBox.DestructiveRole)
+        stay_btn = box.addButton("Cancel", QMessageBox.RejectRole)
+        box.setDefaultButton(stay_btn)
+        box.setEscapeButton(stay_btn)
+        box.exec()
+        return box.clickedButton() is quit_btn
+
+    def _stop_mic_monitor_for_quit(self):
+        mm = getattr(self, "mic_monitor", None)
+        if mm is None:
+            return
+        stop_now = getattr(mm, "stop_now", None)
+        if callable(stop_now):
+            stop_now()
+        else:
+            mm.stop()
+
+    def _stop_recording_for_quit(self):
+        """A recording still running at Quit (or a log-off). A meeting (or
+        Live Assistant session) is saved the way Stop saves it first - My
+        notes, the recording, the transcript so far - and marked so its notes
+        are written at the next launch (MeetingSession.save_for_quit); its
+        notes being written get the same mark. A dictation is dropped. Either
+        way the record thread is stopped so it closes its OWN streams:
+        recorder.shutdown() closing them from this thread mid-read is a native
+        PortAudio crash. A second call finds nothing left to do."""
+        if getattr(self, "_recorder_down", False):
+            return                          # quit_app already ended PortAudio
+        s = getattr(self, "meeting_session", None)
+        if s is not None and getattr(s, "is_busy", False):
+            save = getattr(s, "save_for_quit", None)
+            if callable(save):
+                try:
+                    save()
+                except Exception:
+                    logger.warning("Saving the meeting at quit failed", exc_info=True)
+        rec = getattr(self, "recorder", None)
+        if rec is None or not getattr(rec, "recording", False):
+            return
+        try:
+            rec.request_abort()             # no post-roll: the thread ends at its next read
+        except Exception:
+            pass
+        try:
+            rec.stop_recording()            # joins the record thread (at most 5 s)
+        except Exception:
+            logger.debug("stopping the recording at quit failed", exc_info=True)
 
     def quit_app(self):
+        """Tray Quit (and the end of an update install, Cmd+Q on a Mac, the
+        updater's sig_quit). Asks first when it would end a meeting, its notes
+        or a file job (False = the user kept the app running). A meeting is
+        saved before anything else shuts down, and its notes are written at
+        the next launch."""
+        if getattr(self, "_quitting", False):
+            return True
+        if getattr(self, "_quit_asking", False):
+            return False                    # the question is already on screen
+        self._quit_asking = True
+        try:
+            go = self._confirm_quit()
+        finally:
+            self._quit_asking = False
+        if not go:
+            return False
+        self._quitting = True
+        # Services first: a queued file job is cancelled (its worker stops at
+        # the next check), the calendar's timers and a waiting sign-in end,
+        # the mic check closes - on this thread, before PortAudio goes below.
+        for stop in (lambda: self.file_jobs.shutdown(),
+                     lambda: self.calendar is not None and self.calendar.stop(),
+                     self._stop_mic_monitor_for_quit):
+            try:
+                stop()
+            except Exception:
+                logger.debug("service shutdown failed", exc_info=True)
+        # A recording still running: the meeting is saved and the record
+        # thread stops on its own - before an installer starts, and before
+        # PortAudio goes.
+        self._stop_recording_for_quit()
+        # "Install updates when I quit": start the installer fetched ahead.
+        try:
+            self._run_update_on_quit()
+        except Exception:
+            logger.warning("Update on quit failed", exc_info=True)
+        # A setting changed in the last 250 ms may still be waiting to be saved.
+        self._flush_pending_save()
         # Graceful shutdown of system hooks
         self._unregister_transient_keys()
         self._unregister_kbd_hotkey()
         self._unregister_mouse_listener()
+        self._release_smart_hotkey()
+        self._recorder_down = True
         self.recorder.shutdown()
         self.qapp.quit()
+        return True
+
+    def _on_quit_event(self):
+        """GusanApplication: Qt is about to quit (QEvent.Quit). True lets it.
+        Our own quit (quit_app's qapp.quit) and a log-off already in progress
+        pass; anything else - macOS Cmd+Q, the app menu's or the Dock's Quit -
+        goes through quit_app on the next loop pass (it may ask first)."""
+        if getattr(self, "_quitting", False) or getattr(self, "_session_ending", False):
+            return True
+        QTimer.singleShot(0, self.quit_app)
+        return False
+
+    def _on_session_ending(self, manager=None):
+        """commitDataRequest: Windows is logging off or shutting down (the
+        process ends soon after). No question may be asked: a meeting being
+        recorded is saved (notes at the next launch), and settings too."""
+        self._session_ending = True
+        logger.info("Session ending: saving work")
+        try:
+            self._stop_recording_for_quit()
+        except Exception:
+            logger.warning("Saving work at log-off failed", exc_info=True)
+        self._flush_pending_save()
+
+    def _on_about_to_quit(self):
+        """aboutToQuit - after quit_app, or on its own at a Windows log-off /
+        shutdown: a meeting still recording is saved (once), then a pending
+        settings save is written."""
+        if not getattr(self, "_quitting", False):
+            try:
+                self._stop_recording_for_quit()
+            except Exception:
+                logger.warning("Saving work at exit failed", exc_info=True)
+        self._flush_pending_save()
+
+    # ── services' results (GUI thread) ──
+    def _page_on_screen(self, route):
+        """The Gusan window is on screen, showing ``route``."""
+        mw = getattr(self, "main_win", None)
+        try:
+            return bool(mw is not None and mw.isVisible() and not mw.isMinimized()
+                        and mw.current_route() == route)
+        except Exception:
+            return False
+
+    def _on_meeting_finished(self, folder, notes, error):
+        """GUI thread: the session saved the meeting (and, with notes, a
+        history entry) - lists refresh, and "Notify me when notes or
+        transcripts are ready" says so unless Meetings is on screen (notes of
+        a Live Assistant session or a calendar recording land while you are
+        elsewhere). Notes that failed get one quiet notice too ("Notes
+        couldn't be written · Open"), whatever that switch says - the
+        recording and transcript are kept and the notes view offers to try
+        again. Then the next meeting whose notes a Quit left for later."""
+        self.notify_history_changed()
+        if getattr(self, "_pending_notes_queue", None) and not getattr(self, "_quitting", False):
+            QTimer.singleShot(2000, self._next_pending_notes)
+        if getattr(self, "_quitting", False):
+            return
+        failed = bool(error) or not (notes or "").strip()
+        if failed and not folder:
+            return
+        if not failed and not self.cfg.get("notify_when_ready", True):
+            return
+        if AppController._page_on_screen(self, "meetings"):
+            return
+        s = getattr(self, "meeting_session", None)
+        title = str(getattr(s, "_meeting_title", "") or "").strip() or "Your meeting"
+        open_it = ((lambda f=folder: self.show_main("meetings", meeting=f)) if folder
+                   else (lambda: self.show_main("meetings")))
+        if failed:
+            self.show_tray_hint("Notes couldn't be written", f"{title} · Open", on_click=open_it)
+            return
+        self.show_tray_hint("Notes ready", title, on_click=open_it)
+
+    def _write_pending_notes(self, tries=0):
+        """Startup (+20 s): meetings whose notes a Quit or a log-off left for
+        later (meta notes_pending) get them now - one at a time, only while
+        nothing records or converts (else it tries again a minute later). A
+        dictation may run meanwhile: writing notes from a saved transcript
+        doesn't use the recorder (MeetingSession.holds_recorder)."""
+        if getattr(self, "_quitting", False):
+            return
+        s = getattr(self, "meeting_session", None)
+        if s is None or not callable(getattr(s, "write_pending_notes", None)):
+            return
+        if (self.is_rec or getattr(self, "_busy", False) is True
+                or getattr(self, "_file_job_running", False) is True or s.is_busy):
+            if tries < PENDING_NOTES_MAX_TRIES:
+                QTimer.singleShot(PENDING_NOTES_RETRY_MS,
+                                  lambda t=tries + 1: self._write_pending_notes(t))
+            return
+
+        def _scan():
+            try:
+                import meeting_session
+                folders = meeting_session.pending_notes_folders()
+            except Exception:
+                logger.debug("Looking for unwritten meeting notes failed", exc_info=True)
+                folders = []
+            if folders:
+                self._run_on_gui(self._start_pending_notes, folders)
+        threading.Thread(target=_scan, daemon=True, name="gusan-pending-notes").start()
+
+    def _start_pending_notes(self, folders):
+        self._pending_notes_queue = list(folders)
+        self._next_pending_notes()
+
+    def _next_pending_notes(self):
+        """The next queued meeting's notes (GUI thread). Waits while the
+        session is busy (a meeting started meanwhile: after it)."""
+        if getattr(self, "_quitting", False):
+            return
+        s = getattr(self, "meeting_session", None)
+        queue_ = getattr(self, "_pending_notes_queue", None) or []
+        if s is None or not queue_:
+            return
+        if s.is_busy:
+            return                       # _on_meeting_finished calls again
+        while queue_:
+            folder = queue_.pop(0)
+            try:
+                if s.write_pending_notes(folder):
+                    logger.info("Writing the notes a quit left for %s", folder)
+                    return
+            except Exception:
+                logger.warning("Writing pending meeting notes failed", exc_info=True)
+
+    def _on_file_job_finished(self, item):
+        """A file became a transcript: lists refresh, and "Notify me when notes
+        or transcripts are ready" says so unless Audio to text is on screen."""
+        self.notify_history_changed()
+        if not self.cfg.get("notify_when_ready", True):
+            return
+        if AppController._page_on_screen(self, "audio_to_text"):
+            return
+        tid = item.get("transcript_id")
+        self.show_tray_hint(
+            "Transcript ready", item.get("name") or "Your file is ready.",
+            on_click=(lambda: self.show_main("audio_to_text", transcript_id=tid)) if tid
+            else (lambda: self.show_main("audio_to_text")))
+
+    # ── Google Calendar (calendar_service) ──
+    def _setup_calendar(self):
+        """The calendar service - only in a build with a Google OAuth client
+        (calendar_sync.configured; none today, so every calendar part of the
+        pages stays hidden). Cheap: no network until start()."""
+        try:
+            import calendar_sync
+            if not calendar_sync.configured(self.cfg):
+                return
+            from calendar_service import CalendarService
+            # Privacy Mode is "everything stays on this device": no calendar
+            # reads then (the cached list and its reminders still work; it
+            # refetches when Privacy Mode goes off). Drop network_ok to allow them.
+            cal = CalendarService(self.cfg, is_busy=self._calendar_busy, parent=self,
+                                  network_ok=lambda: not self.cfg.get("privacy_mode", False))
+        except Exception:
+            logger.warning("Google Calendar unavailable", exc_info=True)
+            return
+        cal.remind.connect(self._on_calendar_remind)
+        cal.disconnected.connect(self._on_calendar_disconnected)
+        self.sig_setting_changed.connect(cal.on_setting_changed)
+        self.calendar = cal
+        try:
+            cal.set_owner(getattr(self.auth, "user_id", None))
+        except Exception:
+            logger.debug("calendar owner check failed", exc_info=True)
+        tm = getattr(self, "tray_menu", None)        # the tray's "Next:" row
+        if tm is not None:
+            try:
+                tm.attach_calendar(cal)
+            except Exception:
+                logger.debug("tray calendar row unavailable", exc_info=True)
+        QTimer.singleShot(3000, cal.start)          # the first fetch after startup work
+
+    def _calendar_busy(self):
+        """No "record this meeting?" now: a dictation, a meeting or Live
+        Assistant session, a file job - or a reminder already showing (one at
+        a time; the next due one is asked when it closes)."""
+        if self.is_rec or getattr(self, "_busy", False) is True \
+                or getattr(self, "_file_job_running", False) is True:
+            return True
+        if AppController._is_meeting_busy(self):
+            return True
+        toast = getattr(self, "_reminder", None)
+        try:
+            return bool(toast is not None and toast.is_showing())
+        except RuntimeError:
+            return False
+
+    def _on_calendar_remind(self, meeting):
+        """calendar_service.remind: a meeting is about to start (already marked
+        asked). The "record this meeting?" toast by the tray
+        (ui/floating/meeting_reminder.py) - or, if it can't show, a tray
+        notification that opens Meetings, so a reminder is never lost."""
+        try:
+            toast = self._ensure_reminder()
+            anchor = None
+            try:
+                anchor = self.tray_icon.geometry()
+            except Exception:
+                pass
+            toast.show_meeting(meeting, anchor=anchor)   # False: no longer due
+            return
+        except Exception:
+            logger.warning("The meeting reminder failed to show", exc_info=True)
+        title = (meeting or {}).get("title") or "Your meeting"
+        self.show_tray_hint("Record this meeting?", f"{title} is starting.",
+                            on_click=lambda: self.show_main("meetings"))
+
+    def _ensure_reminder(self):
+        """The one reminder toast, built the first time a meeting is due."""
+        toast = getattr(self, "_reminder", None)
+        if toast is not None:
+            return toast
+        from ui.floating.meeting_reminder import MeetingReminder
+        toast = MeetingReminder(main_app=self)
+        # Record fires for Pro users only (the toast opens the Pro window for
+        # Free users itself); the controller gates again anyway.
+        toast.record.connect(lambda m, assist: self.record_from_calendar(m, with_assist=assist))
+        toast.dismissed.connect(self._on_reminder_dismissed)
+        # "Join call": the toast opens the https link itself and stays up.
+        self.sig_auth_changed.connect(toast.refresh_account)
+        self.sig_setting_changed.connect(toast.on_setting_changed)
+        s = getattr(self, "meeting_session", None)
+        if s is not None:
+            # A recording started elsewhere (the page, Live Assistant) closes it.
+            s.state_changed.connect(self._on_session_state_for_reminder)
+        self._reminder = toast
+        return toast
+
+    def _on_session_state_for_reminder(self, state):
+        toast = getattr(self, "_reminder", None)
+        if toast is not None and state in ("recording", "paused"):
+            try:
+                toast.hide_reminder()
+            except RuntimeError:
+                pass
+
+    def _on_reminder_dismissed(self, meeting):
+        """"Not this one": that meeting is never asked about again (the service
+        already marked it when it asked; this keeps it so)."""
+        cal = getattr(self, "calendar", None)
+        mid = (meeting or {}).get("id")
+        if cal is not None and mid:
+            try:
+                cal.mark_prompted(mid)
+            except Exception:
+                logger.debug("calendar mark_prompted failed", exc_info=True)
+
+    def record_from_calendar(self, meeting, with_assist=False):
+        """Record a Google Calendar meeting (the reminder's Record / Record +
+        Live Assistant): Pro gate, the one-time consent notice, then the
+        meeting session starts with the meeting's title, people and event id
+        and the Meetings page shows it live. ``with_assist`` also opens the
+        Live Assistant card. Returns True when the recording started."""
+        m = dict(meeting or {})
+        toast = getattr(self, "_reminder", None)
+        if toast is not None:
+            try:
+                toast.hide_reminder()
+            except RuntimeError:
+                pass
+        if not self.is_pro():
+            self._pro_upsell("Meeting recording")
+            if not self.is_pro():
+                return False
+        title = str(m.get("title") or "").strip()
+
+        def names(value):
+            if isinstance(value, str):
+                return [p.strip() for p in value.split(",") if p.strip()]
+            return [str(p).strip() for p in (value or []) if str(p).strip()]
+        # The session's attendees include you (the notes say who is who); the
+        # start card lists the others, as the Meetings page does.
+        people = names(m.get("attendees")) or names(m.get("others"))
+        others = names(m.get("others")) if "others" in m else people
+        event_id = str(m.get("id") or "")
+        session = getattr(self, "meeting_session", None)
+        if session is None:
+            self.show_main("meetings", title=title, attendees=others, calendar_event_id=event_id)
+            return False
+        if session.is_busy:
+            self.show_main("meetings")              # one at a time: the live view
+            return False
+        rec = getattr(self, "recorder", None)
+        try:
+            from ui.recording_prompts import ensure_recording_consent
+            if not ensure_recording_consent(self._dialog_parent(), self):
+                return False
+            if with_assist:
+                # The card exists before the start, so the session tells it the
+                # meeting began; short speech pieces keep its answers live
+                # (the notes are written from the full recording afterwards).
+                self._ensure_live_assist()
+                if rec is not None:
+                    rec.fast_live_chunks = True
+            ok, _code, msg = session.start(title=title, attendees=", ".join(people),
+                                           source="calendar", calendar_event_id=event_id or None)
+        except Exception as e:
+            logger.warning("Recording the calendar meeting failed", exc_info=True)
+            ok, msg = False, str(e)
+        if not ok and with_assist and rec is not None:
+            rec.fast_live_chunks = False
+        if not ok:
+            # The start card, filled in: Record there says what is wrong.
+            self.show_main("meetings", title=title, attendees=others, calendar_event_id=event_id)
+            self.show_tray_hint("Couldn't start the recording", msg or "Try again from the Meetings page.")
+            return False
+        self.show_main("meetings", view="live")
+        if with_assist:
+            self.show_live_assist()
+        return True
+
+    def _on_calendar_disconnected(self, reason):
+        if reason == "expired":
+            self.show_tray_hint("Google Calendar disconnected",
+                                "Connect it again on the Meetings page.",
+                                on_click=lambda: self.show_main("meetings"))
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-from ui.meetings import MeetingsWindow
-from ui.settings import Settings
-
-
 def _parse_version(v):
     try:
         parts = [int(x) for x in v.lstrip("v").split(".")[:3]]
@@ -4328,9 +5897,19 @@ def main():
     except Exception:
         pass
 
-    # 2. Standard Qt Setup
-    qapp = QApplication(sys.argv)
+    # 2. Standard Qt Setup (GusanApplication: a Quit from the platform -
+    # Cmd+Q on a Mac - goes through AppController.quit_app)
+    qapp = GusanApplication(sys.argv)
+    # The product name people see. (No QSettings / QStandardPaths use it, so
+    # the data folder stays "Transcribe" - see storage.py.)
+    qapp.setApplicationName(APP_NAME)
     qapp.setQuitOnLastWindowClosed(False) # Tray-resident background app constraint!
+    # Gusan 2.0 fonts: bundled assets/fonts if present, else the system faces.
+    try:
+        from ui.theme import load_fonts
+        load_fonts()
+    except Exception as e:
+        logging.warning("Could not load fonts: %s", e)
 
     # Scrolling the page must never silently rewrite a dropdown/spin-box the
     # cursor happens to pass over (Qt's default wheel behaviour).
@@ -4359,26 +5938,21 @@ def main():
 
     # Attach lock socket IPC listener
     # A second launch (or `python main.py <action>`) hands its action to the
-    # running instance: "show_settings" (default), "show_meeting", or
-    # "live_prompter" to toggle the overlay.
+    # running instance - see dispatch_ipc_action.
     def _ipc_dispatch(action):
-        if action == "live_prompter":
-            controller.toggle_live_assist()
-        elif action == "show_meeting":
-            controller.show_meeting()
-        else:
-            controller.show_settings()
+        dispatch_ipc_action(controller, action)
     # The listener runs on a plain thread with no Qt event loop, so a QTimer
     # started there never fired and a second launch did nothing: hop to the GUI
     # thread through a queued signal instead.
     controller.sig_ipc_action.connect(_ipc_dispatch, Qt.QueuedConnection)
     start_ipc_server(lock_sock, controller.sig_ipc_action.emit)
 
-    # The Settings panel IS the app - show it on every launch. The only quiet
-    # launch is the Windows-startup shortcut (--background), and the first run
-    # ever belongs to the onboarding wizard (which lands in the panel itself).
+    # Open the app on every launch. The only quiet launch is the Windows-startup
+    # shortcut (--background), and the first run ever belongs to the onboarding
+    # wizard (which opens the app itself when it finishes). The window is built
+    # here, after the tray, not inside the controller.
     if "--background" not in sys.argv and controller.cfg.get("onboarding_done", False):
-        QTimer.singleShot(200, controller.show_settings)
+        QTimer.singleShot(200, lambda: controller.show_main())
 
     sys.exit(qapp.exec())
 

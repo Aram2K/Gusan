@@ -288,9 +288,16 @@ def cloud_pill_icon(width=50, height=20):
     return _text_pill_icon("CLOUD", "#0284c7", width=width, height=height)
 
 
+def _color_key(color):
+    """A cache key for a colour given as QColor, Qt.GlobalColor or a CSS string."""
+    return QColor(color).name(QColor.HexArgb)
+
+
 def eye_icon(open_=True, size=22, color=_SLATE):
-    """Eye for password fields: open (click to reveal) or slashed (click to hide)."""
-    key = ("eye", open_, size)
+    """Eye for password fields: open (click to reveal) or slashed (click to hide).
+    Cached per colour too (a green and an amber chip used to share one icon)."""
+    color = QColor(color)
+    key = ("eye", bool(open_), size, _color_key(color), _dpr())
     if key in _ICON_CACHE:
         return _ICON_CACHE[key]
     pm = _new_pixmap(size, size)
@@ -312,6 +319,61 @@ def eye_icon(open_=True, size=22, color=_SLATE):
         p.drawLine(QPointF(w * 0.16, w * 0.86), QPointF(w * 0.84, w * 0.14))
     p.end()
     icon = QIcon(pm)
+    _ICON_CACHE[key] = icon
+    return icon
+
+
+def _incognito_path():
+    """The Gusan incognito mark (hat + glasses) in a 24x24 box - the same
+    drawing as ui/components/icons.IC["incognito"] and the mockups, painted
+    here so the floating card needs no SVG module."""
+    path = QPainterPath()
+    path.moveTo(3.5, 11.5)                       # brim
+    path.lineTo(20.5, 11.5)
+    path.moveTo(6.5, 11.5)                       # crown, with its two rounded corners
+    path.lineTo(8.0, 6.2)
+    path.quadTo(8.27, 5.24, 9.2, 5.5)
+    path.lineTo(12.0, 6.3)
+    path.lineTo(14.8, 5.5)
+    path.quadTo(15.73, 5.24, 16.0, 6.2)
+    path.lineTo(17.5, 11.5)
+    path.addEllipse(QPointF(8.0, 16.5), 2.7, 2.7)    # glasses
+    path.addEllipse(QPointF(16.0, 16.5), 2.7, 2.7)
+    path.moveTo(10.7, 16.3)                      # bridge
+    path.cubicTo(11.5, 15.8, 12.5, 15.8, 13.3, 16.3)
+    return path
+
+
+def incognito_pixmap(size=16, color=_SLATE, stroke=1.8):
+    """The incognito mark as a device-pixel-sharp QPixmap of ``size`` logical
+    px in one colour. ``stroke`` is in the 24-unit drawing (1.8 = the mockups'
+    chip). Cached per size, colour, stroke and screen scale."""
+    key = ("incognito-pm", int(size), _color_key(color), float(stroke), _dpr())
+    if key in _ICON_CACHE:
+        return _ICON_CACHE[key]
+    pm = _new_pixmap(size, size)
+    p = _painter(pm)
+    p.scale(size / 24.0, size / 24.0)
+    pen = QPen(QColor(color))
+    # Never thinner than ~1.1 device px at chip sizes, or it fades out.
+    pen.setWidthF(max(float(stroke), 1.1 * 24.0 / max(1, size)))
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+    p.drawPath(_incognito_path())
+    p.end()
+    _ICON_CACHE[key] = pm
+    return pm
+
+
+def incognito_icon(size=16, color=_SLATE, stroke=1.8):
+    """Incognito (hat + glasses): "hidden on screen share" - the Live Assistant
+    card's green Hidden chip. Cached per size and colour (and stroke, scale)."""
+    key = ("incognito", int(size), _color_key(color), float(stroke), _dpr())
+    if key in _ICON_CACHE:
+        return _ICON_CACHE[key]
+    icon = QIcon(incognito_pixmap(size, color, stroke))
     _ICON_CACHE[key] = icon
     return icon
 

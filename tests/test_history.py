@@ -52,6 +52,17 @@ class TestHistoryStore(unittest.TestCase):
         with open(txt_path, "r", encoding="utf-8") as f:
             self.assertIn("second", f.read())
 
+    def test_a_smart_action_keeps_what_was_said(self):
+        # Gusan 2.0: Home and Smart Actions show "said -> pasted" for these.
+        hist.save_entry("Hi Anna, the release moves to Friday.", "en", "local",
+                        action="write_email", said="tell anna the release moves to friday")
+        hist.save_entry("plain words", "en", "local", action="", said=None)
+        smart, plain = hist.load()[1], hist.load()[0]
+        self.assertEqual(smart["action"], "write_email")
+        self.assertEqual(smart["said"], "tell anna the release moves to friday")
+        self.assertNotIn("action", plain)                 # empty values are left out
+        self.assertNotIn("said", plain)
+
 
 if __name__ == "__main__":
     unittest.main()

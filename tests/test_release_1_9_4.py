@@ -1,7 +1,7 @@
 """1.9.4 review fixes: the fast on-disk model check stays in sync with
 faster-whisper, Settings learns the GPU state without importing ctranslate2
-on the GUI thread, and a crop the card shows to a share ends when the card
-moves to another monitor."""
+on the GUI thread (2.0: hardware.py), and a crop the card shows to a share
+ends when the card moves to another monitor."""
 import os
 import sys
 import unittest
@@ -41,31 +41,27 @@ class TestWhisperRepos(unittest.TestCase):
             self.assertFalse(main._cached_model_bin("Systran/faster-whisper-base"))
 
 
-@unittest.skipUnless(_real_qt(), "real PySide6 not importable (stubbed)")
 class TestSpeedPhrase(unittest.TestCase):
-    def _me(self, state):
-        rec = SimpleNamespace(_cuda_usable=None)
-        return SimpleNamespace(_cuda=None, _gpu_state=state,
-                               app=SimpleNamespace(recorder=rec, cfg={}))
+    """The model cards' speed line (2.0: hardware.speed_phrase / runs_on_gpu,
+    lifted from the 1.x Settings._speed_phrase): the GPU wording only once the
+    worker's hardware probe says the GPU is ready - never a GUI-thread probe."""
+
+    def _phrase(self, gpu_state, cuda_usable=None, platform="win32"):
+        import hardware
+        return hardware.speed_phrase(3, hardware.runs_on_gpu(gpu_state, cuda_usable, platform))
 
     def test_cpu_wording_until_the_worker_reports(self):
-        from ui import settings
-        me = self._me(None)
-        with mock.patch.object(settings.sys, "platform", "win32"), \
-             mock.patch.object(settings.gpu_accel, "status",
+        import gpu_accel
+        with mock.patch.object(gpu_accel, "status",
                                side_effect=AssertionError("no GPU probe on the GUI thread")):
-            self.assertTrue(settings.Settings._speed_phrase(me, 3).endswith("on your CPU"))
-        self.assertIsNone(me._cuda)                      # not remembered: asked again later
-        me._gpu_state = "ready"
-        with mock.patch.object(settings.sys, "platform", "win32"):
-            self.assertTrue(settings.Settings._speed_phrase(me, 3).endswith("on your GPU"))
+            self.assertTrue(self._phrase(None).endswith("on your CPU"))     # not probed yet
+            self.assertTrue(self._phrase("ready").endswith("on your GPU"))
+            # Proven broken this run: back to the CPU wording.
+            self.assertTrue(self._phrase("ready", cuda_usable=False).endswith("on your CPU"))
 
     def test_a_mac_never_imports_ctranslate2_for_it(self):
-        from ui import settings
-        me = self._me(None)
-        with mock.patch.object(settings.sys, "platform", "darwin"), \
-             mock.patch.dict(sys.modules, {"ctranslate2": None}):
-            self.assertTrue(settings.Settings._speed_phrase(me, 3).endswith("on your CPU"))
+        with mock.patch.dict(sys.modules, {"ctranslate2": None}):
+            self.assertTrue(self._phrase("ready", platform="darwin").endswith("on your CPU"))
 
 
 @unittest.skipUnless(_real_qt(), "real PySide6 not importable (stubbed)")

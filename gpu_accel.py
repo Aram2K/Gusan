@@ -331,7 +331,7 @@ def download(on_progress=None, should_cancel=None, _get=None):
             try:
                 shutil.rmtree(dest)
             except OSError as e:
-                raise GpuAccelError("The GPU files are in use. Restart Transcribe and "
+                raise GpuAccelError("The GPU files are in use. Restart Gusan and "
                                     "try again.") from e
         staging.replace(dest)
     except GpuAccelError:
@@ -397,6 +397,11 @@ def finish_pending_remove():
 
 def removal_pending():
     return (_base_dir() / REMOVE_MARKER).exists()
+
+
+def own_download_present():
+    """Our downloaded libraries are on disk (whatever a CUDA Toolkit adds)."""
+    return _has_dlls(str(install_dir()))
 
 
 # ── when to suggest it ─────────────────────────────────────────────────────

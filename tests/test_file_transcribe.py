@@ -1,36 +1,28 @@
-"""File-transcription tab: tier gating, auto-model choice, formatting helpers.
+"""File transcription ("Audio to text"): the helpers the 1.x file tab used now
+live in file_jobs (the Audio to text page and FileJobController run on them),
+with no length limit for anyone.
 
-The Qt widget itself is exercised by offscreen smokes; these cover the pure
-decision logic. Guarded like test_wheelguard: under the suite-wide PySide6
-stubs the module import is skipped rather than faked.
+The job itself is covered Qt-free in test_file_jobs; the classic tab
+(ui/file_transcribe.py) retired with the 1.x Settings window.
 """
 import unittest
 
 
-def _real_qt():
-    try:
-        from PySide6.QtWidgets import QWidget
-        return isinstance(QWidget, type) and QWidget.__module__.startswith("PySide6")
-    except Exception:
-        return False
-
-
-@unittest.skipUnless(_real_qt(), "real PySide6 not importable (stubbed)")
-class TestTierGate(unittest.TestCase):
+class TestClassicTab(unittest.TestCase):
     def setUp(self):
-        import ui.file_transcribe as ft
-        self.ft = ft
+        import file_jobs
+        self.ft = file_jobs
 
-    def test_five_hour_files_for_everyone_without_plan_talk(self):
-        # Transcription is local: no plan decides the length, only memory.
-        self.assertEqual(self.ft.duration_error(61 * 60), "")
-        self.assertEqual(self.ft.duration_error(5 * 3600), "")
-        msg = self.ft.duration_error(6 * 3600)
-        self.assertIn("up to 5 hours", msg)
-        self.assertNotIn("Pro", msg)
-        self.assertNotIn("upgrade", msg.lower())
+    def test_any_length_for_everyone(self):
+        # Transcription is local and unlimited: no cap, no refusal, no plan talk.
+        for name in ("MAX_SEC", "duration_error"):
+            self.assertFalse(hasattr(self.ft, name), name)
 
-    def test_duration_formatting(self):
+    def test_helpers_are_the_shared_ones(self):
+        for name in ("AUDIO_EXTS", "probe_duration", "pick_auto_model", "_fmt_dur",
+                     "_fmt_eta", "run_file_job", "refusal_message"):
+            self.assertTrue(callable(getattr(self.ft, name)) or name == "AUDIO_EXTS", name)
+        self.assertTrue(self.ft.AUDIO_EXTS)
         self.assertEqual(self.ft._fmt_dur(59), "59 s")
         self.assertEqual(self.ft._fmt_dur(3725), "1 h 02 min")
 
@@ -38,12 +30,9 @@ class TestTierGate(unittest.TestCase):
         from main import MODELS
         self.assertIn(self.ft.pick_auto_model(), MODELS)
 
-    def test_progress_stage_bounds_are_ordered(self):
-        f = self.ft
-        self.assertLess(f._P_READ_END, f._P_DOWNLOAD_END)
-        self.assertLess(f._P_DOWNLOAD_END, f._P_TRANSCRIBE_END_WITH_SPK)
-        self.assertLess(f._P_TRANSCRIBE_END_WITH_SPK, f._P_SPEAKERS_END)
-        self.assertLessEqual(f._P_TRANSCRIBE_END_NO_SPK, 96)
+    def test_catalog_names_match_main(self):
+        from main import MODELS
+        self.assertEqual(set(self.ft.WHISPER_MODELS), set(MODELS))
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import patch
 
+import action_api
 import actions
 
 
@@ -137,7 +138,7 @@ class TestActions(unittest.TestCase):
         run_action.assert_not_called()
 
     def test_managed_engine_calls_server_with_token(self):
-        # Pro managed Smart Actions run through the server (founder's Mistral key);
+        # Pro managed Smart Actions run through the server (the founder's keys);
         # the auth token is injected into config by the caller.
         with patch.object(actions.action_api, "run_managed_action", return_value="MANAGED") as run_managed:
             out = actions.process(
@@ -231,6 +232,95 @@ class TestMeetingNotes(unittest.TestCase):
             )
         self.assertEqual(out, "Two sentences.")
         call.assert_called_once()
+
+
+class TestGusanWords(unittest.TestCase):
+    """Gusan 2.0: the engine errors users read name Gusan and point at the new
+    Settings › Speech & AI page. Ids (modes, model ids) are unchanged."""
+    SETTINGS = "Settings › Speech & AI"
+
+    def _error(self, fn, *args, **kwargs):
+        with self.assertRaises(actions.ActionError) as cm:
+            fn(*args, **kwargs)
+        return str(cm.exception)
+
+    def test_managed_engine_is_gusan_cloud(self):
+        self.assertEqual(actions.ACTION_MODELS[actions.API_MANAGED_ID]["label"], "Gusan Cloud (Pro)")
+        self.assertEqual(actions.API_MANAGED_ID, "managed")
+        self.assertEqual(actions.ACTION_LIVE_ASSIST, "live_assist")   # the server's mode
+
+    def test_errors_point_at_speech_and_ai(self):
+        self.assertIn("Gusan Pro", actions.NO_ENGINE_MESSAGE)
+        self.assertIn(self.SETTINGS, actions.NO_ENGINE_MESSAGE)
+        msgs = [
+            self._error(actions.process, "hi there", actions.ACTION_SMART_AUTO,
+                        model=actions.API_OPENAI_ID, config=None),
+            self._error(actions.process_stream, "hi", actions.ACTION_LIVE_ASSIST, lambda d: None,
+                        model=actions.API_MANAGED_ID, config={"privacy_mode": True}),
+            self._error(actions.process_stream, "hi", actions.ACTION_LIVE_ASSIST, lambda d: None,
+                        model=actions.API_MANAGED_ID, config={}),
+            actions._live_assist_basic("User's question: what time is it?"),
+        ]
+        for msg in msgs:
+            self.assertIn(self.SETTINGS, msg)
+        self.assertIn("Gusan Cloud", msgs[2])
+
+    def test_no_old_names_in_the_words(self):
+        import inspect
+        src = inspect.getsource(actions)
+        for old in ("Transcribe Pro", "AI Actions", "Settings →", "Live Assistance"):
+            self.assertNotIn(old, src, old)
+
+    def test_live_answers_on_this_computer_say_what_to_download(self):
+        # "Answers written by: This computer" (or Privacy Mode) with no local
+        # model: signing in or an API key wouldn't help - name the download.
+        for cfg in ({"live_assist_writer": "local"}, {"privacy_mode": True},
+                    {"live_assist_writer": "local", "_managed_token": "T"}):
+            msg = actions.no_live_engine_message(cfg)
+            self.assertEqual(msg, "Download Qwen 1.5B in Settings › Speech & AI to answer on this computer.")
+            self.assertNotIn("Sign in", msg)
+            self.assertNotIn("API key", msg)
+        for cfg in ({}, None, {"live_assist_writer": "cloud"}, {"live_assist_writer": ""}):
+            self.assertEqual(actions.no_live_engine_message(cfg), actions.NO_ENGINE_MESSAGE)
+        # It is the case live_engine answers None for.
+        with patch.object(actions, "_first_downloaded_local_model", return_value=None):
+            self.assertIsNone(actions.live_engine(actions.API_MANAGED_ID,
+                                                  {"live_assist_writer": "local", "_managed_token": "T"}))
+
+
+class TestGeminiRunsOnTheGoogleKey(unittest.TestCase):
+    """The Gemini writer's key is the shared Google key (Settings' "Google
+    Gemini"), never action_api_key - that holds the other writers' key."""
+
+    def test_the_google_key_wins_and_an_openai_key_never_goes_to_google(self):
+        both = {"google_api_key": " G-KEY ", "action_api_key": "sk-openai"}
+        api = actions.cloud_api_config(actions.API_GEMINI_ID, both)
+        self.assertEqual(api["action_api_key"], "G-KEY")
+        self.assertEqual(api["action_api_provider"], action_api.PROVIDER_GEMINI)
+        only_openai = {"action_api_key": "sk-openai", "google_api_key": ""}
+        self.assertEqual(actions.cloud_api_config(actions.API_GEMINI_ID, only_openai)["action_api_key"], "")
+        self.assertFalse(actions.engine_has_key(actions.API_GEMINI_ID, only_openai))   # "add its key"
+        self.assertTrue(actions.engine_has_key(actions.API_GEMINI_ID, both))
+        # The caller's config is never changed.
+        self.assertEqual(both["action_api_key"], "sk-openai")
+
+    def test_other_writers_keep_their_own_key(self):
+        cfg = {"google_api_key": "G", "action_api_key": "sk-openai", "mistral_api_key": "M"}
+        self.assertEqual(actions.cloud_api_config(actions.API_OPENAI_ID, cfg)["action_api_key"], "sk-openai")
+        self.assertEqual(actions.cloud_api_config(actions.API_MISTRAL_ID, cfg)["action_api_key"], "sk-openai")
+        self.assertEqual(actions.cloud_api_config(actions.API_MISTRAL_ID, {"mistral_api_key": "M"})
+                         ["action_api_key"], "M")
+
+    def test_a_gemini_call_sends_the_google_key(self):
+        seen = {}
+
+        def fake_run(text, mode, api_config, source_lang="auto", target_lang="en"):
+            seen.update(api_config)
+            return "ok"
+        with patch.object(action_api, "run_action", fake_run):
+            actions.process("hello there", actions.ACTION_SUMMARIZE, model=actions.API_GEMINI_ID,
+                            config={"google_api_key": "G-KEY", "action_api_key": "sk-openai"})
+        self.assertEqual(seen["action_api_key"], "G-KEY")
 
 
 if __name__ == "__main__":

@@ -135,12 +135,21 @@ class TestOverlayHelpers(unittest.TestCase):
         self.assertEqual(ps(False, False, False, True, partial=True)[0], "off")
         self.assertEqual(ps(False, True, False, False)[0], "off")
         for args in ((True, False, False, True), (True, True, True, True)):
-            self.assertNotIn("not in share", ps(*args)[1])
+            self.assertNotEqual("Hidden", ps(*args)[1])
+        # The chip's words (Gusan 2.0): only a confirmed exclusion says Hidden.
+        self.assertEqual(ps(True, True, False, True)[1], "Hidden")
+        self.assertEqual(ps(True, True, False, False)[1], "Visible")
+        self.assertEqual(ps(False, True, False, False)[1], "Visible")
+        self.assertEqual(ps(True, False, False, False)[1], "Not available")
+        self.assertEqual(ps(True, False, False, True, partial=True)[1], "May be hidden")
         # Header budget: every chip text must stay short enough not to clip.
         for args in ((True, True, False, True), (True, True, False, False),
                      (True, False, False, False), (True, True, True, False),
                      (False, True, False, False)):
             self.assertLessEqual(len(ps(*args)[1]), 24, ps(*args)[1])
+        # One source: the card module re-exports the Qt-free live_context one.
+        import live_context
+        self.assertIs(ps, live_context.private_state)
 
     def test_position_clamped_onto_a_live_screen(self):
         rects = [(0, 0, 1920, 1080)]

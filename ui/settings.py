@@ -774,7 +774,7 @@ class Settings(QDialog):
         startup_frame.setObjectName("cardFrame")
         st_lay = QVBoxLayout(startup_frame)
         login_word = "you log in to your Mac" if sys.platform == "darwin" else "Windows starts"
-        self.chk_autostart = QCheckBox(f"Start Transcribe when {login_word}", startup_frame)
+        self.chk_autostart = QCheckBox(f"Start Gusan when {login_word}", startup_frame)
         st_lay.addWidget(self.chk_autostart)
         st_desc = QLabel("It waits quietly in the tray, so your hotkey works right away.",
                          startup_frame)
@@ -786,7 +786,7 @@ class Settings(QDialog):
             self.chk_autostart.toggled.connect(self._on_autostart_toggled)
         else:
             self.chk_autostart.setEnabled(False)
-            st_desc.setText("Available once Transcribe is installed - not when it runs from "
+            st_desc.setText("Available once Gusan is installed - not when it runs from "
                             "source, or straight from the downloaded zip or disk image.")
         layout.addWidget(startup_frame)
 
@@ -796,7 +796,7 @@ class Settings(QDialog):
         lp_frame = QFrame(tab)
         lp_frame.setObjectName("cardFrame")
         lp_lay = QVBoxLayout(lp_frame)
-        lp_lay.addWidget(QLabel("Live Assistance  ·  private call assistant", lp_frame))
+        lp_lay.addWidget(QLabel("Live Assistant  ·  private call assistant", lp_frame))
         lp_desc = QLabel(
             "A floating glass prompter for calls: the last thing said, a running "
             "summary and instant AI suggestions - "
@@ -807,7 +807,7 @@ class Settings(QDialog):
         lp_desc.setWordWrap(True)
         lp_lay.addWidget(lp_desc)
         lp_row = QHBoxLayout()
-        btn_lp_open = QPushButton("Open Live Assistance", lp_frame)
+        btn_lp_open = QPushButton("Open Live Assistant", lp_frame)
         btn_lp_open.setObjectName("heroButton")
         btn_lp_open.clicked.connect(lambda: self.app and self.app.toggle_live_assist())
         lp_row.addWidget(btn_lp_open)
@@ -817,7 +817,7 @@ class Settings(QDialog):
         # then press the combination you want.
         self.btn_lp_hotkey = QPushButton(self._lp_hotkey_label(), lp_frame)
         self.btn_lp_hotkey.setToolTip("Click, then press the key combination you want "
-                                      "to open/close Live Assistance.")
+                                      "to open/close Live Assistant.")
         self.btn_lp_hotkey.setStyleSheet("font-weight: bold; min-height: 36px; "
                                          "min-width: 160px; border-color: #3b82f6;")
         self.btn_lp_hotkey.clicked.connect(self._toggle_lp_capture)
@@ -1287,7 +1287,7 @@ class Settings(QDialog):
             self.lbl_gpu_status.setText("Checking your graphics card…")
         elif gpu_accel.removal_pending():
             self.btn_gpu.setVisible(False)
-            self.lbl_gpu_status.setText("Removed - the files are deleted when Transcribe "
+            self.lbl_gpu_status.setText("Removed - the files are deleted when Gusan "
                                         "restarts. Transcription uses the processor.")
         elif state == "available":
             last_error = getattr(self, "_gpu_last_error", "")
@@ -2442,7 +2442,7 @@ class Settings(QDialog):
         engine_lay.addWidget(QLabel("Primary Action Engine", engine_frame))
         
         self.combo_engine = QComboBox(engine_frame)
-        self.combo_engine.addItem("Transcribe Pro - managed cloud (no key needed)", actions.API_MANAGED_ID)
+        self.combo_engine.addItem("Gusan Pro - managed cloud (no key needed)", actions.API_MANAGED_ID)
         self.combo_engine.addItem("Local Offline LLM Engine (Qwen / Gemma)", "local_llm")
         # NOTE: the rule-based formatter is no longer offered as a pickable
         # engine - it survives only as the app's invisible safety fallback
@@ -2573,7 +2573,7 @@ class Settings(QDialog):
         lay_managed = QVBoxLayout(self.card_managed)
         lay_managed.setContentsMargins(16, 14, 16, 14)
         lay_managed.setSpacing(6)
-        _mtitle = QLabel("Managed by Transcribe Pro", self.card_managed)
+        _mtitle = QLabel("Managed by Gusan Pro", self.card_managed)
         _mtitle.setStyleSheet("font-weight: 700; font-size: 16px; color: #6d28d9;")
         lay_managed.addWidget(_mtitle)
         _mbody = QLabel(
@@ -3647,13 +3647,10 @@ class Settings(QDialog):
         self._populate_history_list()
 
     def _active_meeting_dir(self):
-        """Folder of a meeting still being recorded/processed - never deleted."""
-        mw = getattr(self.app, "meetings_win", None) if self.app else None
-        if mw is not None and getattr(mw, "state", None) in (
-                getattr(mw, "STATE_RECORDING", "recording"),
-                getattr(mw, "STATE_PROCESSING", "processing")):
-            return getattr(mw, "_meeting_dir", None)
-        return None
+        """Folder of a meeting still being recorded/processed - never deleted
+        (whoever started it: history_actions asks the app's meeting session)."""
+        import history_actions
+        return history_actions.active_meeting_dir(self.app)
 
     def _clear_all_history(self):
         # The list shows meetings AND dictations; clearing only the dictations
@@ -3804,7 +3801,7 @@ class Settings(QDialog):
         l_lay = QVBoxLayout(logo_frame)
         l_lay.setAlignment(Qt.AlignCenter)
         
-        lbl_logo = QLabel("Transcribe", logo_frame)
+        lbl_logo = QLabel("Gusan", logo_frame)
         lbl_logo.setObjectName("titleLabel")
         lbl_logo.setStyleSheet("font-size: 22px; color: #3b82f6; font-weight: bold;")
         l_lay.addWidget(lbl_logo)
@@ -3904,7 +3901,7 @@ class Settings(QDialog):
         contrib_lay.addWidget(lbl_contrib_title)
 
         lbl_contrib_desc = QLabel(
-            "Transcribe App is <b>100% Open Source</b>! We are passionate about community-driven "
+            "Gusan is <b>100% Open Source</b>! We are passionate about community-driven "
             "development and welcome developers, designers, and testers to collaborate. "
             "Help us build the next generation of private voice-to-text tools!",
             contrib_frame
@@ -4106,7 +4103,7 @@ class Settings(QDialog):
 
         self._acct_perks = QLabel(
             "<div style='font-size:11px; line-height:150%;'>"
-            "<b>Transcribe Pro</b> includes:<br>"
+            "<b>Gusan Pro</b> includes:<br>"
             "<span style='color:#a855f7;font-weight:800'>&#10003;</span>&nbsp; <b>Unlimited Smart Actions</b> (fair use) - rewrite, translate, summarize and draft emails by voice<br>"
             "<span style='color:#a855f7;font-weight:800'>&#10003;</span>&nbsp; <b>Smart meeting recording</b> with AI-generated notes and summaries<br>"
             "<span style='color:#a855f7;font-weight:800'>&#10003;</span>&nbsp; <b>Fast cloud transcription</b> - no setup, no API key, no timeouts<br>"
@@ -4854,7 +4851,7 @@ class Settings(QDialog):
                 tag = state.split(":")[1]
                 reply = QMessageBox.question(
                     self, "Update Available",
-                    f"A new version ({tag}) of Transcribe is available!\n\n"
+                    f"A new version ({tag}) of Gusan is available!\n\n"
                     "Would you like to automatically download and apply the update now?",
                     QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
                 )
@@ -4902,7 +4899,7 @@ class Settings(QDialog):
                             
                     threading.Thread(target=_download_and_install, daemon=True).start()
             elif state == "latest":
-                QMessageBox.information(self, "No Updates", "You are running the latest version of Transcribe.")
+                QMessageBox.information(self, "No Updates", "You are running the latest version of Gusan.")
             else:
                 QMessageBox.warning(self, "Error", "Could not reach GitHub updates API. Try again later.")
             return
@@ -4996,7 +4993,7 @@ class Settings(QDialog):
             QMessageBox.information(
                 self, "Already used",
                 f"{self._fmt_hotkey(None, combo)} is your dictation hotkey. "
-                "Pick a different combination for Live Assistance.")
+                "Pick a different combination for Live Assistant.")
             self._reset_lp_capture_button()
             return
         self.app.cfg["live_assist_hotkey"] = combo

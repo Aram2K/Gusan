@@ -1,8 +1,12 @@
-"""Live Assistance logic with no Qt in it: what the model is sent, when the
-screen goes along, and when a piece of the conversation is a question the
-companion should answer on its own. Kept out of ui/live_assist.py so it is
+"""Live Assistant logic with no Qt in it: what the model is sent, when the
+screen goes along, when a piece of the conversation is a question the
+companion should answer on its own, and whether the card is hidden on screen
+share (hide_status: one truthful answer for the card's chip, the Live
+Assistant page and Settings › Privacy). Kept out of ui/live_assist.py so it is
 testable without a display (and without PySide6)."""
 import re
+import sys
+from collections import namedtuple
 
 TAIL_CHARS = 2600                # ~3-4 minutes of speech fed to the model
 HISTORY_TURNS = 2                # earlier answers kept for follow-up questions
@@ -16,7 +20,8 @@ SOLVE_SCREEN = ("Solve the problem or answer the question shown on my screen. "
 
 _LANG_NAMES = {"en": "English", "de": "German", "fr": "French", "es": "Spanish",
                "it": "Italian", "pt": "Portuguese", "nl": "Dutch", "ru": "Russian",
-               "hy": "Armenian", "tr": "Turkish", "zh": "Chinese", "ja": "Japanese"}
+               "hy": "Armenian", "tr": "Turkish", "zh": "Chinese", "ja": "Japanese",
+               "ar": "Arabic"}
 
 
 def clip_context(text, limit=CONTEXT_CHARS):
@@ -131,3 +136,149 @@ def last_question(text):
         if looks_like_question(s):
             return s[:200]
     return ""
+
+
+# ── Hidden on screen share ──
+# The card is kept out of screen capture (ui/glass.py), so it never shows on a
+# shared screen or in a recording while the user still sees it. The chip, the
+# Live Assistant page and Settings › Privacy all say what the OS really does,
+# from this one place: "Hidden" only where hiding is promised (Windows 10 2004+
+# in a local session) and, once the card is open, confirmed by its window.
+# macOS is best effort ("May be hidden") and never "invisible".
+
+HIDE_KEYS = ("on", "off", "failed", "partial", "unavailable")
+
+# The chip's words. Short: the card header is tight (at most 24 characters).
+HIDE_TEXT = {"on": "Hidden", "off": "Visible", "failed": "Visible",
+             "partial": "May be hidden", "unavailable": "Not available"}
+# Tones of ui/components Chip and icon names shared by ui/icons (the card)
+# and ui/components/icons (pages): green incognito, red open eye, amber.
+HIDE_TONE = {"on": "ok", "off": "red", "failed": "red", "partial": "amber",
+             "unavailable": "amber"}
+HIDE_ICON = {"on": "incognito", "off": "eye", "failed": "eye", "partial": "eye_off",
+             "unavailable": "eye"}
+
+HideStatus = namedtuple("HideStatus", "key text tone icon headline tip")
+HideStatus.__doc__ = """Whether the Live Assistant card is hidden on screen share.
+
+key       on | off | failed | partial | unavailable (see private_state)
+text      the chip's word: Hidden / Visible / May be hidden / Not available
+tone      ui/components Chip tone: ok | red | amber
+icon      incognito | eye | eye_off
+headline  a page line: "Hidden on screen share", "Visible on screen share"...
+tip       one or two plain sentences on what it means (no "click" wording)"""
+
+
+def private_state(wanted, supported, remote, excluded, partial=False):
+    """(key, chip text) - always TRUTHFUL about what the OS actually did. The
+    chip is the whole privacy promise; it must never say hidden when the
+    window is in fact capturable (macOS, old Windows, RDP, API refusal).
+
+    ``partial``: macOS, where the window's sharingType is set to none and
+    reads back so - some capture paths honour it, some don't (QuickTime,
+    Zoom's default capture mode), and Apple promises nothing. Never "Hidden"."""
+    if not wanted:
+        key = "off"
+    elif remote:
+        key = "unavailable"
+    elif not supported:
+        key = "partial" if partial else "unavailable"
+    elif excluded:
+        key = "on"
+    else:
+        key = "failed"
+    return key, HIDE_TEXT[key]
+
+
+def mac_partial_tip(macos26=False):
+    """What "May be hidden" means on macOS: the sharingType flag (what
+    Electron's setContentProtection sets) is honoured by some capture paths,
+    not all - see glass.capture_exclusion_supported. Never claims more."""
+    caveat = "Not yet verified on macOS 26." if macos26 else "Apple doesn't guarantee it."
+    return ("Uses macOS's private-window setting. Screenshots skip it, and so do some "
+            "screen shares (reportedly Zoom's “…with window filtering” capture "
+            "modes), but QuickTime and ⌘⇧5 recordings show it, and so can other "
+            "apps and settings. " + caveat + " Test from a second device before relying on "
+            "it, or share a single window.")
+
+
+def _glass():
+    """ui.glass (plain ctypes, no Qt), or None where it can't load."""
+    try:
+        from ui import glass
+        return glass
+    except Exception:
+        return None
+
+
+def _hide_tip(key, mac, remote, supported, macos26):
+    if key == "on":
+        return ("Hidden from screen shares, recordings and screenshots on this computer "
+                "(Zoom, Teams, Meet and the rest). Not from a phone camera.")
+    if key == "off":
+        return "Shows on a shared screen and in recordings."
+    if key == "failed":
+        return ("macOS" if mac else "Windows") + (" refused to hide it - assume it shows "
+                                                   "in a share.")
+    if key == "partial":
+        return mac_partial_tip(macos26)
+    if remote:
+        return ("Remote Desktop can't hide it: the remote view is itself a screen capture, "
+                "so hiding it would hide it from you too. Assume it shows in a share.")
+    if mac:
+        return ("macOS didn't take the private-window setting, so assume it shows in "
+                "screen shares and recordings. Share a single window - your browser or "
+                "the document - to keep it out.")
+    if sys.platform == "win32" and not supported:
+        return ("Hiding from screen shares needs Windows 10 (version 2004) or later. "
+                "Assume it shows in a share.")
+    return "Hiding from screen shares isn't available here. Assume it shows in a share."
+
+
+def _hide_headline(key, remote):
+    if key == "on":
+        return "Hidden on screen share"
+    if key == "partial":
+        return "May be hidden on screen share"
+    if key == "unavailable":
+        return "Can't hide in Remote Desktop" if remote else "Can't hide on this computer"
+    return "Visible on screen share"
+
+
+def hide_status(wanted, excluded=None, partial=None, supported=None, remote=None,
+                mac=None, macos26=None):
+    """Is the Live Assistant card hidden on screen share? -> HideStatus.
+
+    ``wanted``: the user's choice (cfg "live_assist_private"; Settings ›
+    Privacy can ask the same for "overlay_private").
+    ``excluded``: what the OPEN card's window reported (True/False). None when
+    no card window exists yet: then this says what opening it will do -
+    Windows 10 2004+ in a local session hides it (the open card re-checks and
+    says "Visible" if Windows refuses), macOS sets its best-effort flag.
+    ``partial``: macOS with the flag set on the open window (None = derive).
+    ``supported`` / ``remote`` / ``mac`` / ``macos26`` default to this
+    computer (glass.capture_exclusion_supported, glass.is_remote_session,
+    sys.platform, glass.macos_26_or_later); tests pass them."""
+    glass = None
+    if supported is None or remote is None:
+        glass = _glass()
+    if supported is None:
+        supported = bool(glass and glass.capture_exclusion_supported())
+    if remote is None:
+        remote = bool(glass and glass.is_remote_session())
+    if mac is None:
+        mac = sys.platform == "darwin"
+    if excluded is None:
+        excluded = bool(supported)
+        if partial is None:
+            partial = bool(mac and not supported)
+    elif partial is None:
+        partial = bool(mac and not supported and excluded)
+    key, text = private_state(bool(wanted), bool(supported), bool(remote), bool(excluded),
+                              partial=bool(partial))
+    if key == "partial" and macos26 is None:
+        glass = glass or _glass()
+        macos26 = bool(glass and glass.macos_26_or_later())
+    return HideStatus(key, text, HIDE_TONE[key], HIDE_ICON[key],
+                      _hide_headline(key, remote),
+                      _hide_tip(key, mac, remote, supported, bool(macos26)))

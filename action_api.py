@@ -413,9 +413,11 @@ def build_messages(text, mode, source_lang="auto", target_lang="en", vocab_block
     if mode == "smart_auto":
         return smart_prompt.build_messages(text, vocab_block=vocab_block)
     if mode == "write_email":
-        instruction = "Turn this dictated text into a concise email draft. Output only the email."
+        instruction = ("Turn this dictated text into a concise email draft. Output only the email, "
+                       "as plain text (no Markdown).")
     elif mode == "make_todo_list":
-        instruction = "Extract a clear Markdown todo checklist. Output only '- [ ]' checklist items."
+        instruction = ("Extract a clear Markdown todo checklist. Output only '- [ ]' checklist items: "
+                       "no heading, no intro line.")
     elif mode == "translate":
         instruction = f"Translate from {source_lang or 'auto'} to {target_lang}. Output only the translation."
     elif mode == "summarize":
@@ -443,8 +445,8 @@ def build_messages(text, mode, source_lang="auto", target_lang="en", vocab_block
             "## Key decisions\n"
             "Bullet list of concrete decisions reached. Skip if none.\n\n"
             "## Action items\n"
-            "Markdown checkbox list. Format each as:\n"
-            "`- [ ] <task>` (Owner: <name>, Due: <date>)\n"
+            "Markdown checkbox list. Format each line as:\n"
+            "- [ ] <task> (Owner: <name>, Due: <date>)\n"
             "Attribute owners using these heuristics:\n"
             "  - 'I'll do X' → Owner is the speaker (use their name if known)\n"
             "  - 'Aram should review' → Owner: Aram\n"
@@ -491,7 +493,9 @@ SMART_ACTION_URL = "https://hftcelxzfoubheqeoool.supabase.co/functions/v1/smart-
 def run_managed_action(text, mode, token, source_lang="auto", target_lang="en",
                        vocab_block="", image_b64=None, image_status=None):
     """Pro Smart Actions via the server (no BYO key): we build the messages here
-    and the edge function runs them through the founder's Mistral key.
+    and the edge function runs them on the founder's keys. ``mode`` picks the
+    model there: Smart Actions go to DeepSeek V4.1 Flash, meeting notes and the
+    live recap to Mistral Small.
 
     ``image_b64`` (a PNG screenshot) rides along as OpenAI-style content parts,
     which the server forwards verbatim; if the server or model rejects the
@@ -505,7 +509,7 @@ def run_managed_action(text, mode, token, source_lang="auto", target_lang="en",
     def _post(msgs):
         return requests.post(
             SMART_ACTION_URL,
-            json={"messages": msgs, "max_tokens": _max_tokens_for(mode)},
+            json={"messages": msgs, "max_tokens": _max_tokens_for(mode), "mode": mode},
             headers={"Authorization": f"Bearer {token}"},
             timeout=45,
         )
@@ -517,8 +521,11 @@ def run_managed_action(text, mode, token, source_lang="auto", target_lang="en",
     except requests.RequestException as e:
         raise ActionAPIError(f"Network error reaching Smart Actions: {e}")
     _raise_for_managed_status(resp)
-    data = _json_or_error(resp)
-    return strip_think(data.get("text") or "", _answer_family(resp) in ("deepseek", "qwen"))
+    raw = _json_or_error(resp).get("text") or ""
+    text = strip_think(raw, _answer_family(resp) in ("deepseek", "qwen"))
+    if raw.strip() and not text:
+        raise ActionAPIError(THOUGHT_ONLY)      # never paste nothing in silence
+    return text
 
 
 def _raise_for_managed_status(resp):

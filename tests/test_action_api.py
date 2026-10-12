@@ -60,6 +60,8 @@ class TestActionAPI(unittest.TestCase):
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer tok123")
         self.assertIn("messages", kwargs["json"])
         self.assertTrue(kwargs["json"]["messages"])
+        # The mode picks the model on the server (Smart Actions -> DeepSeek).
+        self.assertEqual(kwargs["json"]["mode"], "smart_auto")
 
     def test_managed_action_maps_403_to_pro_required(self):
         response = MagicMock(status_code=403)
@@ -68,6 +70,19 @@ class TestActionAPI(unittest.TestCase):
             with self.assertRaises(action_api.ActionAPIError) as ctx:
                 action_api.run_managed_action("hi", "smart_auto", "tok")
         self.assertIn("Pro", str(ctx.exception))
+
+    def test_managed_deepseek_answer_loses_its_thinking_and_never_pastes_nothing(self):
+        def reply(text):
+            response = MagicMock(status_code=200, headers={"X-Answer-Family": "deepseek"})
+            response.json.return_value = {"text": text}
+            return response
+        with patch.object(action_api.requests, "post", return_value=reply("plan it\n</think>\nHello.")):
+            self.assertEqual(action_api.run_managed_action("hi", "smart_auto", "tok"), "Hello.")
+        # Only thinking came back: say so instead of pasting an empty string.
+        with patch.object(action_api.requests, "post", return_value=reply("<think>still thinking")):
+            with self.assertRaises(action_api.ActionAPIError) as ctx:
+                action_api.run_managed_action("hi", "smart_auto", "tok")
+        self.assertEqual(str(ctx.exception), action_api.THOUGHT_ONLY)
 
 
 class TestAnthropicPayload(unittest.TestCase):

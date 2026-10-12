@@ -100,6 +100,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # APP_VERSION is read from app_info.py as text (never import main). A
+      # tag build stops here when the tag (without the "v") differs from it.
+      - name: Check the version
+        id: version
+        shell: pwsh
+        run: |
+          $src = Get-Content app_info.py -Raw
+          if ($src -notmatch '(?m)^APP_VERSION\s*=\s*"(\d+\.\d+\.\d+)"') {
+            throw 'APP_VERSION = "X.Y.Z" not found in app_info.py'
+          }
+          $app = $Matches[1]
+          if ($env:GITHUB_REF -match '^refs/tags/v(.+)$') {
+            $v = $Matches[1]
+            if ($v -ne $app) {
+              throw "Tag v$v does not match APP_VERSION $app in app_info.py - bump app_info.py or fix the tag."
+            }
+          } else {
+            $v = "$app-dev"
+          }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "app_version=$app" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Version: $v (app_info.py: $app)"
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -107,13 +130,78 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt pyinstaller --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+          pip install -r requirements.txt pyinstaller==6.22.3 --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+
+      # The Gusan window, pages, welcome and floating surfaces, built for real
+      # (offscreen) on the build's Python - the test job runs tests/ with
+      # stand-ins for Qt. compileall catches syntax this Python can't read in
+      # modules the tests don't import. The suite takes ~3-5 min locally; the
+      # cap stops a hung test from holding the job for GitHub's 6-hour default.
+      - name: Qt window tests (offscreen)
+        shell: pwsh
+        timeout-minutes: 25
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          pip install pytest --quiet
+          python -m compileall -q -l .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m compileall -q ui
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pytest -q tests_qt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Generate app icon
         shell: pwsh
         run: |
           pip install pillow --quiet
           python installer/make_icon.py
+
+      # Windows shows these in Task Manager, Startup apps, notifications and
+      # the file's Properties: "Gusan" by AIBUBEN, while the file itself stays
+      # TranscribeApp.exe. Same script as build.ps1 (tests/test_release_2_0_0.py
+      # checks they match).
+      - name: Write the Windows version info
+        shell: pwsh
+        run: |
+          # version-info:begin
+          @'
+          import os, re, sys
+          src = open("app_info.py", encoding="utf-8").read()
+          name = re.search(r'^APP_NAME\s*=\s*"([^"]+)"', src, re.M).group(1)
+          ver = re.search(r'^APP_VERSION\s*=\s*"(\d+)\.(\d+)\.(\d+)"', src, re.M)
+          nums = tuple(int(x) for x in ver.groups()) + (0,)
+          dotted = ".".join(str(n) for n in nums)
+          strings = [
+              ("CompanyName", "AIBUBEN"),
+              ("FileDescription", name),
+              ("FileVersion", dotted),
+              ("InternalName", "TranscribeApp"),
+              ("LegalCopyright", "Copyright (c) 2025 Aram Adamyan. All rights reserved."),
+              ("OriginalFilename", "TranscribeApp.exe"),
+              ("ProductName", name),
+              ("ProductVersion", dotted),
+          ]
+          text = (
+              "VSVersionInfo(\n"
+              "  ffi=FixedFileInfo(filevers=%r, prodvers=%r, mask=0x3f, flags=0x0,\n"
+              "                    OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)),\n"
+              "  kids=[\n"
+              "    StringFileInfo([StringTable('040904B0', [\n"
+              "%s\n"
+              "    ])]),\n"
+              "    VarFileInfo([VarStruct('Translation', [1033, 1200])]),\n"
+              "  ]\n"
+              ")\n"
+          ) % (nums, nums, ",\n".join("      StringStruct(%r, %r)" % kv for kv in strings))
+          out = sys.argv[1]
+          os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+          with open(out, "w", encoding="utf-8") as f:
+              f.write(text)
+          print("Version info: %s %s -> %s" % (name, dotted, out))
+          '@ | python - build/version_info.txt
+          # version-info:end
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build .exe
         shell: pwsh
@@ -122,6 +210,7 @@ jobs:
             --onedir --windowed `
             --name TranscribeApp `
             --icon assets/icon.ico `
+            --version-file build/version_info.txt `
             --add-data "config.example.json;." `
             --add-data "history.py;." `
             --add-data "assets;assets" `
@@ -150,22 +239,22 @@ jobs:
             --exclude-module matplotlib `
             --exclude-module IPython `
             main.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $vi = (Get-Item dist\TranscribeApp\TranscribeApp.exe).VersionInfo
+          Write-Host "Exe: $($vi.ProductName) / $($vi.FileDescription) $($vi.FileVersion) by $($vi.CompanyName)"
+          if ($vi.FileVersion -ne "${{ steps.version.outputs.app_version }}.0") {
+            throw "TranscribeApp.exe has no version info for ${{ steps.version.outputs.app_version }}"
+          }
+          # multimedia-check:begin
+          # Meetings play their recording in the app (Qt's Windows media plugin; the same check in build.yml and build.ps1).
+          $mm = "dist\TranscribeApp\_internal\PySide6\plugins\multimedia\windowsmediaplugin.dll"
+          if (-not (Test-Path $mm)) { throw "No Qt multimedia plugin in the build ($mm): meetings can't play their recording." }
+          Write-Host "Multimedia plugin: $mm"
+          # multimedia-check:end
 
       - name: Zip output folder (portable build)
         shell: pwsh
         run: Compress-Archive -Path dist\TranscribeApp\* -DestinationPath TranscribeApp-Windows.zip
-
-      - name: Resolve version from tag
-        id: version
-        shell: pwsh
-        run: |
-          if ($env:GITHUB_REF -match '^refs/tags/v(.+)$') {
-            $v = $Matches[1]
-          } else {
-            $v = '0.0.0-dev'
-          }
-          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          Write-Host "Version: $v"
 
       - name: Build Inno Setup installer
         shell: pwsh
@@ -206,13 +295,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The same check as the Windows job: a tag must match APP_VERSION in
+      # app_info.py (read as text). The plain X.Y.Z goes into Info.plist.
+      - name: Check the version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$(sed -nE 's/^APP_VERSION[[:space:]]*=[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' app_info.py | head -n 1)"
+          if [ -z "${app}" ]; then
+            echo "::error::APP_VERSION = \"X.Y.Z\" not found in app_info.py"
+            exit 1
+          fi
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF#refs/tags/v}"
+            if [ "${tag}" != "${app}" ]; then
+              echo "::error::Tag v${tag} does not match APP_VERSION ${app} in app_info.py - bump app_info.py or fix the tag."
+              exit 1
+            fi
+          fi
+          echo "app_version=${app}" >> "${GITHUB_OUTPUT}"
+          echo "Version: ${app}"
+
       - name: Install system deps
         run: brew install portaudio python-tk@3.11
 
       - name: Install Python dependencies
         run: |
           /opt/homebrew/bin/python3.11 -m pip install --upgrade pip
-          /opt/homebrew/bin/python3.11 -m pip install -r requirements.txt pyinstaller --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+          /opt/homebrew/bin/python3.11 -m pip install -r requirements.txt pyinstaller==6.22.3 --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
 
       - name: Build .app
         run: |
@@ -246,22 +357,35 @@ jobs:
             --exclude-module IPython \
             main.py
 
-      - name: Patch Info.plist (usage strings + permissions)
+      - name: Patch Info.plist (name, version, usage strings)
         # macOS shows the value of these strings in the system permission
         # prompts. Without them, the prompt is generic / sometimes doesn't
         # appear at all and the underlying API silently fails — which was
         # the root cause of "the hotkey doesn't work on Mac" reports.
+        # The menu bar, Force Quit and the prompts say Gusan (CFBundleName /
+        # CFBundleDisplayName). Kept on purpose: TranscribeApp.app, its
+        # executable and the bundle id PyInstaller derives from --name.
         # Must run BEFORE code-signing so the signature seals the patched bundle.
         run: |
+          set -euo pipefail
           PLIST="dist/TranscribeApp.app/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string 'Transcribe records your microphone to turn speech into text. Audio never leaves your device unless you opt into the Google Cloud backend with your own API key.'" "$PLIST" || \
-          /usr/libexec/PlistBuddy -c "Set :NSMicrophoneUsageDescription 'Transcribe records your microphone to turn speech into text. Audio never leaves your device unless you opt into the Google Cloud backend with your own API key.'" "$PLIST"
-          /usr/libexec/PlistBuddy -c "Add :NSAppleEventsUsageDescription string 'Transcribe pastes transcribed text into the focused window via simulated keystrokes.'" "$PLIST" || \
-          /usr/libexec/PlistBuddy -c "Set :NSAppleEventsUsageDescription 'Transcribe pastes transcribed text into the focused window via simulated keystrokes.'" "$PLIST"
+          VERSION="${{ steps.version.outputs.app_version }}"
+          # Set a string value, adding the key when PyInstaller didn't write it.
+          plist_set() {
+            /usr/libexec/PlistBuddy -c "Set :$1 \"$2\"" "$PLIST" 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Add :$1 string \"$2\"" "$PLIST"
+          }
+          plist_set CFBundleName "Gusan"
+          plist_set CFBundleDisplayName "Gusan"
+          plist_set CFBundleShortVersionString "$VERSION"
+          plist_set CFBundleVersion "$VERSION"
+          plist_set NSMicrophoneUsageDescription "Gusan records your microphone to turn speech into text. Audio stays on your Mac unless you pick a cloud speech engine."
+          plist_set NSAppleEventsUsageDescription "Gusan pastes transcribed text into the focused window via simulated keystrokes."
           # Surface the global-hotkey requirement so macOS shows a clear
           # prompt under Privacy & Security → Accessibility.
-          /usr/libexec/PlistBuddy -c "Add :NSInputMonitoringUsageDescription string 'Transcribe needs to listen for your global hotkey (default: Option+R) so you can start dictation from any app.'" "$PLIST" || \
-          /usr/libexec/PlistBuddy -c "Set :NSInputMonitoringUsageDescription 'Transcribe needs to listen for your global hotkey (default: Option+R) so you can start dictation from any app.'" "$PLIST"
+          plist_set NSInputMonitoringUsageDescription "Gusan needs to listen for your global hotkey (default: Option+R) so you can start dictation from any app."
+          plutil -lint "$PLIST"
+          plutil -p "$PLIST"
 
       - name: Ad-hoc sign the .app
         # Without an Apple Developer ID we can only sign ad-hoc. This still
@@ -275,7 +399,7 @@ jobs:
       - name: Package as DMG
         run: |
           hdiutil create \
-            -volname "TranscribeApp" \
+            -volname "Gusan" \
             -srcfolder dist/TranscribeApp.app \
             -ov -format UDZO \
             TranscribeApp-Mac.dmg

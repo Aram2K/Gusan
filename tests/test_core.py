@@ -341,9 +341,9 @@ class TestConfig(unittest.TestCase):
             m.CONFIG_PATH = orig
 
     def test_action_model_does_not_auto_enable_smart_output_mode(self):
-        # Smart Actions are Pro-only and must be opted into explicitly. Selecting
-        # an action model must NOT flip the default output mode away from
-        # transcribe_only.
+        # output_action is 1.9.x's dictation mode, kept for a 1.9.x copy that
+        # may read config.json: picking an action model never flips it (2.0
+        # never reads it - Smart Actions run from their own shortcut).
         import main as m
         import local_llm
         orig = m.CONFIG_PATH
@@ -546,11 +546,12 @@ class TestLangNames(unittest.TestCase):
 
 
 class TestFmtHotkey(unittest.TestCase):
-    """Test Settings._fmt_hotkey without instantiating the full GUI."""
+    """How a shortcut reads on Windows: hotkeys.display (the pages' keycaps
+    and the tray hint use it; it replaced the 1.x Settings._fmt_hotkey)."""
 
     def _fmt(self, hk):
-        from main import Settings
-        return Settings._fmt_hotkey(None, hk)
+        import hotkeys
+        return hotkeys.display(hk, mac=False)
 
     def test_single_key(self):
         self.assertEqual(self._fmt("r"), "R")
@@ -575,21 +576,22 @@ class TestFmtHotkey(unittest.TestCase):
 
 
 class TestMeetingsWindowHelpers(unittest.TestCase):
-    """Tests for the pure-data helpers on MeetingsWindow - transcript
-    stitching, prompt context building, and share-format conversion.
-
-    These don't exercise the Tk widgets; we bypass __init__ and set the
-    handful of instance attributes the helpers actually read."""
+    """The pure-data meeting helpers - transcript stitching, prompt context
+    building, and share-format conversion. They lived on the 1.x
+    MeetingsWindow and moved, unchanged, to meeting_share (no Qt); the
+    stand-in below keeps the old method names over those functions."""
 
     def _make_mw(self, **overrides):
-        import main
-        mw = main.MeetingsWindow.__new__(main.MeetingsWindow)
-        mw._meeting_title = overrides.get("title", "")
-        mw._meeting_attendees = overrides.get("attendees", "")
-        mw._user_notes = overrides.get("user_notes", "")
-        mw._summary_var = overrides.get("summary", "")
-        mw._transcript_var = overrides.get("transcript", "")
-        return mw
+        import meeting_share
+        title = overrides.get("title", "")
+        attendees = overrides.get("attendees", "")
+        notes = overrides.get("user_notes", "")
+        summary = overrides.get("summary", "")
+        return types.SimpleNamespace(
+            _build_transcript_with_markers=meeting_share.build_transcript_with_markers,
+            _build_llm_input=lambda t: meeting_share.build_llm_input(t, title, attendees, notes),
+            _format_share=lambda fmt: meeting_share.format_share(fmt, summary, title),
+        )
 
     def test_build_transcript_inserts_speaker_change_markers(self):
         mw = self._make_mw()
@@ -625,9 +627,9 @@ class TestMeetingsWindowHelpers(unittest.TestCase):
         self.assertEqual(out, "raw transcript only")
 
     def test_strip_markdown_removes_sigils(self):
-        import main
+        import meeting_share
         md = "## Heading\n\n**bold** text and `code` here\n- [ ] checkbox task\n- bullet"
-        out = main.MeetingsWindow._strip_markdown(md)
+        out = meeting_share.strip_markdown(md)
         self.assertNotIn("##", out)
         self.assertNotIn("**", out)
         self.assertNotIn("- [ ]", out)
@@ -848,165 +850,70 @@ class TestTranscriptionBackendFallbacks(unittest.TestCase):
 
 
 class TestSettingsValidation(unittest.TestCase):
-    def test_save_clicked_missing_mistral_key(self):
-        from ui.settings import Settings
-        from PySide6.QtWidgets import QMessageBox
+    """The rules the 1.x Settings Save enforced, now in the 2.0 services the
+    Settings page calls: speech can't move to your own cloud key before that
+    key is saved (engine_choice.set_speech_source), what a key row says
+    (api_keys.key_view), and the Mistral key test (api_keys.test_mistral)."""
 
-        dialog = MagicMock()
-        dialog.cfg_working = {"backend": "mistral", "mistral_api_key": ""}
-        dialog.tabs = MagicMock()
-        dialog.mistral_key_input = MagicMock()
-        dialog.mistral_key_input.text.return_value = ""
-        dialog.accept = MagicMock()
-        
-        with patch.object(QMessageBox, "warning") as mock_warning:
-            Settings._on_save_clicked(dialog)
-            
-            dialog._sync_action_settings_from_widgets.assert_called_once()
-            dialog.tabs.setCurrentWidget.assert_called_once_with(dialog.models_tab)
-            dialog.mistral_key_input.setFocus.assert_called_once()
-            dialog.mistral_key_input.setStyleSheet.assert_called_once_with(
-                "border: 2px solid #ef4444; background-color: #fef2f2;"
-            )
-            mock_warning.assert_called_once()
-            dialog.accept.assert_not_called()
+    def test_save_clicked_missing_mistral_key(self):
+        import engine_choice
+        out = engine_choice.set_speech_source({"backend": "local", "mistral_api_key": ""},
+                                              "own_key", provider="mistral", pro=False)
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["problem"], "needs_key")
+        self.assertEqual(out["changes"], {})                 # nothing applied
 
     def test_save_clicked_missing_google_key(self):
-        from ui.settings import Settings
-        from PySide6.QtWidgets import QMessageBox
-
-        dialog = MagicMock()
-        dialog.cfg_working = {"backend": "google", "google_api_key": ""}
-        dialog.tabs = MagicMock()
-        dialog.google_key_input = MagicMock()
-        dialog.google_key_input.text.return_value = ""
-        dialog.accept = MagicMock()
-        
-        with patch.object(QMessageBox, "warning") as mock_warning:
-            Settings._on_save_clicked(dialog)
-            
-            dialog._sync_action_settings_from_widgets.assert_called_once()
-            dialog.tabs.setCurrentWidget.assert_called_once_with(dialog.models_tab)
-            dialog.google_key_input.setFocus.assert_called_once()
-            dialog.google_key_input.setStyleSheet.assert_called_once_with(
-                "border: 2px solid #ef4444; background-color: #fef2f2;"
-            )
-            mock_warning.assert_called_once()
-            dialog.accept.assert_not_called()
+        import engine_choice
+        out = engine_choice.set_speech_source({"backend": "local", "google_api_key": "  "},
+                                              "own_key", provider="google", pro=False)
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["problem"], "needs_key")
+        self.assertEqual(out["changes"], {})
 
     def test_save_clicked_valid(self):
-        from ui.settings import Settings
-
-        dialog = MagicMock()
-        dialog.cfg_working = {"backend": "mistral", "mistral_api_key": "some-key"}
-        dialog._mistral_key_verified = True
-        dialog.tabs = MagicMock()
-        dialog.mistral_key_input = MagicMock()
-        dialog.mistral_key_input.text.return_value = "some-key"
-        dialog.accept = MagicMock()
-        dialog.app = MagicMock()
-        dialog.app.cfg = {}
-
-        Settings._on_save_clicked(dialog)
-
-        # Save persists config and confirms with a toast - but does NOT close the
-        # window (Save no longer dismisses Settings).
-        dialog._sync_action_settings_from_widgets.assert_called_once()
-        dialog.app.save_config.assert_called_once()
-        dialog._show_saved_toast.assert_called_once()
-        dialog.accept.assert_not_called()
-        dialog.tabs.setCurrentWidget.assert_not_called()
+        import engine_choice
+        out = engine_choice.set_speech_source(
+            {"backend": "local", "mistral_api_key": "some-key", "mistral_stt_model": "voxtral-mini-latest"},
+            "own_key", provider="mistral", pro=False)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["changes"]["backend"], "mistral")
+        self.assertEqual(out["changes"]["mistral_stt_model"], "voxtral-mini-latest")
 
     def test_save_clicked_invalid_mistral_key(self):
-        from ui.settings import Settings
-        from PySide6.QtWidgets import QMessageBox
-
-        dialog = MagicMock()
-        dialog.cfg_working = {"backend": "mistral", "mistral_api_key": "bad-key"}
-        dialog._mistral_key_verified = False
-        dialog.tabs = MagicMock()
-        dialog.mistral_key_input = MagicMock()
-        dialog.mistral_key_input.text.return_value = "bad-key"
-        dialog.accept = MagicMock()
-        
-        with patch.object(QMessageBox, "warning") as mock_warning:
-            Settings._on_save_clicked(dialog)
-            
-            dialog.tabs.setCurrentWidget.assert_called_once_with(dialog.models_tab)
-            dialog.mistral_key_input.setFocus.assert_called_once()
-            mock_warning.assert_called_once()
-            dialog.accept.assert_not_called()
+        import api_keys
+        resp = MagicMock(status_code=401, text='{"message": "Unauthorized"}')
+        ok, msg = api_keys.test_mistral("bad-key", post=MagicMock(return_value=resp))
+        self.assertFalse(ok)
+        self.assertIn("invalid", msg.lower())
 
     def test_text_changed_invalidates_state(self):
-        from ui.settings import Settings
-
-        dialog = MagicMock()
-        dialog.app = MagicMock()
-        dialog.cfg_working = {"backend": "mistral", "mistral_api_key": "old-key"}
-        dialog._mistral_key_verified = True
-        dialog.chk_privacy.isChecked.return_value = False
-
-        dialog.mistral_key_input = MagicMock()
-        dialog.mistral_key_input.text.return_value = ""  # Changed to empty!
-        
-        dialog.lbl_status_mistral = MagicMock()
-        dialog.mistral_cards = {}
-        
-        Settings._save_general_configs(dialog)
-        
-        self.assertFalse(dialog._mistral_key_verified)
-        dialog.lbl_status_mistral.setText.assert_called_with("Not Configured")
+        import api_keys
+        view = api_keys.key_view({"mistral_api_key": ""}, "mistral")
+        self.assertFalse(view["has_key"])
+        self.assertEqual(view["text"], "No key yet")
+        ok, msg = api_keys.test_mistral("", post=MagicMock())   # nothing to test
+        self.assertEqual((ok, msg), (False, api_keys.EMPTY_TEXT))
 
     def test_text_changed_sets_untested_but_valid(self):
-        from ui.settings import Settings
-
-        dialog = MagicMock()
-        dialog.app = MagicMock()
-        dialog.cfg_working = {"backend": "mistral", "mistral_api_key": "old-key"}
-        dialog._mistral_key_verified = False
-        dialog.chk_privacy.isChecked.return_value = False
-
-        dialog.mistral_key_input = MagicMock()
-        dialog.mistral_key_input.text.return_value = "new-key"  # Changed to non-empty!
-        
-        dialog.lbl_status_mistral = MagicMock()
-        dialog.mistral_cards = {}
-        
-        Settings._save_general_configs(dialog)
-        
-        self.assertTrue(dialog._mistral_key_verified)
-        dialog.lbl_status_mistral.setText.assert_called_with("Not Tested")
+        import api_keys
+        view = api_keys.key_view({"mistral_api_key": "new-key-12345"}, "mistral")
+        self.assertTrue(view["has_key"])
+        self.assertEqual(view["text"], "Key ending 345")
+        self.assertEqual(api_keys.key_view({"mistral_api_key": "new-key"}, "mistral")["text"], "Key saved")
 
     def test_mistral_test_key_success(self):
-        from ui.settings import Settings
-
-        dialog = MagicMock()
-        dialog.mistral_key_input = MagicMock()
-        dialog.mistral_key_input.text.return_value = "valid-key"
-        dialog.cfg_working = {"mistral_stt_model": "voxtral-mini-latest"}
-        dialog.lbl_status_mistral = MagicMock()
-        dialog.btn_test_mistral = MagicMock()
-        dialog.mistral_test_finished = MagicMock()
-
-        with patch("requests.post") as mock_post:
-            mock_resp = MagicMock()
-            mock_resp.status_code = 200
-            mock_post.return_value = mock_resp
-
-            with patch("threading.Thread") as mock_thread:
-                Settings._test_mistral_key(dialog)
-
-                worker_func = mock_thread.call_args[1]["target"]
-                worker_func()
-
-                # The test now does a real transcription call (validates the key,
-                # model access AND credits), not just a key-only models check.
-                self.assertEqual(mock_post.call_count, 1)
-                args, kwargs = mock_post.call_args
-                self.assertEqual(args[0], "https://api.mistral.ai/v1/audio/transcriptions")
-                self.assertEqual(kwargs["headers"], {"Authorization": "Bearer valid-key"})
-                self.assertEqual(kwargs["data"], {"model": "voxtral-mini-latest"})
-                dialog.mistral_test_finished.emit.assert_called_once_with(True, "Working!")
+        import api_keys
+        mock_post = MagicMock(return_value=MagicMock(status_code=200))
+        ok, msg = api_keys.test_mistral("valid-key", "voxtral-mini-latest", post=mock_post)
+        # A real transcription call (validates the key, model access AND
+        # credits), not just a key-only models check.
+        self.assertEqual(mock_post.call_count, 1)
+        args, kwargs = mock_post.call_args
+        self.assertEqual(args[0], "https://api.mistral.ai/v1/audio/transcriptions")
+        self.assertEqual(kwargs["headers"], {"Authorization": "Bearer valid-key"})
+        self.assertEqual(kwargs["data"], {"model": "voxtral-mini-latest"})
+        self.assertEqual((ok, msg), (True, api_keys.OK_TEXT))
 
 
 class TestCaptureMode(unittest.TestCase):
@@ -1088,33 +995,37 @@ class TestCaptureMode(unittest.TestCase):
 
 
 class TestGoogleKeyTest(unittest.TestCase):
-    # The key check now hits the Gemini (AI Studio) models endpoint with a GET,
-    # because Google Cloud Speech rejects API keys. 200 = valid; 400 = invalid key.
+    # The key check hits the Gemini (AI Studio) models endpoint with a GET,
+    # because Google Cloud Speech rejects API keys. 200 = valid; 400 = invalid
+    # key. 2.0: api_keys.test_gemini (the Settings page's key row runs it).
     def _run_worker(self, status_code, json_data):
-        from ui.settings import Settings
-        dialog = MagicMock()
-        dialog.google_key_input.text.return_value = "some-key"
-        with patch("requests.get") as mock_get:
-            mock_resp = MagicMock()
-            mock_resp.status_code = status_code
-            mock_resp.json.return_value = json_data
-            mock_get.return_value = mock_resp
-            with patch("threading.Thread") as mock_thread:
-                Settings._test_google_key(dialog)
-                worker = mock_thread.call_args[1]["target"]
-                worker()
-        return dialog.google_test_finished.emit
+        import json as _json
+        import api_keys
+        mock_resp = MagicMock()
+        mock_resp.status_code = status_code
+        mock_resp.json.return_value = json_data
+        mock_resp.text = _json.dumps(json_data)
+        mock_get = MagicMock(return_value=mock_resp)
+        emit = MagicMock()
+        emit(*api_keys.test_gemini("some-key", get=mock_get))
+        # The key goes in a header, never the URL (where logs can keep it).
+        self.assertNotIn("some-key", mock_get.call_args[0][0])
+        self.assertEqual(mock_get.call_args[1]["headers"], {"x-goog-api-key": "some-key"})
+        return emit
 
     def test_valid_key_reports_working(self):
         # 200 from the models endpoint means the AI Studio key is valid.
         emit = self._run_worker(200, {"models": []})
-        emit.assert_called_once_with(True, "Working!")
+        import api_keys
+        emit.assert_called_once_with(True, api_keys.OK_TEXT)
 
     def test_invalid_key_reports_invalid(self):
         emit = self._run_worker(400, {"error": {
             "status": "INVALID_ARGUMENT",
             "message": "API key not valid. Please pass a valid API key."}})
-        emit.assert_called_once_with(False, "Invalid API key")
+        ok, msg = emit.call_args[0]
+        self.assertFalse(ok)
+        self.assertIn("invalid", msg.lower())
 
     def test_permission_denied_not_reported_as_working(self):
         emit = self._run_worker(403, {"error": {

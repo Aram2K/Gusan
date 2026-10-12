@@ -402,6 +402,91 @@ class TestGoogleSignInRetry(_AuthCase):
         auth._LoopbackServer(("127.0.0.1", self.port), auth._CallbackHandler).server_close()
 
 
+class TestEntitlementStatus(_AuthCase):
+    """Gusan 2.0: a Stripe trial is plan monthly/annual with status 'trialing'
+    - Account & plan needs the status for "Pro trial · N days left"."""
+
+    def test_trialing_status_is_kept(self):
+        m = self.signed_in()
+        self.responses = [_resp(200, _session("X")),
+                          _resp(200, [{"is_pro": True, "plan": "annual", "status": "trialing",
+                                       "current_period_end": "2026-10-10T00:00:00Z"}])]
+        self.assertTrue(m.refresh_entitlement())
+        self.assertEqual((m.plan, m.subscription_status), ("annual", "trialing"))
+        self.assertTrue(m.on_trial)
+        m._clear_local()
+        self.assertIsNone(m.subscription_status)
+        self.assertFalse(m.on_trial)
+
+    def test_active_or_missing_status_is_not_a_trial(self):
+        m = self.manager()
+        m._set_entitlement(True, "monthly", None, False, status="active")
+        self.assertFalse(m.on_trial)
+        m._set_entitlement(True, "monthly", None, False)            # an older RPC: no status
+        self.assertIsNone(m.subscription_status)
+        m._set_entitlement(True, "trial", None, False)             # the retired in-app trial
+        self.assertTrue(m.on_trial)
+        m._set_entitlement(False, None, None, False, status="trialing")
+        self.assertFalse(m.on_trial)                                # not Pro: no trial to show
+        m._set_entitlement(True, "annual", None, False, status=42)
+        self.assertIsNone(m.subscription_status)
+
+
+class TestGusanNames(unittest.TestCase):
+    def test_browser_pages_say_gusan(self):
+        for page in (auth._SUCCESS_HTML, auth._ERROR_HTML):
+            self.assertIn("Gusan", page)
+            self.assertNotIn("Transcribe", page)
+        self.assertIn("signed in", auth._SUCCESS_HTML)
+        self.assertEqual(auth._CallbackHandler.server_version, "GusanAuth/1.0")
+
+    def test_identifiers_installs_depend_on_are_kept(self):
+        self.assertEqual(auth.REDIRECT_URI, "http://127.0.0.1:53682/auth/callback")
+        self.assertEqual(auth.REFRESH_TOKEN_SECRET, "auth_refresh_token")
+
+
+class TestCancelGoogleLogin(_AuthCase):
+    """"Finish in your browser… Cancel" stops the waiting sign-in."""
+
+    def setUp(self):
+        super().setUp()
+        self.port = _free_port()
+        self.opened = threading.Semaphore(0)
+        auth.webbrowser.open.side_effect = lambda url: self.opened.release() or True
+        for name, value in (("REDIRECT_PORT", self.port), ("_LOGIN_TIMEOUT", 15)):
+            p = patch.object(auth, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_nothing_to_cancel(self):
+        self.assertFalse(self.manager().cancel_google_login())
+
+    def test_cancel_stops_the_wait_and_frees_the_port(self):
+        m = self.manager()
+        result = {}
+
+        def run():
+            t0 = time.monotonic()
+            result["ok"] = m.sign_in_with_google()
+            result["reason"] = m.last_error
+            result["elapsed"] = time.monotonic() - t0
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        self.addCleanup(t.join, 5)
+        self.assertTrue(self.opened.acquire(timeout=5))
+        t0 = time.monotonic()
+        self.assertTrue(m.cancel_google_login())
+        self.assertLess(time.monotonic() - t0, 0.5)                 # doesn't block the GUI thread
+        t.join(5)
+        self.assertFalse(t.is_alive())
+        self.assertEqual((result["ok"], result["reason"]), (False, "cancelled"))
+        self.assertLess(result["elapsed"], 5)
+        self.assertIsNone(m._login_flow)
+        self.assertFalse(m.cancel_google_login())                   # already over
+        # The port is free for the next attempt.
+        auth._LoopbackServer(("127.0.0.1", self.port), auth._CallbackHandler).server_close()
+
+
 class TestLaunchAction(unittest.TestCase):
     def test_second_launch_actions(self):
         import main

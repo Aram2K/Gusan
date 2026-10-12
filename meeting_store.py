@@ -1,13 +1,30 @@
 """On-disk meeting library: %APPDATA%/Transcribe/meetings/<YYYYMMDD_HHMMSS>/.
 
-Each folder holds meta.json (title, attendees, duration_sec, timestamp),
-transcript.txt, notes.md, chunks.jsonl (live chunks) and audio_partN.wav
-(one per recording segment - a resumed meeting adds a part). This module is
-the single reader used by the History tab, the detail view and Resume.
+Each folder holds meta.json, transcript.txt, notes.md, my_notes.md (what the
+user typed during the meeting), chunks.jsonl (live chunks) and
+audio_partN.wav (one per recording segment - a resumed meeting adds a part).
+This module is the single reader used by the History tab, the detail view,
+Resume and the Gusan 2.0 Meetings page.
+
+meta.json keys (all optional - older builds wrote only the first four):
+  title, attendees (comma string, kept for older builds), duration_sec
+  (recorded time, pauses excluded), timestamp (last processing time - drifts,
+  display ``started`` instead), started ("YYYY-MM-DD HH:MM:SS", the real
+  start), language, notes_engine, notes_engine_label, notices (list of
+  caveats to show above the notes), notes_notice (the one of them about the
+  notes engine), notes_error, seen (False until the user opened the finished
+  notes), calendar_event_id, attendees_list, source ("page", "live_assist",
+  "calendar", "classic").
+Meta is only ever changed through ``update_meta`` (read, merge, atomic
+write), so keys written by one step survive every other step.
 """
 import json
+import os
 import re
 import shutil
+import tempfile
+import threading
+import time
 import wave
 from pathlib import Path
 
@@ -17,6 +34,19 @@ _PART_RE = re.compile(r"^audio_part(\d+)\.wav$", re.I)
 # A session the user aborted & discarded: its live chunks, kept on disk under
 # this name (as before) but out of the History list.
 DISCARDED_CHUNKS = "chunks.discarded.jsonl"
+META_FILE = "meta.json"
+MY_NOTES_FILE = "my_notes.md"
+
+# Row status for the Meetings list (see meeting_status).
+STATUS_RECORDING = "recording"
+STATUS_PROCESSING = "processing"
+STATUS_NOTES_READY = "notes_ready"
+STATUS_NOTES_FAILED = "notes_failed"      # transcript saved, no notes
+STATUS_AUDIO_ONLY = "audio_only"          # recording or live chunks only
+
+# Read-merge-write of meta.json happens on the processing worker and on the
+# GUI thread (rename, seen): one lock keeps the merges from losing keys.
+_META_LOCK = threading.Lock()
 
 
 def meetings_dir():
@@ -25,11 +55,69 @@ def meetings_dir():
 
 def load_meta(folder):
     try:
-        with open(Path(folder) / "meta.json", "r", encoding="utf-8") as f:
+        with open(Path(folder) / META_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+
+def _atomic_write_text(path, text):
+    """Write ``text`` to ``path`` through a temp file in the same folder and
+    one rename, so a crash or a reader never sees half a file. Retries the
+    rename briefly: on Windows a reader (or a virus scanner) holding the old
+    file open makes os.replace fail for a moment."""
+    path = Path(path)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.05)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+def update_meta(folder, **fields):
+    """Merge ``fields`` into the folder's meta.json and write it atomically.
+    Keys not named are kept (an older build's, or another step's). A value of
+    None removes that key. Returns the merged dict, or None when the folder
+    can't be written."""
+    folder = Path(folder)
+    with _META_LOCK:
+        meta = load_meta(folder)
+        for key, value in fields.items():
+            if value is None:
+                meta.pop(key, None)
+            else:
+                meta[key] = value
+        try:
+            _atomic_write_text(folder / META_FILE, json.dumps(meta, ensure_ascii=False))
+        except OSError:
+            return None
+    return meta
+
+
+def split_attendees(text):
+    """"Anna, David,  anna" -> ["Anna", "David"]: the people chips. Commas or
+    semicolons separate names; blanks and repeats (any case) are dropped."""
+    out, seen = [], set()
+    for part in re.split(r"[,;\n]", str(text or "")):
+        name = part.strip()
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            out.append(name)
+    return out
 
 
 def _read(folder, name):
@@ -42,6 +130,29 @@ def _read(folder, name):
 
 def load_notes(folder):
     return _read(folder, "notes.md")
+
+
+def load_my_notes(folder):
+    """What the user typed in "My notes" during the meeting ("" if nothing)."""
+    return _read(folder, MY_NOTES_FILE)
+
+
+def save_my_notes(folder, text):
+    """Save "My notes" (atomic). Empty text removes the file. True when saved."""
+    folder = Path(folder)
+    text = text or ""
+    try:
+        if not text.strip():
+            path = folder / MY_NOTES_FILE
+            if path.is_file():
+                path.unlink()
+            return True
+        if not folder.is_dir():
+            return False
+        _atomic_write_text(folder / MY_NOTES_FILE, text)
+        return True
+    except OSError:
+        return False
 
 
 def load_transcript(folder):
@@ -113,14 +224,18 @@ def next_audio_part_path(folder):
 
 
 def summary_preview(notes, limit=140):
-    """First real line of the notes (no headings/markers) for the list card."""
-    for line in (notes or "").splitlines():
-        s = line.strip()
-        if not s or s.startswith("#") or s.startswith(">"):
+    """First real line of the notes for the list card: no headings, quotes,
+    list or task markers, and no **bold** / `code` symbols."""
+    import rich_text
+    for block in rich_text.parse_blocks(notes or ""):
+        kind = block[0]
+        if kind in ("head", "quote", "code"):
             continue
-        s = s.lstrip("-*• ").strip()
-        if s:
-            return s if len(s) <= limit else s[:limit - 1].rstrip() + "…"
+        text = block[2] if kind in ("num", "task") else block[1]
+        for line in str(text).splitlines():
+            s = rich_text.strip_inline(line).strip()
+            if s:
+                return s if len(s) <= limit else s[:limit - 1].rstrip() + "…"
     return ""
 
 
@@ -149,11 +264,16 @@ def list_meetings():
         # meta.json alone (nothing was captured) is no meeting either.
         if not (has_transcript or has_notes or parts or (meta and has_chunks)):
             continue
+        attendees = str(meta.get("attendees") or "")
+        people = meta.get("attendees_list")
+        if not (isinstance(people, list) and all(isinstance(p, str) for p in people)):
+            people = split_attendees(attendees)
+        notices = meta.get("notices")
         out.append({
             "dir": str(folder),
             "id": folder.name,
             "title": str(meta.get("title") or "Untitled Meeting").strip(),
-            "attendees": str(meta.get("attendees") or ""),
+            "attendees": attendees,
             "timestamp": str(meta.get("timestamp") or _folder_timestamp(folder.name)),
             # No meta.json (it's written when processing starts): the
             # recording's own length beats a "0 s" card.
@@ -161,8 +281,99 @@ def list_meetings():
             "has_transcript": has_transcript,
             "has_notes": has_notes,
             "audio_parts": [str(p) for p in parts],
+            # Gusan 2.0 fields. The folder name is the real start; "timestamp"
+            # is rewritten on every processing run.
+            "started": str(meta.get("started") or _folder_timestamp(folder.name)),
+            "attendees_list": list(people),
+            "language": str(meta.get("language") or ""),
+            "notes_engine": str(meta.get("notes_engine") or ""),
+            "notes_engine_label": str(meta.get("notes_engine_label") or ""),
+            "notices": [str(n) for n in notices] if isinstance(notices, list) else [],
+            "notes_error": str(meta.get("notes_error") or ""),
+            # Meetings from before 2.0 were all seen in the old window.
+            "seen": meta.get("seen") is not False,
+            "source": str(meta.get("source") or ""),
+            "calendar_event_id": str(meta.get("calendar_event_id") or ""),
         })
     return out
+
+
+def meeting_status(m, active_dir=None, active_state=None):
+    """One list row's status: "recording" / "processing" for the meeting the
+    session is busy with (``active_dir`` + its state; "paused" counts as
+    recording), else "notes_ready", "notes_failed" (transcript but no notes)
+    or "audio_only" (only the recording or live chunks)."""
+    if active_dir and active_state in (STATUS_RECORDING, "paused", STATUS_PROCESSING):
+        try:
+            same = Path(m["dir"]).resolve() == Path(active_dir).resolve()
+        except Exception:
+            same = str(m.get("dir")) == str(active_dir)
+        if same:
+            return STATUS_PROCESSING if active_state == STATUS_PROCESSING else STATUS_RECORDING
+    if m.get("has_notes"):
+        return STATUS_NOTES_READY
+    if m.get("has_transcript"):
+        return STATUS_NOTES_FAILED
+    return STATUS_AUDIO_ONLY
+
+
+def search(query, meetings=None, transcripts=False):
+    """Meetings matching every word of ``query`` (any case) in the title,
+    people, date, language or the first line of the notes - the old History
+    filter, word by word. ``transcripts`` also looks through the notes, My
+    notes and transcript (slower: reads each folder). An empty query returns
+    them all. ``meetings`` defaults to list_meetings()."""
+    items = list_meetings() if meetings is None else list(meetings)
+    words = [w for w in str(query or "").lower().split() if w]
+    if not words:
+        return items
+    out = []
+    for m in items:
+        notes = load_notes(m["dir"])
+        hay = " ".join([
+            str(m.get("title", "")), str(m.get("attendees", "")),
+            str(m.get("timestamp", "")), str(m.get("started", "")),
+            str(m.get("language", "")), summary_preview(notes),
+        ]).lower()
+        if transcripts and not all(w in hay for w in words):
+            hay = " ".join([hay, notes, load_my_notes(m["dir"]),
+                            load_transcript(m["dir"])]).lower()
+        if all(w in hay for w in words):
+            out.append(m)
+    return out
+
+
+def set_title(folder, title):
+    """Rename a meeting (the title pen). Blank becomes "Untitled Meeting".
+    True when saved."""
+    title = " ".join(str(title or "").split()) or "Untitled Meeting"
+    if not Path(folder).is_dir():
+        return False
+    return update_meta(folder, title=title) is not None
+
+
+def mark_seen(folder, seen=True):
+    """The user opened the finished notes (or, with seen=False, mark them new
+    again). True when saved."""
+    if not Path(folder).is_dir():
+        return False
+    return update_meta(folder, seen=bool(seen)) is not None
+
+
+def is_live_session(m):
+    """A meeting recorded from the Live Assistant: tagged ``source`` since
+    2.0; older ones were named "Live session HH:MM" by the card."""
+    source = m.get("source") or ""
+    if source:
+        return source == "live_assist"
+    return bool(re.match(r"^Live session \d{1,2}:\d{2}$", str(m.get("title") or "")))
+
+
+def list_live_sessions(meetings=None):
+    """The Live Assistant page's "Past sessions": meetings it recorded, newest
+    first."""
+    items = list_meetings() if meetings is None else meetings
+    return [m for m in items if is_live_session(m)]
 
 
 def _int(value):
@@ -226,6 +437,12 @@ def _folder_timestamp(name):
         return name
     y, mo, d, h, mi, s = m.groups()
     return f"{y}-{mo}-{d} {h}:{mi}:{s}"
+
+
+def folder_timestamp(name):
+    """"20260929_143000" (a meeting folder's name) -> "2026-09-29 14:30:00",
+    the meeting's start. Any other name comes back unchanged."""
+    return _folder_timestamp(str(name))
 
 
 def format_duration(sec):

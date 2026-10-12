@@ -260,16 +260,21 @@ class TestOverlayImagesAndMic(unittest.TestCase):
         return sent, mock.patch.object(self.la.threading, "Thread", _Thread)
 
     def test_start_listens_to_both_sides(self):
-        mw = SimpleNamespace(STATE_RECORDING="rec", STATE_PROCESSING="proc", STATE_DONE="done",
-                             state="idle", input_title=MagicMock(), calls=[])
-        mw.input_title.text.return_value = "x"
-        mw._start_meeting = lambda **kw: mw.calls.append(kw)
-        self.app.meetings_win = mw
+        # Gusan 2.0: Start drives the app's meeting session (not the classic window).
+        calls = []
+        session = SimpleNamespace(state="idle",
+                                  start=lambda **kw: calls.append(kw) or (True, "", ""))
+        self.app.meeting_session = session
+        self.app.cfg.update(meeting_consent_ack=True, language="fr", live_assist_language="")
         self.app.is_pro = lambda: True
         self.app.recorder = SimpleNamespace(fast_live_chunks=False)
         with mock.patch.object(self.la.threading, "Thread", MagicMock()):
             self.o._start_listening()
-        self.assertEqual(mw.calls[0]["audio_mode"], "smart_meeting")
+        self.assertEqual(calls[0]["audio_mode"], "smart_meeting")
+        self.assertEqual(calls[0]["source"], "live_assist")
+        self.assertEqual(calls[0]["language"], "fr")       # "" = the dictation language
+        self.assertTrue(calls[0]["title"].startswith("Live session "))
+        self.assertTrue(self.app.recorder.fast_live_chunks)
 
     def test_a_pasted_image_is_attached(self):
         from PySide6.QtCore import QEvent, Qt
@@ -610,6 +615,10 @@ class TestOverlayImagesAndMic(unittest.TestCase):
         from PySide6.QtCore import QPoint
         from PySide6.QtWidgets import QApplication, QMenu, QPushButton, QToolTip, QWidget
         self.o.show()
+        # The 1 s watchdog re-applies the card's OWN exclusion (offscreen Qt
+        # never reports it as set); a tick inside the window below made this
+        # test flaky. Popups are what it checks.
+        self.o._tick.stop()
         self.o._private, self.o._exclusion_ok = True, True
         calls = []
         other = QWidget()                                     # e.g. the Settings window
@@ -676,7 +685,7 @@ class TestOverlayImagesAndMic(unittest.TestCase):
 
     def test_macos_15_apply_private_shows_mostly_hidden_only_when_the_flag_sticks(self):
         from contextlib import ExitStack
-        for sticks, text in ((True, "May be hidden"), (False, "Not hidden")):
+        for sticks, text in ((True, "May be hidden"), (False, "Not available")):
             with ExitStack() as stack:
                 for p in self._mac15(sticks):
                     stack.enter_context(p)
@@ -696,10 +705,11 @@ class TestOverlayImagesAndMic(unittest.TestCase):
             self.o._on_tick()
         glass_again.assert_called()
 
-    def test_macos_15_chip_says_not_hidden_and_how_to_share(self):
+    def test_macos_15_chip_says_not_available_and_how_to_share(self):
         with mock.patch.object(self.la.sys, "platform", "darwin"):
             self.o._refresh_private_chip(remote=False, supported=False, excluded=False)
-        self.assertEqual(self.o.btn_private.text(), "Not hidden")
+        self.assertEqual(self.o.btn_private.text(), "Not available")
+        self.assertEqual(self.o.hide_state().tone, "amber")
         self.assertIn("Share a single window", self.o.btn_private.toolTip())
 
 

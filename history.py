@@ -80,9 +80,11 @@ def export_txt(path, entries=None):
     return len(entries)
 
 
-def save_entry(text, language, backend, audio_dir=None):
+def save_entry(text, language, backend, audio_dir=None, **extra):
     """``audio_dir``: the meeting folder holding this entry's recording
-    (audio_partN.wav), so History can offer it for download."""
+    (audio_partN.wav), so History can offer it for download. ``extra``: more
+    fields for the entry, e.g. a Smart Action's ``action`` (its mode) and
+    ``said`` (the words dictated); empty values are left out."""
     if not text.strip():
         return
     entries = load()
@@ -94,8 +96,12 @@ def save_entry(text, language, backend, audio_dir=None):
     }
     if audio_dir:
         entry["audio_dir"] = str(audio_dir)
+    for key, value in extra.items():
+        if key not in entry and value not in (None, ""):
+            entry[key] = value
     entries.insert(0, entry)
     save_all(entries)
+    return entry
 
 
 def clear():

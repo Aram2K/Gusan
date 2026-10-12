@@ -203,50 +203,51 @@ def _real_qt():
 
 @unittest.skipUnless(_real_qt(), "real PySide6 not importable (stubbed)")
 class TestSettingsMixRow(unittest.TestCase):
-    """The real Settings handlers for 'Languages you mix', on a stand-in."""
+    """'Languages you mix' (2.0: the Dictation page's rail, which took it over
+    from the 1.x Settings window), on a stand-in controller."""
 
     def setUp(self):
         import os
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-        from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QLabel, QWidget
+        from PySide6.QtWidgets import QApplication
         QApplication.instance() or QApplication([])
-        from ui.settings import Settings
-        self.S = Settings
-        self.page = QWidget()
-        combo = QComboBox(self.page)
-        combo.addItem("Auto-detect", "auto")
-        combo.addItem("Mixed languages", "multi")
-        me = SimpleNamespace(app=object(), cfg_working={"mix_languages": ["ru", "hy"]},
-                             combo_lang=combo, mix_row=QWidget(self.page),
-                             mix_hint=QLabel(self.page), _refresh_dirty=mock.MagicMock())
-        me.mix_checks = {c: QCheckBox(n, me.mix_row) for c, n in speech_langs.NAMES.items()}
-        me._update_mix_row = lambda *a: Settings._update_mix_row(me, *a)
-        for code, cb in me.mix_checks.items():
-            cb.toggled.connect(lambda on, c=code: Settings._on_mix_toggled(me, c, on))
-        self.me = me
+        from ui.pages import dictation
+        self.writes = []
+
+        def set_setting(key, value):
+            self.writes.append((key, value))
+            self.app.cfg[key] = value
+            return True
+        self.app = SimpleNamespace(cfg={"hotkey": "alt+r", "language": "auto", "backend": "local",
+                                        "whisper_model": "base", "mix_languages": ["ru", "hy"]},
+                                   set_setting=set_setting, track=lambda *a, **k: None,
+                                   is_pro=lambda: False, auth=SimpleNamespace(is_authenticated=False))
+        self.page = dictation.create(self.app)
+        self.page.sync_from_cfg()
 
     def tearDown(self):
         self.page.deleteLater()
 
     def test_shown_only_for_mixed_languages_with_the_saved_picks(self):
-        self.S._load_mix_checks(self.me)
-        ticked = [c for c, cb in self.me.mix_checks.items() if cb.isChecked()]
+        page = self.page
+        ticked = [c for c, cb in page.mix_checks.items() if cb.isChecked()]
         self.assertEqual(ticked, ["hy", "ru"])
-        self.assertTrue(self.me.mix_row.isHidden())           # Auto-detect
-        self.me.combo_lang.setCurrentIndex(1)
-        self.me._update_mix_row()
-        self.assertFalse(self.me.mix_row.isHidden())
-        self.assertFalse(self.me.mix_hint.isHidden())
+        self.assertEqual(list(page.mix_checks), list(speech_langs.NAMES))   # the picker's order
+        self.assertTrue(page.row_mix.isHidden())               # Detect automatically
+        page.language.setCurrentIndex(page.language.findData("multi"))
+        self.assertFalse(page.row_mix.isHidden())
+        self.assertFalse(page.row_mix.hint_label.isHidden())
+        self.assertEqual(self.writes, [("language", "multi")])
 
     def test_ticking_stages_the_mix(self):
-        self.S._load_mix_checks(self.me)
-        self.me.mix_checks["en"].setChecked(True)
-        self.assertEqual(self.me.cfg_working["mix_languages"], ["en", "hy", "ru"])
-        self.me._refresh_dirty.assert_called()
-        self.me.mix_checks["en"].setChecked(False)
-        self.me.mix_checks["ru"].setChecked(False)             # one left: saved as is...
-        self.assertEqual(self.me.cfg_working["mix_languages"], ["hy"])
-        self.assertEqual(speech_langs.mix_languages(self.me.cfg_working), [])   # ...no restriction
+        page = self.page
+        page.mix_checks["en"].setChecked(True)
+        self.assertEqual(self.app.cfg["mix_languages"], ["en", "hy", "ru"])
+        page.mix_checks["en"].setChecked(False)
+        page.mix_checks["ru"].setChecked(False)                # one left: saved as is...
+        self.assertEqual(self.app.cfg["mix_languages"], ["hy"])
+        self.assertEqual(speech_langs.mix_languages(self.app.cfg), [])   # ...no restriction
+        self.assertEqual([k for k, _v in self.writes], ["mix_languages"] * 3)
 
 
 if __name__ == "__main__":

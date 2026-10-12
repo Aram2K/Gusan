@@ -12,11 +12,13 @@ class ProDialog(QDialog):
     """A friendly, visual upgrade dialog. Shows what Pro unlocks, lets the user
     pick Monthly / Annual, and sends them to Stripe checkout (after sign-in)."""
 
-    def __init__(self, main_app=None, feature=None):
-        super().__init__()
+    def __init__(self, main_app=None, feature=None, parent=None):
+        # parent: the Gusan window while it is on screen, so the Pro window
+        # opens over it (never behind it).
+        super().__init__(parent)
         self.app = main_app
         self._plan = "annual"  # default to the best-value plan
-        self.setWindowTitle("Transcribe Pro")
+        self.setWindowTitle("Gusan Pro")
         self.setMinimumWidth(440)
         self.setSizeGripEnabled(True)
         if self.app and hasattr(self.app, "style_content"):
@@ -33,7 +35,7 @@ class ProDialog(QDialog):
         root.setContentsMargins(24, 22, 24, 22)
         root.setSpacing(12)
 
-        eyebrow = QLabel("TRANSCRIBE PRO", self)
+        eyebrow = QLabel("GUSAN PRO", self)
         eyebrow.setAlignment(Qt.AlignCenter)
         eyebrow.setStyleSheet("font-size: 11px; font-weight: 800; letter-spacing: 2px; color: #a855f7;")
         root.addWidget(eyebrow)

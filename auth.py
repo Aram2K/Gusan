@@ -16,6 +16,25 @@ Security design (this whole module is built around "never trust the client"):
 The Qt layer should treat every method here as potentially slow/blocking and
 call the network ones from a worker thread, using `on_state_changed` to refresh
 the UI on the main thread.
+
+Integration notes for Wave 4 (Gusan 2.0 additions)
+  * subscription_status: my_entitlement's `status` ('active' / 'trialing' /
+    None), and on_trial (Pro through a Stripe trial or the retired in-app
+    trial). account_actions.account_view uses them for "Pro trial · N days
+    left"; period_end is then the trial's end.
+  * cancel_google_login(): the "Cancel" on onboarding's / the sign-in sheet's
+    "Finish in your browser…". Non-blocking; the waiting
+    sign_in_with_google() returns False with last_error "cancelled" (track
+    login_failed {"method": "google", "reason": "cancelled"}, or skip it -
+    it isn't a failure). AppController.start_google_login gives no result
+    back; the wizard can instead run
+    api_keys.run_then(app.auth.sign_in_with_google, then=on_result) and also
+    listen to sig_auth_changed (Wave 4: an on_done callback on
+    start_google_login, and no tray hint while the wizard is showing).
+    The attempt registers itself on the first line of sign_in_with_google, so
+    a Cancel clicked after the worker started always finds it.
+  * The browser tab after Google says "Gusan" (app_info.APP_NAME); the
+    redirect URI/port 53682 and the keyring names are unchanged.
 """
 
 import base64
@@ -33,6 +52,7 @@ import webbrowser
 import requests
 
 import storage
+from app_info import APP_NAME
 
 logger = logging.getLogger("transcribe.auth")
 
@@ -68,19 +88,21 @@ _REFRESH_TOKEN_DEAD = frozenset({
     "invalid_grant",
 })
 
+# The browser tab the Google sign-in lands on. User-visible, so it carries the
+# product name (Gusan); the redirect URI, port and keyring names above never change.
 _SUCCESS_HTML = (
-    "<!doctype html><html><head><meta charset='utf-8'><title>Transcribe</title>"
+    f"<!doctype html><html><head><meta charset='utf-8'><title>{APP_NAME}</title>"
     "<style>body{font-family:Segoe UI,system-ui,sans-serif;background:#0f0f12;"
     "color:#fff;display:flex;height:100vh;align-items:center;justify-content:center;"
     "margin:0}.card{text-align:center}.c{color:#f59e0b;font-size:42px}</style></head>"
     "<body><div class='card'><div class='c'>&#10003;</div>"
-    "<h2>You're signed in to Transcribe</h2>"
-    "<p>You can close this tab and return to the app.</p></div></body></html>"
+    f"<h2>You're signed in to {APP_NAME}</h2>"
+    f"<p>You can close this tab and go back to {APP_NAME}.</p></div></body></html>"
 )
 _ERROR_HTML = (
-    "<!doctype html><html><head><meta charset='utf-8'><title>Transcribe</title></head>"
+    f"<!doctype html><html><head><meta charset='utf-8'><title>{APP_NAME}</title></head>"
     "<body style='font-family:sans-serif'><h2>Sign-in failed</h2>"
-    "<p>Please return to the app and try again.</p></body></html>"
+    f"<p>Go back to {APP_NAME} and try again.</p></body></html>"
 )
 
 
@@ -97,7 +119,7 @@ def _make_pkce_pair():
 class _CallbackHandler(http.server.BaseHTTPRequestHandler):
     """One-shot handler that captures ?code=&state= from the OAuth redirect."""
 
-    server_version = "TranscribeAuth/1.0"
+    server_version = f"{APP_NAME}Auth/1.0"
     # A browser preconnect that never sends a request must not wedge
     # handle_request() past the login deadline or a newer attempt's stop.
     timeout = 10
@@ -147,9 +169,10 @@ class _LoginFlow:
     listener instead of racing it for the redirect."""
 
     def __init__(self):
-        self.cancel = threading.Event()  # a newer attempt took over
+        self.cancel = threading.Event()  # a newer attempt took over (or the user cancelled)
         self.closed = threading.Event()  # this attempt no longer holds the port
         self.server = None
+        self.reason = "superseded"       # last_error when cancel stops it: or "cancelled"
 
 
 class AuthManager:
@@ -167,7 +190,11 @@ class AuthManager:
         self.user_name = None
         self.user_id = None
         self.is_pro = False
-        self.plan = None              # 'monthly' | 'annual' | None
+        self.plan = None              # 'monthly' | 'annual' | 'trial' | 'admin' | None
+        # The subscription's Stripe status from my_entitlement: 'active',
+        # 'trialing' (a Stripe 3-day trial: plan stays monthly/annual and
+        # period_end is when the trial ends) or None. See on_trial.
+        self.subscription_status = None
         self.period_end = None        # ISO string or None
         self.cancel_at_period_end = False
         self.trial_available = False   # true if the one-time trial was never started
@@ -183,6 +210,12 @@ class AuthManager:
     @property
     def is_authenticated(self):
         return bool(self._refresh_token)
+
+    @property
+    def on_trial(self):
+        """Pro through a trial: a Stripe trial (status 'trialing') or the
+        retired in-app trial (plan 'trial'). period_end is when it ends."""
+        return bool(self.is_pro and (self.plan == "trial" or self.subscription_status == "trialing"))
 
     def _notify(self):
         cb = self._on_state_changed
@@ -293,6 +326,21 @@ class AuthManager:
                 if self._login_flow is flow:
                     self._login_flow = None
 
+    def cancel_google_login(self):
+        """The "Cancel" next to "Finish in your browser…": stop the Google
+        sign-in that is waiting for its browser redirect. Returns True when
+        one was waiting. Doesn't block: the waiting sign_in_with_google()
+        (on its worker) returns False within about half a second, with
+        last_error "cancelled", and frees the loopback port."""
+        # One attribute read (atomic) - no self._lock: a worker can hold it
+        # through a keyring write, and this runs on the GUI thread.
+        flow = self._login_flow
+        if flow is None or flow.closed.is_set():
+            return False
+        flow.reason = "cancelled"
+        flow.cancel.set()
+        return True
+
     @staticmethod
     def _stop_login_flow(flow):
         """Make an older attempt release the loopback port, or the browser's
@@ -307,8 +355,8 @@ class AuthManager:
                     pass
 
     def _google_flow(self, flow):
-        if flow.cancel.is_set():  # an even newer attempt started meanwhile
-            self.last_error = "superseded"
+        if flow.cancel.is_set():  # an even newer attempt started meanwhile (or Cancel)
+            self.last_error = flow.reason
             return False
         verifier, challenge = _make_pkce_pair()
         state = secrets.token_urlsafe(24)
@@ -353,11 +401,11 @@ class AuthManager:
             if server.auth_code is None and flow.cancel.is_set():
                 # Before signalling the port free: from then on the newer
                 # attempt owns last_error.
-                self.last_error = "superseded"
+                self.last_error = flow.reason
             flow.closed.set()
 
         if server.auth_code is None and flow.cancel.is_set():
-            logger.info("Google sign-in superseded by a newer attempt")
+            logger.info("Google sign-in stopped (%s)", flow.reason)
             return False
         if server.auth_error:
             logger.warning("OAuth returned error: %s", server.auth_error)
@@ -669,6 +717,7 @@ class AuthManager:
                 bool(row.get("cancel_at_period_end")),
                 bool(row.get("trial_available", False)),
                 bool(row.get("is_admin", False)),
+                status=row.get("status"),
             )
         else:
             self._set_entitlement(False, None, None, False, False, False)
@@ -680,10 +729,12 @@ class AuthManager:
     # no client path to grant Pro; the server RPC is locked down to match.
 
     def _set_entitlement(self, is_pro, plan, period_end, cancel_at_period_end,
-                         trial_available=False, is_admin=False):
+                         trial_available=False, is_admin=False, status=None):
         with self._lock:
             self.is_pro = is_pro
             self.plan = plan
+            # Only a real string from the server (an older RPC sends none).
+            self.subscription_status = status if isinstance(status, str) and status else None
             self.period_end = period_end
             self.cancel_at_period_end = cancel_at_period_end
             self.trial_available = trial_available
@@ -695,6 +746,7 @@ class AuthManager:
         with self._lock:
             self.is_pro = False
             self.plan = None
+            self.subscription_status = None
             self.period_end = None
             self.cancel_at_period_end = False
             self.trial_available = False

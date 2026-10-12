@@ -1,5 +1,7 @@
 {
   "hotkey": "alt+r",
+  "smart_actions_hotkey": "alt+s",
+  "smart_actions_speech_model": "",
   "whisper_model": "base",
   "language": "auto",
   "sample_rate": 16000,

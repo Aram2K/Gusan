@@ -243,7 +243,7 @@ class TestDownload(_Base):
         with mock.patch.object(gpu_accel.shutil, "rmtree", locked):
             with self.assertRaises(gpu_accel.GpuAccelError) as cm:
                 gpu_accel.download(_get=get)
-        self.assertIn("Restart Transcribe", str(cm.exception))
+        self.assertIn("Restart Gusan", str(cm.exception))        # the app's new name (2.0)
         self.assertTrue(gpu_accel._has_dlls(str(gpu_accel.install_dir())))   # untouched
 
 
@@ -607,68 +607,116 @@ class TestSettingsCard(unittest.TestCase):
         from PySide6.QtWidgets import QApplication
         cls.qapp = QApplication.instance() or QApplication([])
 
-    def _settings(self, phase=None, cfg=None):
-        from ui import settings as S
-        win = S.Settings.__new__(S.Settings)
-        from PySide6.QtWidgets import QCheckBox, QFrame, QLabel, QProgressBar, QPushButton
-        win.gpu_card, win.gpu_reco = QFrame(), QFrame()
-        win.lbl_gpu_status, win.gpu_progress = QLabel(""), QProgressBar()
-        win.btn_gpu, win.btn_gpu_remove = QPushButton(""), QPushButton("Remove")
-        win.chk_gpu_never = QCheckBox("")
-        for w in (win.gpu_card, win.gpu_reco):
-            w.show()
-        win._gpu_state = None
-        win.app = SimpleNamespace(cfg={"backend": "local", **(cfg or {})},
-                                  gpu_phase=lambda: phase,
-                                  recorder=SimpleNamespace(_cuda_usable=None))
-        return S, win
+    # 2.0: the Settings page's GPU card (ui/pages/settings.py GpuCard and
+    # SettingsPage._gpu_state) and the controller's remove_gpu_download.
+    def _page(self, gpu_state, phase=None):
+        from ui.pages import settings as S
+        me = SimpleNamespace(_built={"speech"}, _hardware=SimpleNamespace(gpu_state=gpu_state), _gpu={},
+                             app=SimpleNamespace(gpu_phase=lambda: phase))
+        return S, me
 
     def test_states(self):
-        S, win = self._settings()
-        with mock.patch.object(S.gpu_accel, "removal_pending", lambda: False), \
-                mock.patch.object(S.gpu_accel, "libs_dir", lambda: None), \
-                mock.patch.object(S.gpu_accel, "can_offer", lambda cfg: True):
-            S.Settings._refresh_gpu_ui(win, "unsupported")
-            self.assertTrue(win.gpu_card.isHidden())
-            self.assertTrue(win.gpu_reco.isHidden())
-            S.Settings._refresh_gpu_ui(win, "available")
-            self.assertFalse(win.gpu_card.isHidden())
-            self.assertIn("Download", win.btn_gpu.text())
-            self.assertFalse(win.gpu_reco.isHidden())               # recommended up front
-            win.app.cfg[gpu_accel.CFG_INTRO] = True                 # "Not now" was clicked
-            S.Settings._refresh_gpu_ui(win, "available")
-            self.assertTrue(win.gpu_reco.isHidden())
-            win._gpu_last_error = "Not enough free disk space"      # a failed attempt stays visible
-            S.Settings._refresh_gpu_ui(win, "available")
-            self.assertIn("disk space", win.lbl_gpu_status.text())
-            self.assertIn("Try again", win.btn_gpu.text())
-        _, win = self._settings(phase="download")
-        with mock.patch.object(S.gpu_accel, "removal_pending", lambda: False), \
-                mock.patch.object(S.gpu_accel, "libs_dir", lambda: None):
-            S.Settings._refresh_gpu_ui(win, "available")
-            self.assertEqual(win.btn_gpu.text(), "Cancel")
-            self.assertFalse(win.gpu_progress.isHidden())
-        _, win = self._settings()
-        ours = str(gpu_accel.install_dir())
-        with mock.patch.object(S.gpu_accel, "removal_pending", lambda: False), \
-                mock.patch.object(S.gpu_accel, "libs_dir", lambda: ours), \
-                mock.patch.object(S.gpu_accel, "install_dir", lambda: Path(ours)):
-            S.Settings._refresh_gpu_ui(win, "ready")
-            self.assertIn("On", win.lbl_gpu_status.text())
-            self.assertFalse(win.btn_gpu_remove.isHidden())
-            win.app.cfg[gpu_accel.CFG_FAILED] = "CUDA driver version is insufficient"
-            S.Settings._refresh_gpu_ui(win, "failed")
-            self.assertEqual(win.btn_gpu.text(), "Try again")
-            self.assertIn("driver", win.lbl_gpu_status.text())
-        with mock.patch.object(S.gpu_accel, "removal_pending", lambda: True), \
-                mock.patch.object(S.gpu_accel, "libs_dir", lambda: ours):
-            S.Settings._refresh_gpu_ui(win, "ready")
-            self.assertIn("restarts", win.lbl_gpu_status.text())
+        from ui.pages import settings as S
+        _, me = self._page("unsupported")
+        with mock.patch.object(S, "IS_MAC", False):
+            self.assertIsNone(S.SettingsPage._gpu_state(me))           # no NVIDIA card: no card
+            self.assertEqual(S.SettingsPage._gpu_state(self._page("available")[1]), "available")
+            self.assertEqual(S.SettingsPage._gpu_state(self._page("available", phase="download")[1]),
+                             "download")
+        card = S.GpuCard()
+        try:
+            card.set_state("available", gpu="RTX 4060")
+            self.assertIn("Download", card.buttons["start"].text())
+            card.set_state("available", gpu="RTX 4060", message="Not enough free disk space")
+            self.assertIn("disk space", card.sub.text())             # a failed attempt stays visible
+            card.set_state("download", pct=40)
+            self.assertEqual(card.buttons["cancel"].text(), "Cancel")
+            self.assertIsNotNone(card.progress)
+            card.set_state("ready", gpu="RTX 4060", removable=True)
+            self.assertIn("on", card.title.text())
+            self.assertIn("remove", card.buttons)
+            card.set_state("ready", gpu="RTX 4060")                   # e.g. a CUDA Toolkit's libraries
+            self.assertNotIn("remove", card.buttons)
+            card.set_state("failed", gpu="RTX 4060")
+            self.assertEqual(card.buttons["retry"].text(), "Try again")
+            self.assertIn("driver", card.sub.text())
+        finally:
+            card.deleteLater()
 
+
+class TestGpuStateWriteBack(unittest.TestCase):
     def test_save_never_puts_back_stale_gpu_state(self):
-        from ui import settings as S
+        # 2.0 pages write only the key they change (settings_apply): the GPU
+        # state the controller keeps is never written back from a page.
+        import settings_apply
+        cfg = {"backend": "local", gpu_accel.CFG_FAILED: "old", gpu_accel.CFG_INTRO: True,
+               gpu_accel.CFG_LAST: 5.0, gpu_accel.CFG_COUNT: 2, gpu_accel.CFG_DECLINED: False}
+        before = dict(cfg)
+        app = SimpleNamespace(cfg=cfg, schedule_config_save=mock.MagicMock(),
+                              sig_setting_changed=SimpleNamespace(emit=lambda key: None))
+        settings_apply.apply(app, {"language": "de"})
         for key in gpu_accel.CFG_KEYS:
-            self.assertIn(key, S.Settings._BACKGROUND_KEYS)
+            self.assertEqual(cfg[key], before[key], key)
+
+
+class TestRemoveGpuDownload(unittest.TestCase):
+    """Settings' Remove (the 1.x Settings window's, now AppController's)."""
+
+    def _app(self):
+        app = SimpleNamespace(cfg={gpu_accel.CFG_FAILED: "driver"}, tracked=[], hints=[], probes=[],
+                              _gpu_removing=False, recorder=mock.MagicMock())
+        app.gpu_download_running = lambda: False
+        app.save_config = mock.MagicMock()
+        app.track = lambda event, props=None: app.tracked.append(event)
+        app.show_tray_hint = lambda t, m, on_click=None: app.hints.append(t)
+        app._run_on_gui = lambda fn, *a: fn(*a)
+        app.downloads = SimpleNamespace(probe_hardware=lambda force=False: app.probes.append(force))
+        for name in ("gpu_removable", "remove_gpu_download", "_on_gpu_removed"):
+            setattr(app, name, getattr(main.AppController, name).__get__(app))
+        return app
+
+    def test_removes_ours_and_reprobes(self):
+        app = self._app()
+        ran = []
+        with mock.patch.object(gpu_accel, "own_download_present", lambda: True), \
+                mock.patch.object(gpu_accel, "removal_pending", lambda: False), \
+                mock.patch.object(gpu_accel, "remove", lambda: ran.append(1) or True), \
+                mock.patch.object(main.threading, "Thread") as thread:
+            self.assertTrue(app.gpu_removable())
+            self.assertTrue(app.remove_gpu_download())
+            self.assertFalse(app.gpu_removable())                      # once
+            thread.call_args[1]["target"]()                            # the worker
+        self.assertEqual(ran, [1])
+        app.recorder.unload_model.assert_called_once_with()
+        self.assertIsNone(app.recorder._cuda_usable)
+        self.assertNotIn(gpu_accel.CFG_FAILED, app.cfg)
+        self.assertTrue(app.cfg[gpu_accel.CFG_INTRO])                  # no reminder for a while
+        self.assertEqual(app.tracked, ["gpu_removed"])
+        self.assertEqual((app.probes, app.hints), ([True], []))
+        self.assertFalse(app._gpu_removing)
+
+    def test_locked_files_go_at_the_next_start(self):
+        app = self._app()
+        with mock.patch.object(gpu_accel, "own_download_present", lambda: True), \
+                mock.patch.object(gpu_accel, "removal_pending", lambda: False), \
+                mock.patch.object(gpu_accel, "remove", lambda: False), \
+                mock.patch.object(main.threading, "Thread") as thread:
+            app.remove_gpu_download()
+            thread.call_args[1]["target"]()
+        self.assertEqual(app.hints, ["GPU acceleration removed"])
+
+    def test_nothing_of_ours_or_busy(self):
+        app = self._app()
+        with mock.patch.object(gpu_accel, "own_download_present", lambda: False):
+            self.assertFalse(app.remove_gpu_download())
+        with mock.patch.object(gpu_accel, "own_download_present", lambda: True), \
+                mock.patch.object(gpu_accel, "removal_pending", lambda: True):
+            self.assertFalse(app.remove_gpu_download())                # already going away
+        app.gpu_download_running = lambda: True
+        with mock.patch.object(gpu_accel, "own_download_present", lambda: True), \
+                mock.patch.object(gpu_accel, "removal_pending", lambda: False):
+            self.assertFalse(app.remove_gpu_download())
+        self.assertEqual(app.tracked, [])
 
 
 class TestRound4(_Base):

@@ -1,104 +1,40 @@
-"""Transcribe Files tab: drop an audio file, get a Word document.
+"""Classic "Transcribe Files" tab (1.x Settings): drop an audio file, get a Word document.
 
-Product shape (the CTO reasoning, so future edits keep the contract):
+Kept working until the Gusan 2.0 Audio to text page replaces it (Wave 4). The
+job itself now lives in file_jobs.run_file_job (Qt-free, shared with the new
+FileJobController); the transcript text and Word export in transcript_store.
+The helpers that used to live here are re-exported for old callers.
+
+Product shape:
 * Everything runs LOCALLY through the same tuned Whisper pipeline as dictation
   (recorder.transcribe_segments), so quality matches the rest of the app and
   no audio leaves the machine.
-* "Auto" picks the best model this computer can realistically run: the largest
-  downloaded model on CUDA, a fast small model on CPU (a 1-hour file on
-  medium/CPU would take hours - never default users into that).
-* Progress is honest: distinct stages (read -> download model if needed ->
-  transcribe -> speakers) drive one determinate bar, with a live time-left
-  estimate derived from actual throughput. Cancel works mid-transcription.
-* A file can be up to 5 hours long for everyone - the whole file is held in
-  memory while it's transcribed. Checked on the DECODED duration, not the
-  file size.
-* Output is a real .docx (docx_export) - speaker labels, timestamps, title -
-  because "transcript in Word" is the artifact people actually send around.
+* "Auto" picks the best model this computer can realistically run.
+* Progress is honest: distinct stages drive one determinate bar, with a live
+  time-left estimate derived from actual throughput. Cancel works while the
+  file is read and mid-transcription.
+* Any length, for everyone.
 """
 import os
 import threading
 import time
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
     QCheckBox, QFrame, QTextEdit, QProgressBar, QFileDialog, QMessageBox,
     QApplication,
 )
 
-import docx_export
-
-MAX_SEC = 5 * 60 * 60          # 5 hours - the whole file is decoded into memory
-
-AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wma",
-              ".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4b", ".amr", ".3gp"}
-
-# Progress-bar allocation per stage (percent).
-_P_READ_END = 6
-_P_DOWNLOAD_END = 22
-_P_TRANSCRIBE_END_WITH_SPK = 78
-_P_TRANSCRIBE_END_NO_SPK = 96
-_P_SPEAKERS_END = 96
-
-
-def probe_duration(path):
-    """Container-metadata duration in seconds (fast, no decode), or None."""
-    try:
-        import av
-        with av.open(path) as c:
-            if c.duration:
-                return c.duration / 1_000_000.0
-            for s in c.streams:
-                if s.duration and s.time_base:
-                    return float(s.duration * s.time_base)
-    except Exception:
-        pass
-    return None
-
-
-def pick_auto_model(recorder=None):
-    """Best model for THIS machine: quality-first on CUDA, speed-first on CPU,
-    preferring what is already downloaded so Auto never surprises the user
-    with a multi-GB download."""
-    from main import model_downloaded, AudioRecorder
-    dev = AudioRecorder._whisper_device()[0]
-    if recorder is not None and getattr(recorder, "_cuda_usable", None) is False:
-        # A CUDA device exists but its runtime libs are proven broken - the
-        # model WILL run on CPU, so choosing a large model here would turn a
-        # one-hour file into an hours-long job.
-        dev = "cpu"
-    if dev == "cuda":
-        order = ["large-v3-turbo", "large-v3", "medium", "small", "base", "tiny"]
-        fallback = "large-v3-turbo"
-    else:
-        order = ["small", "base", "tiny"]
-        fallback = "base"
-    for m in order:
-        if model_downloaded(m):
-            return m
-    return fallback
-
-
-def duration_error(duration_sec):
-    """"" when the file can be transcribed, else the user-facing refusal."""
-    if duration_sec <= MAX_SEC + 1:
-        return ""
-    mins = int(duration_sec // 60)
-    return (f"This file is about {mins} minutes long - files can be up to "
-            f"{MAX_SEC // 3600} hours. Split it and transcribe the parts separately.")
-
-
-def _fmt_dur(sec):
-    m, s = divmod(int(sec), 60)
-    h, m = divmod(m, 60)
-    return f"{h} h {m:02d} min" if h else (f"{m} min {s:02d} s" if m else f"{s} s")
-
-
-def _fmt_eta(sec):
-    if sec < 50:
-        return "under a minute left"
-    return f"about {max(1, int(round(sec / 60.0)))} min left"
+import transcript_store
+from file_jobs import (  # noqa: F401  (re-exported for old callers and tests)
+    AUDIO_EXTS, probe_duration, pick_auto_model, _fmt_dur, _fmt_eta,
+    _P_READ_END, _P_DOWNLOAD_END, _P_TRANSCRIBE_END_WITH_SPK,
+    _P_TRANSCRIBE_END_NO_SPK, _P_SPEAKERS_END,
+    run_file_job, refusal_message, JobCancelled, JobError,
+    BUSY_TITLE, MSG_OTHER_JOB,
+)
 
 
 class FileTranscribeTab(QWidget):
@@ -258,13 +194,11 @@ class FileTranscribeTab(QWidget):
                          daemon=True).start()
 
     def _probe_duration(self, path, info):
-        """Show duration + plan fit right after picking, via the fast probe."""
+        """Show the length right after picking, via the fast probe."""
         line = info
         dur = probe_duration(path)
         if dur:
             line = f"{info}  ·  {_fmt_dur(dur)}"
-            if duration_error(dur):
-                line += f"  ·  ⚠ longer than {MAX_SEC // 3600} hours"
         try:
             self.sig_file_info.emit(line)
         except RuntimeError:
@@ -288,16 +222,13 @@ class FileTranscribeTab(QWidget):
     def _start(self):
         if self._running or not self._path:
             return
-        if self.app is not None:
-            # The recorder (and its GPU/model) is shared with live dictation
-            # and meetings - never fight them for it.
-            if getattr(self.app, "is_rec", False) or getattr(self.app, "_busy", False) or (
-                    hasattr(self.app, "_is_meeting_busy") and self.app._is_meeting_busy()):
-                QMessageBox.information(
-                    self, "Recording in progress",
-                    "Finish the current recording first - file transcription "
-                    "shares the speech model with it.")
-                return
+        # The recorder (and its GPU/model) is shared with live dictation,
+        # meetings and the Audio to text queue - never fight them for it.
+        busy = refusal_message(self.app)
+        if busy:
+            title = BUSY_TITLE if busy == MSG_OTHER_JOB else "Recording in progress"
+            QMessageBox.information(self, title, busy)
+            return
         self._running = True
         self._cancel = False
         self._result = None
@@ -334,128 +265,26 @@ class FileTranscribeTab(QWidget):
 
     # ── the worker (background thread; UI only via signals) ──
     def _run_job(self, path, model_choice, want_speakers, want_ts):
+        """The shared Qt-free job (file_jobs.run_file_job); results and errors
+        come back through sig_finished as before."""
         try:
-            # Cheap metadata gate BEFORE the expensive decode: a 6-hour file
-            # shouldn't wait for (or pay the RAM of) a full decode just to be
-            # told no. The decoded duration below stays the
-            # authoritative check for files with missing/lying metadata.
-            probed = probe_duration(path)
-            if probed:
-                err = duration_error(probed)
-                if err:
-                    self.sig_finished.emit(None, "limit:" + err)
-                    return
-
-            self._emit(1, "Reading audio file…")
-            from faster_whisper import decode_audio
-            import numpy as np
-            audio = np.asarray(decode_audio(path, sampling_rate=16000),
-                               dtype=np.float32)
-            duration = len(audio) / 16000.0
-            if duration < 0.5:
-                self.sig_finished.emit(None, "No audio could be read from this file.")
-                return
-            err = duration_error(duration)
-            if err:
-                self.sig_finished.emit(None, "limit:" + err)
-                return
-            if self._cancel:
-                self.sig_finished.emit(None, "cancelled")
-                return
-            self._emit(_P_READ_END, f"Audio loaded ({_fmt_dur(duration)})")
-
             import main as _m
             recorder = self.app.recorder if self.app else _m.AudioRecorder()
-            model = model_choice or pick_auto_model(recorder)
-            # Decide the stage layout NOW - after the download the same check
-            # would always say "downloaded" and misplace the bar.
-            did_download = not _m.model_downloaded(model)
-            if did_download:
-                label = f"Downloading the {model} model (one time)…"
-                self._emit(_P_READ_END + 1, label)
+            # The global language, passed explicitly: the recorder's own default
+            # can be a stale per-meeting override.
+            cfg = getattr(self.app, "cfg", None) or {}
+            opts = {"model": model_choice, "language": cfg.get("language") or "auto",
+                    "speakers": want_speakers, "timestamps": want_ts}
 
-                def dl_progress(pct, got, total):
-                    if pct is not None:
-                        span = _P_DOWNLOAD_END - _P_READ_END
-                        self._emit(_P_READ_END + span * pct / 100.0, label)
-                _m.download_whisper_model(model, on_progress=dl_progress)
-
-            if self._cancel:
-                self.sig_finished.emit(None, "cancelled")
-                return
-
-            t_start = _P_DOWNLOAD_END if did_download else _P_READ_END
-            t_end = (_P_TRANSCRIBE_END_WITH_SPK if want_speakers
-                     else _P_TRANSCRIBE_END_NO_SPK)
-
-            # Load the model HERE with a real error message. Inside
-            # transcribe_segments a load failure comes back as [], which the
-            # code below would misreport as "no speech in this file".
-            self._emit(t_start, f"Loading the {model} model…")
-            try:
-                recorder.load_model(model)
-            except Exception as e:
-                self.sig_finished.emit(
-                    None, f"The {model} model couldn't be loaded: {str(e)[:200]}")
-                return
-
-            stage_t0 = time.time()
-
-            def on_tr_progress(done, total):
-                frac = done / total if total else 0.0
-                eta = ""
-                elapsed = time.time() - stage_t0
-                if frac > 0.03 and elapsed > 5:
-                    eta = _fmt_eta(elapsed * (1 - frac) / frac)
-                self._emit(t_start + (t_end - t_start) * frac,
-                           f"Transcribing with {model}…", eta)
-
-            segments = recorder.transcribe_segments(
-                audio, model_name=model,
-                on_progress=on_tr_progress,
-                should_cancel=lambda: self._cancel)
-            if segments is None or self._cancel:
-                self.sig_finished.emit(None, "cancelled")
-                return
-            if not segments:
-                self.sig_finished.emit(
-                    None, "No speech was detected in this file.")
-                return
-
-            if want_speakers:
-                import diarization
-                self._emit(t_end, "Identifying speakers…")
-                if diarization.sherpa_installed() and not diarization.models_downloaded():
-                    self._emit(t_end, "Downloading the speaker model (one time)…")
-                    diarization.download_models()
-                if diarization.is_available():
-                    def on_sp_progress(done, total):
-                        frac = done / total if total else 0.0
-                        self._emit(t_end + (_P_SPEAKERS_END - t_end) * frac,
-                                   "Identifying speakers…")
-                    turns = diarization.diarize(audio, on_progress=on_sp_progress)
-                    if turns:
-                        segments = diarization.attribute_segments(segments, turns)
-
-            # A cancel pressed during the speakers stage must not surface a
-            # result the user already walked away from.
-            if self._cancel:
-                self.sig_finished.emit(None, "cancelled")
-                return
-
-            self._emit(97, "Building the document…")
-            paragraphs = docx_export.group_segments(segments)
-            speakers = sorted({p["speaker"] for p in paragraphs
-                               if p.get("speaker") is not None})
-            result = {
-                "path": path,
-                "duration": duration,
-                "paragraphs": paragraphs,
-                "timestamps": want_ts,
-                "speaker_count": len(speakers),
-                "model": model,
-            }
+            def on_progress(pct, stage, eta):
+                self._emit(pct, stage, _fmt_eta(eta) if eta is not None else "")
+            result = run_file_job(path, opts, recorder, on_progress,
+                                  lambda: self._cancel)
             self.sig_finished.emit(result, "")
+        except JobCancelled:
+            self.sig_finished.emit(None, "cancelled")
+        except JobError as e:
+            self.sig_finished.emit(None, e.message)
         except Exception as e:
             self.sig_finished.emit(None, str(e)[:300])
 
@@ -474,15 +303,13 @@ class FileTranscribeTab(QWidget):
         if self.app is not None:
             took_min = round((time.time() - getattr(self, "_job_started", time.time())) / 60, 1)
             if error:
-                reason = ("cancelled" if error == "cancelled"
-                          else "too_long" if error.startswith("limit:") else "error")
+                reason = "cancelled" if error == "cancelled" else "error"
                 self.app.track("file_transcription_failed", {"reason": reason, "took_minutes": took_min})
             elif result:
                 # A long local job on the processor: maybe suggest the GPU.
                 if hasattr(self.app, "_note_local_wait"):
                     # Decode time only - not the model download or diarization.
-                    decode = getattr(getattr(self.app, "recorder", None),
-                                     "_last_segments_seconds", None)
+                    decode = result.get("decode_seconds")
                     self.app._note_local_wait(
                         "file", decode if decode is not None else
                         time.time() - getattr(self, "_job_started", time.time()),
@@ -497,35 +324,23 @@ class FileTranscribeTab(QWidget):
         if error == "cancelled":
             return
         if error:
-            if error.startswith("limit:"):
-                QMessageBox.information(self, "File too long", error[6:])
-            else:
-                QMessageBox.warning(self, "Transcription failed", error)
+            QMessageBox.warning(self, "Transcription failed", error)
             return
         self._result = result
         self._show_preview(result)
         self.result_box.show()
 
     def _preview_paragraph_lines(self, result):
-        lines = []
-        for p in result["paragraphs"]:
-            bits = []
-            if result["timestamps"]:
-                bits.append(f"[{docx_export.format_timestamp(p['start'])}]")
-            label = docx_export.speaker_name(p.get("speaker"))
-            if label:
-                bits.append(f"{label}:")
-            prefix = " ".join(bits)
-            lines.append((prefix, p["text"]))
-        return lines
+        return transcript_store.paragraph_lines(result)
 
     def _show_preview(self, result):
         import html as html_mod
+        from file_jobs import whisper_name
         n_par = len(result["paragraphs"])
         spk = result["speaker_count"]
         head = (f"{_fmt_dur(result['duration'])} of audio · "
                 f"{n_par} paragraphs" + (f" · {spk} speakers" if spk else "")
-                + f" · {result['model']} model")
+                + f" · {whisper_name(result['model'])}")
         rows = [f"<p style='color:#64748b; font-size:11px;'>{html_mod.escape(head)}</p>"]
         for prefix, text in self._preview_paragraph_lines(result):
             row = ""
@@ -539,9 +354,7 @@ class FileTranscribeTab(QWidget):
     def _plain_text(self):
         if not self._result:
             return ""
-        return "\n\n".join(
-            (f"{prefix} {text}".strip())
-            for prefix, text in self._preview_paragraph_lines(self._result))
+        return transcript_store.plain_text(self._result)
 
     def _copy_text(self):
         QApplication.clipboard().setText(self._plain_text())
@@ -552,19 +365,14 @@ class FileTranscribeTab(QWidget):
         if not self._result:
             return
         src = self._result["path"]
-        stem = docx_export.safe_filename(os.path.splitext(os.path.basename(src))[0])
-        suggested = os.path.join(os.path.dirname(src), f"{stem} transcript.docx")
+        suggested = os.path.join(os.path.dirname(src),
+                                 transcript_store.suggested_name(self._result, "docx"))
         path, _ = QFileDialog.getSaveFileName(
             self, "Save Word document", suggested, "Word document (*.docx)")
         if not path:
             return
-        title = os.path.splitext(os.path.basename(src))[0]
-        meta = (f"Transcribed from {os.path.basename(src)} · "
-                f"{_fmt_dur(self._result['duration'])} · Transcribe App")
         try:
-            docx_export.save_docx(
-                path, title, self._result["paragraphs"], meta_line=meta,
-                include_timestamps=self._result["timestamps"])
+            transcript_store.save_word(self._result, path)
         except OSError as e:
             QMessageBox.warning(self, "Save failed", str(e))
             return
@@ -577,7 +385,5 @@ class FileTranscribeTab(QWidget):
         box.addButton("Done", QMessageBox.RejectRole)
         box.exec()
         if box.clickedButton() is open_btn:
-            try:
-                os.startfile(path)      # Windows
-            except Exception:
-                pass
+            # Not os.startfile: it does nothing on Mac.
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))

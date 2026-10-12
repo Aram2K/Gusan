@@ -535,12 +535,13 @@ def _messages_for(mode, text, source_lang, target_lang, vocab_block=""):
     if mode == "write_email":
         instruction = (
             "Turn the user's dictated text into a concise email draft. "
-            "Keep the user's intent, do not invent facts, and output only the email."
+            "Keep the user's intent, do not invent facts, and output only the email, "
+            "as plain text (no Markdown)."
         )
     elif mode == "make_todo_list":
         instruction = (
             "Extract a clear Markdown todo checklist from the user's dictated text. "
-            "Output only checklist items using '- [ ]'."
+            "Output only checklist items using '- [ ]': no heading, no intro line."
         )
     elif mode == "translate":
         instruction = (

@@ -234,7 +234,7 @@ class MeetingDetailDialog(QDialog):
                 path, self.meta.get("title") or "Meeting", note_paras + paras,
                 meta_line=f"{self.meta.get('timestamp') or ''} · "
                           f"{meeting_store.format_duration(self.meta.get('duration_sec') or 0)}"
-                          " · Transcribe App",
+                          " · Gusan",
                 include_timestamps=False)
         except OSError as e:
             QMessageBox.warning(self, "Save failed", str(e))

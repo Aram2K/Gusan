@@ -14,6 +14,21 @@ except ImportError:
     import test_core  # noqa: F401
 
 import main
+import rich_text  # noqa: F401  (imported once, outside the sys.modules patches below)
+
+
+def _fake_rich_clipboard(set_rich_blocking):
+    """sys.modules entries that make `from ui.components import clipboard`
+    a stand-in (the real package needs real Qt)."""
+    import types
+    clip = types.ModuleType("ui.components.clipboard")
+    clip.set_rich_blocking = set_rich_blocking
+    pkg = types.ModuleType("ui.components")
+    pkg.clipboard = clip
+    # The paste chord's keys (pynput is a stand-in here).
+    kb = types.ModuleType("pynput.keyboard")
+    kb.Key = types.SimpleNamespace(ctrl="ctrl", cmd="cmd")
+    return {"ui.components": pkg, "ui.components.clipboard": clip, "pynput.keyboard": kb}
 
 
 def controller(**cfg):
@@ -112,7 +127,99 @@ class TestNewConfigDefaults(unittest.TestCase):
         self.assertEqual(main.DEFAULT["clipboard_restore_delay_ms"], 400)
 
     def test_schema_version_present(self):
-        self.assertEqual(main.DEFAULT["config_schema_version"], 1)
+        # 2 = Gusan 2.0, 3 = the Smart Actions shortcut (main._migrate_config
+        # brings 1.9.x and early 2.0 configs up).
+        self.assertEqual(main.DEFAULT["config_schema_version"], 3)
+
+    def test_smart_actions_defaults(self):
+        self.assertEqual(main.DEFAULT["smart_actions_hotkey"], "alt+s")
+        self.assertEqual(main.DEFAULT["smart_actions_speech_model"], "")     # same as Dictation
+        self.assertEqual(main.DEFAULT["output_action"], "transcribe_only")  # 1.9.x key, kept
+
+
+class TestRichPaste(unittest.TestCase):
+    """D9: a Smart Action's paste puts HTML + nice plain text on the clipboard;
+    plain dictation is never changed. pyperclip, the rich clipboard and the
+    keyboard are mocks."""
+
+    MD = "## Plan\n\n- [ ] Call David\n- **Send** the slides"
+
+    def _paste(self, text, rich, set_rich=True, clipboard_after=None, prev="old clip"):
+        from unittest import mock
+        c = controller(restore_clipboard=True, clipboard_restore_delay_ms=0)
+        c.kbd = mock.MagicMock()
+        copies, posted = [], []
+        state = {"clip": prev}
+
+        def copy(value):
+            copies.append(value)
+            state["clip"] = value
+
+        def paste():
+            return state["clip"] if clipboard_after is None else clipboard_after(state["clip"])
+
+        def blocking(plain, html, timeout=0.6):
+            posted.append((plain, html))
+            if set_rich is True:
+                state["clip"] = plain.replace("\n", "\r\n")      # Qt writes Windows line ends
+                return True
+            if isinstance(set_rich, Exception):
+                raise set_rich
+            return False
+
+        class _Now:                                              # the restore thread, inline
+            def __init__(self, target=None, daemon=None, **kw):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        with mock.patch.dict(sys.modules, _fake_rich_clipboard(blocking)), \
+                mock.patch.object(main.pyperclip, "copy", copy), \
+                mock.patch.object(main.pyperclip, "paste", paste), \
+                mock.patch.object(main.threading, "Thread", _Now), \
+                mock.patch.object(main.time, "sleep", lambda s: None):
+            pasted = c._paste_via_clipboard(text, rich=rich) if rich else c._paste_via_clipboard(text)
+        return pasted, copies, posted, state["clip"], c.kbd
+
+    def test_a_smart_action_goes_as_html_and_nice_plain_text(self):
+        import rich_text
+        pasted, copies, posted, clip, kbd = self._paste(self.MD, rich=True)
+        self.assertTrue(pasted)
+        plain, html = posted[0]
+        self.assertEqual(plain, rich_text.to_plain(self.MD))
+        self.assertEqual(html, rich_text.to_html(self.MD))
+        self.assertIn("☐ Call David", plain)
+        self.assertNotIn("**", plain)
+        self.assertIn("<b>Send</b>", html)
+        # Ctrl+V went out, and the user's clipboard came back: the check
+        # compares with the plain text that was really put there.
+        self.assertTrue(kbd.press.called)
+        self.assertEqual(copies, ["old clip"])
+        self.assertEqual(clip, "old clip")
+
+    def test_no_rich_clipboard_falls_back_to_the_plain_text(self):
+        import rich_text
+        for failure in (False, RuntimeError("no GUI thread")):
+            pasted, copies, posted, clip, _kbd = self._paste(self.MD, rich=True, set_rich=failure)
+            self.assertTrue(pasted)
+            self.assertEqual(copies, [rich_text.to_plain(self.MD), "old clip"], failure)
+
+    def test_someone_elses_clipboard_is_never_overwritten(self):
+        _p, copies, _posted, clip, _k = self._paste(self.MD, rich=True,
+                                                    clipboard_after=lambda now: "they copied this")
+        self.assertEqual(copies, [])                 # nothing restored over their copy
+
+    def test_prose_without_markup_is_pasted_as_is(self):
+        text = "Sure, Thursday works. See you then."
+        _p, copies, posted, _c, _k = self._paste(text, rich=True)
+        self.assertEqual(posted, [])                 # no HTML for plain prose
+        self.assertEqual(copies, [text, "old clip"])
+
+    def test_dictation_is_never_rendered(self):
+        _p, copies, posted, _c, _k = self._paste(self.MD, rich=False)
+        self.assertEqual(posted, [])
+        self.assertEqual(copies, [self.MD, "old clip"])        # the exact words, byte for byte
 
 
 if __name__ == "__main__":

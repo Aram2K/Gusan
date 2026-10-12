@@ -120,6 +120,13 @@ class TestMeetingStore(unittest.TestCase):
         self.assertEqual(ms.summary_preview("## Summary\n- The team agreed on Friday."),
                          "The team agreed on Friday.")
         self.assertEqual(ms.summary_preview(""), "")
+        # No Markdown symbols on the list card.
+        self.assertEqual(ms.summary_preview("**Decisions:**\n- [ ] Fix the **speaker** drift"),
+                         "Fix the speaker drift")
+        self.assertEqual(ms.summary_preview("> a quote\n\nThe **Live Assistant** ships.\nMore"),
+                         "The Live Assistant ships.")
+        self.assertEqual(ms.summary_preview("1. Launch on `Friday`"), "Launch on Friday")
+        self.assertTrue(ms.summary_preview("x " * 200).endswith("…"))
         self.assertEqual(ms.format_duration(3725), "1 h 02 min")
         self.assertEqual(ms.format_duration(65), "1 min 05 s")
 
@@ -233,51 +240,16 @@ class TestMeetingDeletion(unittest.TestCase):
         self.assertEqual(len(ms.list_meetings()), 1)
 
 
-# ── Meeting window logic, without a display ──────────────────────────────────
-# MeetingsWindow's methods are borrowed onto a plain class, so no QDialog is
-# built (and it works the same under tests/test_core.py's suite-wide PySide6
-# stubs). Widgets are tiny fakes.
+# ── Meeting session logic, without a display ─────────────────────────────────
+# The recording engine moved out of the 1.x MeetingsWindow into
+# meeting_session. MeetingEngine is that session without Qt (plain callback
+# signals), so these characterization tests run it directly - same fakes,
+# same assertions as when they borrowed the window's methods. The window
+# itself retired in Gusan 2.0: what it did on top (Start from its pickers,
+# Resume, Abort, the Done page's notices) is checked on the session API the
+# Meetings page and Live Assistant call. Widgets are tiny fakes.
 
-def _harness():
-    from ui import meetings as um
-    ns = {k: v for k, v in vars(um.MeetingsWindow).items()
-          if not k.startswith("__") and isinstance(v, (types.FunctionType, staticmethod, str))}
-    return um, type("MeetingsHarness", (), ns)()
-
-
-class _Field:
-    def __init__(self, text=""):
-        self._text = text
-
-    def text(self):
-        return self._text
-
-    def setText(self, text):
-        self._text = text
-
-    def clear(self):
-        self._text = ""
-
-
-class _Combo:
-    def __init__(self, values, current=None):
-        self.values = list(values)
-        self.index = self.values.index(current) if current in self.values else 0
-
-    def findData(self, value):
-        return self.values.index(value) if value in self.values else -1
-
-    def currentIndex(self):
-        return self.index
-
-    def setCurrentIndex(self, i):
-        self.index = i
-
-    def currentData(self):
-        return self.values[self.index] if 0 <= self.index < len(self.values) else None
-
-    def blockSignals(self, _on):
-        return False
+import meeting_session as msess  # noqa: E402
 
 
 class _Emitter:
@@ -289,7 +261,7 @@ class _Emitter:
 
 
 class _Rec:
-    """Just the AudioRecorder surface the meeting window touches."""
+    """Just the AudioRecorder surface the meeting session touches."""
 
     def __init__(self, result=("", "en"), truncated=False):
         self.result = result
@@ -298,7 +270,10 @@ class _Rec:
         self._loopback_peak = 1.0
         self.on_chunk_complete = self.on_levels = None
         self.on_partial = self.on_lang_detected = None
+        self.on_source_levels = None
+        self.fast_live_chunks = False
         self.started = None
+        self.stops = 0
 
     def transcribe(self):
         return self.result
@@ -307,7 +282,7 @@ class _Rec:
         self.started = kw
 
     def stop_recording(self):
-        pass
+        self.stops += 1
 
 
 class _App:
@@ -329,35 +304,23 @@ class _App:
         return True
 
 
-def _window(app, meeting_dir=None, chunks=(), prior=""):
-    um, w = _harness()
-    w.app = app
-    w.state = w.STATE_PROCESSING
-    w._chunks = list(chunks)
-    w._chunks_lock = threading.Lock()
-    w._meeting_dir = meeting_dir
-    w._meeting_title, w._meeting_attendees = "Sync", ""
-    w._record_started_at = w._record_stopped_at = None
-    w._resume_dir, w._resume_prior, w._resume_prior_duration = None, prior, 0
-    w._transcript_notices = []
-    w._user_notes = ""
-    w.proc_signals = types.SimpleNamespace(finished=_Emitter())
-    w.statuses = []
-    w._emit_status = w.statuses.append
-    w._save_recording_segment = lambda: None
-    w.summarized = []
-    w._summarize_and_finish = lambda: w.summarized.append(w._final_transcript)
-    w._build_attributed_transcript = lambda: ""
-    # Setup page + other widgets.
-    w.input_title, w.input_attendees = _Field(), _Field()
-    w.combo_device = _Combo(["smart_meeting", "default_mic"], app.cfg.get("meeting_audio_mode"))
-    w.combo_lang = _Combo(["auto", "en"], "auto")
-    w.combo_whisper = _Combo(["base", "small", "large-v3"], app.cfg.get("whisper_model"))
-    w.combo_action = _Combo(["managed", "api_cerebras", "qwen_3b"], app.cfg.get("action_model"))
-    for name in ("container", "live_trans_log", "live_summary_log", "input_live_notes",
-                 "lbl_done_title", "txt_summary", "txt_transcript"):
-        setattr(w, name, MagicMock())
-    return um, w
+def _session(app, meeting_dir=None, chunks=(), prior=""):
+    s = msess.MeetingEngine(app)
+    s.state = s.STATE_PROCESSING
+    s._chunks = list(chunks)
+    s._meeting_dir = meeting_dir
+    s._meeting_title, s._meeting_attendees = "Sync", ""
+    s._resume_dir, s._resume_prior, s._resume_prior_duration = None, prior, 0
+    s.proc_signals = types.SimpleNamespace(finished=_Emitter())
+    s.statuses = []
+    s._emit_status = s.statuses.append
+    s._save_recording_segment = lambda: None
+    s.summarized = []
+    s._summarize_and_finish = lambda: s.summarized.append(s._final_transcript)
+    s._build_attributed_transcript = lambda: ""
+    s.spawned = []
+    s._spawn = lambda target, *args: s.spawned.append((target, args))
+    return s
 
 
 def _chunk(idx, text):
@@ -371,9 +334,9 @@ class TestMeetingTranscript(unittest.TestCase):
         self.dir = Path(self._tmp.name)
 
     def _run(self, result, chunks=(), prior="", truncated=False):
-        um, w = _window(_App(_Rec(result, truncated)), self.dir, chunks, prior)
-        w._process_meeting_notes()
-        return w
+        s = _session(_App(_Rec(result, truncated)), self.dir, chunks, prior)
+        s._process_meeting_notes()
+        return s
 
     def test_one_failed_chunk_keeps_every_chunk_that_transcribed(self):
         # Chunks land in completion order; chunk 1 failed on the cloud.
@@ -402,7 +365,7 @@ class TestMeetingTranscript(unittest.TestCase):
 
     def test_speaker_pass_covers_failed_chunks_but_not_a_dead_device(self):
         for lang, expect_notice in (("!managed:503", False), ("!audio:device lost", True)):
-            um, w = _window(_App(_Rec(("", lang))), self.dir, [_chunk(0, "hello")])
+            w = _session(_App(_Rec(("", lang))), self.dir, [_chunk(0, "hello")])
             w._build_attributed_transcript = lambda: "Speaker 1: hello there"
             w._process_meeting_notes()
             self.assertTrue(w._final_transcript.startswith("Speaker 1: hello there"))
@@ -423,7 +386,7 @@ class TestMeetingTranscript(unittest.TestCase):
         # Past the recorder's full-audio cap, the speaker pass would only see
         # the first 2 h and replace the complete transcript - it must not run.
         full = " ".join(f"minute {m}." for m in range(150))
-        um, w = _window(_App(_Rec((full, "en"), truncated=True)), self.dir)
+        w = _session(_App(_Rec((full, "en"), truncated=True)), self.dir)
         w._build_attributed_transcript = MagicMock(return_value="Speaker 1: minute 0.")
         w._process_meeting_notes()
         w._build_attributed_transcript.assert_not_called()
@@ -431,29 +394,29 @@ class TestMeetingTranscript(unittest.TestCase):
         self.assertIn("minute 149.", (self.dir / "transcript.txt").read_text(encoding="utf-8"))
         self.assertIn("2 h 00 min", w._transcript_notices[0])
         # ...and a shorter meeting still gets its speaker labels.
-        um, w = _window(_App(_Rec((full, "en"))), self.dir)
+        w = _session(_App(_Rec((full, "en"))), self.dir)
         w._build_attributed_transcript = lambda: "Speaker 1: all of it"
         w._process_meeting_notes()
         self.assertEqual(w._final_transcript, "Speaker 1: all of it")
         self.assertEqual(w._transcript_notices, [])
 
     def test_done_page_shows_the_notices_above_the_notes(self):
-        um, w = _window(_App(), self.dir)
-        w._final_transcript = "t"
-        w._transcript_notices = ["The saved recording ends at about 2 h 00 min."]
-        with patch.object(um.telemetry, "track"), \
-                patch.dict(sys.modules, {"main": _fake_main()}):
-            w._on_processing_finished("## Notes", "")
-        shown = w.txt_summary.setMarkdown.call_args[0][0]
-        self.assertTrue(shown.startswith("> ⚠️ The saved recording ends at about 2 h"))
-        self.assertTrue(shown.endswith("## Notes"))
-        self.assertEqual(w._final_notes, "## Notes")      # exports stay clean
-
-
-def _fake_main():
-    m = types.ModuleType("main")
-    m.APP_VERSION = "0.0.0-test"
-    return m
+        s = _session(_App(), self.dir)
+        s._final_transcript = "t"
+        s._transcript_notices = ["The saved recording ends at about 2 h 00 min."]
+        done = []
+        s.finished.connect(lambda *a: done.append(a))
+        with patch.object(msess.telemetry, "track"):
+            s._on_processing_finished("## Notes", "")
+        self.assertEqual(s._final_notes, "## Notes")      # exports stay clean
+        self.assertEqual(done, [(str(self.dir), "## Notes", "")])
+        self.assertEqual(s.phase, "done")
+        # The notes view (Meetings page) draws the notices above the notes:
+        # from the session, and from the meeting's meta.json afterwards.
+        notice = "The saved recording ends at about 2 h 00 min."
+        self.assertEqual(s.notices(), [notice])
+        self.assertEqual(s._result_meta()["notices"], [notice])
+        self.assertNotIn("2 h 00 min", s.notes)
 
 
 class TestMeetingStartState(unittest.TestCase):
@@ -466,85 +429,84 @@ class TestMeetingStartState(unittest.TestCase):
         self.root = Path(self._tmp.name) / "meetings"
         self.root.mkdir()
         for p in (patch.object(ms.storage, "path_for", return_value=self.root),
-                  patch.dict(sys.modules, {"main": _fake_main()})):
+                  patch.object(msess, "has_loopback", return_value=True),
+                  patch.object(msess.telemetry, "track")):
             p.start()
             self.addCleanup(p.stop)
 
-    def _start(self, w, **kw):
-        from ui import meetings as um
-        with patch.object(um.telemetry, "track"):
-            w._start_meeting(**kw)
+    def _idle(self, app, *a, **kw):
+        s = _session(app, *a, **kw)
+        s.state = s.STATE_IDLE
+        return s
 
     def test_start_uses_settings_changed_after_launch_without_saving(self):
         app = _App()
-        um, w = _window(app)
-        w.state = w.STATE_IDLE
-        # Settings saved new picks after the window was built at launch.
+        s = self._idle(app)
+        # Settings saved new picks after the session was built at launch.
         app.cfg.update(whisper_model="large-v3", action_model="api_cerebras",
-                       meeting_audio_mode="smart_meeting")
-        self._start(w, language="en")
-        self.assertEqual(w.state, w.STATE_RECORDING)
+                       meeting_audio_mode="smart_meeting", meeting_notes_model="qwen_3b")
+        ok, code, _msg = s.start(language="en")
+        self.assertTrue(ok, code)
+        self.assertEqual(s.state, s.STATE_RECORDING)
         self.assertEqual((app.cfg["whisper_model"], app.cfg["action_model"],
                           app.cfg["meeting_audio_mode"]),
                          ("large-v3", "api_cerebras", "smart_meeting"))
         self.assertEqual(app.saves, 0)
-        self.assertEqual(w.combo_whisper.currentData(), "large-v3")
-        self.assertEqual(w.combo_action.currentData(), "api_cerebras")
-        self.assertEqual(app.recorder.started["capture_mode"], "smart_meeting")
+        self.assertEqual(s._notes_engine, "qwen_3b")              # the saved meeting pick, live
+        self.assertEqual(app.recorder.started, {"capture_mode": "smart_meeting",
+                                                "language": "en"})
 
     def test_live_assist_hears_both_sides_without_changing_the_saved_mode(self):
         app = _App(meeting_audio_mode="default_mic")
-        um, w = _window(app)
-        w.state = w.STATE_IDLE
-        self._start(w, language="en", audio_mode="smart_meeting")
+        s = self._idle(app)
+        ok, code, _msg = s.start(language="en", audio_mode="smart_meeting")
+        self.assertTrue(ok, code)
         self.assertEqual(app.recorder.started["capture_mode"], "smart_meeting")
         self.assertEqual(app.cfg["meeting_audio_mode"], "default_mic")    # saved pick kept
-        self.assertEqual(w._session_audio_mode, "smart_meeting")
+        self.assertEqual(s._session_audio_mode, "smart_meeting")
 
     def test_a_mode_this_system_cannot_capture_falls_back(self):
         app = _App(meeting_audio_mode="default_mic")
-        um, w = _window(app)
-        w.combo_device = _Combo(["default_mic"], "default_mic")          # no loopback here
-        w.state = w.STATE_IDLE
-        self._start(w, language="en", audio_mode="smart_meeting")
+        s = self._idle(app)
+        with patch.object(msess, "has_loopback", return_value=False):    # no loopback here
+            s.start(language="en", audio_mode="smart_meeting")
         self.assertEqual(app.recorder.started["capture_mode"], "default_mic")
 
     def test_resync_is_read_only_and_a_pick_here_is_saved(self):
-        app = _App(action_model="rule_based")        # not offered in the meeting picker
-        um, w = _window(app)
-        w._sync_setup_from_cfg()
-        self.assertEqual(w.combo_action.currentData(), "managed")   # Pro default shown
-        self.assertEqual((app.cfg["action_model"], app.saves), ("rule_based", 0))
-        w.combo_whisper.setCurrentIndex(1)                          # user picks "small"
-        w._on_whisper_picked(1)
-        self.assertEqual((app.cfg["whisper_model"], app.saves), ("small", 1))
-        w._sync_setup_from_cfg()
-        self.assertEqual(w.combo_whisper.currentData(), "small")
+        app = _App(action_model="rule_based")        # not offered as a notes engine
+        self.assertEqual(msess.default_engine_id(app), "managed")   # Pro default shown and used
+        s = self._idle(app)
+        s.start(language="en", notes_engine="api_cerebras")       # this meeting's pick...
+        self.assertEqual(s._notes_engine, "api_cerebras")
+        self.assertEqual((app.cfg["action_model"], app.saves), ("rule_based", 0))   # ...never saved
+        # A pick made to keep (Rewrite notes with persist) is written once.
+        done = _session(app, self.root / "20260101_080000")
+        done.state = done.STATE_DONE
+        done._final_transcript = "We agreed on Friday."
+        self.assertTrue(done.retry_notes("qwen_3b", persist=True))
+        self.assertEqual((app.cfg["action_model"], app.saves), ("qwen_3b", 1))
+        self.assertEqual(done._notes_engine, "qwen_3b")
 
     def test_live_assist_start_after_done_is_a_new_meeting(self):
         old = self.root / "20260101_090000"
         old.mkdir()
         app = _App()
-        um, w = _window(app, old, prior="Old meeting transcript.")
-        w._resume_dir = old                     # a resumed meeting...
-        w._meeting_title, w._meeting_attendees = "Board meeting", "CEO, CFO"
-        w.input_title.setText("Board meeting")
-        w.input_attendees.setText("CEO, CFO")
-        w._final_transcript = "Old meeting transcript."
-        with patch.object(um.telemetry, "track"):
-            w._on_processing_finished("", "quota exceeded")   # ...whose summary failed
-        self.assertEqual(w.state, w.STATE_DONE)
-        self.assertEqual(w._resume_dir, old)                  # kept for Retry
-        self.assertEqual((w.input_title.text(), w.input_attendees.text()), ("", ""))
-        # What the Live Assistance card does: name the session only if untitled.
-        if not w.input_title.text().strip():
-            w.input_title.setText("Live session 11:00")
-        self._start(w, language="en")
-        self.assertEqual(w.state, w.STATE_RECORDING)
-        self.assertNotEqual(w._meeting_dir, old)
-        self.assertEqual(w._meeting_dir.parent, self.root)
-        self.assertEqual((w._resume_dir, w._resume_prior), (None, ""))
-        self.assertEqual((w._meeting_title, w._meeting_attendees), ("Live session 11:00", ""))
+        s = _session(app, old, prior="Old meeting transcript.")
+        s._resume_dir = old                     # a resumed meeting...
+        s._meeting_title, s._meeting_attendees = "Board meeting", "CEO, CFO"
+        s._final_transcript = "Old meeting transcript."
+        s._on_processing_finished("", "quota exceeded")   # ...whose summary failed
+        self.assertEqual(s.state, s.STATE_DONE)
+        self.assertEqual(s.phase, "failed")
+        self.assertEqual(s._resume_dir, old)                  # kept for Retry
+        # What the Live Assistant card does: a new, titled session.
+        ok, code, _msg = s.start(title="Live session 11:00", language="en", source="live_assist")
+        self.assertTrue(ok, code)
+        self.assertEqual(s.state, s.STATE_RECORDING)
+        self.assertNotEqual(s._meeting_dir, old)
+        self.assertEqual(s._meeting_dir.parent, self.root)
+        self.assertEqual((s._resume_dir, s._resume_prior), (None, ""))
+        self.assertEqual((s._meeting_title, s._meeting_attendees), ("Live session 11:00", ""))
 
     def test_resume_keeps_its_folder(self):
         old = self.root / "20260101_090000"
@@ -552,42 +514,45 @@ class TestMeetingStartState(unittest.TestCase):
         (old / "transcript.txt").write_text("ORIGINAL", encoding="utf-8")
         (old / "meta.json").write_text(json.dumps({"title": "Board", "duration_sec": 60}),
                                        encoding="utf-8")
-        um, w = _window(_App())
-        w.state = w.STATE_DONE
-        w.show = w.raise_ = w.activateWindow = lambda: None
-        with patch.object(um.telemetry, "track"):
-            w.resume_meeting(str(old))
-        self.assertEqual(w.state, w.STATE_RECORDING)
-        self.assertEqual(w._meeting_dir, old)
-        self.assertEqual((w._resume_prior, w._meeting_title), ("ORIGINAL", "Board"))
+        s = _session(_App())
+        s.state = s.STATE_DONE
+        ok, code, _msg = s.start(resume_dir=str(old))          # the 1.x window's Resume
+        self.assertTrue(ok, code)
+        self.assertEqual(s.state, s.STATE_RECORDING)
+        self.assertEqual(s._meeting_dir, old)
+        self.assertEqual((s._resume_prior, s._meeting_title), ("ORIGINAL", "Board"))
+        # The same through continue_meeting (the notes view's Continue).
+        s2 = _session(_App())
+        s2.state = s2.STATE_DONE
+        ok, _code, _msg = s2.continue_meeting(str(old))
+        self.assertTrue(ok)
+        self.assertEqual((s2._meeting_dir, s2._resume_prior, s2._meeting_title),
+                         (old, "ORIGINAL", "Board"))
+        self.assertEqual(s2._resume_prior_duration, 60)
 
     def test_meetings_started_in_the_same_second_get_their_own_folders(self):
-        from ui import meetings as um
         (self.root / "20260927_100000").mkdir()
-        _, w = _window(_App())
-        w.state = w.STATE_DONE
-        with patch.object(um.time, "strftime", return_value="20260927_100000"):
-            self._start(w)
-        self.assertEqual(w._meeting_dir.name, "20260927_100000_2")
-        self.assertEqual(ms._folder_timestamp(w._meeting_dir.name), "2026-09-27 10:00:00")
+        s = _session(_App())
+        s.state = s.STATE_DONE
+        with patch.object(msess.time, "strftime", return_value="20260927_100000"):
+            s.start()
+        self.assertEqual(s._meeting_dir.name, "20260927_100000_2")
+        self.assertEqual(ms._folder_timestamp(s._meeting_dir.name), "2026-09-27 10:00:00")
 
     def test_abort_keeps_a_discarded_session_out_of_history(self):
-        um, w = _window(_App())
-        w.state = w.STATE_IDLE
-        self._start(w)
-        _write_chunks(w._meeting_dir, [(0, "never mind")])
-        w._abort()
-        self.assertEqual(w.state, w.STATE_IDLE)
+        s = self._idle(_App())
+        s.start()
+        _write_chunks(s._meeting_dir, [(0, "never mind")])
+        s.abort()
+        self.assertEqual(s.state, s.STATE_IDLE)
         self.assertEqual(ms.list_meetings(), [])
         # A resumed meeting's folder is left alone.
         old = self.root / "20260101_090000"
         old.mkdir()
         (old / "transcript.txt").write_text("ORIGINAL", encoding="utf-8")
-        w.show = w.raise_ = w.activateWindow = lambda: None
-        with patch.object(um.telemetry, "track"):
-            w.resume_meeting(str(old))
+        s.continue_meeting(str(old))
         _write_chunks(old, [(0, "more")])
-        w._abort()
+        s.abort()
         self.assertTrue((old / "chunks.jsonl").is_file())
         self.assertEqual([m["id"] for m in ms.list_meetings()], ["20260101_090000"])
 

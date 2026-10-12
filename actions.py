@@ -22,7 +22,7 @@ API_GEMINI_ID = "api_gemini"
 API_ANTHROPIC_ID = "api_anthropic"
 API_CEREBRAS_ID = "api_cerebras"
 API_MISTRAL_ID = "api_mistral"
-API_MANAGED_ID = "managed"  # Pro: runs through the server (founder's Mistral key)
+API_MANAGED_ID = "managed"  # Pro: runs through the server (the founder's keys)
 
 ACTION_MODES = {
     ACTION_TRANSCRIBE_ONLY: {
@@ -45,7 +45,7 @@ ACTION_MODES = {
 
 ACTION_MODELS = {
     API_MANAGED_ID: {
-        "label": "Transcribe Pro (managed cloud)",
+        "label": "Gusan Cloud (Pro)",
         "description": "Pro: high-quality cloud AI with no API key or setup - we handle it.",
         "available": True,
         "kind": "managed",
@@ -79,7 +79,7 @@ ACTION_MODELS = {
     },
     API_CEREBRAS_ID: {
         "label": "Cerebras API (fastest · vision)",
-        "description": "Sub-second streamed answers - the engine Live Assistance is built for. "
+        "description": "Sub-second streamed answers - the engine Live Assistant is built for. "
                        "Key from cloud.cerebras.ai.",
         "available": True,
         "kind": "cloud",
@@ -98,15 +98,18 @@ ACTION_MODELS = {
 
 def cloud_api_config(model, config):
     """The config a cloud engine runs with: provider set from the engine, plus
-    the key conveniences - Gemini may run on the Google speech key, Mistral on
-    the Voxtral speech key - so one key powers speech AND AI actions."""
+    the key conveniences so one key powers speech AND AI actions. Gemini runs
+    on the shared Google key (google_api_key - Settings' "Google Gemini" key;
+    1.9 saved a Gemini writer's key there too) and never on action_api_key,
+    which holds the other writers' key: an OpenAI key there must not go to
+    Google. Mistral uses its writer key, else the Voxtral speech key."""
     info = ACTION_MODELS[model]
     api_config = {**(config or {}), "action_api_provider": info["provider"]}
-    if not (api_config.get("action_api_key") or "").strip():
+    if info["provider"] == action_api.PROVIDER_GEMINI:
+        api_config["action_api_key"] = ((config or {}).get("google_api_key") or "").strip()
+    elif not (api_config.get("action_api_key") or "").strip():
         fallback = ""
-        if info["provider"] == action_api.PROVIDER_GEMINI:
-            fallback = (config or {}).get("google_api_key") or ""
-        elif info["provider"] == action_api.PROVIDER_MISTRAL:
+        if info["provider"] == action_api.PROVIDER_MISTRAL:
             fallback = (config or {}).get("mistral_api_key") or ""
         if fallback.strip():
             api_config["action_api_key"] = fallback.strip()
@@ -225,7 +228,7 @@ def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_I
 
         kind = ACTION_MODELS[model].get("kind")
 
-        # Managed (Pro): run through the server's Mistral key - no BYO key. The
+        # Managed (Pro): run through the server (DeepSeek) - no BYO key. The
         # auth token is injected into config by the caller (main._stop).
         if kind == "managed":
             token = (config or {}).get("_managed_token")
@@ -247,7 +250,7 @@ def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_I
         # explicitly picked a cloud LLM, so a failure must be visible.
         if kind == "cloud":
             if not config:
-                raise ActionError("Add your API key in Settings → AI Actions to use Smart actions.")
+                raise ActionError("Add your API key in Settings › Speech & AI to use Smart Actions.")
             api_config = cloud_api_config(model, config)
             try:
                 return action_api.run_action(
@@ -263,8 +266,8 @@ def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_I
             if not local_llm.model_downloaded(model):
                 label = local_llm.MODEL_CATALOG.get(model, {}).get("label", model)
                 raise ActionError(
-                    f"Smart actions need {label}, which isn't downloaded yet. "
-                    "Download it in Settings → AI Actions, or choose a cloud engine."
+                    f"Smart Actions need {label}, which isn't downloaded yet. "
+                    "Download it in Settings › Speech & AI, or choose a cloud engine."
                 )
             try:
                 return local_llm.run_action(
@@ -346,8 +349,21 @@ def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_I
     return text
 
 
-NO_ENGINE_MESSAGE = ("No AI engine is connected. Sign in to Transcribe Pro, or add an "
-                     "API key in Settings → AI Actions.")
+NO_ENGINE_MESSAGE = ("No AI engine is connected. Sign in to Gusan Pro, or add an "
+                     "API key in Settings › Speech & AI.")
+# Live answers kept on this computer ("Answers written by: This computer", or
+# Privacy Mode) with no local model downloaded: signing in or a key wouldn't help.
+LOCAL_ANSWERS_MESSAGE = "Download Qwen 1.5B in Settings › Speech & AI to answer on this computer."
+
+
+def no_live_engine_message(config):
+    """The Live Assistant's line when no engine can answer (live_engine gave
+    None): a local model to download when answers must stay on this computer,
+    else NO_ENGINE_MESSAGE."""
+    config = config or {}
+    if config.get("privacy_mode") or config.get("live_assist_writer") == "local":
+        return LOCAL_ANSWERS_MESSAGE
+    return NO_ENGINE_MESSAGE
 
 
 def process_stream(text, mode, on_token, source_lang="auto", target_lang="en",
@@ -364,7 +380,7 @@ def process_stream(text, mode, on_token, source_lang="auto", target_lang="en",
     kind = ACTION_MODELS.get(model, {}).get("kind")
     if config and config.get("privacy_mode") and kind in ("cloud", "managed"):
         raise ActionError("Cloud AI engines are off in Privacy Mode - pick a local model "
-                          "in Settings → AI Actions.")
+                          "in Settings › Speech & AI.")
     text = (text or "").strip()
     if not text:
         return ""
@@ -384,7 +400,7 @@ def process_stream(text, mode, on_token, source_lang="auto", target_lang="en",
             if not local_llm.model_downloaded(model):
                 label = local_llm.MODEL_CATALOG.get(model, {}).get("label", model)
                 raise ActionError(f"{label} isn't downloaded yet - download it in "
-                                  "Settings → AI Actions, or choose a cloud engine.")
+                                  "Settings › Speech & AI, or choose a cloud engine.")
             return local_llm.run_action_stream(
                 text, mode, on_token, source_lang=source_lang, target_lang=target_lang,
                 model_id=model, vocab_block=vocab_block)
@@ -398,9 +414,8 @@ def process_stream(text, mode, on_token, source_lang="auto", target_lang="en",
         if kind == "managed":
             token = (config or {}).get("_managed_token")
             if not token:
-                raise ActionError("Sign in with your Transcribe Pro account to use the "
-                                  "Pro AI engine - or add your own API key in Settings "
-                                  "→ AI Actions.")
+                raise ActionError("Sign in with your Gusan Pro account to use Gusan Cloud "
+                                  "- or add your own API key in Settings › Speech & AI.")
             return action_api.run_managed_action_stream(
                 text, mode, token, on_token, source_lang=source_lang,
                 target_lang=target_lang, vocab_block=vocab_block,
@@ -412,16 +427,17 @@ def process_stream(text, mode, on_token, source_lang="auto", target_lang="en",
 
 
 def live_engine(engine, config):
-    """The engine for the Live Assistance's answers, from the Smart Actions
+    """The engine for the Live Assistant's answers, from the Smart Actions
     engine resolved for this user (``config`` carries ``_managed_token`` for
     Pro). Live answers need speed and sight, so a Pro user ALWAYS gets the Pro
     cloud engine (fast streaming models, vision) whatever is set for Smart
-    Actions; only Privacy Mode keeps it local. Without Pro: a cloud engine with
-    its own key, else a downloaded local model; None when nothing real can run
-    (there's no rule-based answer)."""
+    Actions; only Privacy Mode - or the Live Assistant page's "Answers written
+    by: This computer" (cfg live_assist_writer "local") - keeps it local.
+    Without Pro: a cloud engine with its own key, else a downloaded local
+    model; None when nothing real can run (there's no rule-based answer)."""
     config = config or {}
     kind = ACTION_MODELS.get(engine, {}).get("kind")
-    if config.get("privacy_mode"):
+    if config.get("privacy_mode") or config.get("live_assist_writer") == "local":
         # On-device only: a local model or nothing - never the server.
         return engine if kind == "local_llm" else _first_downloaded_local_model()
     has_token = bool(config.get("_managed_token"))
@@ -460,7 +476,7 @@ def warm_up(model, config):
 
 
 def _live_assist_basic(text):
-    """No-LLM fallback for Live Assistance: point at the last question asked in
+    """No-LLM fallback for the Live Assistant: point at the last question asked in
     the conversation tail and echo the freshest points. Says plainly that it
     is basic mode - a user who expects AI suggestions must not mistake this
     for them. Input is the context built by ui.live_assist.rolling_context."""
@@ -476,7 +492,7 @@ def _live_assist_basic(text):
     if question:
         lines.append(f"You asked: {question}")
         lines.append("Basic mode can't answer questions - set up an AI engine in "
-                     "Settings → AI Actions (Transcribe Pro works out of the box).")
+                     "Settings › Speech & AI (Gusan Pro works out of the box).")
     if asked:
         lines.append(f"They're asking: {asked}")
     else:
@@ -703,5 +719,5 @@ def _meeting_notes_extractive(text):
             parts.append(f"- [ ] {_clean_sentence(item)}")
     else:
         parts.append("_No obvious action items detected. Consider configuring a "
-                     "cloud or local LLM in Settings → Actions for richer notes._")
+                     "cloud or local AI in Settings › Speech & AI for richer notes._")
     return "\n".join(parts)

@@ -1,5 +1,6 @@
 """Regression tests for the v1.9.1 release review fixes that live in main.py,
-ui/settings.py and ui/live_assist.py (pure logic - no display needed)."""
+settings_apply.py (the 1.x Settings window's write-back rule) and
+ui/live_assist.py (pure logic - no display needed)."""
 import time
 import unittest
 from types import SimpleNamespace
@@ -53,13 +54,26 @@ class TestOfflineAccountBucket(unittest.TestCase):
 
 class TestSettingsWriteBack(unittest.TestCase):
     def test_background_keys_never_ride_back_from_the_snapshot(self):
-        from ui.settings import Settings
-        me = SimpleNamespace(_BACKGROUND_KEYS=Settings._BACKGROUND_KEYS, cfg_working={
-            "whisper_model": "large-v3", "secrets_owner": "user:X", "user_secrets": {},
-            "last_known_pro": {"X": False}, "pending_update_version": "v1.9.2",
-            "live_assist_auto_answer": False, "known_emails": ["a@b.c"],
-            "overlay_pos": [10, 20]})
-        self.assertEqual(Settings._staged_settings(me), {"whisper_model": "large-v3"})
+        # 2.0 pages write one key at a time (settings_apply, no snapshot):
+        # a change touches only its own key, and the account state the
+        # controller owns can't be written by a page at all.
+        import settings_apply
+        cfg = {"whisper_model": "base", "secrets_owner": "user:X", "user_secrets": {"k": 1},
+               "last_known_pro": {"X": False}, "pending_update_version": "v1.9.2",
+               "live_assist_auto_answer": False, "known_emails": ["a@b.c"], "overlay_pos": [10, 20]}
+        before = dict(cfg)
+        announced = []
+        app = SimpleNamespace(cfg=cfg, schedule_config_save=MagicMock(), _preload_speech_model=MagicMock(),
+                              sig_setting_changed=SimpleNamespace(emit=announced.append))
+        out = settings_apply.apply(app, {"whisper_model": "large-v3"})
+        self.assertEqual(out, {"whisper_model": True})
+        self.assertEqual({k: v for k, v in cfg.items() if before.get(k) != v}, {"whisper_model": "large-v3"})
+        self.assertEqual(announced, ["whisper_model"])
+        stale = {"secrets_owner": "user:Y", "user_secrets": {}, "last_known_pro": {},
+                 "pending_update_version": "", "known_emails": []}
+        self.assertEqual(settings_apply.apply(app, stale), {k: False for k in stale})
+        self.assertEqual(cfg["secrets_owner"], "user:X")
+        self.assertEqual(cfg["pending_update_version"], "v1.9.2")
 
     def test_auto_answer_uses_a_new_key(self):
         # 1.9.0 wrote "live_assist_auto": false into every config.json.

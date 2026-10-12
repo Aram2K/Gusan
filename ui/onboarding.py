@@ -23,7 +23,7 @@ class Onboarding(QDialog):
         # steps, since they're already configured).
         self.account_only = account_only
 
-        self.setWindowTitle("Sign in to Transcribe" if account_only else "Welcome to Transcribe")
+        self.setWindowTitle("Sign in to Gusan" if account_only else "Welcome to Gusan")
         # Resizable with a soft minimum (was setFixedSize(520, 680), which both
         # overflowed small/scaled screens and refused user resizing).
         self.setMinimumSize(460, 520)
