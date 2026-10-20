@@ -48,12 +48,12 @@
   <text x="162" y="88"
         font-family="Arial, Helvetica, sans-serif"
         font-size="52" font-weight="bold"
-        fill="#ffffff" letter-spacing="-1">Transcribe</text>
+        fill="#ffffff" letter-spacing="-1">Gusan</text>
 
   <!-- Tagline -->
   <text x="163" y="118"
         font-family="Arial, Helvetica, sans-serif"
-        font-size="15" fill="#94a3b8">🇦🇲 Armenian-first&#160;&#160;·&#160;&#160;⚡ 100% Offline AI&#160;&#160;·&#160;&#160;🎙 Private Dictation &amp; Summaries</text>
+        font-size="15" fill="#94a3b8">⚡ Offline-first AI&#160;&#160;·&#160;&#160;🎙 Private Dictation &amp; Summaries&#160;&#160;·&#160;&#160;🕶 Hidden Live Assistant</text>
 
   <!-- ── Waveform bars ── -->
   <g transform="translate(162, 170)">
@@ -149,10 +149,5 @@
   <rect x="706" y="82" width="94" height="26" rx="5" fill="#14532d"/>
   <text x="753" y="99" font-family="Arial, Helvetica, sans-serif" font-size="12"
         fill="#22c55e" text-anchor="middle">✓ Free</text>
-
-  <!-- Armenian -->
-  <rect x="596" y="116" width="204" height="26" rx="5" fill="#1e293b"/>
-  <text x="698" y="133" font-family="Arial, Helvetica, sans-serif" font-size="12"
-        fill="#94a3b8" text-anchor="middle">🇦🇲 Armenian Pro Optimized</text>
 
 </svg>
