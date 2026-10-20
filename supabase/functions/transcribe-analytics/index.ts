@@ -69,6 +69,8 @@ const allowedEvents = new Set([
   'file_transcription_completed',
   'file_transcription_failed',
   'file_transcription_saved',
+  'notion_connect_result',
+  'notion_disconnected',
 ])
 
 const sensitiveKeys = new Set([

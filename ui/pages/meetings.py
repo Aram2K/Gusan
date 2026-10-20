@@ -43,8 +43,11 @@ Integration notes for Wave 4
   (new; "managed" = Gusan Cloud or a local_llm id; read by MeetingSession.start),
   ``meeting_consent_reminder`` (new, default True: shows the consent line on the
   start card), ``calendar_ask_to_record`` / ``calendar_only_with_link``
-  (calendar_service.DEFAULTS), ``notion_api_key`` + ``notion_parent_page``
-  (through ``set_settings`` when present). Add the three new keys to main.DEFAULT.
+  (calendar_service.DEFAULTS), and the Notion connection (ui/notion_sheet.py
+  writes ``notion_api_key``, ``notion_refresh_token``, ``notion_auth_mode``,
+  ``notion_workspace_name``, ``notion_parent_page`` / ``_title``,
+  ``notion_hub_page`` and ``notion_reconnect`` in one ``set_settings`` call;
+  ``notion_auto_send`` is the rail's switch). Add the three new keys to main.DEFAULT.
   Every write falls back to cfg + save_config only when set_setting is missing.
 * ``ui.recording_prompts.ensure_recording_consent`` writes ``meeting_consent_ack``
   through ``app.set_setting`` (cfg + ``save_config`` without it); the session
@@ -81,11 +84,12 @@ from datetime import datetime, timezone
 
 from PySide6.QtCore import QEvent, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPen, QPixmap, QRadialGradient
-from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QComboBox, QDialog, QDialogButtonBox, QFrame,
-                               QHBoxLayout, QLabel, QLineEdit, QPushButton, QRadioButton, QScrollArea,
-                               QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QComboBox, QFrame, QHBoxLayout, QLabel,
+                               QLineEdit, QPushButton, QRadioButton, QScrollArea, QSizePolicy,
+                               QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
-from ui import theme
+import notion_export
+from ui import notion_sheet, theme
 from ui.components import (Button, Card, Chip, Divider, IconButton, PageHeader, ProTag, SettingRow,
                            SettingsRail, Toggle, icons, label)
 from ui.pages import meeting_views as views
@@ -105,8 +109,9 @@ LOCAL_DEFAULT = "qwen_tiny"    # local_llm.QWEN_TINY_ID
 _SETTING_KEYS = {
     "meeting_audio_mode", "meeting_language", "language", NOTES_KEY, "action_model", "backend",
     "whisper_model", "privacy_mode", "managed_provider", "google_stt_model", "mistral_stt_model",
-    ASK_KEY, LINK_ONLY_KEY, CONSENT_KEY, "notion_api_key", "notion_parent_page", "live_assist_hotkey",
-    "live_assist_private", "google_oauth_client_id", "google_oauth_client_secret",
+    ASK_KEY, LINK_ONLY_KEY, CONSENT_KEY, "notion_api_key", "notion_parent_page", "notion_auth_mode",
+    "notion_workspace_name", "notion_parent_title", "notion_auto_send", "notion_reconnect",
+    "live_assist_hotkey", "live_assist_private", "google_oauth_client_id", "google_oauth_client_secret",
 }
 
 
@@ -157,7 +162,7 @@ def _cloud_writer_model():
         import engine_choice
         return engine_choice.CLOUD_WRITER_MODEL
     except Exception:
-        return "Claude Sonnet 5.5"
+        return "Mistral Small"
 
 
 def create(main_app):
@@ -580,15 +585,11 @@ class MeetingsPage(QWidget):
         self._tick.stop()               # never touches the recording
 
     # ── Notion ──
-    def connect_notion(self):
-        dlg = NotionDialog(self.cfg(), self)
-        if dlg.exec() != QDialog.Accepted:
-            return False
-        token, page = dlg.values()
-        import notion_export
-        if not token or not notion_export.extract_page_id(page):
-            return False
-        return self.set_settings({"notion_api_key": token, "notion_parent_page": page})
+    def connect_notion(self, then="", reason=""):
+        """Open the Notion sheet (connect, switch, where notes go). True when
+        the caller's ``then`` button was pressed - or, with no ``then``, when
+        Notion is connected as the sheet closes."""
+        return notion_sheet.show_notion_sheet(self, then=then, reason=reason)
 
 
 # ── list view ────────────────────────────────────────────────────────────────
@@ -1912,46 +1913,6 @@ class NotesOption(QFrame):
         super().mousePressEvent(e)
 
 
-class NotionDialog(QDialog):
-    """Notion setup: the integration secret + the page the notes land under."""
-
-    def __init__(self, cfg, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Connect Notion")
-        self.setMinimumWidth(460)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(22, 20, 22, 18)
-        lay.setSpacing(10)
-        info = QLabel(
-            "1. Create an internal integration at "
-            "<a href='https://www.notion.so/my-integrations'>notion.so/my-integrations</a> and copy its secret.<br>"
-            "2. In Notion, open the page the notes should land under &rarr; <b>&#8943;</b> &rarr; "
-            "<b>Connections</b> &rarr; add that integration.<br>"
-            "3. Paste both below. They stay on this computer.", self)
-        info.setOpenExternalLinks(True)
-        info.setWordWrap(True)
-        lay.addWidget(info)
-        lay.addWidget(QLabel("Integration secret", self))
-        self.token = QLineEdit(self)
-        self.token.setEchoMode(QLineEdit.Password)
-        self.token.setAccessibleName("Integration secret")
-        self.token.setText(cfg.get("notion_api_key", "") or "")
-        lay.addWidget(self.token)
-        lay.addWidget(QLabel("Page link", self))
-        self.page = QLineEdit(self)
-        self.page.setAccessibleName("Page link")
-        self.page.setPlaceholderText("https://www.notion.so/Your-Page-…")
-        self.page.setText(cfg.get("notion_parent_page", "") or "")
-        lay.addWidget(self.page)
-        btns = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel, self)
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
-        lay.addWidget(btns)
-
-    def values(self):
-        return self.token.text().strip(), self.page.text().strip()
-
-
 class MeetingRail(SettingsRail):
     """'Meeting settings': Google Calendar, Meeting language, Notes
     written by, Send notes to Notion, Remind me to tell people; the speech
@@ -2013,22 +1974,37 @@ class MeetingRail(SettingsRail):
         self.opt_cloud.radio.clicked.connect(self._pick_cloud)
         self.opt_local.radio.clicked.connect(self._pick_local)
         self.add_row(SettingRow("Notes written by", opts, stacked=True))
-        # Notion
+        # Notion. The actions stack (Manage over Disconnect, Reconnect over Disconnect):
+        # side by side they would not fit beside the label in this narrow rail.
         self.notion_control = QWidget()
-        nl = QHBoxLayout(self.notion_control)
+        nl = QVBoxLayout(self.notion_control)
         nl.setContentsMargins(0, 0, 0, 0)
-        nl.setSpacing(6)
-        self.notion_connect = Button("Connect", "secondary", "s", icon="notion", parent=self.notion_control)
+        nl.setSpacing(2)
+        self.notion_connect = Button("Connect", "secondary", "s", parent=self.notion_control)
         self.notion_connect.setAccessibleName("Connect Notion")
         self.notion_connect.clicked.connect(self._notion_connect)
-        nl.addWidget(self.notion_connect)
+        self.notion_reconnect = Button("Reconnect", "secondary", "s", parent=self.notion_control)
+        self.notion_reconnect.setAccessibleName("Reconnect Notion")
+        self.notion_reconnect.clicked.connect(self._notion_connect)
+        self.notion_manage = Button("Manage", "link", "s", parent=self.notion_control)
+        self.notion_manage.setAccessibleName("Manage Notion")
+        self.notion_manage.clicked.connect(self._notion_manage)
         self.notion_disconnect = Button("Disconnect", "link", "s", parent=self.notion_control)
         self.notion_disconnect.setProperty("tone", "muted")
-        self.notion_disconnect.setFont(theme.font(12.5, 600))
         self.notion_disconnect.setAccessibleName("Disconnect Notion")
         self.notion_disconnect.clicked.connect(self._notion_disconnect)
-        nl.addWidget(self.notion_disconnect)
+        for link in (self.notion_manage, self.notion_disconnect):
+            link.setFont(theme.font(12.5, 600))
+            link.setFixedHeight(22)
+        for w in (self.notion_connect, self.notion_reconnect, self.notion_manage, self.notion_disconnect):
+            nl.addWidget(w, 0, Qt.AlignRight)
         self.notion_row = self.add_row(SettingRow("Send notes to Notion", self.notion_control))
+        self.notion_row.hint_label.setTextFormat(Qt.PlainText)    # the workspace name is Notion's text, not markup
+        _label_icon(self.notion_row, notion_sheet.mark_label(16))
+        self.notion_auto_toggle = Toggle(notion_sheet.AUTO_NAME, False)
+        self.notion_auto_toggle.toggled.connect(lambda on: self.page.set_setting("notion_auto_send", bool(on)))
+        self.notion_auto_row = self.add_row(SettingRow("Send automatically", self.notion_auto_toggle,
+                                                       hint=notion_sheet.RAIL_AUTO_HINT))
         # Consent
         self.consent_toggle = Toggle("Remind me to tell people", True)
         self.consent_toggle.toggled.connect(lambda on: self.page.set_setting(CONSENT_KEY, bool(on)))
@@ -2066,10 +2042,7 @@ class MeetingRail(SettingsRail):
             tog.blockSignals(False)
             tog.update()
         self.sync_notes_by()
-        notion = bool((cfg.get("notion_api_key") or "").strip() and (cfg.get("notion_parent_page") or "").strip())
-        self.notion_connect.setVisible(not notion)
-        self.notion_disconnect.setVisible(notion)
-        self.notion_row.set_hint("Connected" if notion else "")
+        self.sync_notion(cfg)
         info = views.runs_on(self.page.app, "dictation")
         if info:
             kind = info.get("kind")
@@ -2085,6 +2058,37 @@ class MeetingRail(SettingsRail):
         else:
             self.runs_label.setText("Runs on this computer")
             self.runs_model.setText("")
+
+    def sync_notion(self, cfg=None):
+        """The Notion rows: Connect | Manage + Disconnect | Reconnect + Disconnect,
+        the workspace as the hint, and the automatic-send switch once connected."""
+        cfg = self.page.cfg() if cfg is None else cfg
+        notion = notion_export.is_connected(cfg)
+        again = notion and bool(cfg.get("notion_reconnect"))
+        auto = bool(cfg.get("notion_auto_send"))
+        self.notion_connect.setVisible(not notion)
+        self.notion_manage.setVisible(notion and not again)
+        self.notion_reconnect.setVisible(again)
+        self.notion_disconnect.setVisible(notion)
+        if again:
+            hint = notion_sheet.RAIL_RECONNECT_HINT
+        elif notion:
+            hint = (cfg.get("notion_workspace_name") or "").strip() or "Connected"
+        else:
+            hint = ""
+        self.notion_row.set_hint(hint)
+        # The one hint that asks for something reads in the darker body colour; the
+        # workspace name is passive and keeps the shared muted one.
+        role = "body" if again else "hint"
+        if self.notion_row.hint_label.property("textRole") != role:
+            theme.set_role(self.notion_row.hint_label, role)
+        self.notion_auto_row.setVisible(notion)
+        self.notion_auto_row.set_hint(notion_sheet.RAIL_PAUSED_HINT if auto and cfg.get("privacy_mode")
+                                      else notion_sheet.RAIL_AUTO_HINT)
+        self.notion_auto_toggle.blockSignals(True)
+        self.notion_auto_toggle.setChecked(auto)
+        self.notion_auto_toggle.blockSignals(False)
+        self.notion_auto_toggle.update()
 
     def notes_choice(self):
         """("cloud" | "local", local model id) - what the radios show."""
@@ -2211,6 +2215,10 @@ class MeetingRail(SettingsRail):
         self.page.connect_notion()
         self.sync_settings()
 
+    def _notion_manage(self):
+        self.page.connect_notion()          # connected: the sheet opens on "Connected"
+        self.sync_settings()
+
     def _notion_disconnect(self):
-        self.page.set_settings({"notion_api_key": "", "notion_parent_page": ""})
+        notion_sheet.disconnect_notion(self.page)
         self.sync_settings()

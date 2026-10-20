@@ -84,6 +84,7 @@ from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QProgressBar,
                                QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget)
 
+import engine_choice
 import file_jobs
 import hardware
 import transcript_store
@@ -104,6 +105,10 @@ DROP_TITLE = "Drop audio or video here"
 DROP_FORMATS = "MP3, WAV, M4A, FLAC or video · any length"
 RAIL_TITLE = "Audio to text settings"
 RAIL_FOOT = "On this computer. Nothing is uploaded."
+RAIL_FOOT_CLOUD = "Sent to Gusan Cloud to transcribe."
+RAIL_FOOT_OWN = "Sent to {name} with your key."
+PRIVACY_HINT = "Privacy mode keeps it on this computer."    # as on Smart Actions
+UPSELL_SPEECH = engine_choice.UPSELL_SPEECH                 # "Fast cloud transcription"
 FILES_TITLE = "Your files"
 EMPTY_TEXT = "Files you convert show up here."
 NOT_READY = "Audio to text isn't ready yet. Try again in a moment."
@@ -115,6 +120,9 @@ WORD_MISSING = "The Word file was moved or deleted."
 K_MODEL, K_LANG, K_SPK, K_TS, K_WORD = ("file_model", "file_language", "file_speakers",
                                         "file_timestamps", "file_save_word")
 RAIL_KEYS = (K_MODEL, K_LANG, K_SPK, K_TS, K_WORD)
+# Other settings that change the Accuracy list or what a pick runs.
+MODEL_WATCH = ("privacy_mode", "google_api_key", "mistral_api_key", "managed_provider",
+               "google_stt_model", "mistral_stt_model", "admin_tier_override")
 AUTO = "auto"
 AUTO_PLAIN = "Automatic"
 LIST_STEP = 50                      # rows shown, then "Show more"
@@ -128,6 +136,13 @@ _DROP_FILL_ALPHA = 0.40
 def _cfg(app):
     cfg = getattr(app, "cfg", None)
     return cfg if isinstance(cfg, dict) else {}
+
+
+def _is_pro(app):
+    try:
+        return bool(app.is_pro())
+    except Exception:
+        return False
 
 
 class MetaLine(QLabel):
@@ -897,11 +912,13 @@ class AudioToTextPage(QWidget):
         self.refresh_list()
 
     def on_setting_changed(self, key):
-        if key in RAIL_KEYS:
+        if key in RAIL_KEYS or key in MODEL_WATCH:
             self._sync_settings()
 
     def refresh_account(self):
-        """The page is the same for every plan: no limits, nothing to unlock."""
+        """Pro started or ended: the PRO marks in Accuracy follow, and a Gusan
+        Cloud pick that can't run now reads Automatic."""
+        self._sync_settings()
 
     # ── views ──
     def current_view(self):
@@ -1139,19 +1156,15 @@ class AudioToTextPage(QWidget):
         av = QVBoxLayout(acc)
         av.setContentsMargins(0, 0, 0, 0)
         av.setSpacing(3)
+        # Automatic / a Whisper model / Gusan Cloud (PRO) / your own key.
         self.model_combo = _combo(PlainNameCombo(acc), "Accuracy", width=150)
-        self.model_combo.addItem(AUTO_PLAIN, AUTO)
-        self.model_combo.setItemData(0, AUTO_PLAIN, PLAIN_ROLE)
-        for mid, info in hardware.MODEL_INFO.items():
-            self.model_combo.addItem(info.label(), mid)
-            self.model_combo.setItemData(self.model_combo.count() - 1, info.plain, PLAIN_ROLE)
-        self.model_combo.view().setMinimumWidth(260)
+        self._fill_model_combo()
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
         av.addWidget(self.model_combo)
         self.model_line = label("", "model", acc)
         self.model_line.setContentsMargins(13, 0, 0, 0)
         av.addWidget(self.model_line)
-        rail.add_row(SettingRow("Accuracy", acc))
+        self.model_row = rail.add_row(SettingRow("Accuracy", acc))
 
         self.lang_combo = QComboBox(rail)
         for code, name in LANGUAGES:
@@ -1179,13 +1192,60 @@ class AudioToTextPage(QWidget):
         fl = QHBoxLayout(foot)
         fl.setContentsMargins(0, 0, 0, 0)
         fl.setSpacing(8)
-        shield = label("", "muted", foot)
-        shield.setPixmap(icons.pixmap("shield", 15, "muted"))
-        fl.addWidget(shield)
+        self.rail_foot_icon = label("", "muted", foot)       # shield / cloud / key
+        self._foot_icon = "shield"
+        self.rail_foot_icon.setPixmap(icons.pixmap("shield", 15, "muted"))
+        fl.addWidget(self.rail_foot_icon)
         self.rail_foot = label(RAIL_FOOT, "muted", foot)
         fl.addWidget(self.rail_foot, 1)
         rail.set_foot(foot)
         return rail
+
+    def _fill_model_combo(self):
+        """The Accuracy list from engine_choice.file_choices."""
+        try:
+            choices = engine_choice.file_choices(_cfg(self.app))
+        except Exception:
+            logger.debug("file_choices failed", exc_info=True)
+            choices = [(AUTO, AUTO_PLAIN, AUTO_PLAIN, False)]
+            choices += [(mid, i.plain, i.label(), False) for mid, i in hardware.MODEL_INFO.items()]
+        pro = _is_pro(self.app)
+        box = self.model_combo
+        box.blockSignals(True)
+        box.clear()
+        for value, plain, line, needs_pro in choices:
+            # Calm Pro: a plain "PRO" after the name, for Free users only.
+            text = "%s  PRO" % line if (needs_pro and not pro) else line
+            box.add_choice(text, value, plain=plain)
+        box.blockSignals(False)
+        fm = box.view().fontMetrics()
+        longest = max((fm.horizontalAdvance(box.itemText(i)) for i in range(box.count())), default=0)
+        box.view().setMinimumWidth(max(260, longest + 40))
+        self._model_fill = self._fill_key()
+
+    def _fill_key(self):
+        """What the list's items depend on: the plan (the PRO marks), the Gusan
+        Cloud provider (its model's name) and the own keys and their models."""
+        cfg = _cfg(self.app)
+        return (_is_pro(self.app), str(cfg.get("managed_provider") or ""),
+                bool(str(cfg.get("google_api_key") or "").strip()),
+                bool(str(cfg.get("mistral_api_key") or "").strip()),
+                str(cfg.get("google_stt_model") or ""), str(cfg.get("mistral_stt_model") or ""))
+
+    def model_value(self):
+        """What really converts a file now, as an Accuracy value: a cloud pick
+        that can't run (Privacy mode, Pro ended, the key removed) reads
+        Automatic, and so does an unknown value."""
+        cfg = _cfg(self.app)
+        value = str(self._value(K_MODEL) or AUTO).strip()
+        try:
+            backend, model = engine_choice.file_session(dict(cfg, **{K_MODEL: value}), _is_pro(self.app))
+        except Exception:
+            logger.debug("file_session failed", exc_info=True)
+            return AUTO
+        if backend != "local":
+            return value
+        return model or AUTO
 
     def _value(self, key):
         return _cfg(self.app).get(key, file_jobs.FILE_DEFAULTS[key])
@@ -1194,9 +1254,16 @@ class AudioToTextPage(QWidget):
         """Controls from app.cfg (FILE_DEFAULTS for missing keys), without writing back."""
         self._syncing = True
         try:
-            model = self._value(K_MODEL) or AUTO
-            i = self.model_combo.findData(model if model in hardware.MODEL_INFO else AUTO)
-            self.model_combo.setCurrentIndex(max(0, i))
+            box = self.model_combo
+            if self._fill_key() != getattr(self, "_model_fill", None):
+                self._fill_model_combo()            # PRO marks, the cloud model, own keys
+            box.setCurrentIndex(max(0, box.findData(self.model_value())))
+            privacy = bool(_cfg(self.app).get("privacy_mode"))
+            for value in engine_choice.FILE_CLOUD_VALUES:
+                i = box.findData(value)
+                if i >= 0:
+                    box.set_choice_enabled(i, not privacy)     # Privacy mode keeps it on this computer
+            self.model_row.set_hint(PRIVACY_HINT if privacy else "")
             lang = self._value(K_LANG) or "auto"
             i = self.lang_combo.findData(lang)
             if i < 0:
@@ -1231,7 +1298,25 @@ class AudioToTextPage(QWidget):
         self._update_model_line()
 
     def _on_model_changed(self, _i):
-        self._set(K_MODEL, self.model_combo.currentData() or AUTO)
+        if self._syncing:
+            return
+        value = self.model_combo.currentData() or AUTO
+        try:
+            res = engine_choice.set_file_model(self.app, value)
+        except Exception:
+            logger.warning("set_file_model failed", exc_info=True)
+            res = {"ok": False, "problem": "error", "changes": {}, "upsell": ""}
+        if not res.get("ok"):
+            self._sync_settings()                   # back to what is really set; nothing saved
+            if res.get("problem") == "pro":
+                upsell = getattr(self.app, "_pro_upsell", None)
+                if callable(upsell):
+                    try:
+                        upsell(res.get("upsell") or UPSELL_SPEECH)
+                    except Exception:
+                        logger.warning("_pro_upsell failed", exc_info=True)
+            return
+        self._set(K_MODEL, value)
 
     def _on_lang_changed(self, _i):
         self._set(K_LANG, self.lang_combo.currentData() or "auto")
@@ -1258,13 +1343,38 @@ class AudioToTextPage(QWidget):
             logger.debug("auto model unknown", exc_info=True)
             return None
 
+    def _cloud_engine(self, value):
+        """engine_choice.file_engine for a cloud value, or {} (it runs locally)."""
+        try:
+            ro = engine_choice.file_engine(_cfg(self.app), value, _is_pro(self.app))
+        except Exception:
+            logger.debug("file_engine failed", exc_info=True)
+            return {}
+        return ro if ro.get("kind") in ("cloud", "own_key") else {}
+
     def _update_model_line(self, *_a):
         mid = self.model_combo.currentData() or AUTO
-        if mid == AUTO:
-            mid = self.auto_model()
-        text = hardware.real_name(mid) if mid else ""
+        ro = self._cloud_engine(mid) if mid in engine_choice.FILE_CLOUD_VALUES else {}
+        if ro:
+            text = ro.get("model_name") or ""       # "Gemini 2.5 Flash", never a Whisper name
+        else:
+            if mid == AUTO:
+                mid = self.auto_model()
+            text = hardware.real_name(mid) if mid and mid not in engine_choice.FILE_CLOUD_VALUES else ""
         self.model_line.setText(text)
         self.model_line.setVisible(bool(text))
+        self.model_combo.setAccessibleDescription(text)
+        # The footer says where the audio goes.
+        if ro.get("kind") == "cloud":
+            icon, foot = "cloud", RAIL_FOOT_CLOUD
+        elif ro.get("kind") == "own_key":
+            icon, foot = "key", RAIL_FOOT_OWN.format(name=ro.get("plain") or "")
+        else:
+            icon, foot = "shield", RAIL_FOOT
+        self.rail_foot.setText(foot)
+        if icon != self._foot_icon:
+            self._foot_icon = icon
+            self.rail_foot_icon.setPixmap(icons.pixmap(icon, 15, "muted"))
 
 
 def create(main_app):

@@ -447,6 +447,9 @@ QToolButton[gusan="iconBtn"][focusVisible="true"], QPushButton[gusan="iconBtn"][
 QToolButton[gusan="iconBtn"][framed="true"], QPushButton[gusan="iconBtn"][framed="true"] {{
     background: #ffffff; border: 1px solid {t['line2']};
 }}
+QToolButton[gusan="iconBtn"][framed="true"][focusVisible="true"], QPushButton[gusan="iconBtn"][framed="true"][focusVisible="true"] {{
+    border: 2px solid {t['blue-l']};
+}}
 QToolButton[gusan="playBtn"] {{ background: {t['blue']}; border: 1px solid {t['blue-h']}; border-radius: 20px; }}
 QToolButton[gusan="playBtn"]:hover {{ background: {t['blue-h']}; }}
 QToolButton[gusan="playBtn"]:pressed, QToolButton[gusan="playBtn"][loading="true"] {{ background: #1e40af; }}

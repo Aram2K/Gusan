@@ -110,6 +110,9 @@ ALLOWED_EVENTS = {
     "file_transcription_completed",
     "file_transcription_failed",
     "file_transcription_saved",
+    # Notion export (no text, ids, names or URLs: a mode, a result, a reason).
+    "notion_connect_result",
+    "notion_disconnected",
 }
 
 _queue_lock = threading.Lock()   # guards every read-modify-write of the queue file

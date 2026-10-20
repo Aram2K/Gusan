@@ -505,7 +505,7 @@ def test_pro_sees_offline_backup_and_cloud_selected(env):
     page = _settings(win)
     assert page.speech_tiles["cloud"].isChecked()
     assert page.writer_tiles["cloud"].isChecked()
-    assert page.writer_tiles["cloud"].hints() == ["DeepSeek V4.1 Flash", "Claude Sonnet 5.5 for meeting notes"]
+    assert page.writer_tiles["cloud"].hints() == ["DeepSeek V4.1 Flash", "Mistral Small for meeting notes"]
     from PySide6.QtWidgets import QLabel
     texts = [lb.text() for lb in page.model_cards["small"].action.findChildren(QLabel)]
     assert "Offline backup" in texts

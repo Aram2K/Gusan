@@ -179,10 +179,32 @@ DEFAULT = {
     # Put the user's clipboard back after we paste.
     "restore_clipboard": True,
     "clipboard_restore_delay_ms": 400,
-    # Notion export (Record Meeting -> Send to Notion). Internal-integration
-    # token + the page the notes land under. Plain-config like mistral_api_key.
+    # Notion export (meeting notes -> Notion). notion_api_key is the access token
+    # from "Connect Notion" or a pasted own-integration secret; with
+    # notion_refresh_token (OAuth only) it lives in the OS keyring
+    # (_NOTION_SECRETS: storage.NOTION_TOKEN_SECRET / NOTION_REFRESH_SECRET),
+    # like the API keys; config.json keeps "" once the keyring has them.
+    # notion_auth_mode: "" / "oauth" / "own" (a token with no mode is a setup from
+    # before OAuth, read as "own"). notion_parent_page is the page the notes land
+    # under (a pasted link still works); notion_hub_page is the "Gusan meetings"
+    # page Gusan made, and the destination is "the hub" while the two match.
+    # notion_reconnect: Notion refused the token for good, so Settings asks to
+    # connect again. The workspace and page names are for display only.
     "notion_api_key": "",
+    "notion_refresh_token": "",
+    "notion_auth_mode": "",
+    "notion_workspace_name": "",
     "notion_parent_page": "",
+    "notion_parent_title": "",
+    "notion_hub_page": "",
+    "notion_reconnect": False,
+    # "Send every meeting's notes to Notion automatically": off until the user
+    # turns it on (Meeting settings, or the connected Notion sheet).
+    "notion_auto_send": False,
+    # The Gusan account (auth.user_id) a Notion connection was made under; ""
+    # = made as a guest, adopted by the first account that signs in. Another
+    # account signing in forgets the connection (_reconcile_notion_owner).
+    "notion_owner": "",
     # Live Assistance overlay (ui/live_assist.py): private copilot during calls.
     "live_assist_hotkey": "ctrl+alt+a",
     "live_assist_private": True,     # excluded from screen capture
@@ -293,6 +315,13 @@ def normalize_mistral_model(model):
 # OS keyring; config keeps "" once migrated).
 _SECRET_CFG_KEYS = ("google_api_key", "action_api_key", "mistral_api_key")
 
+# The Notion tokens (the access token or a pasted secret, and the OAuth refresh
+# token) live in the keyring too. A table of their own, NOT part of
+# _SECRET_CFG_KEYS: that tuple also drives the per-account stash, and a Notion
+# connection belongs to the computer (see _reconcile_notion_owner).
+_NOTION_SECRETS = {"notion_api_key": storage.NOTION_TOKEN_SECRET,
+                   "notion_refresh_token": storage.NOTION_REFRESH_SECRET}
+
 # What the OS keyring is known to hold ({secret name: value}), from this run's
 # reads and successful writes. save_config runs after every instant-apply burst
 # (and on macOS each keyring write is a `security` subprocess), so it writes a
@@ -354,6 +383,28 @@ def _strip_user_secret_keys(store):
     return sanitized, blob
 
 
+def _load_notion_secrets(loaded):
+    """Fill the Notion tokens of ``loaded`` from the OS keyring; a plaintext one
+    in config.json (a 1.9 setup) moves into it. Returns ({cfg key: ""} for each
+    token the keyring now holds, moved): the blanks every config.json write of
+    this load must carry, and whether a plaintext token was moved. A token the
+    keyring would not take stays as it is (the API keys' fallback)."""
+    held, moved = {}, False
+    for key, name in _NOTION_SECRETS.items():
+        value = (loaded.get(key) or "").strip()
+        if value:
+            if _store_secret(name, value):
+                loaded[key] = value
+                held[key] = ""
+                moved = True
+        else:
+            loaded[key] = storage.read_secret(name)
+            _note_keyring_value(name, loaded[key])
+            if loaded[key]:
+                held[key] = ""
+    return held, moved
+
+
 def load_config():
     data = storage.read_json(CONFIG_PATH, DEFAULT)
     if not isinstance(data, dict):
@@ -364,11 +415,23 @@ def load_config():
     # hand-edited or older config self-heals on load.
     vocabulary.sync_config(loaded)
 
+    # First: every config.json write below carries the Notion blanks, or the
+    # migration of another key would put a plaintext token back on disk.
+    notion_blank, notion_moved = _load_notion_secrets(loaded)
+    if notion_moved:
+        try:
+            # Twice: the second write also replaces config.json.bak, a copy of
+            # the file as it was, which would still hold the plaintext token.
+            for _ in range(2):
+                storage.atomic_write_json(CONFIG_PATH, {**loaded, **notion_blank})
+        except OSError as e:
+            logger.warning("Could not sanitize the Notion token in config: %s", e)
+
     key = (loaded.get("google_api_key") or "").strip()
     if key:
         if _store_secret(storage.GOOGLE_API_KEY_SECRET, key):
             loaded["google_api_key"] = key
-            disk = {**loaded, "google_api_key": ""}
+            disk = {**loaded, "google_api_key": "", **notion_blank}
             try:
                 storage.atomic_write_json(CONFIG_PATH, disk)
             except OSError as e:
@@ -395,7 +458,7 @@ def load_config():
     if action_key:
         if _store_secret(storage.ACTION_API_KEY_SECRET, action_key):
             loaded["action_api_key"] = action_key
-            disk = {**loaded, "google_api_key": "", "action_api_key": ""}
+            disk = {**loaded, "google_api_key": "", "action_api_key": "", **notion_blank}
             try:
                 storage.atomic_write_json(CONFIG_PATH, disk)
             except OSError as e:
@@ -409,7 +472,7 @@ def load_config():
         # Migrate a plaintext Mistral key from config.json into the OS keyring.
         if _store_secret(storage.MISTRAL_API_KEY_SECRET, mistral_key):
             loaded["mistral_api_key"] = mistral_key
-            disk = {**loaded, "google_api_key": "", "action_api_key": "", "mistral_api_key": ""}
+            disk = {**loaded, "google_api_key": "", "action_api_key": "", "mistral_api_key": "", **notion_blank}
             try:
                 storage.atomic_write_json(CONFIG_PATH, disk)
             except OSError as e:
@@ -440,7 +503,7 @@ def load_config():
         if ANALYTICS_DECLINED_PATH.exists():
             loaded["analytics_enabled"] = False
         loaded["analytics_consent_applied"] = True
-        disk = {**loaded, "google_api_key": "", "action_api_key": ""}
+        disk = {**loaded, "google_api_key": "", "action_api_key": "", **notion_blank}
         try:
             storage.atomic_write_json(CONFIG_PATH, disk)
         except OSError as e:
@@ -465,6 +528,9 @@ def save_config(c):
     mistral_key = (disk.get("mistral_api_key") or "").strip()
     if _store_secret(storage.MISTRAL_API_KEY_SECRET, mistral_key):
         disk["mistral_api_key"] = ""
+    for k, name in _NOTION_SECRETS.items():
+        if _store_secret(name, (disk.get(k) or "").strip()):
+            disk[k] = ""
     # Per-user stashed keys (account switching) go to the keyring too - the
     # on-disk store keeps only the non-secret engine config per user.
     sanitized_store, keys_blob = _strip_user_secret_keys(disk.get("user_secrets"))
@@ -3024,6 +3090,7 @@ class AppController(QObject):
         "translate_target", "meeting_audio_mode", "save_history",
         "cleanup_enabled", "restore_clipboard",
         "smart_actions_hotkey", "smart_actions_speech_model",
+        "notion_auto_send",
     )
     _TRACKED_AS_SET = ("smart_actions_hotkey",)
 
@@ -3100,6 +3167,36 @@ class AppController(QObject):
         switched = entitlements.reconcile_user_secrets(self.cfg, current)
         self.save_config()
         return switched
+
+    def _reconcile_notion_owner(self):
+        """A Notion connection belongs to the Gusan account that made it (the
+        calendar's rule): when another account signs in on this computer, the
+        connection is forgotten here - its meetings never land in someone
+        else's workspace, and the new account never sees that workspace's
+        pages. One made as a guest (notion_owner "") is adopted by the account
+        that signs in. Signed out, offline at launch (no user_id yet) and not
+        connected: nothing happens."""
+        owner = str(getattr(getattr(self, "auth", None), "user_id", None) or "")
+        if not owner or not self.cfg.get("notion_api_key"):
+            return
+        stamp = str(self.cfg.get("notion_owner") or "")
+        if stamp == owner:
+            return
+        if not stamp:
+            self.cfg["notion_owner"] = owner
+            self.save_config()
+            return
+        import notion_connect
+        import notion_export
+        mode = notion_export.connection_mode(self.cfg)
+        token = (notion_connect.latest_tokens().get("access_token") or self.cfg.get("notion_api_key") or "").strip()
+        self.cfg["notion_owner"] = ""
+        self.set_settings(dict(notion_export.BLANK_SETTINGS))      # also drops the token from the keyring
+        notion_connect.forget_tokens()
+        if mode == "oauth" and token:
+            # Give the other account's grant back at Notion (best effort, a worker: it goes online).
+            threading.Thread(target=notion_connect.revoke, args=(token,), daemon=True,
+                             name="gusan-notion-revoke").start()
 
     def set_admin_tier_override(self, value):
         """Super-admin only: force a tier locally (auto|guest|free|pro)."""
@@ -3216,6 +3313,11 @@ class AppController(QObject):
                 cal.set_owner(getattr(self.auth, "user_id", None))
             except Exception:
                 logger.debug("calendar owner check failed", exc_info=True)
+        # Same rule for Notion: another account's connection is forgotten here.
+        try:
+            self._reconcile_notion_owner()
+        except Exception:
+            logger.debug("Notion owner check failed", exc_info=True)
         try:
             self._build_tray_menu()
         except Exception:
@@ -4121,6 +4223,11 @@ class AppController(QObject):
     def set_settings(self, updates):
         """Several settings at once (one save, each side effect once).
         Returns {key: ok}."""
+        if updates.get("notion_api_key") and updates.get("notion_auth_mode"):
+            # A fresh Notion connection: stamp whose it is now (see
+            # _reconcile_notion_owner), not at the next sign-in, or it would
+            # look like nobody's when its account signs out.
+            self.cfg["notion_owner"] = str(getattr(getattr(self, "auth", None), "user_id", None) or "")
         return settings_apply.apply(self, updates, autostart_mod=autostart)
 
     def schedule_config_save(self):
@@ -5503,8 +5610,11 @@ class AppController(QObject):
         elsewhere). Notes that failed get one quiet notice too ("Notes
         couldn't be written · Open"), whatever that switch says - the
         recording and transcript are kept and the notes view offers to try
-        again. Then the next meeting whose notes a Quit left for later."""
+        again. Then the next meeting whose notes a Quit left for later. First
+        of all, with "Send every meeting's notes to Notion automatically" on,
+        the notes go to Notion (_maybe_auto_send_notion)."""
         self.notify_history_changed()
+        AppController._maybe_auto_send_notion(self, folder, notes, error)
         if getattr(self, "_pending_notes_queue", None) and not getattr(self, "_quitting", False):
             QTimer.singleShot(2000, self._next_pending_notes)
         if getattr(self, "_quitting", False):
@@ -5524,6 +5634,103 @@ class AppController(QObject):
             self.show_tray_hint("Notes couldn't be written", f"{title} · Open", on_click=open_it)
             return
         self.show_tray_hint("Notes ready", title, on_click=open_it)
+
+    def _maybe_auto_send_notion(self, folder, notes, error):
+        """GUI thread, first thing when a meeting finished: with "Send every
+        meeting's notes to Notion automatically" on (notion_auto_send, off
+        until the user turns it on) and Notion connected, a recorded meeting's
+        notes go to Notion - the notes only, never the transcript, and only its
+        FIRST notes: a rewrite, a Live Assistant session and a meeting already
+        in Notion are left alone (the worker checks the last two against the
+        saved meeting). The send runs on a worker thread; its answer comes to
+        _notion_auto_done. Never raises: Notion can't cost a meeting its notes."""
+        try:
+            if not (getattr(self, "cfg", None) or {}).get("notion_auto_send"):
+                return
+            if (getattr(self, "_quitting", False) or error or not folder
+                    or not (notes or "").strip()):
+                return
+            s = getattr(self, "meeting_session", None)
+            if getattr(s, "last_notes_new", False) is not True:
+                return                          # a rewrite of notes it had
+            import notion_export
+            if not notion_export.is_connected(self.cfg):
+                return
+            if self.cfg.get("notion_reconnect"):
+                return                          # Notion refused the token for good: the failure that
+                #                                 set the flag had its hint, Settings says "Reconnect"
+            title = str(getattr(s, "_meeting_title", "") or "").strip() or "Your meeting"
+            threading.Thread(target=self._auto_send_notion,
+                             args=(folder, title, dict(self.cfg)),
+                             daemon=True, name="gusan-notion-auto").start()
+        except Exception:
+            logger.warning("Sending the notes to Notion automatically failed", exc_info=True)
+
+    def _auto_send_notion(self, folder, title, cfg):
+        """Worker thread: the automatic Notion send (_maybe_auto_send_notion);
+        ``cfg`` is the copy taken when the meeting finished. Privacy mode sends
+        nothing and asks nothing: meta says why, and the Meetings settings row
+        reads "Paused while Privacy mode is on"."""
+        res = {"ok": False, "url": "", "code": "other", "sentence": ""}
+        try:
+            import meeting_store
+            import notion_sync
+            meta = meeting_store.load_meta(folder)
+            if meeting_store.is_live_session(meta) or meta.get("notion_url"):
+                return                          # never auto-sent / already in Notion
+            if cfg.get("privacy_mode"):
+                meeting_store.update_meta(folder, notion_error="privacy")
+                res["code"] = "privacy"
+            else:
+                res = notion_sync.send_meeting(
+                    folder, cfg, auto=True,
+                    persist=lambda d: self._run_on_gui(self.set_settings, d))
+        except Exception:
+            logger.warning("Sending the notes to Notion automatically failed", exc_info=True)
+        self._run_on_gui(self._notion_auto_done, folder, title, res)
+
+    def _notion_auto_done(self, folder, title, res):
+        """GUI thread: the automatic Notion send ended. A failure always gets
+        one calm tray hint ("Couldn't send to Notion · Open"), whatever "Notify
+        me when ready" says; a success is quiet while Meetings is on screen and
+        otherwise says "Sent to Notion" only with that switch on. A privacy
+        skip, a meeting already in Notion and a meeting another send already
+        has in hand, say nothing."""
+        try:
+            import notion_export
+            ok = bool(res.get("ok"))
+            code = str(res.get("code") or "")
+            if code == "busy" or (code == "sent" and not ok):
+                return
+            mode = notion_export.connection_mode(self.cfg) or "own"
+            props = {"target": "notion", "ok": ok, "auto": True, "mode": mode}
+            if not ok:
+                props["reason"] = code if code in (
+                    "privacy", "auth", "no_access", "rate", "offline") else "other"
+            self.track("meeting_exported", props)
+            self.notify_history_changed()            # the meeting's meta changed
+            if getattr(self, "_quitting", False):
+                return
+            if not ok and code == "auth" and mode == "oauth" \
+                    and not self.cfg.get("notion_reconnect"):
+                self.set_setting("notion_reconnect", True)     # the rail says "Reconnect"
+            if not ok and code == "privacy":
+                return
+            if ok and (not self.cfg.get("notify_when_ready", True)
+                       or AppController._page_on_screen(self, "meetings")):
+                return
+            open_it = lambda f=folder: self.show_main("meetings", meeting=f)
+            if ok:
+                self.show_tray_hint("Sent to Notion", title, on_click=open_it)
+            else:
+                # Say what to do when that is known; else which meeting it was.
+                why = {"auth": ("Reconnect it in Meeting settings" if mode == "oauth"
+                                else "Notion rejected the secret"),
+                       "offline": "Check your internet",
+                       "no_access": "Pick another page in Meeting settings"}.get(code)
+                self.show_tray_hint("Couldn't send to Notion", f"{why or title} · Open", on_click=open_it)
+        except Exception:
+            logger.warning("Showing the Notion send result failed", exc_info=True)
 
     def _write_pending_notes(self, tries=0):
         """Startup (+20 s): meetings whose notes a Quit or a log-off left for

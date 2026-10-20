@@ -179,7 +179,7 @@ class TestModelNames(unittest.TestCase):
 
     def test_cloud_names(self):
         self.assertEqual(hardware.CLOUD_SPEECH_MODEL, "Gemini 2.5 Flash")
-        self.assertEqual(hardware.CLOUD_WRITER_MODEL, "Claude Sonnet 5.5")
+        self.assertEqual(hardware.CLOUD_WRITER_MODEL, "Mistral Small")
         self.assertEqual(hardware.CLOUD_LIVE_MODEL, "DeepSeek V4.1 Flash")
         self.assertEqual(hardware.CLOUD_SMART_MODEL, "DeepSeek V4.1 Flash")
 

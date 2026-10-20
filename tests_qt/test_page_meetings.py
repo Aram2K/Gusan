@@ -936,6 +936,552 @@ def test_open_live_assistant_never_hides_the_card(shell, meetings_root):
     assert ("show_live_assist",) in app.calls and ("toggle_live_assist",) not in app.calls
 
 
+# ── Notion: the rail, the sheet's entry point, Send to Notion ────────────────
+NOTION_HUB = "99999999-9999-9999-9999-999999999999"
+NOTION_OAUTH = {"notion_api_key": "tok", "notion_refresh_token": "ref", "notion_auth_mode": "oauth",
+                "notion_workspace_name": "Aram's workspace", "notion_parent_page": NOTION_HUB,
+                "notion_parent_title": "Gusan meetings", "notion_hub_page": NOTION_HUB}
+NOTION_KEYS = ("notion_api_key", "notion_refresh_token", "notion_auth_mode", "notion_workspace_name",
+               "notion_parent_page", "notion_parent_title", "notion_hub_page", "notion_auto_send",
+               "notion_reconnect")
+
+
+def _writable(app, **cfg):
+    """A stub controller whose settings really land in cfg (the stub only records)."""
+    app.cfg.update(cfg)
+
+    def set_settings(updates):
+        app.calls.append(("set_settings", dict(updates)))
+        app.cfg.update(updates)
+        return {k: True for k in updates}
+
+    def set_setting(key, value):
+        app.calls.append(("set_setting", key, value))
+        app.cfg[key] = value
+        return True
+    app.set_settings = set_settings
+    app.set_setting = set_setting
+    app.flush_config_save = lambda: app.calls.append(("flush_config_save",))
+    return app
+
+
+def _sync(rail, app, **cfg):
+    for k in NOTION_KEYS + ("privacy_mode",):
+        app.cfg.pop(k, None)
+    app.cfg.update(cfg)
+    rail.sync_settings()
+    QApplication.processEvents()
+
+
+def test_the_notion_rows_follow_the_connection(shell, meetings_root):
+    win, app = shell("pro")
+    page = _open(win)
+    rail = page.list_view.rail
+    row = rail.notion_row
+    assert row.label.text() == "Send notes to Notion"
+    # not connected: one Connect, nothing else
+    _sync(rail, app)
+    assert rail.notion_connect.isVisibleTo(page) and rail.notion_connect.accessibleName() == "Connect Notion"
+    for hidden in (rail.notion_manage, rail.notion_reconnect, rail.notion_disconnect, rail.notion_auto_row):
+        assert not hidden.isVisibleTo(page)
+    assert not row.hint_label.isVisibleTo(page)
+    # connected with the button: the workspace, Manage + Disconnect, the switch
+    _sync(rail, app, **NOTION_OAUTH)
+    assert not rail.notion_connect.isVisibleTo(page) and not rail.notion_reconnect.isVisibleTo(page)
+    assert rail.notion_manage.isVisibleTo(page) and rail.notion_manage.accessibleName() == "Manage Notion"
+    assert rail.notion_disconnect.isVisibleTo(page) and rail.notion_disconnect.accessibleName() == "Disconnect Notion"
+    assert row.hint_label.text() == "Aram's workspace"
+    assert rail.notion_auto_row.isVisibleTo(page) and rail.notion_auto_row.label.text() == "Send automatically"
+    assert rail.notion_auto_row.hint_label.text() == "After every meeting"
+    assert not rail.notion_auto_toggle.isChecked()
+    assert rail.notion_auto_toggle.accessibleName() == "Send every meeting's notes to Notion automatically"
+    # the switch is on, Privacy mode is on: it says it is paused (the switch keeps its value)
+    _sync(rail, app, **NOTION_OAUTH, notion_auto_send=True, privacy_mode=True)
+    assert rail.notion_auto_toggle.isChecked()
+    assert rail.notion_auto_row.hint_label.text() == "Paused while Privacy mode is on"
+    # Notion refused the saved connection for good
+    _sync(rail, app, **NOTION_OAUTH, notion_reconnect=True)
+    assert row.hint_label.text() == "Reconnect Notion to keep sending."
+    assert rail.notion_reconnect.isVisibleTo(page) and rail.notion_reconnect.accessibleName() == "Reconnect Notion"
+    assert not rail.notion_manage.isVisibleTo(page) and rail.notion_disconnect.isVisibleTo(page)
+    # a setup from before the button (a pasted secret, no workspace name)
+    _sync(rail, app, notion_api_key="ntn_old", notion_parent_page=NOTION_HUB)
+    assert row.hint_label.text() == "Connected" and rail.notion_manage.isVisibleTo(page)
+    # a token with no page to send to is not connected
+    _sync(rail, app, notion_api_key="ntn_old")
+    assert rail.notion_connect.isVisibleTo(page) and not rail.notion_manage.isVisibleTo(page)
+
+
+def test_the_notion_rail_actions_all_fit_beside_their_label(shell, meetings_root):
+    win, app = shell("pro")
+    win.show()
+    page = _open(win)
+    rail = page.list_view.rail
+    for cfg in ({}, NOTION_OAUTH, dict(NOTION_OAUTH, notion_reconnect=True),
+                dict(NOTION_OAUTH, notion_workspace_name="Institut Imagine – Direction des systèmes d'information")):
+        _sync(rail, app, **cfg)
+        row = rail.notion_row
+        shown = [w for w in (rail.notion_connect, rail.notion_manage, rail.notion_reconnect, rail.notion_disconnect)
+                 if w.isVisibleTo(page)]
+        assert shown
+        for w in shown:                                     # nothing clipped by the narrow rail
+            assert w.width() >= w.sizeHint().width() - 1, w.text()
+            assert w.mapTo(row, w.rect().bottomRight()).x() <= row.width(), w.text()
+        label = row.label
+        assert label.width() >= label.sizeHint().width() - 1, "the label is cut: %r" % label.text()
+
+
+def test_the_automatic_switch_writes_its_key(shell, meetings_root):
+    win, app = shell("pro")
+    page = _open(win)
+    rail = page.list_view.rail
+    _sync(rail, app, **NOTION_OAUTH)
+    rail.notion_auto_toggle.click()
+    assert ("set_setting", "notion_auto_send", True) in app.calls
+    rail.notion_auto_toggle.click()
+    assert ("set_setting", "notion_auto_send", False) in app.calls
+
+
+def test_connect_manage_and_reconnect_open_the_sheet(shell, meetings_root, monkeypatch):
+    from ui import notion_sheet
+    opened = []
+    monkeypatch.setattr(notion_sheet, "show_notion_sheet",
+                        lambda host, then="", reason="": opened.append((host, then, reason)) or False)
+    win, app = shell("pro")
+    page = _open(win)
+    rail = page.list_view.rail
+    _sync(rail, app)
+    rail.notion_connect.click()
+    _sync(rail, app, **NOTION_OAUTH)
+    rail.notion_manage.click()
+    _sync(rail, app, **NOTION_OAUTH, notion_reconnect=True)
+    rail.notion_reconnect.click()
+    assert [o[0] for o in opened] == [page, page, page] and [o[1:] for o in opened] == [("", "")] * 3
+    assert page.connect_notion(then="Send this meeting") is False
+    assert opened[-1][1:] == ("Send this meeting", "")
+
+
+def test_the_rail_disconnect_forgets_the_connection(shell, meetings_root, monkeypatch):
+    import notion_connect
+    from ui import notion_sheet
+    revoked = []
+    monkeypatch.setattr(notion_connect, "revoke", lambda token: revoked.append(token))
+    monkeypatch.setattr(notion_sheet, "_run_then", lambda fn, *a, then=None, error=None, **k: fn(*a))
+    win, app = shell("pro")
+    _writable(app, **NOTION_OAUTH, notion_auto_send=True)
+    page = _open(win)
+    rail = page.list_view.rail
+    rail.sync_settings()
+    assert rail.notion_disconnect.isVisibleTo(page)
+    rail.notion_disconnect.click()                          # no question: it is reversible
+    for key in NOTION_KEYS:
+        assert app.cfg[key] in ("", False), key
+    assert revoked == ["tok"]
+    assert ("track", "notion_disconnected", {"mode": "oauth", "reason": "user"}) in app.calls
+    assert rail.notion_connect.isVisibleTo(page) and not rail.notion_auto_row.isVisibleTo(page)
+
+
+# ── Send to Notion on a meeting ──────────────────────────────────────────────
+@pytest.fixture
+def sync_fake(monkeypatch):
+    """A stand-in notion_sync: records every send_meeting, answers ``result``."""
+    import sys
+    import types
+    mod = types.ModuleType("notion_sync")
+    mod.calls = []
+    mod.result = {"ok": True, "url": "https://www.notion.so/Q4-roadmap-abc", "code": "sent", "sentence": ""}
+    mod.during = None
+
+    def send_meeting(folder, cfg, *, auto=False, persist=None, **kw):
+        mod.calls.append({"folder": folder, "cfg": dict(cfg), "auto": auto, "persist": persist})
+        if mod.during:
+            mod.during(persist)
+        return dict(mod.result)
+    mod.send_meeting = send_meeting
+    monkeypatch.setitem(sys.modules, "notion_sync", mod)
+    return mod
+
+
+@pytest.fixture
+def opened_urls(monkeypatch):
+    from ui.pages import meeting_views as v
+    urls = []
+    monkeypatch.setattr(v.QDesktopServices, "openUrl", staticmethod(lambda url: urls.append(url.toString()) or True))
+    return urls
+
+
+def _notes_view(shell, meetings_root, **cfg):
+    folder = _meeting(meetings_root, "20260929_110000", "Q4 roadmap")
+    win, app = shell("pro")
+    _writable(app, **cfg)
+    page = _open(win, folder=str(folder))
+    return page.notes_view, app, str(folder), page
+
+
+def _tracked(app, event):
+    return [c[2] for c in app.calls if c[0] == "track" and c[1] == event]
+
+
+def test_send_to_notion_when_connected_sends_and_opens_the_page(shell, meetings_root, sync_fake, opened_urls):
+    nv, app, folder, _page = _notes_view(shell, meetings_root, **NOTION_OAUTH)
+    nv.export("notion")
+    assert [(c["folder"], c["auto"]) for c in sync_fake.calls] == [(folder, False)]
+    assert sync_fake.calls[0]["cfg"]["notion_api_key"] == "tok"
+    assert nv.flash_label.text() == "Sent to Notion"
+    assert opened_urls == ["https://www.notion.so/Q4-roadmap-abc"]
+    assert _tracked(app, "meeting_exported") == [{"target": "notion", "ok": True, "auto": False, "mode": "oauth"}]
+    assert nv._flash.interval() == 1800
+
+
+def test_send_to_notion_only_opens_https_pages(shell, meetings_root, sync_fake, opened_urls):
+    sync_fake.result = dict(sync_fake.result, url="javascript:alert(1)")
+    nv, _app, _folder, _page = _notes_view(shell, meetings_root, **NOTION_OAUTH)
+    nv.export("notion")
+    assert opened_urls == [] and nv.flash_label.text() == "Sent to Notion"
+
+
+def test_send_to_notion_when_not_connected_connects_first_and_goes_on(shell, meetings_root, sync_fake, monkeypatch):
+    from ui import notion_sheet
+    asked = []
+
+    def sheet(host, then="", reason=""):
+        asked.append(then)
+        host.cfg().update(NOTION_OAUTH)                     # the person connects, then presses "Send this meeting"
+        return True
+    monkeypatch.setattr(notion_sheet, "show_notion_sheet", sheet)
+    nv, app, folder, _page = _notes_view(shell, meetings_root)
+    nv.export("notion")
+    assert asked == ["Send this meeting"]
+    assert [c["folder"] for c in sync_fake.calls] == [folder]
+    assert sync_fake.calls[0]["cfg"]["notion_api_key"] == "tok"
+    assert _tracked(app, "meeting_exported")[0]["mode"] == "oauth"
+
+
+def test_closing_the_notion_sheet_any_other_way_sends_nothing(shell, meetings_root, sync_fake, monkeypatch):
+    from ui import notion_sheet
+    monkeypatch.setattr(notion_sheet, "show_notion_sheet", lambda host, then="", reason="": False)
+    nv, app, _folder, _page = _notes_view(shell, meetings_root)
+    nv.export("notion")
+    assert sync_fake.calls == [] and not nv.flash_label.isVisible()
+    assert _tracked(app, "meeting_exported") == []
+
+
+def test_a_connection_notion_refused_opens_the_sheet_again(shell, meetings_root, sync_fake, monkeypatch):
+    from ui import notion_sheet
+    asked = []
+    monkeypatch.setattr(notion_sheet, "show_notion_sheet",
+                        lambda host, then="", reason="": asked.append(then) or False)
+    nv, _app, _folder, _page = _notes_view(shell, meetings_root, **NOTION_OAUTH, notion_reconnect=True)
+    nv.export("notion")
+    assert asked == ["Send this meeting"] and sync_fake.calls == []
+
+
+def test_send_to_notion_asks_before_leaving_privacy_mode(shell, meetings_root, sync_fake, monkeypatch):
+    from ui.components import mini_prompt
+    asked = []
+    answer = {"yes": False}
+
+    def ask(parent, title, body, yes, no, icon="info"):
+        asked.append((title, body, yes, no, icon))
+        return answer["yes"]
+    monkeypatch.setattr(mini_prompt, "ask", ask)
+    nv, _app, _folder, _page = _notes_view(shell, meetings_root, **NOTION_OAUTH, privacy_mode=True)
+    nv.export("notion")
+    assert asked == [("Privacy mode is on", "Send this meeting to Notion anyway?", "Send", "Not now", "incognito")]
+    assert sync_fake.calls == []
+    answer["yes"] = True
+    nv.export("notion")
+    assert len(sync_fake.calls) == 1
+
+
+def test_nothing_to_send_says_so_before_anything_else(shell, meetings_root, sync_fake, monkeypatch):
+    from ui import notion_sheet
+    monkeypatch.setattr(notion_sheet, "show_notion_sheet", lambda *a, **k: pytest.fail("no sheet for an empty meeting"))
+    folder = _meeting(meetings_root, "20260929_110000", "Empty", notes="", transcript="")
+    win, app = shell("pro")
+    page = _open(win, folder=str(folder))
+    page.notes_view.export("notion")
+    assert page.notes_view.flash_label.text() == "Nothing to send yet." and sync_fake.calls == []
+
+
+@pytest.mark.parametrize("code,sentence", [
+    ("auth", "Couldn't send to Notion. Reconnect it in Meeting settings."),
+    ("no_access", "Couldn't send to Notion. Pick another page in Meeting settings."),
+    ("rate", "Notion is busy. Try again in a minute."),
+    ("offline", "Couldn't reach Notion. Check your internet."),
+    ("other", "Couldn't send to Notion.")])
+def test_a_failed_send_shows_its_sentence_for_five_seconds(shell, meetings_root, sync_fake, opened_urls, code, sentence):
+    sync_fake.result = {"ok": False, "url": "", "code": code, "sentence": sentence}
+    nv, app, _folder, _page = _notes_view(shell, meetings_root, **NOTION_OAUTH)
+    nv.export("notion")
+    assert nv.flash_label.text() == sentence and nv._flash.interval() == 5000
+    assert opened_urls == []
+    assert _tracked(app, "meeting_exported") == [
+        {"target": "notion", "ok": False, "auto": False, "mode": "oauth", "reason": code}]
+    nv._end_flash()
+    assert nv._flash.interval() == 1800                     # the next "Copied" is short again
+
+
+def test_a_failure_without_a_sentence_still_says_something(shell, meetings_root, sync_fake):
+    sync_fake.result = {"ok": False, "code": "weird"}
+    nv, app, _folder, _page = _notes_view(shell, meetings_root, **NOTION_OAUTH)
+    nv.export("notion")
+    assert nv.flash_label.text() == "Couldn't send to Notion."
+    assert _tracked(app, "meeting_exported")[0]["reason"] == "other"
+
+
+def test_a_meeting_already_being_sent_says_so(shell, meetings_root, sync_fake):
+    sync_fake.result = {"ok": False, "code": "busy", "sentence": "x"}
+    nv, _app, _folder, _page = _notes_view(shell, meetings_root, **NOTION_OAUTH)
+    nv.export("notion")
+    assert nv.flash_label.text() == "Already sending this meeting."
+
+
+def test_the_send_works_when_the_worker_itself_blows_up(shell, meetings_root, sync_fake):
+    def boom(persist):
+        raise RuntimeError("secret detail")
+    sync_fake.during = boom
+    nv, app, _folder, _page = _notes_view(shell, meetings_root, **NOTION_OAUTH)
+    nv.export("notion")
+    assert nv.flash_label.text() == "Couldn't send to Notion."          # never the exception's text
+    assert "secret" not in nv.flash_label.text()
+    assert _tracked(app, "meeting_exported")[0]["ok"] is False
+
+
+def test_settings_a_send_changes_are_saved_through_the_page(shell, meetings_root, sync_fake):
+    def during(persist):
+        persist({"notion_api_key": "tok-new", "notion_refresh_token": "ref-new"})
+    sync_fake.during = during
+    nv, app, _folder, _page = _notes_view(shell, meetings_root, **NOTION_OAUTH)
+    nv.export("notion")
+    assert app.cfg["notion_api_key"] == "tok-new" and app.cfg["notion_refresh_token"] == "ref-new"
+    assert ("set_settings", {"notion_api_key": "tok-new", "notion_refresh_token": "ref-new"}) in app.calls
+    # the persist handed to the worker is a (queued) signal, not a direct call into the page
+    assert sync_fake.calls[0]["persist"].__name__ == "emit"
+
+
+def test_settings_changed_by_a_worker_thread_land_on_the_gui_thread(shell, meetings_root, sync_fake):
+    import threading
+    nv, app, _folder, _page = _notes_view(shell, meetings_root, **NOTION_OAUTH)
+    seen = {}
+    real = app.set_settings
+
+    def set_settings(updates):
+        seen["gui"] = threading.current_thread() is threading.main_thread()
+        return real(updates)
+    app.set_settings = set_settings
+    worker = threading.Thread(target=lambda: nv._notion_settings.emit({"notion_reconnect": True}))
+    worker.start()
+    worker.join()
+    assert _wait_for(lambda: "gui" in seen)
+    assert seen["gui"] is True and app.cfg["notion_reconnect"] is True
+
+
+def test_a_sent_meeting_gets_a_quiet_in_notion_link(shell, meetings_root, opened_urls):
+    folder = _meeting(meetings_root, "20260929_110000", "Q4 roadmap", notion_url="https://www.notion.so/Q4-abc")
+    win, _app = shell("pro")
+    page = _open(win, folder=str(folder))
+    nv = page.notes_view
+    links = [b for b in nv.findChildren(QAbstractButton) if b.text() == "In Notion"]
+    assert len(links) == 1 and links[0].isVisibleTo(page) and links[0].property("kind") == "link"
+    assert links[0].accessibleName() == "Open this meeting in Notion"
+    links[0].click()
+    assert opened_urls == ["https://www.notion.so/Q4-abc"]
+    other = _meeting(meetings_root, "20260930_090000", "Weekly sync")
+    page.open_notes(str(other))
+    QApplication.processEvents()
+    assert not [b for b in page.notes_view.findChildren(QAbstractButton)
+                if b.text() == "In Notion" and b.isVisibleTo(page)]
+    odd = _meeting(meetings_root, "20261001_090000", "Odd link", notion_url="javascript:alert(1)")
+    page.open_notes(str(odd))
+    QApplication.processEvents()
+    assert not [b for b in page.notes_view.findChildren(QAbstractButton)
+                if b.text() == "In Notion" and b.isVisibleTo(page)]
+
+
+def test_after_a_send_the_meeting_shows_the_link_without_reopening(shell, meetings_root, sync_fake, opened_urls):
+    nv, _app, folder, _page = _notes_view(shell, meetings_root, **NOTION_OAUTH)
+
+    def during(persist):                                    # what notion_sync writes into the meeting
+        path = meetings_root / "20260929_110000" / "meta.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["notion_url"] = "https://www.notion.so/Q4-roadmap-abc"
+        path.write_text(json.dumps(data), encoding="utf-8")
+    sync_fake.during = during
+    nv.export("notion")
+    assert [b for b in nv.findChildren(QAbstractButton) if b.text() == "In Notion"]
+
+
+# ── review fixes: plain text, contrast, the real notion_sync ─────────────────
+def test_the_workspace_name_in_the_rail_is_plain_text(shell, meetings_root, tmp_path):
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QImage
+    from PySide6.QtWidgets import QLabel
+    img = QImage(8, 8, QImage.Format_RGB32)
+    img.fill(QColor("#ff0000"))
+    png = tmp_path / "x.png"
+    assert img.save(str(png))
+    hostile = '<img src="%s" width="40" height="40">' % png.as_uri()
+    win, app = shell("pro")
+    win.show()
+    page = _open(win)
+    rail = page.list_view.rail
+    _sync(rail, app, **dict(NOTION_OAUTH, notion_workspace_name=hostile))
+    label = rail.notion_row.hint_label
+    assert label.textFormat() == Qt.PlainText and label.text() == hostile
+
+    def reds(lb):
+        shot = lb.grab().toImage()
+        return sum(1 for x in range(shot.width()) for y in range(shot.height())
+                   if QColor(shot.pixel(x, y)).red() > 200 and QColor(shot.pixel(x, y)).green() < 60)
+    control = QLabel(hostile)                                # the stock label loads the picture
+    control.resize(200, 60)
+    assert reds(control) > 100
+    assert reds(label) == 0
+
+
+def _contrast(a, b):
+    def lum(c):
+        def ch(v):
+            v /= 255.0
+            return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+        return 0.2126 * ch(c.red()) + 0.7152 * ch(c.green()) + 0.0722 * ch(c.blue())
+    hi, lo = sorted((lum(a), lum(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _text_colour_in(img, widget, rail):
+    """(the most text-like colour, the background) of ``widget`` in a render of ``rail``."""
+    from PySide6.QtCore import QPoint, QRect
+    from PySide6.QtGui import QColor
+    top_left = widget.mapTo(rail, QPoint(0, 0))
+    dpr = img.devicePixelRatio() or 1
+    r = QRect(int(top_left.x() * dpr), int(top_left.y() * dpr), int(widget.width() * dpr), int(widget.height() * dpr))
+    counts = {}
+    for y in range(r.top(), min(r.bottom() + 1, img.height())):
+        for x in range(r.left(), min(r.right() + 1, img.width())):
+            counts[img.pixel(x, y)] = counts.get(img.pixel(x, y), 0) + 1
+    bg = QColor.fromRgb(max(counts, key=counts.get))
+    far = max(counts, key=lambda k: sum(abs(a - b) for a, b in zip(QColor.fromRgb(k).getRgb()[:3], bg.getRgb()[:3])))
+    return QColor.fromRgb(far), bg
+
+
+def test_what_the_rail_asks_for_is_readable(shell, meetings_root):
+    """The reconnect hint (an instruction) and the Disconnect link (an action) are at least 4.5:1
+    on the rail, measured on the real pixels (the muted grey was 4.4:1)."""
+    from PySide6.QtGui import QImage
+    win, app = shell("pro")
+    win.resize(1180, 820)
+    win.show()
+    page = _open(win)
+    rail = page.list_view.rail
+    _sync(rail, app, **NOTION_OAUTH, notion_reconnect=True)
+    QApplication.processEvents()
+    img = rail.grab().toImage().convertToFormat(QImage.Format_RGB32)
+    for widget in (rail.notion_row.hint_label, rail.notion_disconnect, rail.notion_reconnect):
+        if widget is rail.notion_reconnect:
+            continue                                         # a button with its own fill
+        fg, bg = _text_colour_in(img, widget, rail)
+        assert _contrast(fg, bg) >= 4.5, (widget.text(), fg.name(), bg.name(), _contrast(fg, bg))
+    _sync(rail, app, **NOTION_OAUTH)
+    assert rail.notion_row.hint_label.property("textRole") == "hint"         # a passive name stays quiet
+    _sync(rail, app, **NOTION_OAUTH, notion_reconnect=True)
+    assert rail.notion_row.hint_label.property("textRole") == "body"
+    _sync(rail, app, **NOTION_OAUTH)
+    assert rail.notion_row.hint_label.property("textRole") == "hint"
+
+
+def test_a_muted_link_reads_dark_enough_on_the_glass(shell, meetings_root):
+    from PySide6.QtGui import QImage
+    win, app = shell("pro")
+    win.resize(1180, 820)
+    win.show()
+    page = _open(win)
+    rail = page.list_view.rail
+    _sync(rail, app, **NOTION_OAUTH)
+    QApplication.processEvents()
+    img = rail.grab().toImage().convertToFormat(QImage.Format_RGB32)
+    fg, bg = _text_colour_in(img, rail.notion_disconnect, rail)
+    assert _contrast(fg, bg) >= 4.5, (fg.name(), bg.name())
+
+
+def test_send_to_notion_runs_through_the_real_notion_sync(shell, meetings_root, opened_urls, monkeypatch):
+    """No stand-in module: the real notion_sync publishes (a fake publish_meeting), writes the page into
+    the meeting, and the meeting then shows its "In Notion" link - the way a missing module could not hide."""
+    import notion_export
+    calls = []
+
+    def publish(token, parent, title, notes, transcript="", meta_line="", *, oauth=False):
+        calls.append((token, parent, title, bool(notes), transcript, oauth))
+        return "https://www.notion.so/Q4-roadmap-0123456789abcdef0123456789abcdef"
+    monkeypatch.setattr(notion_export, "publish_meeting", publish)
+    nv, app, folder, _page = _notes_view(shell, meetings_root, **NOTION_OAUTH)
+    nv.export("notion")
+    assert calls == [("tok", NOTION_HUB, "Q4 roadmap", True, "Speaker 1: Hello team.", True)]
+    assert nv.flash_label.text() == "Sent to Notion"
+    assert opened_urls == ["https://www.notion.so/Q4-roadmap-0123456789abcdef0123456789abcdef"]
+    meta = json.loads((meetings_root / "20260929_110000" / "meta.json").read_text(encoding="utf-8"))
+    assert meta["notion_url"].startswith("https://www.notion.so/Q4-roadmap")
+    assert meta["notion_auto"] is False and "notion_error" not in meta
+    assert [b for b in nv.findChildren(QAbstractButton) if b.text() == "In Notion"]
+    assert _tracked(app, "meeting_exported") == [{"target": "notion", "ok": True, "auto": False, "mode": "oauth"}]
+
+
+def test_a_refused_token_is_refreshed_and_saved_through_the_real_notion_sync(shell, meetings_root, opened_urls,
+                                                                              monkeypatch):
+    import notion_connect
+    import notion_export
+    seen = []
+
+    def publish(token, parent, title, notes, transcript="", meta_line="", *, oauth=False):
+        seen.append(token)
+        if token == "tok":
+            raise notion_export.NotionAuthError("401")
+        return "https://www.notion.so/Q4-roadmap-0123456789abcdef0123456789abcdef"
+    monkeypatch.setattr(notion_export, "publish_meeting", publish)
+    monkeypatch.setattr(notion_connect, "refresh", lambda rt: {"access_token": "tok-2", "refresh_token": "ref-2"})
+    nv, app, _folder, _page = _notes_view(shell, meetings_root, **NOTION_OAUTH)
+    nv.export("notion")
+    assert seen == ["tok", "tok-2"]
+    assert nv.flash_label.text() == "Sent to Notion"
+    assert _wait_for(lambda: app.cfg["notion_api_key"] == "tok-2")
+    assert app.cfg["notion_refresh_token"] == "ref-2"
+
+
+def test_a_deleted_hub_is_made_again_through_the_real_notion_sync(shell, meetings_root, opened_urls, monkeypatch):
+    import notion_connect
+    import notion_export
+    new = {"id": "88888888-8888-8888-8888-888888888888", "title": "Gusan meetings", "url": ""}
+    parents = []
+
+    def publish(token, parent, title, notes, transcript="", meta_line="", *, oauth=False):
+        parents.append(parent)
+        if parent == NOTION_HUB:
+            raise notion_export.NotionNotFoundError("gone")
+        return "https://www.notion.so/Q4-roadmap-0123456789abcdef0123456789abcdef"
+    monkeypatch.setattr(notion_export, "publish_meeting", publish)
+    monkeypatch.setattr(notion_connect, "create_hub", lambda token, title=notion_connect.HUB_TITLE: dict(new))
+    nv, app, _folder, _page = _notes_view(shell, meetings_root, **NOTION_OAUTH)
+    nv.export("notion")
+    assert parents == [NOTION_HUB, new["id"]]
+    assert _wait_for(lambda: app.cfg["notion_parent_page"] == new["id"])
+    assert app.cfg["notion_hub_page"] == new["id"]
+
+
+def test_a_failed_real_send_says_why_and_the_meeting_remembers_it(shell, meetings_root, opened_urls, monkeypatch):
+    import notion_export
+
+    def publish(*a, **kw):
+        raise notion_export.NotionError("net", code="offline")
+    monkeypatch.setattr(notion_export, "publish_meeting", publish)
+    nv, app, _folder, _page = _notes_view(shell, meetings_root, **NOTION_OAUTH)
+    nv.export("notion")
+    assert nv.flash_label.text() == "Couldn't reach Notion. Check your internet."
+    meta = json.loads((meetings_root / "20260929_110000" / "meta.json").read_text(encoding="utf-8"))
+    assert meta["notion_error"] == "offline" and "notion_url" not in meta
+    assert opened_urls == []
+
+
 # ── pure helpers ─────────────────────────────────────────────────────────────
 def test_an_older_write_never_lands_over_a_newer_one(tmp_path):
     from ui.pages import meeting_views as v

@@ -1,8 +1,10 @@
 """FileJobController (file_jobs) on a real event loop, running run_file_job
-with the Audio to text options (offscreen)."""
+with the Audio to text options (offscreen); a cloud job, and its model's name
+in the transcript view."""
 import os
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QThread
@@ -43,8 +45,8 @@ def audio_files(tmp_path):
     return paths
 
 
-def _app():
-    app = make_stub_app("free")
+def _app(tier="free"):
+    app = make_stub_app(tier)
     app.recorder = object()
     app._file_job_running = False
     app.is_rec = False
@@ -182,3 +184,94 @@ def test_classic_tab_still_works_on_run_file_job(qapp, audio_files, monkeypatch)
     assert tracked == ["file_transcription_started", "file_transcription_completed"]
     ctrl.shutdown()
     ctrl.deleteLater()
+
+
+class _Speakers:
+    """diarization stand-in: speaker 0 for the first minute, then speaker 1."""
+
+    def sherpa_installed(self):
+        return True
+
+    def models_downloaded(self):
+        return True
+
+    def is_available(self):
+        return True
+
+    def diarize(self, audio, on_progress=None):
+        return [(0.0, 60.0, 0), (60.0, 1e9, 1)]
+
+    def attribute_segments(self, segments, turns):
+        return [dict(s, speaker=next(t[2] for t in turns if t[0] <= (s["start"] + s["end"]) / 2 < t[1]))
+                for s in segments]
+
+
+def test_controller_runs_a_gusan_cloud_job(qapp, audio_files, monkeypatch):
+    # The real run_file_job and cloud_files; the decoder, the speaker model
+    # and the upload are fakes (no network, no Whisper).
+    np = pytest.importorskip("numpy")
+    import cloud_files
+    import file_jobs
+    import transcript_store
+    monkeypatch.setattr(cloud_files, "_vad_model", lambda: None)     # loudness, no model
+    app = _app("pro")
+    loads = []
+    app.recorder = SimpleNamespace(get_auth_token=lambda: "tok", load_model=loads.append)
+    app.cfg.update(file_model="cloud", file_save_word=False)
+    rng = np.random.default_rng(3)
+    audio = (rng.standard_normal(120 * 16000) * 0.0005).astype(np.float32)
+    for start in range(1, 118, 4):                  # 3 s of "speech" every 4 s
+        audio[start * 16000:(start + 3) * 16000] += 0.2
+    sent = []
+
+    def send(spec, wav):
+        sent.append((spec.engine, threading.current_thread() is not threading.main_thread()))
+        return "Hello there. Nice to meet you.", None
+
+    def runner(path, opts, recorder, on_progress, should_cancel, **kw):
+        return file_jobs.run_file_job(path, opts, recorder, on_progress, should_cancel,
+                                      decode=lambda *a, **k: audio, probe=lambda p: 120.0,
+                                      diarizer=_Speakers(), cloud_send=send, **kw)
+
+    ctrl = file_jobs.FileJobController(app, runner=runner)
+    log = _record(ctrl)
+    items, msg = ctrl.enqueue(audio_files[0])
+    assert msg == ""
+    assert file_jobs.BUSY_FOR_DICTATION == file_jobs.BUSY_CLOUD     # not "the same speech model"
+    assert _wait_for(lambda: items[0]["state"] in ("done", "failed"), 10)
+    item = items[0]
+    assert item["state"] == "done", item.get("error")
+    assert (item["model"], item["model_name"], item["engine"]) == \
+        ("gemini-2.5-flash", "Gemini 2.5 Flash", "gusan")
+    assert sent and all(engine == "gusan" and worker for engine, worker in sent)
+    assert loads == []
+    assert all(e[1] for e in log), "every signal is delivered on the GUI thread"
+    doc = transcript_store.load_transcript(item["transcript_id"])
+    assert doc["model"] == "gemini-2.5-flash" and doc["speaker_count"] == 2
+    names = [c[0] for c in app.calls]
+    assert "_note_local_wait" not in names and "_preload_speech_model" not in names
+    tracked = {c[1]: c[2] for c in app.calls if c[0] == "track"}
+    assert tracked["file_transcription_started"]["engine"] == "gusan"
+    assert tracked["file_transcription_completed"]["engine"] == "gusan"
+    assert file_jobs.BUSY_FOR_DICTATION != file_jobs.BUSY_CLOUD
+    ctrl.deleteLater()
+
+
+def test_transcript_view_names_the_cloud_model(qapp):
+    import transcript_store
+    import ui.pages.transcript_view as tv
+    assert tv.model_text("gemini-2.5-flash") == "Gemini 2.5 Flash"
+    assert tv.model_text("voxtral-mini-latest") == "Voxtral Mini"
+    assert tv.model_text("small") == "Whisper Small"
+    assert tv.model_text("my-custom-model") == "my-custom-model"
+    assert tv.model_text("") == ""
+    folder = transcript_store.save_transcript({
+        "path": r"C:\nowhere\call.m4a", "name": "call.m4a", "duration": 90.0,
+        "segments": [{"start": 0.0, "end": 2.0, "text": "Hello there.", "speaker": None}],
+        "speakers": False, "timestamps": True, "model": "gemini-2.5-flash", "engine": "gusan",
+        "language": "en", "language_setting": "auto"})
+    view = tv.TranscriptView(make_stub_app("pro"))
+    view.show_doc(transcript_store.load_transcript(os.path.basename(str(folder))))
+    assert "Gemini 2.5 Flash" in view.meta_texts()
+    assert "gemini-2.5-flash" not in view.meta_texts()
+    view.deleteLater()

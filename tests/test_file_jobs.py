@@ -1,16 +1,21 @@
 """file_jobs: the Qt-free Audio to text job runner and queue.
 
 run_file_job gets fakes for every heavy piece (decoder, model download,
-recorder, diarizer), so nothing here loads main, Qt, numpy or a model. The
-streaming decoder is checked against faster-whisper's own decoder when real
-numpy / PyAV / faster-whisper are importable (skipped under test_core's stubs).
+recorder, diarizer, cloud send), so nothing here loads main, Qt or a model or
+goes to the network. The streaming decoder is checked against faster-whisper's
+own decoder, and cloud runs go through the real cloud_files, when real numpy /
+PyAV / faster-whisper are importable (skipped under test_core's stubs).
 """
+import contextlib
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -108,7 +113,9 @@ class FakeDiarizer:
 
 def run(opts=None, recorder=None, *, seconds=60.0, probe=60.0, downloaded=True,
         download_error=None, cancel=lambda: False, progress=None, info=None, diarizer=None,
-        decode=None, auto="base"):
+        decode=None, auto="base", audio=None, **cloud):
+    """run_file_job with fakes; ``audio`` is what the decoder returns (default
+    a length-only FakeAudio), ``cloud`` / ``cloud_send`` go straight through."""
     recorder = recorder or FakeRecorder()
     events = progress if progress is not None else []
     downloads = []
@@ -117,7 +124,7 @@ def run(opts=None, recorder=None, *, seconds=60.0, probe=60.0, downloaded=True,
         if on_progress:
             on_progress(0.5)
             on_progress(1.0)
-        return FakeAudio(seconds)
+        return FakeAudio(seconds) if audio is None else audio
 
     def fake_download(name, on_progress=None):
         downloads.append(name)
@@ -133,7 +140,7 @@ def run(opts=None, recorder=None, *, seconds=60.0, probe=60.0, downloaded=True,
         on_info=(info.append if info is not None else None),
         decode=decode or fake_decode, probe=lambda p: probe,
         model_downloaded=lambda m: downloaded, download_model=fake_download,
-        auto_model=lambda rec: auto, diarizer=diarizer or FakeDiarizer())
+        auto_model=lambda rec: auto, diarizer=diarizer or FakeDiarizer(), **cloud)
     return result, recorder, events, downloads
 
 
@@ -144,7 +151,7 @@ class TestRunFileJob(unittest.TestCase):
         self.assertEqual(result["path"], "C:/audio/talk.m4a")
         self.assertEqual(result["name"], "talk.m4a")
         self.assertEqual(result["duration"], 60.0)
-        self.assertEqual(result["model"], "small")
+        self.assertEqual((result["model"], result["engine"]), ("small", "local"))
         self.assertEqual((result["language"], result["language_setting"]), ("en", "en"))
         self.assertEqual(result["speaker_count"], 2)
         self.assertEqual([s["speaker"] for s in result["segments"]], [0, 1, 1])
@@ -195,6 +202,13 @@ class TestRunFileJob(unittest.TestCase):
         result, rec, _, _ = run({"model": "auto"}, auto="large-v3-turbo")
         self.assertEqual(result["model"], "large-v3-turbo")
         self.assertEqual(rec.loaded, ["large-v3-turbo"])
+
+    def test_cloud_pick_without_a_spec_runs_automatic(self):
+        # Never "Whisper cloud couldn't be downloaded".
+        for value in fj.CLOUD_MODELS:
+            result, rec, _, downloads = run({"model": value}, downloaded=False, auto="small")
+            self.assertEqual((result["model"], result["engine"]), ("small", "local"), value)
+            self.assertEqual((rec.loaded, downloads), (["small"], ["small"]))
 
     def test_download_once_then_load(self):
         result, rec, _, downloads = run({"model": "medium"}, downloaded=False)
@@ -305,6 +319,182 @@ class TestRunFileJob(unittest.TestCase):
             self.assertNotIn(words, src)
 
 
+def _real_numpy():
+    try:
+        import numpy as np
+        return np.__name__ == "numpy" and tuple(np.zeros(2).shape) == (2,)
+    except Exception:
+        return False
+
+
+def talk(seconds, seed=1):
+    """Speech-like audio for cloud_files: noise bursts with short pauses."""
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    audio = (rng.standard_normal(int(seconds * SR)) * 0.0005).astype(np.float32)
+    t = 0.5
+    while t < seconds - 1:
+        e = min(t + rng.uniform(2.0, 6.0), seconds - 0.5)
+        a, b = int(t * SR), int(e * SR)
+        audio[a:b] += (rng.standard_normal(b - a) * 0.2).astype(np.float32)
+        t = e + rng.uniform(0.4, 1.2)
+    return audio
+
+
+def cloud_spec(engine="gusan", **kw):
+    import cloud_speech
+    model = {"gusan": "gemini-2.5-flash", "google": "gemini-2.5-flash",
+             "mistral": "voxtral-mini-latest"}[engine]
+    kw.setdefault("model_id", model)
+    kw.setdefault("model_name", fj.display_name(model))
+    return cloud_speech.Spec(engine=engine, **kw)
+
+
+def cloud_error(kind, name="Gusan Cloud"):
+    import cloud_speech
+    return cloud_speech.CloudSpeechError(kind, cloud_speech.error_message(kind, name))
+
+
+class Progress(list):
+    """The progress events; ``moved`` is set once a piece came back."""
+
+    def __init__(self):
+        super().__init__()
+        self.moved = threading.Event()
+
+    def append(self, event):
+        super().append(event)
+        if event[1] == fj.STAGE_TRANSCRIBING and event[0] > fj._P_READ_END:
+            self.moved.set()
+
+
+@unittest.skipUnless(_real_numpy(), "real numpy not importable (stubbed)")
+class TestCloudRun(unittest.TestCase):
+    """run_file_job with a cloud Spec, through the real cloud_files (loudness
+    instead of the VAD model) and a fake send: no Whisper, no network."""
+
+    def setUp(self):
+        import cloud_files
+        patcher = mock.patch.object(cloud_files, "_vad_model", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.sent = []
+        self._lock = threading.Lock()
+
+    def sender(self, text="Hello there. How are you today? I'm fine, thanks.", language=None):
+        def send(spec, wav):
+            with self._lock:
+                self.sent.append((spec, bytes(wav[:4])))
+            return text, language
+        return send
+
+    def test_cloud_run_skips_whisper_and_labels_speakers(self):
+        info, diar = [], FakeDiarizer(turns=((0.0, 75.0, 0), (75.0, 1e9, 1)))
+        spec = cloud_spec(spellings=("PySide6",))
+        result, rec, events, downloads = run(
+            {"language": "auto"}, audio=talk(150), downloaded=False, info=info, diarizer=diar,
+            cloud=spec, cloud_send=self.sender("We use pyside6 here. It works well for us."))
+        self.assertGreaterEqual(len(self.sent), 2)
+        self.assertTrue(all(s is spec and head == b"RIFF" for s, head in self.sent))
+        # Nothing on this computer's speech model: no download, no load, no transcribe.
+        self.assertEqual((rec.loaded, rec.calls, downloads), ([], [], []))
+        self.assertEqual((result["model"], result["engine"]), ("gemini-2.5-flash", "gusan"))
+        self.assertIn({"model": "gemini-2.5-flash"}, info)
+        self.assertIsNone(result["decode_seconds"])
+        # Auto with no detection: None (never the recorder's stale language).
+        self.assertEqual((result["language"], result["language_setting"]), (None, "auto"))
+        # Speaker labels run after all pieces, as on this computer.
+        self.assertEqual(diar.diarized, 1)
+        self.assertEqual(result["speaker_count"], 2)
+        self.assertEqual({s["speaker"] for s in result["segments"]}, {0, 1})
+        starts = [s["start"] for s in result["segments"]]
+        self.assertEqual(starts, sorted(starts))
+        self.assertTrue(result["segments"][0]["text"].startswith("We use PySide6 here."))
+        pcts, stages = [e[0] for e in events], [e[1] for e in events]
+        self.assertEqual(pcts, sorted(pcts))
+        self.assertIn(fj.STAGE_TRANSCRIBING, stages)
+        self.assertIn(fj.STAGE_SPEAKERS, stages)
+        self.assertFalse([s for s in stages if s.startswith(("Loading", "Downloading"))])
+
+    def test_cloud_language(self):
+        result, *_ = run({"language": "auto", "speakers": False}, audio=talk(90),
+                         cloud=cloud_spec("mistral"), cloud_send=self.sender(language="de"))
+        self.assertEqual((result["language"], result["engine"]), ("de", "mistral"))
+        result, *_ = run({"language": "fr", "speakers": False}, audio=talk(90),
+                         cloud=cloud_spec("mistral", language="fr"),
+                         cloud_send=self.sender(language="de"))
+        self.assertEqual(result["language"], "fr")
+
+    def test_gusan_cloud_refused_at_the_first_piece_runs_here(self):
+        for kind in ("cap", "pro_required", "no_token"):
+            with self.subTest(kind):
+                def send(spec, wav, kind=kind):
+                    raise cloud_error(kind)
+                info = []
+                result, rec, events, _ = run({"model": "cloud"}, audio=talk(90), info=info,
+                                             auto="base", cloud=cloud_spec(), cloud_send=send)
+                self.assertEqual((result["model"], result["engine"]), ("base", "local"))
+                self.assertEqual(rec.loaded, ["base"])
+                self.assertEqual([i["model"] for i in info if "model" in i],
+                                 ["gemini-2.5-flash", "base"])
+                self.assertIn("Loading Whisper Base", [e[1] for e in events])
+
+    def test_gusan_cloud_refused_later_fails_the_job(self):
+        # Never a silent local fill under a cloud name.
+        progress = Progress()
+        calls = []
+
+        def send(spec, wav):
+            with self._lock:
+                calls.append(1)
+                first = len(calls) == 1
+            if first:
+                return "Hello there.", None
+            progress.moved.wait(5)
+            raise cloud_error("cap")
+        rec = FakeRecorder()
+        with self.assertRaises(fj.JobError) as cm:
+            run(audio=talk(240), recorder=rec, progress=progress, cloud=cloud_spec(), cloud_send=send)
+        self.assertEqual((cm.exception.reason, cm.exception.message),
+                         ("cloud", cloud_error("cap").message))
+        self.assertEqual(rec.loaded, [])
+
+    def test_own_key_errors_fail_the_job(self):
+        def send(spec, wav):
+            raise cloud_error("bad_key", "Google Gemini")
+        rec = FakeRecorder()
+        with self.assertRaises(fj.JobError) as cm:
+            run(audio=talk(90), recorder=rec, cloud=cloud_spec("google"), cloud_send=send)
+        self.assertEqual(cm.exception.reason, "cloud")
+        self.assertEqual(cm.exception.message, cloud_error("bad_key", "Google Gemini").message)
+        self.assertEqual(rec.loaded, [])                # own keys never fall back
+
+    def test_no_speech(self):
+        import numpy as np
+        with self.assertRaises(fj.JobError) as cm:
+            run(audio=talk(90), cloud=cloud_spec(), cloud_send=self.sender(""))
+        self.assertEqual((cm.exception.reason, cm.exception.message), ("no_speech", fj.MSG_NO_SPEECH))
+        self.sent.clear()
+        with self.assertRaises(fj.JobError) as cm:
+            run(audio=np.zeros(60 * SR, dtype=np.float32), cloud=cloud_spec(),
+                cloud_send=self.sender())
+        self.assertEqual(cm.exception.reason, "no_speech")
+        self.assertEqual(self.sent, [])                 # silence is never sent
+
+    def test_cancel(self):
+        flag = {"on": False}
+        send = self.sender()
+
+        def cancelling(spec, wav):
+            flag["on"] = True
+            return send(spec, wav)
+        diar, rec = FakeDiarizer(), FakeRecorder()
+        with self.assertRaises(fj.JobCancelled):
+            run(audio=talk(150), recorder=rec, diarizer=diar, cancel=lambda: flag["on"],
+                cloud=cloud_spec(), cloud_send=cancelling)
+        self.assertEqual((diar.diarized, rec.loaded), (0, []))
+
+
 class TestHelpers(unittest.TestCase):
     def test_options(self):
         self.assertEqual(fj.normalize_options(None), {
@@ -319,15 +509,29 @@ class TestHelpers(unittest.TestCase):
             "model": None, "language": "auto", "speakers": True, "timestamps": True,
             "save_word": True})
         self.assertIsNone(fj.options_from_cfg({"file_model": "huge-v9"})["model"])
+        # Cloud picks are kept; the queue resolves them when the job starts.
+        for value in ("cloud", "own:google", "own:mistral"):
+            self.assertEqual(fj.options_from_cfg({"file_model": value})["model"], value)
         self.assertEqual(set(fj.FILE_DEFAULTS), {"file_model", "file_language", "file_speakers",
                                                  "file_timestamps", "file_save_word",
                                                  "notify_when_ready"})
+
+    def test_cloud_models_match_engine_choice(self):
+        import engine_choice
+        self.assertEqual(fj.CLOUD_MODELS, engine_choice.FILE_CLOUD_VALUES)
 
     def test_whisper_names(self):
         self.assertEqual(fj.whisper_name("small"), "Whisper Small")
         self.assertEqual(fj.whisper_name("large-v3-turbo"), "Whisper Large v3 Turbo")
         self.assertEqual(fj.whisper_name(None), "Whisper")
         self.assertEqual(set(fj.WHISPER_NAMES), set(fj.WHISPER_MODELS))
+
+    def test_display_names(self):
+        self.assertEqual(fj.display_name("small"), "Whisper Small")
+        self.assertEqual(fj.display_name("gemini-2.5-flash"), "Gemini 2.5 Flash")
+        self.assertEqual(fj.display_name("voxtral-mini-latest"), "Voxtral Mini")
+        self.assertEqual(fj.display_name("gemini-9-custom"), "gemini-9-custom")   # as typed
+        self.assertEqual(fj.display_name(None), "Whisper")
 
     def test_time_copy(self):
         self.assertEqual(fj.ready_in_text(None), "")
@@ -382,7 +586,8 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(fj.refusal_message(app), fj.MSG_RECORDING)
         app.meeting, app._file_job_running = False, True
         self.assertEqual(fj.refusal_message(app), fj.MSG_OTHER_JOB)
-        for msg in (fj.MSG_RECORDING, fj.BUSY_FOR_DICTATION, fj.BUSY_FOR_MEETING, fj.BUSY_TITLE):
+        for msg in (fj.MSG_RECORDING, fj.BUSY_FOR_DICTATION, fj.BUSY_FOR_MEETING, fj.BUSY_TITLE,
+                    fj.BUSY_CLOUD):
             self.assertNotIn("Transcribe", msg)
 
     def test_imports_without_qt_numpy_or_main(self):
@@ -492,9 +697,27 @@ class TestQueue(unittest.TestCase):
             raise MemoryError()
         return make_result(path)
 
-    def queue(self, sync=True, **kw):
+    def cloud_runner(self, path, opts, recorder, on_progress, should_cancel, **kw):
+        """Runs the cloud Spec it is given (else the Whisper model in opts,
+        else Automatic = base) and notes the busy sentences while it runs."""
+        spec = kw.get("cloud")
+        self.runs.append({"path": path, "opts": dict(opts), "cloud": spec, "kw": sorted(kw),
+                          "busy": (fj.BUSY_FOR_DICTATION, fj.BUSY_FOR_MEETING)})
+        model = spec.model_id if spec is not None else (opts["model"] or "base")
+        kw["on_info"]({"duration": 90.0, "model": model})
+        if self.behaviour.get(os.path.basename(path)) == "went_local":
+            # Gusan Cloud refused the first piece: the same job goes on with Whisper.
+            kw["on_info"]({"model": "base"})
+            self.runs[-1]["busy_after"] = fj.BUSY_FOR_DICTATION
+            return dict(make_result(path, model="base"), engine="local")
+        result = dict(make_result(path, model=model), engine=spec.engine if spec else "local")
+        if spec is not None:
+            result["decode_seconds"] = None
+        return result
+
+    def queue(self, sync=True, runner=None, **kw):
         return fj.FileJobQueue(
-            self.app, runner=self.runner, store=self.store,
+            self.app, runner=runner or self.runner, store=self.store,
             spawn=(lambda fn: fn()) if sync else self.spawned.append,
             listener=lambda event, *args: self.log.append((event,) + args), **kw)
 
@@ -521,10 +744,10 @@ class TestQueue(unittest.TestCase):
         progress = [e for e in self.log if e[0] == "progress"]
         self.assertEqual(progress[-1][1:], (40, fj.STAGE_TRANSCRIBING, "Ready in about 3 min"))
         self.assertEqual(self.app.events("file_transcription_started"),
-                         [{"model": "small", "speakers": True, "timestamps": True}])
+                         [{"model": "small", "engine": "local", "speakers": True, "timestamps": True}])
         done = self.app.events("file_transcription_completed")[0]
-        self.assertEqual((done["model"], done["audio_minutes"], done["speakers"], done["timestamps"]),
-                         ("small", 1.5, 0, True))
+        self.assertEqual((done["model"], done["engine"], done["audio_minutes"], done["speakers"],
+                          done["timestamps"]), ("small", "local", 1.5, 0, True))
         self.assertEqual(self.app.events("file_transcription_saved"),
                          [{"format": "docx", "auto": True}])  # the "Save as Word" copy
         self.assertEqual(self.app.waits, [("file", 42.0, "small")])
@@ -695,6 +918,127 @@ class TestQueue(unittest.TestCase):
         q.cancel_all()
         self.assertEqual([i["state"] for i in items[1:]], ["cancelled", "cancelled"])
         self.assertTrue(items[0]["_cancel"].is_set())
+
+    # cloud models
+    def test_gusan_cloud_job(self):
+        import cloud_speech
+        token = lambda: "tok"   # noqa: E731
+        self.app.recorder = SimpleNamespace(get_auth_token=token)
+        self.app.is_pro = lambda: True
+        self.app.cfg.update(file_model="cloud", managed_provider="gemini")
+        items, msg = self.queue(runner=self.cloud_runner).enqueue(self.files[0])
+        self.assertEqual(msg, "")
+        run, item = self.runs[0], items[0]
+        spec = run["cloud"]
+        self.assertIsInstance(spec, cloud_speech.Spec)
+        self.assertIn("cloud", run["kw"])
+        self.assertEqual((spec.engine, spec.model_id, spec.provider),
+                         ("gusan", "gemini-2.5-flash", "gemini"))
+        self.assertIs(spec.token_fn, token)
+        self.assertIs(spec.cfg, self.app.cfg)      # live: Privacy mode re-checked per piece
+        self.assertEqual(run["busy"], (fj.BUSY_CLOUD, fj.BUSY_CLOUD))
+        self.assertEqual((item["state"], item["model"], item["model_name"], item["engine"]),
+                         ("done", "gemini-2.5-flash", "Gemini 2.5 Flash", "gusan"))
+        self.assertEqual(self.store.saved[0]["model"], "gemini-2.5-flash")
+        self.assertEqual(self.app.events("file_transcription_started"),
+                         [{"model": "gemini-2.5-flash", "engine": "gusan", "speakers": True,
+                           "timestamps": True}])
+        done = self.app.events("file_transcription_completed")[0]
+        self.assertEqual((done["model"], done["engine"]), ("gemini-2.5-flash", "gusan"))
+        self.assertEqual(self.app.waits, [])           # only jobs on this computer
+        self.assertEqual(self.app.preloads, 0)         # dictation's model was never evicted
+        self.assertFalse(self.app._file_job_running)
+        self.assertNotEqual(fj.BUSY_FOR_DICTATION, fj.BUSY_CLOUD)   # back once it's done
+
+    def test_own_key_job(self):
+        self.app.cfg.update(file_model="own:mistral", mistral_api_key="sk-secret-123",
+                            mistral_stt_model="voxtral-mini-2507", file_language="fr")
+        items, _ = self.queue(runner=self.cloud_runner).enqueue(self.files[0])
+        spec, item = self.runs[0]["cloud"], items[0]
+        self.assertEqual((spec.engine, spec.model_id, spec.language), ("mistral", "voxtral-mini-2507", "fr"))
+        self.assertEqual((item["model_name"], item["engine"]), ("Voxtral Mini 2507", "mistral"))
+        self.assertEqual(self.app.events("file_transcription_started")[0]["engine"], "mistral")
+        self.assertNotIn("sk-secret-123", repr(item) + repr(self.log))     # never in a log line
+
+    def test_cloud_pick_that_cant_run_is_automatic(self):
+        def broken():
+            raise RuntimeError("auth not ready")
+        cases = {
+            "Pro ended": (dict(file_model="cloud"), lambda: False, None),
+            "no is_pro": (dict(file_model="cloud"), None, None),
+            "is_pro fails": (dict(file_model="cloud"), broken, None),
+            "Privacy mode": (dict(file_model="cloud", privacy_mode=True), lambda: True, None),
+            "key removed": (dict(file_model="own:google", google_api_key=" "), None, None),
+            "own key, Privacy mode": (dict(file_model="own:mistral", mistral_api_key="k",
+                                           privacy_mode=True), None, None),
+            "Spec fails": (dict(file_model="cloud"), lambda: True, RuntimeError("boom")),
+        }
+        import cloud_speech
+        for name, (cfg, is_pro, spec_error) in cases.items():
+            with self.subTest(name):
+                self.app, self.runs = FakeApp(**cfg), []
+                if is_pro is not None:
+                    self.app.is_pro = is_pro
+                patch = (mock.patch.object(cloud_speech, "spec_from_cfg", side_effect=spec_error)
+                         if spec_error else contextlib.nullcontext())
+                with patch:
+                    items, msg = self.queue(runner=self.cloud_runner).enqueue(self.files[0])
+                run, item = self.runs[0], items[0]
+                self.assertEqual(msg, "")
+                self.assertIsNone(run["cloud"])
+                self.assertNotIn("cloud", run["kw"])
+                self.assertIsNone(run["opts"]["model"])              # Automatic
+                self.assertEqual(run["busy"][0], fj._BUSY_LOCAL["BUSY_FOR_DICTATION"])
+                self.assertEqual(self.app.events("file_transcription_started")[0]["engine"], "local")
+                self.assertEqual((item["state"], item["model_name"], item["engine"]),
+                                 ("done", "Whisper Base", "local"))
+                self.assertEqual(self.app.waits, [("file", 42.0, "base")])
+                self.assertFalse(self.app._file_job_running)
+
+    def test_queued_cloud_item_names_the_model_that_will_run(self):
+        self.app.is_pro = lambda: True
+        self.app.cfg["managed_provider"] = "mistral"
+        q = self.queue(sync=False, runner=self.cloud_runner)
+        items, _ = q.enqueue(self.files[:2], {"model": "cloud"})
+        self.assertEqual((items[0]["model"], items[0]["model_name"], items[0]["engine"]),
+                         ("voxtral-mini-latest", "Voxtral Mini", "gusan"))        # running
+        self.assertEqual(items[1]["model_name"], "Voxtral Mini")                  # queued
+        self.assertEqual(fj.BUSY_FOR_MEETING, fj.BUSY_CLOUD)
+        self.app.is_pro = lambda: False
+        more, _ = q.enqueue([self.files[2]], {"model": "cloud"})
+        self.assertEqual(more[0]["model_name"], "")                 # will run as Automatic
+        while self.spawned:
+            self.spawned.pop(0)()
+        # Pro ended while it waited: Automatic on this computer.
+        self.assertEqual([(i["model"], i["engine"]) for i in items + more],
+                         [("voxtral-mini-latest", "gusan"), ("base", "local"), ("base", "local")])
+        self.assertNotEqual(fj.BUSY_FOR_MEETING, fj.BUSY_CLOUD)
+
+    def test_cloud_job_that_went_local(self):
+        self.app.is_pro = lambda: True
+        self.app.cfg.update(file_model="cloud", whisper_model="small")
+        self.behaviour["a.mp3"] = "went_local"
+        items, _ = self.queue(runner=self.cloud_runner).enqueue(self.files[0])
+        run, item = self.runs[0], items[0]
+        self.assertEqual(run["busy"][0], fj.BUSY_CLOUD)
+        self.assertEqual(run["busy_after"], fj._BUSY_LOCAL["BUSY_FOR_DICTATION"])
+        self.assertEqual((item["model"], item["model_name"], item["engine"]),
+                         ("base", "Whisper Base", "local"))
+        self.assertEqual(self.app.events("file_transcription_started")[0]["engine"], "gusan")
+        self.assertEqual(self.app.events("file_transcription_completed")[0]["engine"], "local")
+        self.assertEqual(self.app.waits, [("file", 42.0, "base")])
+        self.assertEqual(self.app.preloads, 1)          # base evicted dictation's small
+
+    def test_dictation_model_restored_after_a_local_job_before_a_cloud_one(self):
+        self.app.is_pro = lambda: True
+        q = self.queue(sync=False, runner=self.cloud_runner)
+        q.enqueue(self.files[0], {"model": "medium"})
+        q.enqueue(self.files[1], {"model": "cloud"})
+        while self.spawned:
+            self.spawned.pop(0)()
+        self.assertEqual([r["cloud"] is None for r in self.runs], [True, False])
+        self.assertEqual(self.app.preloads, 1)          # medium evicted dictation's base
+        self.assertEqual([w[2] for w in self.app.waits], ["medium"])
 
 
 def _real_decoder_stack():

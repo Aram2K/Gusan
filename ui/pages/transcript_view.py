@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (QBoxLayout, QFileDialog, QFrame, QGraphicsBlurEff
                                QWidget)
 
 import docx_export
+import engine_choice
 import hardware
 import transcript_store
 from ui import theme
@@ -353,7 +354,13 @@ def speakers_text(doc):
 
 
 def model_text(model_id):
-    return hardware.real_name(model_id) if model_id else ""
+    """'small' -> 'Whisper Small'; a cloud model's id -> its real name
+    ('gemini-2.5-flash' -> 'Gemini 2.5 Flash')."""
+    if not model_id:
+        return ""
+    if hardware.info(model_id):
+        return hardware.real_name(model_id)
+    return engine_choice.model_display_name(model_id)
 
 
 # ── a worker for disk work (results come back on the GUI thread) ──────────────

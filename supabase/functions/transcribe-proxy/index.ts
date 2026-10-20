@@ -106,7 +106,8 @@ async function transcribeGemini(audioB64: string, language: string, languages: s
         { inline_data: { mime_type: "audio/wav", data: audioB64 } },
       ],
     }],
-    generationConfig: { temperature: 0 },
+    // Thinking off: transcription gains nothing from it, and it costs time and tokens.
+    generationConfig: { temperature: 0, thinkingConfig: { thinkingBudget: 0 } },
   };
   const r = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GOOGLE_KEY}`,

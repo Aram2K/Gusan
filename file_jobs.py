@@ -27,7 +27,8 @@ main.py was NOT edited by this wave. What the controller and the pages must do:
    Live Assistance through it) and the idle sweep keep refusing / skipping.
    It sends the same telemetry (file_transcription_started / completed /
    failed {reason: cancelled|error} / saved) and calls
-   self._note_local_wait("file", decode_seconds, model) after a finished job.
+   self._note_local_wait("file", decode_seconds, model) after a finished job
+   on this computer (started / completed also carry "engine").
    On quit: self.file_jobs.shutdown().
 2. Start / cancel (pages, tray, drops on the window):
        items, msg = app.file_jobs.enqueue(paths)            # opts from cfg
@@ -46,7 +47,7 @@ main.py was NOT edited by this wave. What the controller and the pages must do:
        finished(item) · failed(item, str message) · cancelled(item)
        running_changed(bool)
    failed carries the item first: the reason code is item["reason"]
-   (no_audio | unreadable | memory | download | model | no_speech | error),
+   (no_audio | unreadable | memory | download | model | no_speech | cloud | error),
    the message is the one plain sentence for the card (an unexpected crash is
    MSG_ERROR; its traceback goes to the log). A cancel is its own signal,
    never a failure.
@@ -56,8 +57,10 @@ main.py was NOT edited by this wave. What the controller and the pages must do:
    copy ("Ready in about 6 min" / "Ready in under a minute" / "").
    Item keys: id, path, name, kind ("voice"|"video"|"call"), opts, state
    ("queued"|"running"|"done"|"failed"|"cancelled"), pct, stage, eta,
-   eta_seconds, duration (probed, then exact), model (MODELS key), model_name
-   ("Whisper Small"), result (run_file_job's dict), transcript_id,
+   eta_seconds, duration (probed, then exact), model (MODELS key, or the
+   cloud model's real id once the job starts), model_name ("Whisper Small",
+   "Gemini 2.5 Flash"), engine ("local" | "gusan" | "google" | "mistral",
+   set when the job starts), result (run_file_job's dict), transcript_id,
    transcript_dir, word_path, save_error, reason, error.
 4. Config: merge FILE_DEFAULTS into main.DEFAULT (file_model "auto",
    file_language "auto", file_speakers, file_timestamps, file_save_word,
@@ -116,8 +119,8 @@ main.py was NOT edited by this wave. What the controller and the pages must do:
 9. Privacy "Delete history" also calls transcript_store.delete_all_transcripts().
    Transcripts are kept like meetings (they don't follow save_history).
 10. After the queue drains the controller calls app._preload_speech_model()
-    when the job used another model than dictation's, so the next Alt+R does
-    not wait 4-9 s for a reload.
+    when a job on this computer used another model than dictation's, so the
+    next Alt+R does not wait 4-9 s for a reload.
 11. Retire ui/file_transcribe.py and its Settings tab (ui/settings.py:636-645)
     once the Audio to text page ships; it already runs on run_file_job.
 
@@ -128,6 +131,12 @@ What this module is
   order: probe, decode, model (auto pick / one-time download / explicit load),
   recorder.transcribe_segments, optional diarization, group_segments. Returns
   the result dict, raises JobCancelled or JobError(reason, message).
+* Cloud models (file_model "cloud" / "own:google" / "own:mistral"): the queue
+  resolves the pick as the job starts (engine_choice.file_session: Pro,
+  Privacy mode, the key) into a cloud_speech.Spec, and run_file_job sends the
+  decoded file in pieces (cloud_files) instead of loading Whisper; speaker
+  labels and paragraphs are the same. A pick that can't run, or Gusan Cloud
+  refusing the first piece, runs as Automatic on this computer.
 * No length limit for anyone (BRIEF rev 2). The file is decoded straight into
   one float32 array sized from the probed length (about 4 bytes per sample
   instead of faster-whisper's ~10 at peak), with progress and Cancel while it
@@ -142,6 +151,7 @@ import logging
 import os
 import threading
 import time
+import weakref
 
 import docx_export
 import transcript_store
@@ -159,9 +169,11 @@ WHISPER_MODELS = ("tiny", "base", "small", "medium", "large-v3-turbo", "large-v3
 WHISPER_NAMES = {"tiny": "Whisper Tiny", "base": "Whisper Base", "small": "Whisper Small",
                  "medium": "Whisper Medium", "large-v3-turbo": "Whisper Large v3 Turbo",
                  "large-v3": "Whisper Large v3"}
+# Cloud picks (engine_choice.FILE_CLOUD_VALUES): Gusan Cloud, then your own key.
+CLOUD_MODELS = ("cloud", "own:google", "own:mistral")
 
 FILE_DEFAULTS = {
-    "file_model": "auto",           # "auto" | a WHISPER_MODELS key   (rail: Accuracy)
+    "file_model": "auto",           # "auto" | a WHISPER_MODELS key | a CLOUD_MODELS value (rail: Accuracy)
     "file_language": "auto",        # "auto" | "multi" | a LANG_NAMES code (rail: Language)
     "file_speakers": True,          # rail: Speaker labels
     "file_timestamps": True,        # rail: Timestamps
@@ -189,10 +201,16 @@ STAGE_CANCELLED = "Cancelled"
 STAGE_DONE = "Done"
 
 BUSY_TITLE = "Audio to text is running"
-BUSY_FOR_DICTATION = ("Wait for it to finish, or cancel it on the Audio to text page. "
-                      "Dictation uses the same speech model.")
-BUSY_FOR_MEETING = ("A file is being converted right now. Wait for it to finish, or "
-                    "cancel it on the Audio to text page. Meetings use the same speech model.")
+# BUSY_FOR_DICTATION / BUSY_FOR_MEETING (main.py, meeting_session.py) are read
+# through __getattr__ at the bottom: these while a job runs on this computer,
+# BUSY_CLOUD while a cloud job runs (it doesn't use the shared speech model).
+_BUSY_LOCAL = {
+    "BUSY_FOR_DICTATION": ("Wait for it to finish, or cancel it on the Audio to text page. "
+                           "Dictation uses the same speech model."),
+    "BUSY_FOR_MEETING": ("A file is being converted right now. Wait for it to finish, or "
+                         "cancel it on the Audio to text page. Meetings use the same speech model."),
+}
+BUSY_CLOUD = "Gusan is converting a file. Try again when it's done."
 MSG_RECORDING = "Finish the recording first. Audio to text uses the same speech model."
 MSG_OTHER_JOB = "A file is already being converted. Wait for it to finish."
 MSG_NO_AUDIO = "No audio could be read from this file."
@@ -208,7 +226,7 @@ class JobCancelled(Exception):
 
 class JobError(Exception):
     """A job failed. ``reason``: no_audio | unreadable | memory | download |
-    model | no_speech | error. ``message``: one plain sentence for the card."""
+    model | no_speech | cloud | error. ``message``: one plain sentence for the card."""
 
     def __init__(self, reason, message):
         super().__init__(message)
@@ -222,6 +240,18 @@ def whisper_name(model):
     if not model:
         return "Whisper"
     return WHISPER_NAMES.get(model, f"Whisper {model}")
+
+
+def display_name(model):
+    """The plain model name a card shows: "Whisper Small", or a cloud model's
+    real name ("gemini-2.5-flash" -> "Gemini 2.5 Flash")."""
+    if not model or model in WHISPER_NAMES:
+        return whisper_name(model)
+    try:
+        import engine_choice
+        return engine_choice.model_display_name(model)
+    except Exception:
+        return str(model)
 
 
 def is_audio_file(path):
@@ -267,10 +297,11 @@ def normalize_options(opts=None):
 
 
 def options_from_cfg(cfg):
-    """Job options from the Audio to text rail settings (FILE_DEFAULTS keys)."""
+    """Job options from the Audio to text rail settings (FILE_DEFAULTS keys).
+    A cloud pick stays as it is: the queue resolves it when the job starts."""
     get = (cfg or {}).get
     model = get("file_model", FILE_DEFAULTS["file_model"])
-    if model not in WHISPER_MODELS:
+    if model not in WHISPER_MODELS and model not in CLOUD_MODELS:
         model = None
     return normalize_options({
         "model": model,
@@ -434,18 +465,25 @@ def decode_file(path, sampling_rate=SAMPLE_RATE, expected_seconds=None,
 
 def run_file_job(path, opts, recorder, on_progress=None, should_cancel=None, *,
                  on_info=None, decode=None, probe=None, model_downloaded=None,
-                 download_model=None, auto_model=None, diarizer=None):
-    """Transcribe one file on this computer. Runs on a worker thread.
+                 download_model=None, auto_model=None, diarizer=None,
+                 cloud=None, cloud_send=None):
+    """Transcribe one file, on this computer or on a cloud model. Runs on a
+    worker thread.
 
     ``opts``: see normalize_options. ``recorder``: the shared AudioRecorder
     (load_model, transcribe_segments). ``on_progress(pct, stage, eta_seconds)``
     with eta_seconds None while unknown. ``should_cancel()`` is polled.
     ``on_info(dict)`` gets {"duration"} / {"model"} as soon as they are known.
-    The keyword hooks replace main / faster-whisper / diarization in tests.
+    ``cloud``: a cloud_speech.Spec - the decoded file goes to that model in
+    pieces (cloud_files) instead of Whisper; if Gusan Cloud can't be used at
+    the first piece, the job goes on here with Automatic. Without it a cloud
+    pick in opts runs as Automatic. The keyword hooks replace main /
+    faster-whisper / diarization / cloud_speech.send (``cloud_send``) in tests.
 
     Returns {"path", "name", "duration", "segments" (start, end, text, speaker),
-    "paragraphs", "timestamps", "speakers", "speaker_count", "model",
-    "language", "language_setting", "decode_seconds"}.
+    "paragraphs", "timestamps", "speakers", "speaker_count", "model" (the real
+    id: "small", "gemini-2.5-flash"), "engine" ("local" | "gusan" | "google" |
+    "mistral"), "language", "language_setting", "decode_seconds"}.
     Raises JobCancelled, or JobError(reason, message).
     """
     opts = normalize_options(opts)
@@ -501,72 +539,106 @@ def run_file_job(path, opts, recorder, on_progress=None, should_cancel=None, *,
     info(duration=duration)
     check()
     emit(_P_READ_END, STAGE_READING)
-
-    # 3. The model: picked, downloaded once, then loaded with a real error.
-    if opts["model"]:
-        model = opts["model"]
-    else:
-        model = (auto_model or pick_auto_model)(recorder)
-    name = whisper_name(model)
-    info(model=model)
-    if model_downloaded is None:
-        from main import model_downloaded
-    # Decide the stage layout NOW - after the download the same check would
-    # always say "downloaded" and misplace the bar.
-    did_download = not model_downloaded(model)
-    if did_download:
-        label = f"Downloading {name}"
-        emit(_P_READ_END + 1, label)
-
-        def dl_progress(pct, got=0, total=0):
-            if pct is not None:
-                emit(_P_READ_END + (_P_DOWNLOAD_END - _P_READ_END) * pct / 100.0, label)
-        if download_model is None:
-            from main import download_whisper_model as download_model
-        try:
-            download_model(model, on_progress=dl_progress)
-        except Exception as e:
-            logger.warning("Model download failed (%s): %s", model, e)
-            # model_manager.DownloadError already carries one plain sentence
-            # (disk full, model being removed...); anything else is technical.
-            why = str(e).strip() if type(e).__name__ == "DownloadError" else ""
-            raise JobError("download", f"{name} couldn't be downloaded. "
-                           + (why or "Check your internet connection and try again.")) from None
-    check()
-
-    t_start = _P_DOWNLOAD_END if did_download else _P_READ_END
     t_end = _P_TRANSCRIBE_END_WITH_SPK if opts["speakers"] else _P_TRANSCRIBE_END_NO_SPK
-    # Inside transcribe_segments a load failure comes back as [], which would
-    # read as "no speech in this file" - so load here, with the real reason.
-    emit(t_start, f"Loading {name}")
-    try:
-        recorder.load_model(model)
-    except Exception as e:
-        raise JobError("model", f"{name} couldn't be loaded: {str(e)[:200]}") from None
-    check()
+    segments, engine, detected, decode_s = None, "local", None, None
 
-    # 4. Transcribe (the shared inference lock is held inside).
-    stage_t0 = time.monotonic()
+    # 3-4 on a cloud model: the file goes out in pieces, a few at a time.
+    # Speaker labels and paragraphs (5-6) are the same as on this computer.
+    if cloud is not None:
+        import cloud_files
+        model = getattr(cloud, "model_id", "") or ""
+        info(model=model)
+        try:
+            out = cloud_files.transcribe_file(
+                audio, cloud, emit=emit, cancelled=cancelled, send=cloud_send,
+                start_pct=_P_READ_END, end_pct=t_end, stage=STAGE_TRANSCRIBING)
+        except cloud_files.CloudUnavailable as e:
+            # Gusan Cloud refused the first piece (daily cap, Pro ended, no
+            # token). Nothing came back, so the whole file runs here instead:
+            # models are never mixed.
+            logger.info("Gusan Cloud can't take this file (%s); converting it on this computer",
+                        e.kind)
+        except cloud_files.Cancelled:
+            raise JobCancelled() from None
+        except cloud_files.NoSpeech:
+            raise JobError("no_speech", MSG_NO_SPEECH) from None
+        except cloud_files.CloudFileError as e:
+            raise JobError("cloud", e.message) from None
+        else:
+            segments = [dict(s) for s in out["segments"]]
+            model = out.get("model_id") or model
+            engine = getattr(cloud, "engine", "") or "cloud"
+            detected = out.get("language")
+        check()
 
-    def on_tr_progress(done, total):
-        frac = done / total if total else 0.0
-        elapsed = time.monotonic() - stage_t0
-        eta = elapsed * (1 - frac) / frac if frac > 0.03 and elapsed > 5 else None
-        emit(t_start + (t_end - t_start) * frac, STAGE_TRANSCRIBING, eta)
+    if segments is None:
+        # 3. The model: picked, downloaded once, then loaded with a real error.
+        # A cloud pick that reaches here (no Spec, or refused above) is Automatic.
+        if opts["model"] and opts["model"] not in CLOUD_MODELS:
+            model = opts["model"]
+        else:
+            model = (auto_model or pick_auto_model)(recorder)
+        name = whisper_name(model)
+        info(model=model)
+        if model_downloaded is None:
+            from main import model_downloaded
+        # Decide the stage layout NOW - after the download the same check would
+        # always say "downloaded" and misplace the bar.
+        did_download = not model_downloaded(model)
+        if did_download:
+            label = f"Downloading {name}"
+            emit(_P_READ_END + 1, label)
 
-    emit(t_start, STAGE_TRANSCRIBING)
-    try:
-        recorder._last_segments_language = None
-    except Exception:
-        pass
-    segments = recorder.transcribe_segments(
-        audio, language=opts["language"], model_name=model,
-        on_progress=on_tr_progress, should_cancel=cancelled)
-    if segments is None or cancelled():
-        raise JobCancelled()
-    if not segments:
-        raise JobError("no_speech", MSG_NO_SPEECH)
-    segments = [dict(s) for s in segments]
+            def dl_progress(pct, got=0, total=0):
+                if pct is not None:
+                    emit(_P_READ_END + (_P_DOWNLOAD_END - _P_READ_END) * pct / 100.0, label)
+            if download_model is None:
+                from main import download_whisper_model as download_model
+            try:
+                download_model(model, on_progress=dl_progress)
+            except Exception as e:
+                logger.warning("Model download failed (%s): %s", model, e)
+                # model_manager.DownloadError already carries one plain sentence
+                # (disk full, model being removed...); anything else is technical.
+                why = str(e).strip() if type(e).__name__ == "DownloadError" else ""
+                raise JobError("download", f"{name} couldn't be downloaded. "
+                               + (why or "Check your internet connection and try again.")) from None
+        check()
+
+        t_start = _P_DOWNLOAD_END if did_download else _P_READ_END
+        # Inside transcribe_segments a load failure comes back as [], which would
+        # read as "no speech in this file" - so load here, with the real reason.
+        emit(t_start, f"Loading {name}")
+        try:
+            recorder.load_model(model)
+        except Exception as e:
+            raise JobError("model", f"{name} couldn't be loaded: {str(e)[:200]}") from None
+        check()
+
+        # 4. Transcribe (the shared inference lock is held inside).
+        stage_t0 = time.monotonic()
+
+        def on_tr_progress(done, total):
+            frac = done / total if total else 0.0
+            elapsed = time.monotonic() - stage_t0
+            eta = elapsed * (1 - frac) / frac if frac > 0.03 and elapsed > 5 else None
+            emit(t_start + (t_end - t_start) * frac, STAGE_TRANSCRIBING, eta)
+
+        emit(t_start, STAGE_TRANSCRIBING)
+        try:
+            recorder._last_segments_language = None
+        except Exception:
+            pass
+        segments = recorder.transcribe_segments(
+            audio, language=opts["language"], model_name=model,
+            on_progress=on_tr_progress, should_cancel=cancelled)
+        if segments is None or cancelled():
+            raise JobCancelled()
+        if not segments:
+            raise JobError("no_speech", MSG_NO_SPEECH)
+        segments = [dict(s) for s in segments]
+        detected = getattr(recorder, "_last_segments_language", None)
+        decode_s = getattr(recorder, "_last_segments_seconds", None)
 
     # 5. Speaker labels (cannot be cancelled mid-run; checked before and after).
     if opts["speakers"]:
@@ -595,10 +667,8 @@ def run_file_job(path, opts, recorder, on_progress=None, should_cancel=None, *,
     paragraphs = docx_export.group_segments(segments)
     speakers = sorted({p["speaker"] for p in paragraphs if p.get("speaker") is not None})
     setting = opts["language"] or "auto"
-    detected = getattr(recorder, "_last_segments_language", None)
     language = setting if setting not in ("auto", "multi") else (
         detected if isinstance(detected, str) and detected else None)
-    decode_s = getattr(recorder, "_last_segments_seconds", None)
     return {
         "path": path,
         "name": os.path.basename(str(path)),
@@ -609,6 +679,7 @@ def run_file_job(path, opts, recorder, on_progress=None, should_cancel=None, *,
         "speakers": opts["speakers"],
         "speaker_count": len(speakers),
         "model": model,
+        "engine": engine,
         "language": language,
         "language_setting": setting,
         "decode_seconds": decode_s if isinstance(decode_s, (int, float)) else None,
@@ -619,6 +690,15 @@ def run_file_job(path, opts, recorder, on_progress=None, should_cancel=None, *,
 
 def _spawn_thread(fn):
     threading.Thread(target=fn, daemon=True, name="file-job").start()
+
+
+# Every queue (the app has one), so the busy sentences can tell whether the
+# running job is a cloud one.
+_QUEUES = weakref.WeakSet()
+
+
+def _cloud_job_running():
+    return any((q.current() or {}).get("engine", "local") != "local" for q in list(_QUEUES))
 
 
 class FileJobQueue:
@@ -645,6 +725,8 @@ class FileJobQueue:
         self._current = None
         self._seq = 0
         self._reported_running = False
+        self._local_model = None        # the last Whisper model a job used, until the queue drains
+        _QUEUES.add(self)
 
     # public
     def is_running(self):
@@ -734,12 +816,63 @@ class FileJobQueue:
         return {"id": self._seq, "path": path, "name": os.path.basename(path),
                 "kind": file_kind(path), "opts": dict(opts), "state": "queued",
                 "pct": 0, "stage": STAGE_WAITING, "eta": "", "eta_seconds": None,
-                "duration": None, "model": model,
-                "model_name": whisper_name(model) if model else "",
-                "result": None, "transcript_id": None, "transcript_dir": None,
+                "duration": None, "model": model, "model_name": self._planned_name(model),
+                "engine": "local", "result": None, "transcript_id": None, "transcript_dir": None,
                 "word_path": None, "save_error": None, "reason": None, "error": None,
                 "queued_at": time.time(), "started_at": None,
-                "_cancel": threading.Event()}
+                "_cancel": threading.Event(), "_cloud": None}
+
+    def _is_pro(self):
+        is_pro = getattr(self.app, "is_pro", None)
+        try:
+            return bool(is_pro()) if callable(is_pro) else False
+        except Exception:
+            return False
+
+    def _planned_name(self, model):
+        """The card's model name while queued: the Whisper name, the cloud
+        model's name when that pick can run now, "" for Automatic."""
+        if not model:
+            return ""
+        if model not in CLOUD_MODELS:
+            return whisper_name(model)
+        try:
+            import engine_choice
+            cfg = getattr(self.app, "cfg", None) or {}
+            return engine_choice.file_engine(cfg, model, self._is_pro())["model_name"]
+        except Exception:
+            return ""
+
+    def _resolve_cloud(self, item):
+        """GUI thread, as the job starts: a cloud pick gets its
+        cloud_speech.Spec when it can run now (Pro for Gusan Cloud, Privacy
+        mode off, the key saved). Otherwise - or on any error here, so the
+        job always starts - it runs as Automatic on this computer."""
+        opts = item["opts"]
+        if opts["model"] not in CLOUD_MODELS:
+            return
+        spec = None
+        try:
+            import cloud_speech
+            import engine_choice
+            cfg = getattr(self.app, "cfg", None) or {}
+            backend, model = engine_choice.file_session(
+                dict(cfg, **{engine_choice.FILE_KEY: opts["model"]}), self._is_pro())
+            if backend != "local":
+                # The live cfg: Privacy mode and the key are checked again before every piece.
+                token_fn = getattr(getattr(self.app, "recorder", None), "get_auth_token", None)
+                spec = cloud_speech.spec_from_cfg(cfg, backend, model,
+                                                  language=opts["language"] or "auto",
+                                                  token_fn=token_fn if callable(token_fn) else None)
+        except Exception:
+            logger.warning("Cloud model not usable; converting on this computer", exc_info=True)
+            spec = None
+        if spec is None:
+            opts["model"] = None
+            item.update(model=None, model_name="", engine="local", _cloud=None)
+        else:
+            item.update(model=spec.model_id, model_name=spec.model_name, engine=spec.engine,
+                        _cloud=spec)
 
     def _emit(self, event, *args):
         try:
@@ -766,15 +899,18 @@ class FileJobQueue:
         if self._current is not None or not self._queue:
             return
         item = self._queue.pop(0)
+        self._resolve_cloud(item)           # never raises: a problem means Automatic
         item.update(state="running", started_at=time.time(), pct=0, stage=STAGE_STARTING)
         self._current = item
         # Two-way exclusion: dictation / meetings refuse to start while this is
-        # up (they would block on the shared model's inference lock for the
-        # whole file - potentially an hour of "Finalising…").
+        # up (a local job would hold the shared model's inference lock for the
+        # whole file; a cloud job still blocks them, with BUSY_CLOUD).
         self._set_flag(True)
         opts = item["opts"]
         self._track("file_transcription_started", {
-            "model": opts["model"], "speakers": opts["speakers"], "timestamps": opts["timestamps"]})
+            "model": item["model"] if item["_cloud"] is not None else opts["model"],
+            "engine": item["engine"], "speakers": opts["speakers"],
+            "timestamps": opts["timestamps"]})
         self._emit("started", item)
         if not self._reported_running:
             self._reported_running = True
@@ -799,6 +935,8 @@ class FileJobQueue:
             kwargs = {"on_info": lambda info: self._post_safe(lambda: self._on_info(item, info))}
             if self._downloader is not None:
                 kwargs["download_model"] = self._downloader
+            if item.get("_cloud") is not None:
+                kwargs["cloud"] = item["_cloud"]
             result = self._runner(
                 item["path"], item["opts"], recorder,
                 lambda pct, stage, eta=None: self._post_safe(
@@ -851,7 +989,9 @@ class FileJobQueue:
             item["duration"] = float(info["duration"])
         if info.get("model"):
             item["model"] = info["model"]
-            item["model_name"] = whisper_name(info["model"])
+            item["model_name"] = display_name(info["model"])
+            if info["model"] in WHISPER_MODELS:
+                item["engine"] = "local"        # Gusan Cloud refused it: this computer now
         self._emit("progress", item["pct"], item["stage"], item["eta"])
 
     def _on_progress(self, item, pct, stage, eta):
@@ -870,19 +1010,23 @@ class FileJobQueue:
         item.update(extra)
         item["eta"], item["eta_seconds"] = "", None
         if err is None and result is not None:
+            model = result.get("model")
+            local = model in WHISPER_MODELS
+            engine = result.get("engine") or ("local" if local else item.get("engine") or "local")
             item.update(state="done", pct=100, stage=STAGE_DONE, result=result,
-                        duration=result.get("duration"), model=result.get("model"),
-                        model_name=whisper_name(result.get("model")))
+                        duration=result.get("duration"), model=model,
+                        model_name=display_name(model), engine=engine)
             note = getattr(self.app, "_note_local_wait", None)
-            if callable(note):
+            if local and callable(note):
                 # Decode time only - not the model download or diarization.
                 decode = result.get("decode_seconds")
                 try:
-                    note("file", decode if decode is not None else took * 60, result.get("model"))
+                    note("file", decode if decode is not None else took * 60, model)
                 except Exception:
                     pass
             self._track("file_transcription_completed", {
-                "model": result.get("model"),
+                "model": model,
+                "engine": engine,
                 "audio_minutes": round((result.get("duration") or 0) / 60, 1),
                 "took_minutes": took,
                 "speakers": result.get("speaker_count", 0),
@@ -899,6 +1043,8 @@ class FileJobQueue:
             item.update(state="failed", reason=err[0], error=err[1])
             self._track("file_transcription_failed", {"reason": "error", "took_minutes": took})
             outcome = ("failed", item, err[1])
+        if item.get("model") in WHISPER_MODELS:
+            self._local_model = item["model"]
         if self._current is None and not self._queue:
             self._set_flag(False)
         self._emit(*outcome)
@@ -909,15 +1055,16 @@ class FileJobQueue:
             elif self._reported_running:
                 self._reported_running = False
                 self._emit("running_changed", False)
-                self._restore_dictation_model(item)
+                self._restore_dictation_model()
 
-    def _restore_dictation_model(self, item):
-        """The job may have evicted dictation's model: load it back (only if
-        it's on disk, in the background) so the next Alt+R is instant."""
+    def _restore_dictation_model(self):
+        """A job on this computer may have evicted dictation's model: load it
+        back (only if it's on disk, in the background) so the next Alt+R is
+        instant. Cloud jobs never load a Whisper model."""
         app = self.app
         reload = getattr(app, "_preload_speech_model", None)
         want = (getattr(app, "cfg", None) or {}).get("whisper_model")
-        used = item.get("model")
+        used, self._local_model = self._local_model, None
         if callable(reload) and used and want and used != want:
             try:
                 reload()
@@ -990,4 +1137,7 @@ def __getattr__(name):
         if _controller_cls is None:
             _controller_cls = _make_controller_class()
         return _controller_cls
+    if name in _BUSY_LOCAL:
+        # Read when dictation / a meeting is refused, so it fits the job running now.
+        return BUSY_CLOUD if _cloud_job_running() else _BUSY_LOCAL[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

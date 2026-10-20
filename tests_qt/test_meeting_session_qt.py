@@ -161,7 +161,7 @@ def test_a_meeting_from_start_to_notes_on_the_gui_thread(qapp, meetings_root):
     assert meeting_store.load_my_notes(folder) == "Ask Anna about the budget"
     meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
     assert meta["title"] == "Weekly sync" and meta["attendees_list"] == ["Anna", "David"]
-    assert meta["notes_engine_label"] == "Gusan Cloud · Claude Sonnet 5.5"
+    assert meta["notes_engine_label"] == "Gusan Cloud · Mistral Small"
     assert meta["seen"] is False and meta["language"] == "en"
     assert ("release",) in app.calls
     # The recorder's dictation callbacks are back.

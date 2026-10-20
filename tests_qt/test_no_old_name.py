@@ -203,6 +203,64 @@ def test_the_sign_in_sheet(quiet, mode):
     assert_no_old_name("sign-in sheet (%s)" % mode, visible_strings(sheet))
 
 
+def test_the_notion_sheet(quiet, monkeypatch):
+    """All five screens, their messages and the picker, with the rail's Notion rows."""
+    import notion_connect
+    from tests_qt.test_notion_sheet import OAUTH_CFG, PAGES, Deferred, Host
+    from ui import notion_sheet as ns
+    monkeypatch.setattr(notion_connect, "NOTION_CLIENT_ID", "test-client-id")
+    sheets = []
+
+    def build(cfg=None, **kw):
+        sheet = ns.NotionSheet(Host(cfg), run=Deferred(), **kw)
+        quiet.append(sheet)
+        sheet.show()
+        QApplication.processEvents()
+        sheets.append(sheet)
+        return sheet
+    intro = build()
+    assert_no_old_name("Notion sheet (first screen)", visible_strings(intro))
+    for sentence in notion_connect.MESSAGES.values():
+        intro._show_intro(sentence)
+        assert_no_old_name("Notion sheet (first screen, %r)" % sentence, visible_strings(intro))
+    intro.connect_btn.click()
+    assert intro.page_name() == "waiting"
+    assert_no_old_name("Notion sheet (waiting)", visible_strings(intro))
+    intro.flow.finishing.emit()
+    assert_no_old_name("Notion sheet (setting things up)", visible_strings(intro))
+    connected = build(OAUTH_CFG, then="Send this meeting")
+    connected._fill_picker(PAGES)
+    assert connected.page_name() == "connected"
+    assert_no_old_name("Notion sheet (connected)", visible_strings(connected))
+    manual = build()
+    manual._show_manual(notion_connect.MESSAGES["rejected"])
+    assert_no_old_name("Notion sheet (own integration)", visible_strings(manual))
+    share = build()
+    share._on_no_page({"mode": "oauth", "token": "t", "refresh": "", "workspace": "", "dest": None, "pages": []})
+    assert share.page_name() == "share"
+    assert_no_old_name("Notion sheet (share a page)", visible_strings(share))
+    share._on_no_page({"mode": "own", "token": "t", "refresh": "", "workspace": "", "dest": None, "pages": []})
+    assert_no_old_name("Notion sheet (share a page, own)", visible_strings(share))
+    assert any("Gusan" in s for s in visible_strings(connected) + visible_strings(share))
+
+
+def test_the_notion_rows_of_the_meeting_settings(quiet, meetings_root):
+    from ui import shell as shell_mod
+    app = make_stub_app("pro")
+    app.cfg.update({"notion_api_key": "tok", "notion_auth_mode": "oauth", "notion_workspace_name": "Aram's workspace",
+                    "notion_parent_page": "99999999-9999-9999-9999-999999999999", "notion_auto_send": True})
+    win = shell_mod.MainWindow(app)
+    quiet.append(win)
+    page = win.open("meetings")
+    QApplication.processEvents()
+    strings = visible_strings(page.list_view.rail)
+    assert "Send notes to Notion" in strings and "Send automatically" in strings
+    assert_no_old_name("Meeting settings (Notion connected)", strings)
+    app.cfg["notion_reconnect"] = True
+    page.list_view.rail.sync_settings()
+    assert_no_old_name("Meeting settings (Notion reconnect)", visible_strings(page.list_view.rail))
+
+
 @pytest.mark.parametrize("feature", [None, "Live Assistant", "Meeting recording", "Smart Actions"])
 def test_the_pro_window(quiet, feature):
     from ui.pro_dialog import ProDialog

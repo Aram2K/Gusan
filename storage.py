@@ -13,6 +13,11 @@ SECRET_SERVICE = "TranscribeApp"
 GOOGLE_API_KEY_SECRET = "google_api_key"
 ACTION_API_KEY_SECRET = "action_api_key"
 MISTRAL_API_KEY_SECRET = "mistral_api_key"
+# Notion (notion_connect.py): the access token and, with Connect Notion, the
+# refresh token. Machine-wide, like the config keys notion_api_key and
+# notion_refresh_token that they back.
+NOTION_TOKEN_SECRET = "notion_access_token"
+NOTION_REFRESH_SECRET = "notion_refresh_token"
 # JSON blob holding the per-user stashed API keys (the user_secrets store), so
 # keys swapped out on account switch never sit in plaintext config.json either.
 USER_SECRETS_SECRET = "user_secrets_keys"

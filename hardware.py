@@ -98,7 +98,7 @@ LEGACY_LOCAL_AI_IDS = {"aibuben_tiny": "qwen_tiny", "aibuben_balanced": "qwen_3b
 
 # Gusan Cloud (Pro). Names only - the routing lives in main / engine_choice.
 CLOUD_SPEECH_MODEL = "Gemini 2.5 Flash"     # cloud speech (transcribe-proxy default)
-CLOUD_WRITER_MODEL = "Claude Sonnet 5.5"    # meeting notes (smart-action: Claude first, Mistral backup)
+CLOUD_WRITER_MODEL = "Mistral Small"        # meeting notes (smart-action tries Claude Sonnet 5.5 first once its key is scoped to a workspace)
 CLOUD_LIVE_MODEL = "DeepSeek V4.1 Flash"    # Live Assistant answers
 CLOUD_SMART_MODEL = CLOUD_LIVE_MODEL        # Smart Actions (smart-action SMART_MODES)
 

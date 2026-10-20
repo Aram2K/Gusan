@@ -156,7 +156,7 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(msess.available_audio_modes(False), ("default_mic",))
 
     def test_labels_titles_and_sentences(self):
-        self.assertEqual(msess.engine_label("managed"), "Gusan Cloud · Claude Sonnet 5.5")
+        self.assertEqual(msess.engine_label("managed"), "Gusan Cloud · Mistral Small")
         self.assertEqual(msess.engine_label("qwen_tiny"), "This computer · Qwen 1.5B")
         self.assertEqual(msess.engine_label("rule_based"), "Built-in formatter")
         self.assertTrue(msess.engine_label("api_cerebras").endswith("· your key"))
@@ -445,7 +445,7 @@ class TestOutcome(_Base):
                          "## Summary\n- Ship Friday")
         meta = ms.load_meta(folder)
         self.assertEqual(meta["notes_engine"], "managed")
-        self.assertEqual(meta["notes_engine_label"], "Gusan Cloud · Claude Sonnet 5.5")
+        self.assertEqual(meta["notes_engine_label"], "Gusan Cloud · Mistral Small")
         self.assertIs(meta["seen"], False)
         self.assertEqual(meta["language"], "en")
         self.assertEqual(meta["notices"], [])

@@ -944,20 +944,24 @@ class TestKeyringWritesOnlyChanges(unittest.TestCase):
     def test_a_debounced_save_writes_no_unchanged_secret(self):
         writes = []
         cfg = {**main.DEFAULT, "google_api_key": "G", "action_api_key": "A", "mistral_api_key": "",
-               "user_secrets": {}}
+               "notion_api_key": "N", "notion_refresh_token": "R", "user_secrets": {}}
         with mock.patch.object(main.storage, "write_secret",
                                side_effect=lambda n, v: writes.append((n, v)) or True):
             main.save_config(cfg)
-            self.assertEqual(len(writes), 4)                # first save: every secret once
+            self.assertEqual(len(writes), 6)                # first save: every secret once (the Notion pair too)
             writes.clear()
             main.save_config(cfg)
             main.save_config(dict(cfg, hotkey="ctrl+r"))
             self.assertEqual(writes, [])                    # nothing changed in the keyring
             main.save_config(dict(cfg, action_api_key="A2"))
             self.assertEqual(writes, [(main.storage.ACTION_API_KEY_SECRET, "A2")])
+            writes.clear()
+            main.save_config(dict(cfg, action_api_key="A2", notion_api_key="N2"))     # a refreshed Notion token
+            self.assertEqual(writes, [(main.storage.NOTION_TOKEN_SECRET, "N2")])
         with open(main.CONFIG_PATH, encoding="utf-8") as f:
             disk = json.load(f)
         self.assertEqual((disk["google_api_key"], disk["action_api_key"]), ("", ""))
+        self.assertEqual((disk["notion_api_key"], disk["notion_refresh_token"]), ("", ""))
 
     def test_a_keyring_that_refuses_keeps_trying_and_the_key_stays_on_disk(self):
         writes = []
@@ -985,6 +989,9 @@ class TestKeyringWritesOnlyChanges(unittest.TestCase):
         self.assertNotIn(main.storage.GOOGLE_API_KEY_SECRET, writes)
         self.assertNotIn(main.storage.ACTION_API_KEY_SECRET, writes)
         self.assertNotIn(main.storage.MISTRAL_API_KEY_SECRET, writes)
+        self.assertNotIn(main.storage.NOTION_TOKEN_SECRET, writes)
+        self.assertNotIn(main.storage.NOTION_REFRESH_SECRET, writes)
+        self.assertEqual(cfg["notion_api_key"], "K-" + main.storage.NOTION_TOKEN_SECRET)
 
 
 class TestUpdatesWaitForRecordings(unittest.TestCase):

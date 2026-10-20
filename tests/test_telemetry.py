@@ -263,7 +263,8 @@ class TestTelemetryContract(unittest.TestCase):
         self.assertEqual(telemetry.SENSITIVE_KEYS - _ts_set("sensitiveKeys"), set())
 
     def test_every_tracked_event_is_allow_listed(self):
-        call = re.compile(r"\btrack\(\s*\"(\w+)\"(?:\s+if\s+[^()]+?\s+else\s+\"(\w+)\")?")
+        # track("event", ...), and the helper form the Notion sheet uses: _track(host, "event", ...)
+        call = re.compile(r"\b_?track\(\s*(?:(?:self\.)?host\s*,\s*)?\"(\w+)\"(?:\s+if\s+[^()]+?\s+else\s+\"(\w+)\")?")
         skip = {"venv", ".venv", "tests", "build", "dist", ".claude", ".git", "__pycache__"}
         used = set()
         for dirpath, dirnames, filenames in os.walk(ROOT):

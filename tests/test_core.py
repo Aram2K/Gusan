@@ -292,6 +292,156 @@ class TestConfig(unittest.TestCase):
         # The in-memory config the app keeps using is untouched.
         self.assertEqual(cfg["user_secrets"]["user:A"]["google_api_key"], "UG-key")
 
+    # ── the Notion tokens live in the keyring too (main._NOTION_SECRETS) ──
+    @staticmethod
+    def _fake_keyring(refuse=()):
+        """A dict-backed keyring; ``refuse`` names it will not store."""
+        store = {}
+
+        def write(name, value):
+            if name in refuse:
+                return False
+            if value:
+                store[name] = value
+            else:
+                store.pop(name, None)
+            return True
+        return store, write, lambda name: store.get(name, "")
+
+    def _with_keyring(self, store, write, read):
+        import main as m
+        orig = m.CONFIG_PATH
+        m.CONFIG_PATH = self._cfg_path
+        self.addCleanup(setattr, m, "CONFIG_PATH", orig)
+        for attr, fn in (("write_secret", write), ("read_secret", read)):
+            p = patch.object(m.storage, attr, side_effect=fn)
+            p.start()
+            self.addCleanup(p.stop)
+        return m
+
+    def _config_texts(self):
+        out = {}
+        for suffix in ("", ".bak"):
+            path = self._cfg_path + suffix
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as f:
+                    out[suffix or "config.json"] = f.read()
+        return out
+
+    def test_notion_tokens_go_to_the_keyring_and_config_keeps_blanks(self):
+        import json
+        store, write, read = self._fake_keyring()
+        m = self._with_keyring(store, write, read)
+        cfg = {**DEFAULT, "notion_api_key": "ntn_access", "notion_refresh_token": "ref_token",
+               "notion_auth_mode": "oauth", "notion_parent_page": "p"}
+        m.save_config(cfg)
+        with open(self._cfg_path, encoding="utf-8") as f:
+            raw = json.load(f)
+        self.assertEqual((raw["notion_api_key"], raw["notion_refresh_token"]), ("", ""))
+        self.assertEqual(raw["notion_auth_mode"], "oauth")              # the rest of the connection stays on disk
+        self.assertEqual(store[m.storage.NOTION_TOKEN_SECRET], "ntn_access")
+        self.assertEqual(store[m.storage.NOTION_REFRESH_SECRET], "ref_token")
+        self.assertNotIn("ntn_access", "".join(self._config_texts().values()))
+        self.assertNotIn("ref_token", "".join(self._config_texts().values()))
+        self.assertEqual(cfg["notion_api_key"], "ntn_access")           # the app keeps using the real value
+        # ...and a later start finds them in the keyring
+        back = m.load_config()
+        self.assertEqual((back["notion_api_key"], back["notion_refresh_token"]), ("ntn_access", "ref_token"))
+        self.assertEqual(back["notion_auth_mode"], "oauth")
+
+    def test_disconnecting_clears_the_tokens_from_the_keyring(self):
+        store, write, read = self._fake_keyring()
+        m = self._with_keyring(store, write, read)
+        names = (m.storage.NOTION_TOKEN_SECRET, m.storage.NOTION_REFRESH_SECRET)
+        m.save_config({**DEFAULT, "notion_api_key": "a", "notion_refresh_token": "b"})
+        self.assertEqual([store.get(n) for n in names], ["a", "b"])
+        m.save_config({**DEFAULT})
+        self.assertEqual([store.get(n) for n in names], [None, None])
+        self.assertEqual(m.load_config()["notion_api_key"], "")
+
+    def test_a_plaintext_legacy_notion_token_migrates_and_leaves_no_copy(self):
+        import json
+        store, write, read = self._fake_keyring()
+        m = self._with_keyring(store, write, read)
+        with open(self._cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"whisper_model": "small", "notion_api_key": "ntn_legacy",
+                       "notion_parent_page": "0123456789abcdef0123456789abcdef"}, f)
+        c = load_config()
+        self.assertEqual(c["notion_api_key"], "ntn_legacy")             # the app still has it
+        self.assertEqual(store[m.storage.NOTION_TOKEN_SECRET], "ntn_legacy")
+        self.assertEqual(c["whisper_model"], "small")
+        texts = self._config_texts()
+        self.assertNotIn("ntn_legacy", texts["config.json"])
+        self.assertNotIn("ntn_legacy", texts.get(".bak", ""))           # the backup copy is clean too
+        self.assertEqual(json.loads(texts["config.json"])["notion_parent_page"],
+                         "0123456789abcdef0123456789abcdef")
+        self.assertEqual(load_config()["notion_api_key"], "ntn_legacy")
+
+    def test_another_keys_migration_never_puts_a_notion_token_back_on_disk(self):
+        import json
+        store, write, read = self._fake_keyring()
+        m = self._with_keyring(store, write, read)
+        written = []
+        real = m.storage.atomic_write_json
+
+        def spy(path, data, **kw):
+            written.append(json.dumps(data))
+            return real(path, data, **kw)
+        with open(self._cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"google_api_key": "G-plain", "action_api_key": "A-plain", "mistral_api_key": "M-plain",
+                       "notion_api_key": "ntn_legacy", "notion_refresh_token": "ref_legacy"}, f)
+        with patch.object(m.storage, "atomic_write_json", side_effect=spy):
+            c = load_config()
+        self.assertTrue(written)                                        # the key migrations did write
+        for text in written:
+            self.assertNotIn("ntn_legacy", text)
+            self.assertNotIn("ref_legacy", text)
+        self.assertEqual((c["notion_api_key"], c["notion_refresh_token"]), ("ntn_legacy", "ref_legacy"))
+        self.assertEqual(c["google_api_key"], "G-plain")
+        self.assertEqual(store[m.storage.GOOGLE_API_KEY_SECRET], "G-plain")
+        self.assertEqual(store[m.storage.NOTION_REFRESH_SECRET], "ref_legacy")
+        self.assertNotIn("ntn_legacy", "".join(self._config_texts().values()))
+
+    def test_a_keyring_that_reads_notion_tokens_does_not_leak_them_in_another_migration(self):
+        import json
+        store, write, read = self._fake_keyring()
+        m = self._with_keyring(store, write, read)
+        store[m.storage.NOTION_TOKEN_SECRET] = "ntn_in_keyring"
+        written = []
+        real = m.storage.atomic_write_json
+        with open(self._cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"google_api_key": "G-plain"}, f)
+        with patch.object(m.storage, "atomic_write_json",
+                          side_effect=lambda path, data, **kw: (written.append(json.dumps(data)), real(path, data, **kw))[1]):
+            c = load_config()
+        self.assertEqual(c["notion_api_key"], "ntn_in_keyring")
+        self.assertTrue(written)
+        self.assertNotIn("ntn_in_keyring", "".join(written) + "".join(self._config_texts().values()))
+
+    def test_without_a_keyring_the_notion_token_stays_where_it_was(self):
+        import json
+        store, write, read = self._fake_keyring(refuse=("notion_access_token", "notion_refresh_token"))
+        m = self._with_keyring(store, write, read)
+        m.save_config({**DEFAULT, "notion_api_key": "ntn_a", "notion_refresh_token": "ref_b"})
+        with open(self._cfg_path, encoding="utf-8") as f:
+            raw = json.load(f)
+        self.assertEqual((raw["notion_api_key"], raw["notion_refresh_token"]), ("ntn_a", "ref_b"))
+        c = load_config()
+        self.assertEqual((c["notion_api_key"], c["notion_refresh_token"]), ("ntn_a", "ref_b"))
+        self.assertFalse({"notion_access_token", "notion_refresh_token"} & set(store))
+        # a refused token is not lost when another key migrates
+        with open(self._cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"google_api_key": "G-plain", "notion_api_key": "ntn_a"}, f)
+        c = load_config()
+        self.assertEqual(c["notion_api_key"], "ntn_a")
+        with open(self._cfg_path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["notion_api_key"], "ntn_a")
+
+    def test_the_notion_tokens_are_not_per_account_secrets(self):
+        import main as m
+        self.assertEqual(set(m._NOTION_SECRETS), {"notion_api_key", "notion_refresh_token"})
+        self.assertFalse(set(m._NOTION_SECRETS) & set(m._SECRET_CFG_KEYS))
+
     def test_partial_config_merged_with_defaults(self):
         import main as m
         orig = m.CONFIG_PATH

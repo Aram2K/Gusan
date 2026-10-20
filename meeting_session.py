@@ -287,7 +287,7 @@ def engine_label(engine):
             import hardware
             model = hardware.CLOUD_WRITER_MODEL
         except Exception:
-            model = "Claude Sonnet 5.5"
+            model = "Mistral Small"
         return "Gusan Cloud · " + model
     if engine == actions.RULE_BASED_ID:
         return "Built-in formatter"
@@ -387,6 +387,12 @@ class MeetingCore:
         self._resume_prior_duration = 0
         self._chunks_path = None
         self._final_notes = ""
+        # Were these notes the meeting's FIRST? True after a first run, notes a
+        # Quit left for later and a Retry after a failure; False after a rewrite
+        # of notes it had. Read by main's automatic Notion send, right after
+        # `finished`. _had_notes: the meeting had notes before the current run.
+        self.last_notes_new = False
+        self._had_notes = False
         self._final_transcript = ""
         self._final_lang = ""
         self._meeting_title = ""
@@ -723,6 +729,7 @@ class MeetingCore:
         self._chunks = []
         self._final_transcript = ""
         self._final_notes = ""
+        self._had_notes = False        # a new recording's notes (continued too) are first ones
         self._final_lang = ""
         self._summary_downgraded = False
         self._transcript_notices = []
@@ -1493,6 +1500,7 @@ class MeetingCore:
             self._failed = True
             self.last_error = error_msg
             self._final_notes = ""
+            self.last_notes_new = False
             if transcript.strip():
                 # The recording is NOT lost: the transcript is kept and the
                 # notes can be retried (resume state kept for that).
@@ -1515,6 +1523,10 @@ class MeetingCore:
         self._failed = False
         self.last_error = ""
         self._final_notes = notes
+        # First notes of this meeting - not a rewrite (also: not the retry of a
+        # rewrite that failed, which still had its old notes).
+        self.last_notes_new = not self._had_notes
+        self._had_notes = self._had_notes or bool((notes or "").strip())
         self._clear_resume_state()
 
         # Persist to the app history (like dictations) so the notes are
@@ -1584,6 +1596,11 @@ class MeetingCore:
         self._meeting_attendees = str(meta.get("attendees") or "")
         self._final_transcript = transcript
         self._final_notes = meeting_store.load_notes(folder)
+        # Notes a Quit left for later are due now, whatever an earlier part of a
+        # continued meeting wrote: first notes. Otherwise a rewrite (or the
+        # first notes of a meeting whose first attempt failed: nothing on disk).
+        self._had_notes = (bool(self._final_notes.strip())
+                           and not meta.get(META_NOTES_PENDING))
         self._final_lang = str(meta.get("language") or "")
         self._user_notes = meeting_store.load_my_notes(folder).strip()
         self._my_notes_draft = self._user_notes

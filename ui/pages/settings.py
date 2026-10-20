@@ -2520,7 +2520,7 @@ class SettingsPage(QWidget):
         two = QBoxLayout(QBoxLayout.LeftToRight)       # top to bottom in a narrow window
         two.setSpacing(20)
         self.speech_two = two
-        left, lv = self._block("Speech runs on", sub="Dictation, meetings and audio to text.", parent=sec)
+        left, lv = self._block("Speech runs on", sub="Dictation and meetings.", parent=sec)
         tiles = QVBoxLayout()
         tiles.setSpacing(8)
         self.speech_tiles = {

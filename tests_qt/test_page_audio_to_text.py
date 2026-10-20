@@ -165,18 +165,24 @@ def test_opens_in_the_shell_for_every_plan(qapp, store, tier):
         QApplication.processEvents()
 
 
-def test_same_page_for_free_and_pro_and_no_limits_or_upsell(build, store):
+def test_same_page_for_free_and_pro_with_no_limit_wording(build, store):
     _save(store, "board_call.mp3", 6000)
-    free, _ = build("free")
-    pro, _ = build("pro")
+    free, free_app = build("free")
+    pro, pro_app = build("pro")
     texts = _texts(free)
     assert sorted(texts) == sorted(_texts(pro))
     for t in texts:
         low = t.lower()
         assert not any(b in low for b in ("limit", "hour", "upgrade", "minutes left", "unlock")), t
-        assert t != "PRO", "no Pro tag on a page that is the same for everybody"
+        assert t != "PRO", "calm Pro: no Pro tag or banner, only the mark in the Accuracy list"
     assert "MP3, WAV, M4A, FLAC or video · any length" in texts
     assert "On this computer. Nothing is uploaded." in _texts(free)
+    # The one Pro item is Gusan Cloud in the list, marked for Free users only.
+    marked = [free.model_combo.itemText(i) for i in range(free.model_combo.count())
+              if "PRO" in free.model_combo.itemText(i)]
+    assert marked == ["Gusan Cloud · Gemini 2.5 Flash  PRO"]
+    assert not [i for i in range(pro.model_combo.count()) if "PRO" in pro.model_combo.itemText(i)]
+    assert not [c for c in free_app.calls + pro_app.calls if c[0] == "_pro_upsell"], "nothing opens by itself"
 
 
 def test_every_control_has_a_name(build, store):
@@ -337,8 +343,13 @@ def test_language_list_and_model_list(build, store):
     assert langs == ["Detect automatically", "Mixed languages", "English", "Arabic", "Armenian",
                      "French", "German", "Russian", "Spanish"]
     plain = [page.model_combo.itemData(i, Qt.UserRole + 1) for i in range(page.model_combo.count())]
-    assert plain == ["Automatic", "Lightest", "Fast", "Balanced", "Accurate", "Most accurate", "Maximum"]
+    assert plain == ["Automatic", "Lightest", "Fast", "Balanced", "Accurate", "Most accurate", "Maximum",
+                     "Gusan Cloud"]
     assert page.model_combo.itemText(5) == "Most accurate · Whisper Large v3 Turbo"
+    assert page.model_combo.itemText(7) == "Gusan Cloud · Gemini 2.5 Flash  PRO"
+    fm = page.model_combo.view().fontMetrics()
+    longest = max(fm.horizontalAdvance(page.model_combo.itemText(i)) for i in range(page.model_combo.count()))
+    assert page.model_combo.view().minimumWidth() >= max(260, longest + 40), "the list fits its longest line"
 
 
 def test_a_refused_setting_snaps_back(build, store):
@@ -365,6 +376,147 @@ def test_automatic_names_the_model_it_would_use(build, store):
     page, app = build(file_model="auto",
                       downloads=FakeDownloads(ready=["small", "large-v3-turbo"], gpu_state="ready"))
     assert page.model_line.text() == "Whisper Large v3 Turbo"
+
+
+# ── cloud models in Accuracy ─────────────────────────────────────────────────
+def _saving(app):
+    """set_setting that also saves to cfg (as the real controller does)."""
+    def set_setting(key, value):
+        app.calls.append(("set_setting", key, value))
+        app.cfg[key] = value
+        return True
+    app.set_setting = set_setting
+
+
+def _sets(app):
+    return [c[1:] for c in app.calls if c[0] == "set_setting"]
+
+
+def _item_texts(page):
+    return {page.model_combo.itemData(i): page.model_combo.itemText(i) for i in range(page.model_combo.count())}
+
+
+def _foot(page):
+    """(footer text, its icon's name) - the icon compared with the real pixmaps."""
+    from ui.components import icons
+    img = page.rail_foot_icon.pixmap().toImage()
+    names = [n for n in ("shield", "cloud", "key") if icons.pixmap(n, 15, "muted").toImage() == img]
+    return page.rail_foot.text(), (names[0] if len(names) == 1 else names)
+
+
+def test_free_pick_of_gusan_cloud_opens_the_pro_window_and_saves_nothing(build, store):
+    page, app = build("free", file_model="small")
+    page.model_combo.setCurrentIndex(page.model_combo.findData("cloud"))
+    assert app.calls.count(("_pro_upsell", "Fast cloud transcription")) == 1
+    assert _sets(app) == [], "nothing saved"
+    assert page.model_combo.currentData() == "small", "the combo snapped back"
+    assert page.model_line.text() == "Whisper Small"
+    assert _foot(page) == ("On this computer. Nothing is uploaded.", "shield")
+
+
+def test_pro_pick_of_gusan_cloud_is_saved_once_and_named(build, store):
+    page, app = build("pro", file_model="small")
+    assert _item_texts(page)["cloud"] == "Gusan Cloud · Gemini 2.5 Flash"
+    page.model_combo.setCurrentIndex(page.model_combo.findData("cloud"))
+    assert _sets(app) == [("file_model", "cloud")]
+    assert not [c for c in app.calls if c[0] == "_pro_upsell"]
+    assert page.model_combo.plain_text() == "Gusan Cloud"
+    assert page.model_line.text() == "Gemini 2.5 Flash", "the real model, never a Whisper name"
+    assert _foot(page) == ("Sent to Gusan Cloud to transcribe.", "cloud")
+    page.model_combo.setCurrentIndex(page.model_combo.findData("auto"))
+    assert _sets(app)[-1] == ("file_model", "auto")
+    assert _foot(page) == ("On this computer. Nothing is uploaded.", "shield")
+
+    # Saved, and Gusan Cloud runs Voxtral Mini: the list and the line follow.
+    page, app = build("pro", file_model="cloud", managed_provider="mistral")
+    assert page.model_combo.currentData() == "cloud"
+    assert _item_texts(page)["cloud"] == "Gusan Cloud · Voxtral Mini"
+    assert page.model_line.text() == "Voxtral Mini"
+    app.cfg["managed_provider"] = "gemini"
+    page.on_setting_changed("managed_provider")
+    assert _item_texts(page)["cloud"] == "Gusan Cloud · Gemini 2.5 Flash"
+    assert page.model_combo.currentData() == "cloud" and page.model_line.text() == "Gemini 2.5 Flash"
+    assert _sets(app) == [], "following a setting never writes"
+
+
+def test_own_key_items_appear_once_the_key_is_saved(build, store):
+    page, app = build("free", file_model="small")
+    _saving(app)
+    assert not {"own:google", "own:mistral"} & set(_item_texts(page))
+    app.cfg["google_api_key"] = "test-google-key"
+    page.on_setting_changed("google_api_key")
+    items = _item_texts(page)
+    assert items["own:google"] == "Google Gemini · Gemini 2.5 Flash · your own key", "never marked PRO"
+    assert "own:mistral" not in items
+    page.model_combo.setCurrentIndex(page.model_combo.findData("own:google"))
+    assert _sets(app) == [("file_model", "own:google")]
+    assert not [c for c in app.calls if c[0] == "_pro_upsell"]
+    assert page.model_line.text() == "Gemini 2.5 Flash"
+    assert _foot(page) == ("Sent to Google Gemini with your key.", "key")
+
+    app.cfg["mistral_api_key"] = "test-mistral-key"
+    page.on_setting_changed("mistral_api_key")
+    assert _item_texts(page)["own:mistral"] == "Mistral · Voxtral Mini · your own key"
+    assert page.model_combo.currentData() == "own:google", "the pick stays through a refill"
+    page.model_combo.setCurrentIndex(page.model_combo.findData("own:mistral"))
+    assert _sets(app)[-1] == ("file_model", "own:mistral")
+    assert page.model_line.text() == "Voxtral Mini"
+    assert _foot(page) == ("Sent to Mistral with your key.", "key")
+
+    # The key removed (api_keys also resets file_model): the item goes, Automatic shows.
+    app.cfg["mistral_api_key"] = ""
+    page.on_setting_changed("mistral_api_key")
+    assert "own:mistral" not in _item_texts(page)
+    assert page.model_combo.currentData() == "auto"
+    assert _foot(page) == ("On this computer. Nothing is uploaded.", "shield")
+
+
+def test_privacy_mode_greys_out_the_cloud_items_and_says_why(build, store):
+    page, app = build("pro", file_model="cloud", privacy_mode=True, google_api_key="test-google-key")
+    box = page.model_combo
+    hint = page.model_row.hint_label
+    assert box.currentData() == "auto", "a cloud pick runs on this computer in Privacy mode"
+    for value in ("cloud", "own:google"):
+        assert not box.choice_enabled(box.findData(value)), value
+    assert box.choice_enabled(box.findData("small")) and box.choice_enabled(box.findData("auto"))
+    assert hint.isVisibleTo(page) and hint.text() == "Privacy mode keeps it on this computer."
+    assert _foot(page) == ("On this computer. Nothing is uploaded.", "shield")
+    box.setCurrentIndex(box.findData("cloud"))                 # can't be clicked; even so
+    assert box.currentData() == "auto" and _sets(app) == []
+    assert not [c for c in app.calls if c[0] == "_pro_upsell"]
+
+    app.cfg["privacy_mode"] = False
+    page.on_setting_changed("privacy_mode")
+    assert box.choice_enabled(box.findData("cloud")) and box.choice_enabled(box.findData("own:google"))
+    assert not hint.isVisibleTo(page)
+    assert box.currentData() == "cloud", "the saved pick runs again"
+    assert _foot(page) == ("Sent to Gusan Cloud to transcribe.", "cloud")
+
+
+def test_a_saved_cloud_pick_that_cannot_run_shows_automatic(build, store):
+    page, app = build("free", file_model="cloud", downloads=FakeDownloads(ready=["base", "small"]))
+    assert page.model_combo.currentData() == "auto"
+    assert page.model_line.text() == "Whisper Small"
+    assert _foot(page) == ("On this computer. Nothing is uploaded.", "shield")
+    page, app = build("pro", file_model="own:google")              # no key saved
+    assert page.model_combo.currentData() == "auto"
+    assert _sets(app) == [], "showing Automatic never writes"
+
+
+def test_refresh_account_follows_the_plan(build, store):
+    page, app = build("free", file_model="cloud")
+    assert _item_texts(page)["cloud"].endswith("  PRO") and page.model_combo.currentData() == "auto"
+    app.set_tier("pro")
+    page.refresh_account()
+    assert _item_texts(page)["cloud"] == "Gusan Cloud · Gemini 2.5 Flash"
+    assert page.model_combo.currentData() == "cloud"
+    assert _foot(page) == ("Sent to Gusan Cloud to transcribe.", "cloud")
+    app.set_tier("free")                                         # Pro ended
+    page.refresh_account()
+    assert _item_texts(page)["cloud"] == "Gusan Cloud · Gemini 2.5 Flash  PRO"
+    assert page.model_combo.currentData() == "auto"
+    assert _foot(page) == ("On this computer. Nothing is uploaded.", "shield")
+    assert _sets(app) == [] and not [c for c in app.calls if c[0] == "_pro_upsell"]
 
 
 # ── adding files ─────────────────────────────────────────────────────────────

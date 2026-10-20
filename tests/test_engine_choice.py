@@ -82,9 +82,9 @@ class TestWriter(unittest.TestCase):
         r = ec.runs_on({"action_model": "rule_based"}, "smart_actions", pro=True, downloaded=NOTHING)
         self.assertEqual(r["label"], "Gusan Cloud · DeepSeek V4.1 Flash")
         self.assertEqual(r["model_id"], actions.API_MANAGED_ID)
-        # Meeting notes are written by Claude Sonnet 5.5 first (smart-action routes by mode).
+        # Meeting notes are written by Mistral Small (smart-action routes by mode; Claude Sonnet 5.5 comes first once its key has a workspace).
         r = ec.runs_on({"action_model": "rule_based"}, "meeting_notes", pro=True, downloaded=NOTHING)
-        self.assertEqual(r["label"], "Gusan Cloud · Claude Sonnet 5.5")
+        self.assertEqual(r["label"], "Gusan Cloud · Mistral Small")
         # Pro but signed out (no token): stays basic, as actions.process does.
         r = ec.runs_on({"action_model": "managed"}, "smart_actions", pro=True, signed_in=False,
                        downloaded=NOTHING)

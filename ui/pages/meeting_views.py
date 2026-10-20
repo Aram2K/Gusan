@@ -27,14 +27,18 @@ from PySide6.QtWidgets import (QCheckBox, QFileDialog, QFrame, QHBoxLayout, QInp
 
 import rich_text
 from app_info import APP_NAME
-from ui import theme
+from ui import privacy_prompt, theme
 from ui.components import clipboard as rich_clipboard
 from ui.components import (AudioPlayer, Button, Card, Chip, Divider, IconButton, Keycaps, PageHeader, ProTag,
-                           Segmented, icons, label)
+                           Segmented, icons, label, mini_prompt)
 
 logger = logging.getLogger("transcribe")
 
 SYNC_BG = False            # tests: run background work inline
+FLASH_MS = 1800            # how long "Copied" and friends stay up
+FLASH_ERROR_MS = 5000      # a failure to read: the Notion errors
+NOTION_THEN = "Send this meeting"       # the Notion sheet's button when it was opened from here
+NOTION_REASONS = ("auth", "no_access", "rate", "offline")      # telemetry: why a send failed (else "other")
 
 # ── words ────────────────────────────────────────────────────────────────────
 LANGS = (("auto", "Detect automatically"), ("multi", "Mixed languages"), ("en", "English"),
@@ -237,8 +241,8 @@ QPushButton[gusan="btn"][hero="true"]:hover {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {c('blue')}, stop:1 {c('pro')});
 }}
 QPushButton[gusan="btn"][hero="true"][focusVisible="true"] {{ border: 2px solid #93c5fd; }}
-QPushButton[gusan="btn"][kind="link"][tone="muted"] {{ color: {c('muted')}; }}
-QPushButton[gusan="btn"][kind="link"][tone="muted"]:hover {{ color: {c('text2')}; }}
+QPushButton[gusan="btn"][kind="link"][tone="muted"] {{ color: {c('text2')}; }}
+QPushButton[gusan="btn"][kind="link"][tone="muted"]:hover {{ color: {c('ink')}; }}
 QPushButton[gusan="btn"][kind="secondary"][open="true"] {{ background: {c('bg2')}; border: 1px solid {c('blue-line')}; }}
 QMenu[gusan="menu"] {{
     background: #ffffff; border: 1px solid {c('line')}; border-radius: 12px; padding: 6px;
@@ -291,6 +295,7 @@ class ElidedLabel(QLabel):
     def __init__(self, text="", parent=None):
         super().__init__(parent)
         self._full = text or ""
+        self.setTextFormat(Qt.PlainText)        # a name from outside (a Notion workspace) is text, never markup
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._elide()
 
@@ -1490,10 +1495,13 @@ class NotesView(QWidget):
     """One saved meeting: Notes / Transcript / My notes, Copy, Export, Continue
     recording (Pro), and ⋯ (Rewrite notes, Rename, Show in folder, Delete)."""
 
+    _notion_settings = Signal(dict)     # settings a Notion send changed (from its worker thread)
+
     def __init__(self, page, parent=None):
         super().__init__(parent)
         self.page = page
         self.app = page.app
+        self._notion_settings.connect(self._save_notion_settings)
         self.folder = None
         self.data = {}
         self._bg = BgRunner(self)
@@ -1504,7 +1512,7 @@ class NotesView(QWidget):
         self._notes_save.timeout.connect(self._save_my_notes)
         self._flash = QTimer(self)
         self._flash.setSingleShot(True)
-        self._flash.setInterval(1800)
+        self._flash.setInterval(FLASH_MS)
         self._flash.timeout.connect(self._end_flash)
 
         root = QVBoxLayout(self)
@@ -1739,6 +1747,13 @@ class NotesView(QWidget):
         lang = lang_name(meta.get("language"))
         if lang:
             parts.append(label(lang, "muted"))
+        notion_url = str(meta.get("notion_url") or "")
+        if notion_url.startswith("https://"):
+            link = Button("In Notion", "link", "s")
+            link.setFont(theme.font(13.5, 600))
+            link.setAccessibleName("Open this meeting in Notion")
+            link.clicked.connect(lambda _=False, u=notion_url: QDesktopServices.openUrl(QUrl(u)))
+            parts.append(link)
         for i, wdg in enumerate(parts):
             if isinstance(wdg, QLabel):
                 wdg.setFont(theme.font(13.5))
@@ -1865,15 +1880,17 @@ class NotesView(QWidget):
             self.tabs.set_index(i)
 
     # ── actions ──
-    def flash(self, text, tone="ok"):
+    def flash(self, text, tone="ok", ms=None):
+        """A short line by the toolbar; ``ms`` keeps a long one (an error to read) up longer."""
         self.flash_label.setText(text)
         set_tone(self.flash_label, tone)
         self.flash_label.show()
-        self._flash.start()
+        self._flash.start(ms or FLASH_MS)
 
     def _end_flash(self):
         self.flash_label.hide()
         self.copy_btn.setText("Copy notes")
+        self._flash.setInterval(FLASH_MS)       # the next "Copied" is short again
 
     def copy_notes(self):
         # D9: HTML (Word, Outlook, Gmail, Docs, Notion, Slack, Teams get real
@@ -1884,7 +1901,7 @@ class NotesView(QWidget):
         ok = bool(rich_clipboard.copy_rich(notes))
         if ok:
             self.copy_btn.setText("Copied")
-            self._flash.start()
+            self._flash.start(FLASH_MS)
         else:
             self.flash("Couldn't copy the notes.", "red")
         self.page.track("meeting_exported", {"target": "clipboard", "ok": ok})
@@ -1967,41 +1984,52 @@ class NotesView(QWidget):
 
     def send_to_notion(self):
         d = self.data or {}
-        notes = (d.get("notes") or "").strip()
-        transcript = (d.get("transcript") or "").strip()
-        if not (notes or transcript):
+        if not ((d.get("notes") or "").strip() or (d.get("transcript") or "").strip()):
             self.flash("Nothing to send yet.", "amber")
             return
-        cfg = getattr(self.app, "cfg", None) or {}
         import notion_export
-        if not ((cfg.get("notion_api_key") or "").strip() and notion_export.extract_page_id(cfg.get("notion_parent_page"))):
-            if not self.page.connect_notion():
+        cfg = getattr(self.app, "cfg", None) or {}
+        if not notion_export.is_connected(cfg) or cfg.get("notion_reconnect"):
+            # Connect first; the sheet ends in "Send this meeting" and the same click goes on.
+            if not self.page.connect_notion(then=NOTION_THEN):
                 return
             cfg = getattr(self.app, "cfg", None) or {}
-        if cfg.get("privacy_mode"):
-            answer = QMessageBox.question(self, "Privacy Mode is on",
-                                          "Privacy Mode keeps everything on this computer. Send this meeting "
-                                          "to Notion anyway?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if answer != QMessageBox.Yes:
-                return
-        token, parent = cfg.get("notion_api_key", ""), cfg.get("notion_parent_page", "")
-        title = d.get("title") or "Meeting notes"
-        meta_line = self._meta_line() + " · " + APP_NAME
+        if cfg.get("privacy_mode") and not mini_prompt.ask(
+                self, privacy_prompt.TITLE, "Send this meeting to Notion anyway?", "Send", "Not now",
+                icon="incognito"):
+            return
+        folder, mode = self.folder, notion_export.connection_mode(cfg) or "own"
         self.flash("Sending to Notion…", "muted")
 
         def work():
-            return notion_export.publish_meeting(token, parent, title, notes, transcript=transcript,
-                                                 meta_line=meta_line)
+            import notion_sync
+            # persist runs on this worker: the signal hops to the GUI thread
+            return notion_sync.send_meeting(folder, dict(cfg), auto=False, persist=self._notion_settings.emit)
 
-        def done(url, err):
-            self.page.track("meeting_exported", {"target": "notion", "ok": err is None})
-            if err is not None:
-                self.flash("Couldn't send to Notion: %s" % err, "red")
-            else:
+        def done(res, err):
+            res = res or {}
+            ok = err is None and bool(res.get("ok"))
+            props = {"target": "notion", "ok": ok, "auto": False, "mode": mode}
+            code = str(res.get("code") or "other")
+            if not ok:
+                props["reason"] = code if code in NOTION_REASONS else "other"
+            self.page.track("meeting_exported", props)
+            if ok:
                 self.flash("Sent to Notion")
-                if url:
+                url = str(res.get("url") or "")
+                if url.startswith("https://"):
                     QDesktopServices.openUrl(QUrl(url))
+                if self.folder == folder:
+                    self.reload()               # the meta row gets its "In Notion" link
+            elif code == "busy":
+                self.flash("Already sending this meeting.", "muted")
+            else:
+                self.flash(res.get("sentence") or "Couldn't send to Notion.", "red", FLASH_ERROR_MS)
         self._bg.run(work, done)
+
+    def _save_notion_settings(self, updates):
+        """A Notion send changed the connection (a fresh token, "connect again")."""
+        self.page.set_settings(dict(updates))
 
     def continue_recording(self):
         if not self.folder:
