@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""The Notion sheet (ui/notion_sheet.py), offscreen: every screen, the connect
-flow (success, cancel, every error), the pasted-secret path, where notes go,
-the automatic-send switch, Disconnect, and the colours.
+"""The Notion sheet (ui/notion_sheet.py), offscreen: every screen, the one-button
+connect flow (success, cancel, every error), the pasted-secret fallback, where
+notes go, the automatic-send switch, Disconnect, the keyboard and the colours.
 
-Fakes only: the browser, notion_connect.connect / revoke / refresh and the
+Fakes only: the browser, notion_connect.connect_mcp / disconnect / refresh and the
 Notion calls are stand-ins, so nothing is opened or sent. Workers run through
 a synchronous or a deferred runner (``run=``), like tests_qt/test_page_onboarding.py."""
 import logging
@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QAbstractButton, QApplication, QComboBox, QLabel, 
 
 import notion_connect
 import notion_export
+import notion_mcp
 from notion_connect import ConnectError
 from notion_export import NotionAuthError, NotionError
 from ui import notion_sheet as ns
@@ -32,6 +33,12 @@ PAGES = [
 ]
 TOKEN = {"access_token": "tok-1", "refresh_token": "ref-1", "workspace_id": "w1",
          "workspace_name": "Aram's workspace", "workspace_icon": "", "bot_id": "b1", "duplicated_template_id": ""}
+# What the Connect button leaves behind (notion_mcp.connection_settings), and the older relay connection
+# (a picker of shared pages; no build ships it switched on, but it still works).
+MCP_CFG = {"notion_api_key": "tok-1", "notion_refresh_token": "ref-1", "notion_auth_mode": "mcp",
+           "notion_workspace_name": "Aram's workspace", "notion_parent_page": HUB,
+           "notion_parent_title": "Gusan meetings", "notion_hub_page": HUB, "notion_mcp_client_id": "cid-1",
+           "notion_token_expires": 1900000000}
 OAUTH_CFG = {"notion_api_key": "tok-1", "notion_refresh_token": "ref-1", "notion_auth_mode": "oauth",
              "notion_workspace_name": "Aram's workspace", "notion_parent_page": HUB,
              "notion_parent_title": "Gusan meetings", "notion_hub_page": HUB}
@@ -39,7 +46,8 @@ OWN_CFG = {"notion_api_key": "ntn_secret", "notion_auth_mode": "own", "notion_wo
            "notion_parent_page": PAGES[0]["id"], "notion_parent_title": PAGES[0]["title"]}
 BLANK_KEYS = ("notion_api_key", "notion_refresh_token", "notion_auth_mode", "notion_workspace_name",
               "notion_parent_page", "notion_parent_title", "notion_hub_page", "notion_auto_send",
-              "notion_reconnect")
+              "notion_reconnect", "notion_token_expires")
+AUTHORIZE = "https://mcp.notion.com/authorize?client_id=cid-1&state=abc"
 
 
 # ── fakes ────────────────────────────────────────────────────────────────────
@@ -124,24 +132,19 @@ def world(qapp, monkeypatch):
     import ui.winfit
     monkeypatch.setattr(ui.winfit, "settle_on_screen", lambda *a, **k: None)
     monkeypatch.setattr(ui.winfit, "fit_on_screen", lambda *a, **k: None)      # the offscreen screen is 800x600
-    monkeypatch.setattr(notion_connect, "NOTION_CLIENT_ID", "test-client-id")
-    w = SimpleNamespace(opened=[], revoked=[], refreshed=[], connects=[], dest={"id": HUB, "title": "Gusan meetings",
-                                                                                 "kind": "hub"},
-                        pages=list(PAGES), search_outcomes=[], validate=lambda token: {"workspace_name": "My Notion"},
-                        refresh_result=None, asked=[], answer=True, alive=True, alive_checks=[], revoke_ok=True, chosen=[])
+    w = SimpleNamespace(opened=[], revoked=[], disconnected=[], refreshed=[], connects=[], pages=list(PAGES),
+                        search_outcomes=[], validate=lambda token: {"workspace_name": "My Notion"},
+                        refresh_result=None, asked=[], answer=True, revoke_ok=True, registers=True)
     monkeypatch.setattr(ns, "_open_url", lambda url: w.opened.append(url) or True)
     monkeypatch.setattr(ns, "_run_then", sync_run)          # a sheet made without run= stays on this thread
-    monkeypatch.setattr(notion_connect, "revoke", lambda token: w.revoked.append(token) or w.revoke_ok)
-    monkeypatch.setattr(notion_connect, "choose_destination",
-                        lambda token, template_id="": w.chosen.append((token, template_id)) or w.dest)
-    monkeypatch.setattr(notion_connect, "validate_token", lambda token: w.validate(token))
 
-    def page_alive(token, page_id):
-        w.alive_checks.append((token, page_id))
-        if isinstance(w.alive, Exception):
-            raise w.alive
-        return w.alive
-    monkeypatch.setattr(notion_connect, "page_alive", page_alive)
+    def disconnect(cfg):
+        w.disconnected.append(dict(cfg))
+        w.revoked.append(cfg.get("notion_api_key"))
+        return w.revoke_ok
+    monkeypatch.setattr(notion_connect, "disconnect", disconnect)
+    monkeypatch.setattr(notion_connect, "revoke", lambda token: w.revoked.append(token) or w.revoke_ok)
+    monkeypatch.setattr(notion_connect, "validate_token", lambda token: w.validate(token))
 
     def search(token, query="", limit=50):
         if w.search_outcomes:
@@ -168,19 +171,37 @@ def world(qapp, monkeypatch):
     return w
 
 
-def fake_connect(world, tok=None, error=None, steps=True):
-    """A notion_connect.connect stand-in (runs in the worker the runner gave it)."""
-    def connect(cfg=None, open_browser=None, timeout=0, cancel=None, on_url=None, on_code=None):
-        world.connects.append(cancel)
+def connect_result(workspace="Aram's workspace"):
+    """What notion_connect.connect_mcp returns (the core's own settings builder)."""
+    res = {"mode": "mcp", "token": "tok-1", "refresh": "ref-1", "workspace": workspace, "expires_at": 1900000000,
+           "client_id": "cid-1", "redirects": "2",
+           "dest": {"id": HUB, "title": "Gusan meetings", "kind": "hub",
+                                          "url": "https://www.notion.so/" + HUB.replace("-", "")},
+           "pages": None}
+    res["settings"] = notion_mcp.connection_settings(res)
+    return res
+
+
+def fake_connect(world, res=None, error=None, steps=True):
+    """A notion_connect.connect_mcp stand-in (runs in the worker the runner gave it). Like the real
+    one it gives a grant back itself when the user cancelled while it was being made."""
+    def connect(cfg=None, open_browser=None, timeout=0, cancel=None, on_url=None, on_code=None, persist=None):
+        world.connects.append({"cancel": cancel, "cfg": dict(cfg or {})})
         if on_url:
-            on_url("https://api.notion.com/v1/oauth/authorize?client_id=test")
+            on_url(AUTHORIZE)
         if open_browser:
-            open_browser("https://api.notion.com/v1/oauth/authorize?client_id=test")
+            open_browser(AUTHORIZE)
         if error is not None:
             raise error
+        if persist and world.registers:
+            persist({"notion_mcp_client_id": "cid-1", "notion_mcp_redirects": "2"})
         if steps and on_code:
             on_code()
-        return dict(tok or TOKEN)
+        out = res or connect_result()
+        if cancel is not None and cancel.is_set():
+            world.revoked.append(out["token"])
+            raise notion_connect.ConnectCancelled()
+        return out
     return connect
 
 
@@ -229,6 +250,21 @@ def _texts(root):
     return [lb.text() for lb in root.findChildren(QLabel) if lb.isVisibleTo(root) and lb.text()]
 
 
+def _all_text(root):
+    """Every word a person can read or hear on the visible screen: labels, buttons, names."""
+    out = _texts(root)
+    for wd in _visible_controls(root):
+        out += [wd.text() if isinstance(wd, QAbstractButton) else "", wd.accessibleName(), wd.toolTip()]
+    for lb in root.findChildren(QLabel):
+        if lb.isVisibleTo(root):
+            out.append(lb.accessibleName())
+    return " | ".join(t for t in out if t)
+
+
+# The words of the plumbing: never on the first, waiting, error or connected screens.
+JARGON = ("mcp", "oauth", "token", "integration", "api ", "client id", "authorize")
+
+
 def _button(root, text):
     hits = [b for b in root.findChildren(QAbstractButton) if b.isVisibleTo(root) and b.text() == text]
     assert len(hits) == 1, "%r: %d visible" % (text, len(hits))
@@ -269,6 +305,7 @@ def test_the_first_screen_is_one_button(make):
     assert sheet.windowTitle() == "Notion"
     assert sheet.width() == ns.W and sheet.height() <= ns.MAX_H
     assert sheet.intro_title.text().replace("\n", " ") == "Send your meeting notes to Notion."
+    assert sheet.intro_body.text() == "Gusan adds each meeting to a private page in your Notion. You choose when."
     primary = [b for b in sheet.findChildren(QAbstractButton)
                if b.isVisibleTo(sheet) and b.property("kind") == "primary"]
     assert [b.text() for b in primary] == ["Connect Notion"]
@@ -276,15 +313,42 @@ def test_the_first_screen_is_one_button(make):
     assert not [e for e in sheet.findChildren(QLineEdit) if e.isVisibleTo(sheet)]
     texts = " ".join(_texts(sheet))
     assert "Opens Notion in your browser." in texts
-    for word in ("secret", "token", "OAuth", "page link", "Page link", "coming soon"):
+    for word in ("secret", "page link", "Page link", "coming soon", "share"):
         assert word not in texts, word
-    assert sheet.own_link.isVisibleTo(sheet) and sheet.own_link.text() == "Use a Notion secret instead"
+    # the own-secret route is one small quiet link at the bottom
+    assert sheet.own_link.isVisibleTo(sheet) and sheet.own_link.text() == "Use your own Notion secret instead"
+    assert sheet.own_link.property("kind") == "link"
+    assert sheet.own_link.geometry().top() > sheet.connect_btn.geometry().bottom() - 1
     assert not sheet.intro_message.isVisibleTo(sheet)
     assert sheet.connect_btn.isDefault()           # Enter presses it
 
 
-def test_when_connecting_is_not_set_up_the_sheet_opens_on_the_own_integration(world, make, monkeypatch):
-    monkeypatch.setattr(notion_connect, "NOTION_CLIENT_ID", "")
+def test_the_plumbing_words_are_not_on_the_main_screens(world, make):
+    run = Deferred()
+    seen = {}
+    sheet, _ = make(run=run)
+    seen["intro"] = _all_text(sheet)
+    sheet._show_intro("That took too long. Nothing was connected.")
+    seen["error"] = _all_text(sheet)
+    sheet._show_intro(notion_connect.MESSAGES["reconnect"])
+    seen["reconnect"] = _all_text(sheet)
+    sheet.connect_btn.click()
+    seen["waiting"] = _all_text(sheet)
+    sheet.flow.finishing.emit()
+    seen["finishing"] = _all_text(sheet)
+    for code in ("denied", "timeout", "offline", "port_busy", "expired", "server", "browser", "full", "other"):
+        sheet._show_intro(notion_connect.MESSAGES[code])
+        seen["error-" + code] = _all_text(sheet)
+    connected, _ = make(MCP_CFG, run=run)
+    seen["connected"] = _all_text(connected)
+    for name, text in seen.items():
+        assert text.strip(), name
+        for word in JARGON:
+            assert word not in text.lower(), (name, word, text)
+
+
+def test_when_the_one_button_path_is_missing_the_sheet_opens_on_the_own_secret(world, make, monkeypatch):
+    monkeypatch.setattr(notion_connect, "mcp_available", lambda: False)
     sheet, _host = make()
     assert sheet.page_name() == "manual"
     assert not sheet.back_btn.isVisibleTo(sheet)
@@ -307,12 +371,23 @@ def test_privacy_mode_is_asked_once_before_going_online(world, make):
 
 
 def test_reconnect_says_so_and_keeps_the_button_plain(make):
-    sheet, _host = make(dict(OAUTH_CFG, notion_reconnect=True))
+    sheet, _host = make(dict(MCP_CFG, notion_reconnect=True))
     assert sheet.page_name() == "intro"
     assert sheet.intro_message.isVisibleTo(sheet) and sheet.intro_message.text() == "Notion needs to be connected again."
     assert sheet.connect_btn.text() == "Connect Notion"
-    sheet2, _ = make(OAUTH_CFG, reason="reconnect")
+    sheet2, _ = make(MCP_CFG, reason="reconnect")
     assert sheet2.page_name() == "intro" and sheet2.intro_message.text() == "Notion needs to be connected again."
+
+
+def test_reconnecting_goes_through_the_same_button_and_clears_the_flag(world, make):
+    cfg = dict(MCP_CFG, notion_reconnect=True, notion_auto_send=True)
+    sheet, host = make(cfg)
+    sheet.connect_btn.click()
+    assert sheet.page_name() == "connected"
+    assert host.cfg()["notion_reconnect"] is False
+    assert host.cfg()["notion_auto_send"] is True                      # their switch stays as it was
+    assert world.connects[0]["cfg"]["notion_hub_page"] == HUB          # the core may keep the page it had
+    assert world.connects[0]["cfg"]["notion_mcp_client_id"] == "cid-1"  # and reuses the id it registered
 
 
 # ── screen 2: the browser, then connected ────────────────────────────────────
@@ -324,25 +399,68 @@ def test_waiting_then_finishing_then_connected(world, make):
     assert sheet.wait_title.text() == "Finish in your browser"
     assert sheet.wait_body.text() == "Allow access in Notion, then come back here."
     assert sheet.reopen_link.isVisibleTo(sheet) and sheet.cancel_btn.isVisibleTo(sheet)
+    assert sheet.reopen_link.text() == "Open it again" and sheet.cancel_btn.text() == "Cancel"
     assert sheet.progress.isVisibleTo(sheet) and sheet.progress._timer.isActive()
     assert not sheet.connect_btn.isVisibleTo(sheet)
-    run.finish(0)                                          # the worker: the browser, the code, the page
-    assert world.opened == ["https://api.notion.com/v1/oauth/authorize?client_id=test"]
+    run.finish(0)                                          # the worker: the browser, the answer, the page
+    assert world.opened == [AUTHORIZE]
     assert sheet.page_name() == "connected"
     assert not sheet.progress._timer.isActive()            # nothing keeps running behind the connected screen
     assert sheet.name_label.text() == "Aram's workspace"
     assert not sheet.auto_toggle.isChecked()               # a new connection starts quiet
-    assert sheet.picker.itemText(0) == "Gusan meetings (private page)" and sheet.picker.currentIndex() == 0
+    # nothing to pick, nothing to share, nothing to load
+    assert sheet.hub_block.isVisibleTo(sheet) and not sheet.pick_block.isVisibleTo(sheet)
+    assert sheet.hub_name.text() == "Gusan meetings"
+    assert [j.fn.__name__ for j in run.jobs] == ["_connect_work"]
     assert sheet.done_btn.text() == "Done" and sheet.done_btn.isDefault()
-    # one write for the whole connection, and stored now
+    assert sheet.open_notion_btn.isVisibleTo(sheet) and sheet.open_notion_btn.text() == "Open Notion"
+    # the whole connection in ONE write, and stored now
     saves = host.saves()
-    assert len(saves) == 1 and saves[0] == {
-        "notion_api_key": "tok-1", "notion_refresh_token": "ref-1", "notion_auth_mode": "oauth",
+    assert saves[-1] == connect_result()["settings"]
+    assert saves[-1] == {
+        "notion_api_key": "tok-1", "notion_refresh_token": "ref-1", "notion_auth_mode": "mcp",
         "notion_workspace_name": "Aram's workspace", "notion_parent_page": HUB,
-        "notion_parent_title": "Gusan meetings", "notion_hub_page": HUB, "notion_reconnect": False}
+        "notion_parent_title": "Gusan meetings", "notion_hub_page": HUB, "notion_reconnect": False,
+        "notion_mcp_client_id": "cid-1", "notion_mcp_redirects": "2", "notion_token_expires": 1900000000}
     assert host.flushed()
-    assert host.tracked("notion_connect_result") == [{"mode": "oauth", "ok": True, "reason": ""}]
-    assert notion_export.is_connected(host.cfg())
+    assert host.tracked("notion_connect_result") == [{"mode": "mcp", "ok": True, "reason": ""}]
+    assert notion_export.is_connected(host.cfg()) and notion_export.connection_mode(host.cfg()) == "mcp"
+
+
+def test_the_registered_client_id_is_saved_the_moment_it_exists(world, make):
+    run = Deferred()
+    sheet, host = make(run=run)
+    sheet.connect_btn.click()
+    run.finish(0)
+    saves = host.saves()
+    assert saves[0] == {"notion_mcp_client_id": "cid-1", "notion_mcp_redirects": "2"}     # before the connection itself
+    assert len(saves) == 2 and "notion_api_key" in saves[1]
+    before_second = host.events[:host.events.index(("set_settings", saves[1]))]
+    assert ("call", "flush_config_save") in before_second              # the id is stored at once, not on a timer
+
+
+def test_a_worker_thread_hands_settings_to_the_gui_thread_and_only_notion_keys_get_through(world, make):
+    """persist is called from the worker: the signal makes the save happen on the GUI thread, and only
+    the connection's own keys ever get through."""
+    import api_keys
+    sheet, host = make()
+    main = threading.get_ident()
+    where = []
+    orig = host.set_settings
+
+    def spy(updates):
+        where.append(threading.get_ident())
+        return orig(updates)
+    host.set_settings = spy
+    t = api_keys.run_in_background(
+        lambda: sheet.flow._persist.emit({"notion_mcp_client_id": "cid-9", "main_evil": 1, "privacy_mode": False}))
+    t.join(10)
+    for _ in range(50):
+        QApplication.processEvents()
+        if host.saves():
+            break
+    assert host.saves() == [{"notion_mcp_client_id": "cid-9"}]
+    assert where == [main]
 
 
 def test_the_code_arriving_shows_setting_things_up(world, make):
@@ -355,14 +473,15 @@ def test_the_code_arriving_shows_setting_things_up(world, make):
     assert sheet.progress.isVisibleTo(sheet)
 
 
-def test_open_notion_again_uses_the_same_address(world, make):
+def test_open_it_again_uses_the_same_address(world, make):
     run = Deferred()
     sheet, _host = make(run=run)
     sheet.connect_btn.click()
-    sheet.flow._set_url("https://api.notion.com/v1/oauth/authorize?client_id=test&state=abc.5555")
+    sheet.flow._set_url("https://mcp.notion.com/authorize?client_id=cid-1&state=abc.5555")
     sheet.reopen_link.click()
     sheet.reopen_link.click()
-    assert world.opened == ["https://api.notion.com/v1/oauth/authorize?client_id=test&state=abc.5555"] * 2
+    assert world.opened == ["https://mcp.notion.com/authorize?client_id=cid-1&state=abc.5555"] * 2
+    assert sheet.reopen_link.accessibleName() == "Open Notion again in your browser"
 
 
 def test_cancel_goes_back_quietly_and_a_late_answer_is_given_back(world, make):
@@ -373,25 +492,42 @@ def test_cancel_goes_back_quietly_and_a_late_answer_is_given_back(world, make):
     assert sheet.page_name() == "intro" and not sheet.intro_message.isVisibleTo(sheet)
     assert sheet.connect_btn.text() == "Connect Notion"
     assert isinstance(run.jobs[0].args[0], threading.Event) and run.jobs[0].args[0].is_set()
-    assert host.tracked("notion_connect_result") == [{"mode": "oauth", "ok": False, "reason": "cancelled"}]
+    assert host.tracked("notion_connect_result") == [{"mode": "mcp", "ok": False, "reason": "cancelled"}]
     run.finish(0)                                          # the worker only now ends: its answer is ignored
     assert sheet.page_name() == "intro"
-    assert not host.saves() and host.cfg().get("notion_api_key") is None
+    assert not [u for u in host.saves() if "notion_api_key" in u] and host.cfg().get("notion_api_key") is None
     assert world.revoked == ["tok-1"]                      # ...and the grant it made is given back
 
 
-def test_a_grant_that_arrives_after_giving_up_is_revoked(world, make):
+def test_cancel_keeps_saying_the_connection_needs_connecting_again(world, make):
+    """A connection Notion refused for good: pressing Cancel while reconnecting goes back to the
+    first screen, which still says why it is there (not a screen that looks like a fresh start)."""
+    run = Deferred()
+    sheet, _host = make(dict(MCP_CFG, notion_reconnect=True), run=run)
+    assert sheet.intro_message.text() == "Notion needs to be connected again."
+    sheet.connect_btn.click()
+    assert sheet.page_name() == "waiting"
+    sheet.cancel_btn.click()
+    assert sheet.page_name() == "intro"
+    assert sheet.intro_message.isVisibleTo(sheet) and sheet.intro_message.text() == "Notion needs to be connected again."
+    assert sheet.connect_btn.text() == "Connect Notion"                    # not "Try again": nothing failed
+
+
+def test_a_grant_that_arrives_after_giving_up_is_given_back_whole(world, make):
     run = Deferred()
     sheet, host = make(run=run)
     sheet.connect_btn.click()
     job = run.jobs[0]
-    res = job.fn(*job.args)                                # the worker finished first...
+    res = job.fn(threading.Event(), {})                    # the worker finished first (never cancelled)...
     sheet.cancel_btn.click()                               # ...the user gave up before its answer was read
     job.then(res)
-    assert run.jobs[-1].args == ("tok-1",)                 # giving the grant back is queued as work
+    assert run.jobs[-1].fn is notion_connect.disconnect    # giving the grant back is queued as work
     run.finish(len(run.jobs) - 1)
-    assert world.revoked == ["tok-1"] and not host.saves()
-    assert sheet.page_name() == "intro"
+    assert world.revoked == ["tok-1"] and sheet.page_name() == "intro"
+    given = world.disconnected[0]                          # everything that is needed to revoke it at Notion
+    assert (given["notion_auth_mode"], given["notion_refresh_token"], given["notion_mcp_client_id"]) == (
+        "mcp", "ref-1", "cid-1")
+    assert not [u for u in host.saves() if "notion_api_key" in u]
 
 
 def test_closing_the_sheet_while_waiting_cancels_it(world, make):
@@ -400,14 +536,15 @@ def test_closing_the_sheet_while_waiting_cancels_it(world, make):
     sheet.connect_btn.click()
     sheet.reject()
     assert run.jobs[0].args[0].is_set()
-    assert host.tracked("notion_connect_result") == [{"mode": "oauth", "ok": False, "reason": "cancelled"}]
+    assert host.tracked("notion_connect_result") == [{"mode": "mcp", "ok": False, "reason": "cancelled"}]
     run.finish(0)
-    assert not host.saves() and host.cfg().get("notion_api_key") is None
+    assert not [u for u in host.saves() if "notion_api_key" in u] and host.cfg().get("notion_api_key") is None
     assert world.revoked == ["tok-1"]
     assert len(host.tracked("notion_connect_result")) == 1          # the late answer adds nothing
 
 
-@pytest.mark.parametrize("code", ["denied", "timeout", "offline", "port_busy", "expired", "server", "browser", "other"])
+@pytest.mark.parametrize("code", ["denied", "timeout", "offline", "port_busy", "expired", "server", "browser", "full",
+                                  "other"])
 def test_every_failure_is_one_plain_sentence_on_the_first_screen(world, make, code):
     sheet, host = make(connect=fake_connect(world, error=ConnectError(code)))
     sheet.connect_btn.click()
@@ -415,8 +552,8 @@ def test_every_failure_is_one_plain_sentence_on_the_first_screen(world, make, co
     assert sheet.intro_message.isVisibleTo(sheet)
     assert sheet.intro_message.text() == notion_connect.MESSAGES[code]
     assert sheet.connect_btn.text() == "Try again"
-    assert not host.saves()
-    assert host.tracked("notion_connect_result") == [{"mode": "oauth", "ok": False, "reason": code}]
+    assert not [u for u in host.saves() if "notion_api_key" in u]
+    assert host.tracked("notion_connect_result") == [{"mode": "mcp", "ok": False, "reason": code}]
 
 
 def test_exact_failure_sentences(world, make):
@@ -428,9 +565,33 @@ def test_exact_failure_sentences(world, make):
               "expired": "That Notion sign-in expired. Try again.",
               "server": "Notion couldn't finish connecting. Try again in a minute.",
               "browser": "Couldn't open your browser. Try again.",
+              "full": "That Notion workspace is full. Free up space or upgrade it.",
               "other": "Couldn't connect to Notion. Try again."}
     for code, sentence in expect.items():
         assert notion_connect.MESSAGES[code] == sentence
+
+
+def test_a_full_workspace_is_said_in_full_on_the_first_screen_and_nothing_is_kept(world, make):
+    """Connected, but Notion cannot make even the first page (a free workspace with several members has a
+    total limit on blocks): the core gives the grant back and the sheet says so, plainly, with a way out."""
+    sheet, host = make(connect=fake_connect(world, error=ConnectError("full")))
+    sheet.connect_btn.click()
+    assert sheet.page_name() == "intro" and sheet.intro_message.isVisibleTo(sheet)
+    text = sheet.intro_message.text()
+    assert text == notion_export.FULL_TEXT
+    assert text.startswith("That Notion workspace is full.") and text.endswith("upgrade it.")
+    for word in JARGON + ("block", "mcp", "error"):
+        assert word not in text.lower(), word
+    assert sheet.connect_btn.text() == "Try again"                       # one click, once the user has made room
+    label = sheet.intro_message
+    assert label.heightForWidth(label.width()) <= label.height() + 1, "the sentence is cut off"
+    assert sheet.height() <= ns.MAX_H and sheet.scroll.verticalScrollBar().maximum() == 0   # no scrolling to read it
+    assert not [u for u in host.saves() if "notion_api_key" in u] and host.cfg().get("notion_api_key") is None
+    assert host.tracked("notion_connect_result") == [{"mode": "mcp", "ok": False, "reason": "full"}]
+    # and the same click, with room made, connects
+    sheet.flow._connect_fn = fake_connect(world)
+    sheet.connect_btn.click()
+    assert sheet.page_name() == "connected"
 
 
 def test_trying_again_clears_the_message(world, make):
@@ -442,56 +603,87 @@ def test_trying_again_clears_the_message(world, make):
     assert sheet.page_name() == "connected" and not sheet.intro_message.isVisibleTo(sheet)
 
 
-def test_a_failure_while_making_the_page_gives_the_grant_back(world, make, monkeypatch):
-    def boom(token, template_id=""):
-        raise NotionError("down", code="offline")
-    monkeypatch.setattr(notion_connect, "choose_destination", boom)
+def test_a_failed_save_is_a_plain_failure_not_a_half_connection(world, make):
     sheet, host = make()
+    host.set_settings = lambda updates: "notion_api_key" not in updates
     sheet.connect_btn.click()
-    assert sheet.page_name() == "intro" and sheet.intro_message.text() == notion_connect.MESSAGES["offline"]
-    assert world.revoked == ["tok-1"] and not host.saves()
+    assert sheet.page_name() == "intro" and sheet.intro_message.text() == notion_connect.MESSAGES["other"]
 
 
-def test_no_page_anywhere_asks_to_share_one(world, make):
-    world.dest = None
-    sheet, host = make()
-    sheet.connect_btn.click()
-    assert sheet.page_name() == "share"
-    assert sheet.share_body.accessibleName().startswith(
-        "In Notion, open the page for your notes, click ••• then Connections, and add Gusan.")
-    assert "<b" in sheet.share_body.text()                  # the things to click are in bold
-    assert not host.saves() and not sheet.reopen_link.isVisibleTo(sheet)
-    for text in ("Open Notion", "Check again", "Cancel"):
-        assert _button(sheet, text)
-    _button(sheet, "Open Notion").click()
-    assert world.opened[-1] == notion_connect.NOTION_HOME_URL
-    # a page gets shared; "Check again" moves on to the connected screen
-    world.dest = None
-    sheet.check_btn.click()
-    assert sheet.page_name() == "connected"
-    assert host.cfg()["notion_parent_page"] == PAGES[0]["id"] and host.cfg()["notion_auth_mode"] == "oauth"
-    # closing without a page would have given the grant back (below)
+def test_connecting_in_privacy_mode_asks_once_and_goes_online_for_nothing_else(world, make):
+    run = Deferred()
+    sheet, host = make({"privacy_mode": True}, run=run)
+    sheet.connect_btn.click()                                       # asked here: yes
+    run.finish(0)
+    assert len(world.asked) == 1 and sheet.page_name() == "connected"
+    assert [j.fn.__name__ for j in run.jobs] == ["_connect_work"]   # no page search behind the connected screen
 
 
-def test_closing_without_a_page_gives_the_oauth_grant_back(world, make):
-    world.dest = None
-    sheet, host = make()
-    sheet.connect_btn.click()
-    assert sheet.page_name() == "share"
-    _button(sheet, "Cancel").click()
-    assert world.revoked == ["tok-1"] and not host.saves()
+# ── the keyboard ─────────────────────────────────────────────────────────────
+def test_enter_connects_and_esc_cancels_the_wait_then_closes(world, make):
+    from PySide6.QtTest import QTest
+    run = Deferred()
+    sheet, host = make(run=run)
+    sheet.activateWindow()
+    QApplication.processEvents()
+    QTest.keyClick(sheet, Qt.Key_Return)                            # Enter = the primary button
+    assert sheet.page_name() == "waiting" and len(run.jobs) == 1
+    QTest.keyClick(sheet, Qt.Key_Escape)                            # Esc = Cancel, the sheet stays
+    assert sheet.page_name() == "intro" and sheet.isVisible()
+    assert run.jobs[0].args[0].is_set()
+    assert host.tracked("notion_connect_result") == [{"mode": "mcp", "ok": False, "reason": "cancelled"}]
+    QTest.keyClick(sheet, Qt.Key_Escape)                            # a second Esc closes it
+    assert not sheet.isVisible()
 
 
-def test_check_again_with_nothing_shared_says_so(world, make):
-    world.dest = None
-    world.pages = []
-    sheet, _host = make()
-    sheet.connect_btn.click()
-    assert not sheet.share_message.isVisibleTo(sheet)
-    sheet.check_btn.click()
-    assert sheet.page_name() == "share" and sheet.share_message.isVisibleTo(sheet)
-    assert sheet.share_message.text() == "Nothing shared yet. Add the page, then check again."
-    assert sheet.check_btn.text() == "Check again" and sheet.check_btn.isEnabled()
+def test_enter_twice_never_cancels_and_the_focus_is_on_a_harmless_control(world, make):
+    from PySide6.QtTest import QTest
+    run = Deferred()
+    sheet, _host = make(run=run)
+    sheet.activateWindow()
+    QApplication.processEvents()
+    QTest.keyClick(sheet, Qt.Key_Return)
+    QApplication.processEvents()
+    assert sheet.page_name() == "waiting" and sheet.focusWidget() is sheet.reopen_link
+    QTest.keyClick(sheet, Qt.Key_Return)                            # a second Enter re-opens the browser...
+    assert sheet.page_name() == "waiting" and not run.jobs[0].args[0].is_set()      # ...and cancels nothing
+    sheet.flow.finishing.emit()
+    QTest.keyClick(sheet, Qt.Key_Escape)                            # "Setting things up…" has no Cancel: Esc closes
+    assert not sheet.isVisible() and run.jobs[0].args[0].is_set()
+
+
+def _tab_stops(sheet):
+    """The widgets Tab visits on the screen showing, in order (walking the real focus chain)."""
+    first = sheet.stack.currentWidget()
+    seen, w = [], sheet
+    for _ in range(200):
+        w = w.nextInFocusChain()
+        if w is sheet or (seen and w is seen[0]):
+            break
+        if (w.focusPolicy() & Qt.TabFocus) and w.isVisibleTo(sheet) and first.isAncestorOf(w):
+            seen.append(w)
+    return seen
+
+
+def test_tab_order_follows_reading_order_and_every_stop_has_a_name(world, make):
+    run = Deferred()
+    intro, _ = make(run=run)
+    assert [_name_of(w) for w in _tab_stops(intro)] == ["Connect Notion", "Use your own Notion secret instead"]
+    intro.connect_btn.click()
+    assert [_name_of(w) for w in _tab_stops(intro)] == ["Open Notion again in your browser", "Cancel"]
+    connected, _ = make(MCP_CFG, run=run)
+    assert [_name_of(w) for w in _tab_stops(connected)] == [
+        "Send every meeting's notes to Notion automatically", "Disconnect", "Open Notion", "Done"]
+    with_pages, _ = make(OAUTH_CFG, run=run)
+    assert [_name_of(w) for w in _tab_stops(with_pages)] == [
+        "Send every meeting's notes to Notion automatically", "Notes go to", "Refresh pages", "Disconnect",
+        "Open Notion", "Done"]
+    manual, _ = make(run=run)
+    manual.own_link.click()
+    assert [_name_of(w) for w in _tab_stops(manual)] == [
+        "Back", "Open Notion integrations", "Integration secret", "Show secret", "Connect"]
+    manual._on_no_page({"mode": "own", "token": "t", "refresh": "", "workspace": ""})
+    assert [_name_of(w) for w in _tab_stops(manual)] == ["Open Notion", "Check again", "Cancel"]
 
 
 # ── screen 4: the pasted secret ──────────────────────────────────────────────
@@ -529,8 +721,9 @@ def test_manual_connect_writes_the_connection_and_preselects_the_first_page(worl
     assert host.cfg()["notion_auth_mode"] == "own"
     assert host.cfg()["notion_workspace_name"] == "My Notion"
     assert host.cfg()["notion_parent_page"] == PAGES[0]["id"] and host.cfg()["notion_hub_page"] == ""
-    assert host.cfg()["notion_refresh_token"] == ""
+    assert host.cfg()["notion_refresh_token"] == "" and host.cfg()["notion_token_expires"] == 0
     assert sheet.name_label.text() == "My Notion"
+    assert sheet.pick_block.isVisibleTo(sheet) and not sheet.hub_block.isVisibleTo(sheet)
     assert sheet.dest_hint.text() == "To add pages, share them with your integration in Notion."
     assert sheet.picker.itemText(0).endswith("Product meetings") and "private page" not in sheet.picker.itemText(0)
     assert host.tracked("notion_connect_result") == [{"mode": "own", "ok": True, "reason": ""}]
@@ -602,7 +795,77 @@ def test_manual_cancel_on_share_discards_the_secret_and_never_calls_our_server(w
     assert not host.saves() and world.revoked == []           # an own secret never goes to the function
 
 
+def test_share_screen_content_and_check_again_with_nothing_shared(world, make):
+    world.pages = []
+    sheet, host = _manual(make)
+    sheet.secret.edit.setText("ntn_x")
+    sheet.manual_btn.click()
+    assert sheet.page_name() == "share"
+    assert sheet.share_body.accessibleName().startswith(
+        "In Notion, open the page for your notes, click ••• then Connections, and add your integration.")
+    assert "<b" in sheet.share_body.text()                    # the things to click are in bold
+    assert not sheet.share_message.isVisibleTo(sheet) and not sheet.reopen_link.isVisibleTo(sheet)
+    for text in ("Open Notion", "Check again", "Cancel"):
+        assert _button(sheet, text)
+    _button(sheet, "Open Notion").click()
+    assert world.opened[-1] == notion_connect.NOTION_HOME_URL
+    sheet.check_btn.click()                                   # still nothing shared: say so
+    assert sheet.page_name() == "share" and sheet.share_message.isVisibleTo(sheet)
+    assert sheet.share_message.text() == "Nothing shared yet. Add the page, then check again."
+    assert sheet.check_btn.text() == "Check again" and sheet.check_btn.isEnabled()
+    assert not host.saves()
+
+
+def test_a_grant_held_without_a_page_is_given_back_when_the_sheet_closes(world, make):
+    """Only a button grant is ever given back this way; a pasted secret never leaves for our server."""
+    sheet, host = make()
+    sheet._on_no_page({"mode": "mcp", "token": "tok-held", "refresh": "ref-held", "workspace": "W",
+                       "client_id": "cid-1"})
+    assert sheet.page_name() == "share"
+    sheet.reject()
+    assert world.revoked == ["tok-held"] and world.disconnected[0]["notion_refresh_token"] == "ref-held"
+    assert not host.saves()
+
+
 # ── screen 3: connected ──────────────────────────────────────────────────────
+def test_a_button_connection_has_nothing_to_pick_and_goes_nowhere_by_itself(world, make):
+    run = Deferred()
+    sheet, host = make(MCP_CFG, run=run)
+    assert sheet.page_name() == "connected"                   # already connected: straight here
+    assert sheet.name_label.text() == "Aram's workspace"
+    assert not run.jobs and not world.asked                   # no search, no refresh, nothing online
+    assert sheet.hub_block.isVisibleTo(sheet) and not sheet.pick_block.isVisibleTo(sheet)
+    assert not sheet.picker.isVisibleTo(sheet) and not sheet.refresh_btn.isVisibleTo(sheet)
+    assert not sheet.search_row.isVisibleTo(sheet)
+    texts = " ".join(_texts(sheet))
+    assert "Notes go to" in texts and "Gusan meetings" in texts and "A private page in your Notion." in texts
+    assert "share" not in texts.lower() and "integration" not in texts.lower()
+    assert "Send every meeting automatically" in texts
+    assert not sheet.auto_toggle.isChecked()
+    names = [_name_of(b) for b in sheet.findChildren(QAbstractButton) if b.isVisibleTo(sheet)]
+    assert "Disconnect" in names and "Open Notion" in names and "Done" in names
+
+
+def test_a_button_connection_in_privacy_mode_asks_nothing(world, make):
+    run = Deferred()
+    sheet, host = make(dict(MCP_CFG, privacy_mode=True), run=run)
+    assert sheet.page_name() == "connected" and not run.jobs and world.asked == []
+    assert sheet.hub_block.isVisibleTo(sheet)
+    assert ns.DEST_HINT_PAUSED not in _all_text(sheet)        # nothing is paused: nothing goes online
+
+
+def test_open_notion_opens_the_page_the_notes_go_to(world, make):
+    sheet, _host = make(MCP_CFG)
+    sheet.open_notion_btn.click()
+    assert world.opened[-1] == "https://www.notion.so/" + HUB.replace("-", "")
+    own, _ = make(OWN_CFG)
+    own.open_notion_btn.click()
+    assert world.opened[-1] == "https://www.notion.so/" + PAGES[0]["id"].replace("-", "")
+    blank, _ = make(dict(MCP_CFG, notion_parent_page=""))
+    blank.open_notion_btn.click()
+    assert world.opened[-1] == notion_connect.NOTION_HOME_URL
+
+
 def test_connected_picker_lists_the_hub_then_the_shared_pages(world, make):
     run = Deferred()
     sheet, host = make(OAUTH_CFG, run=run)
@@ -651,8 +914,9 @@ def test_a_failed_search_says_so_without_losing_the_saved_page(world, make):
     assert host.cfg()["notion_api_key"] == "tok-1"
 
 
-def test_the_switch_writes_at_once_and_starts_from_what_is_saved(world, make):
-    sheet, host = make(dict(OAUTH_CFG, notion_auto_send=True))
+@pytest.mark.parametrize("cfg", [MCP_CFG, OAUTH_CFG, OWN_CFG])
+def test_the_switch_writes_at_once_and_starts_from_what_is_saved(world, make, cfg):
+    sheet, host = make(dict(cfg, notion_auto_send=True))
     assert sheet.auto_toggle.isChecked()
     sheet.auto_toggle.click()
     assert ("set_setting", "notion_auto_send", False) in host.events
@@ -662,18 +926,18 @@ def test_the_switch_writes_at_once_and_starts_from_what_is_saved(world, make):
 
 
 def test_opening_a_connected_sheet_from_send_this_meeting(world, make):
-    sheet, _host = make(OAUTH_CFG, then="Send this meeting")
+    sheet, _host = make(MCP_CFG, then="Send this meeting")
     assert sheet.done_btn.text() == "Send this meeting"
     sheet.done_btn.click()
     assert sheet.result_sent is True
-    plain, _ = make(OAUTH_CFG)
+    plain, _ = make(MCP_CFG)
     plain.done_btn.click()
     assert plain.result_sent is False
 
 
 def test_a_long_workspace_name_is_elided_not_wrapped(world, make):
     name = "Institut Imagine – Direction des systèmes d'information et du numérique"
-    sheet, _host = make(dict(OAUTH_CFG, notion_workspace_name=name))
+    sheet, _host = make(dict(MCP_CFG, notion_workspace_name=name))
     assert sheet.name_label.full_text() == name
     assert sheet.name_label.text() != name and sheet.name_label.text().endswith("…")
     assert sheet.name_label.height() < 30
@@ -688,16 +952,31 @@ def test_a_legacy_connection_reads_as_connected_with_the_plain_name(world, make)
 
 
 # ── disconnect ───────────────────────────────────────────────────────────────
-def test_disconnect_forgets_at_once_and_gives_the_grant_back(world, make):
-    sheet, host = make(dict(OAUTH_CFG, notion_auto_send=True))
+@pytest.mark.parametrize("cfg,mode", [(MCP_CFG, "mcp"), (OAUTH_CFG, "oauth")])
+def test_disconnect_forgets_at_once_and_gives_the_grant_back(world, make, cfg, mode):
+    sheet, host = make(dict(cfg, notion_auto_send=True))
     sheet.disconnect_link.click()
     for key in BLANK_KEYS:
-        assert host.cfg()[key] in ("", False), key
+        assert host.cfg()[key] in ("", False, 0), key
     assert host.cfg()["notion_auto_send"] is False and host.cfg()["notion_reconnect"] is False
     assert world.revoked == ["tok-1"]
-    assert host.tracked("notion_disconnected") == [{"mode": "oauth", "reason": "user"}]
+    given = world.disconnected[0]                              # the settings as they were BEFORE they were blanked
+    assert given["notion_auth_mode"] == mode and given["notion_refresh_token"] == "ref-1"
+    assert host.tracked("notion_disconnected") == [{"mode": mode, "reason": "user"}]
     assert host.flushed()
     assert sheet.page_name() == "intro" and not sheet.intro_message.isVisibleTo(sheet)
+
+
+def test_disconnecting_a_button_connection_keeps_the_id_gusan_registered_and_connects_again(world, make):
+    """Registering again would orphan earlier grants: the id outlives a disconnect and is reused."""
+    sheet, host = make(MCP_CFG)
+    sheet.disconnect_link.click()
+    assert host.cfg()["notion_mcp_client_id"] == "cid-1"
+    assert world.disconnected[0]["notion_mcp_client_id"] == "cid-1"
+    sheet.connect_btn.click()                                  # the same sheet connects again
+    assert sheet.page_name() == "connected" and host.cfg()["notion_api_key"] == "tok-1"
+    assert world.connects[0]["cfg"]["notion_mcp_client_id"] == "cid-1"
+    assert world.connects[0]["cfg"].get("notion_api_key") in ("", None)
 
 
 def test_disconnect_of_an_own_secret_never_leaves_for_our_server(world, make):
@@ -719,11 +998,12 @@ def test_disconnect_while_the_pages_load_is_not_undone_by_their_answer(world, ma
     assert sheet.page_name() == "intro"
 
 
-def test_disconnect_notion_function_prefers_the_newest_token(world, monkeypatch):
-    monkeypatch.setattr(notion_connect, "latest_tokens", lambda: {"access_token": "tok-newest"})
-    host = Host(OAUTH_CFG)
+def test_disconnect_notion_function_prefers_the_newest_pair(world, monkeypatch):
+    monkeypatch.setattr(notion_connect, "latest_tokens",
+                        lambda: {"access_token": "tok-newest", "refresh_token": "ref-newest"})
+    host = Host(MCP_CFG)
     ns.disconnect_notion(host, run=sync_run)
-    assert world.revoked == ["tok-newest"]
+    assert world.revoked == ["tok-newest"] and world.disconnected[0]["notion_refresh_token"] == "ref-newest"
     assert host.cfg()["notion_api_key"] == ""
 
 
@@ -764,7 +1044,7 @@ def test_an_own_secret_notion_refuses_asks_for_a_new_one(world, make):
 
 # ── show_notion_sheet ────────────────────────────────────────────────────────
 def test_show_notion_sheet_returns_what_the_caller_asked(world):
-    host = Host(OAUTH_CFG)
+    host = Host(MCP_CFG)
     QTimer.singleShot(30, lambda: ns._SHEET["sheet"].done_btn.click())
     assert ns.show_notion_sheet(host) is True                  # no `then`: connected as it closed
     QTimer.singleShot(30, lambda: ns._SHEET["sheet"].done_btn.click())
@@ -778,7 +1058,7 @@ def test_show_notion_sheet_returns_what_the_caller_asked(world):
 
 
 def test_a_second_call_raises_the_open_sheet_instead_of_opening_another(world):
-    host = Host(OAUTH_CFG)
+    host = Host(MCP_CFG)
     seen = {}
 
     def second():
@@ -792,18 +1072,25 @@ def test_a_second_call_raises_the_open_sheet_instead_of_opening_another(world):
 
 
 # ── looks ────────────────────────────────────────────────────────────────────
-STATES = ("intro", "intro_error", "waiting", "finishing", "connected", "manual", "manual_error", "share")
+STATES = ("intro", "intro_error", "waiting", "finishing", "connected", "connected_then", "connected_picker",
+          "manual", "manual_error", "share")
 
 
 def _build_state(make, name):
     run = Deferred()
     if name == "connected":
+        sheet, _ = make(MCP_CFG, run=run)
+        return sheet
+    if name == "connected_then":
+        sheet, _ = make(dict(MCP_CFG, notion_auto_send=True), run=run, then="Send this meeting")
+        return sheet
+    if name == "connected_picker":
         sheet, _ = make(OAUTH_CFG, run=run)
         sheet._fill_picker(PAGES)
         return sheet
     if name == "share":
         sheet, _ = make(run=run)
-        sheet._on_no_page({"mode": "oauth", "token": "t", "refresh": "", "workspace": "", "dest": None, "pages": []})
+        sheet._on_no_page({"mode": "own", "token": "t", "refresh": "", "workspace": "", "dest": None, "pages": []})
         return sheet
     sheet, _ = make(run=run)
     if name == "intro_error":
@@ -965,16 +1252,6 @@ def test_refresh_without_privacy_mode_never_asks(world, make):
     assert world.asked == [] and len(run.jobs) == 2
 
 
-def test_connecting_in_privacy_mode_then_loads_the_pages_without_asking_again(world, make):
-    run = Deferred()
-    sheet, host = make({"privacy_mode": True}, run=run)
-    sheet.connect_btn.click()                                       # asked here: yes
-    run.finish(0)
-    assert len(world.asked) == 1 and sheet.page_name() == "connected"
-    assert [j.fn.__name__ for j in run.jobs[1:]] == ["_pages_work"]
-    assert sheet.dest_hint.text() != ns.DEST_HINT_PAUSED
-
-
 def test_a_paused_sheet_does_not_search_on_typing(world, make):
     run = Deferred()
     sheet, _host = make(dict(OAUTH_CFG, privacy_mode=True), run=run)
@@ -993,7 +1270,7 @@ def test_a_workspace_name_is_drawn_as_plain_text(world, make, tmp_path):
     png = tmp_path / "x.png"
     assert img.save(str(png))
     hostile = '<img src="%s" width="40" height="40">' % png.as_uri()
-    sheet, _host = make(dict(OAUTH_CFG, notion_workspace_name=hostile))
+    sheet, _host = make(dict(MCP_CFG, notion_workspace_name=hostile))
     lb = sheet.name_label
     assert lb.textFormat() == Qt.PlainText
     assert lb.full_text() == hostile                                 # shown as typed, tags and all
@@ -1008,59 +1285,11 @@ def test_a_workspace_name_is_drawn_as_plain_text(world, make, tmp_path):
     assert reds(lb) == 0                                             # ours loads nothing
 
 
-# ── reconnecting keeps where the notes were going ────────────────────────────
-def test_reconnecting_keeps_the_hub_that_is_still_there(world, make):
-    cfg = dict(OAUTH_CFG, notion_reconnect=True, notion_auto_send=True)
-    sheet, host = make(cfg)
-    world.dest = {"id": "77777777-7777-7777-7777-777777777777", "title": "A second hub", "kind": "hub"}
-    sheet.connect_btn.click()
-    assert sheet.page_name() == "connected"
-    assert world.alive_checks == [("tok-1", HUB)]
-    assert host.cfg()["notion_parent_page"] == HUB and host.cfg()["notion_hub_page"] == HUB
-    assert host.cfg()["notion_parent_title"] == "Gusan meetings"
-    assert host.cfg()["notion_reconnect"] is False
-    assert world.chosen == []                                        # no second "Gusan meetings" page
-
-
-def test_reconnecting_keeps_a_page_the_user_picked(world, make):
-    picked = PAGES[1]
-    cfg = dict(OAUTH_CFG, notion_reconnect=True, notion_parent_page=picked["id"],
-               notion_parent_title=picked["title"])
-    sheet, host = make(cfg)
-    sheet.connect_btn.click()
-    assert host.cfg()["notion_parent_page"] == picked["id"]
-    assert host.cfg()["notion_parent_title"] == "Weekly sync notes"
-    assert host.cfg()["notion_hub_page"] == ""                       # it was not the hub
-    assert world.chosen == []
-
-
-@pytest.mark.parametrize("alive", [False, NotionError("busy", code="rate"), NotionError("x", code="offline"),
-                                   NotionAuthError("401")])
-def test_reconnecting_makes_a_new_page_when_the_old_one_is_gone_or_cannot_be_checked(world, make, alive):
-    world.alive = alive
-    world.dest = {"id": "77777777-7777-7777-7777-777777777777", "title": "Gusan meetings", "kind": "hub"}
-    sheet, host = make(dict(OAUTH_CFG, notion_reconnect=True))
-    sheet.connect_btn.click()
-    assert sheet.page_name() == "connected"
-    assert len(world.alive_checks) == 1 and len(world.chosen) == 1
-    assert host.cfg()["notion_parent_page"] == "77777777-7777-7777-7777-777777777777"
-
-
-def test_a_first_connection_and_a_template_never_ask_about_an_old_page(world, make):
-    sheet, host = make()                                              # nothing saved
-    sheet.connect_btn.click()
-    assert world.alive_checks == [] and len(world.chosen) == 1
-    world2 = fake_connect(world, tok=dict(TOKEN, duplicated_template_id="55555555-5555-5555-5555-555555555555"))
-    sheet2, host2 = make(dict(OAUTH_CFG, notion_reconnect=True), connect=world2)
-    sheet2.connect_btn.click()
-    assert world.alive_checks == []                                   # Notion made a page for this grant: use it
-    assert world.chosen[-1] == ("tok-1", "55555555-5555-5555-5555-555555555555")
-
-
 # ── Disconnect that could not give the grant back ────────────────────────────
-def test_a_disconnect_that_could_not_revoke_says_so(world, make):
+@pytest.mark.parametrize("cfg", [MCP_CFG, OAUTH_CFG])
+def test_a_disconnect_that_could_not_revoke_says_so(world, make, cfg):
     world.revoke_ok = False
-    sheet, host = make(OAUTH_CFG)
+    sheet, host = make(cfg)
     sheet.disconnect_link.click()
     assert host.cfg()["notion_api_key"] == ""                         # forgotten here, as always
     tips = [e for e in host.events if e[:2] == ("call", "show_tray_hint")]
@@ -1069,7 +1298,7 @@ def test_a_disconnect_that_could_not_revoke_says_so(world, make):
 
 
 def test_a_disconnect_that_did_revoke_says_nothing(world, make):
-    sheet, host = make(OAUTH_CFG)
+    sheet, host = make(MCP_CFG)
     sheet.disconnect_link.click()
     assert world.revoked == ["tok-1"]
     assert not [e for e in host.events if e[:2] == ("call", "show_tray_hint")]
@@ -1181,20 +1410,28 @@ def test_enter_in_search_searches_now_and_does_not_press_done(world, make, monke
 def test_cancel_returns_an_answer_instead_of_raising(world, make):
     sheet, _host = make(connect=fake_connect(world, error=notion_connect.ConnectCancelled()))
     ev = threading.Event()
-    res = sheet.flow._oauth_work(ev, {})
+    res = sheet.flow._connect_work(ev, {})
     assert isinstance(res["error"], notion_connect.ConnectCancelled)
-    for code in ("denied", "timeout", "offline", "port_busy", "expired", "server", "browser", "other"):
+    for code in ("denied", "timeout", "offline", "port_busy", "expired", "server", "browser", "full", "other"):
         sheet.flow._connect_fn = fake_connect(world, error=ConnectError(code))
-        assert sheet.flow._oauth_work(ev, {})["error"].code == code
+        assert sheet.flow._connect_work(ev, {})["error"].code == code
 
 
-def test_a_page_making_failure_is_an_answer_too_and_gives_the_grant_back(world, make, monkeypatch):
-    def boom(token, template_id=""):
-        raise NotionError("down", code="offline")
-    monkeypatch.setattr(notion_connect, "choose_destination", boom)
-    sheet, _host = make()
-    res = sheet.flow._oauth_work(threading.Event(), {})
-    assert res["error"].code == "offline" and world.revoked == ["tok-1"]
+def test_the_real_connect_is_what_the_button_calls_when_nothing_replaces_it(world, make, monkeypatch):
+    seen = {}
+
+    def real(cfg=None, open_browser=None, timeout=0, cancel=None, on_url=None, on_code=None, persist=None):
+        seen.update(cfg=cfg, cancel=cancel, has_url=callable(on_url), has_code=callable(on_code),
+                    has_persist=callable(persist), browser=open_browser)
+        return connect_result()
+    monkeypatch.setattr(notion_connect, "connect_mcp", real)
+    sheet, host = make()
+    sheet.flow._connect_fn = None
+    sheet.connect_btn.click()
+    assert sheet.page_name() == "connected"
+    assert seen["has_url"] and seen["has_code"] and seen["has_persist"] and isinstance(seen["cancel"], threading.Event)
+    seen["browser"]("https://mcp.notion.com/authorize?x=1")               # the sheet opens the browser, not the core
+    assert world.opened[-1] == "https://mcp.notion.com/authorize?x=1"
 
 
 def test_a_real_fault_is_still_raised_and_logged(world, make, caplog):
@@ -1202,7 +1439,7 @@ def test_a_real_fault_is_still_raised_and_logged(world, make, caplog):
     sheet, _host = make(connect=fake_connect(world, error=RuntimeError("a bug")))
     done = threading.Event()
     with caplog.at_level(logging.WARNING):
-        t = api_keys.run_in_background(sheet.flow._oauth_work, threading.Event(), {}, on_error=lambda e: done.set())
+        t = api_keys.run_in_background(sheet.flow._connect_work, threading.Event(), {}, on_error=lambda e: done.set())
         t.join(10)
     assert done.is_set()
     assert any("Background task" in r.getMessage() for r in caplog.records)
@@ -1215,7 +1452,7 @@ def test_pressing_cancel_logs_no_failed_task(world, make, caplog):
     sheet, host = make(connect=fake_connect(world, error=notion_connect.ConnectCancelled()))
     answers = []
     with caplog.at_level(logging.DEBUG):
-        t = api_keys.run_in_background(sheet.flow._oauth_work, threading.Event(), {}, on_done=answers.append)
+        t = api_keys.run_in_background(sheet.flow._connect_work, threading.Event(), {}, on_done=answers.append)
         t.join(10)
     assert len(answers) == 1 and isinstance(answers[0]["error"], notion_connect.ConnectCancelled)
     assert not [r for r in caplog.records if "Background task" in r.getMessage() or r.exc_info]
@@ -1226,7 +1463,7 @@ def test_the_sheet_shows_a_returned_failure_like_a_raised_one(world, make):
         sheet, host = make(connect=fake_connect(world, error=ConnectError(code)))
         sheet.connect_btn.click()
         assert sheet.intro_message.text() == notion_connect.MESSAGES[code]
-        assert host.tracked("notion_connect_result") == [{"mode": "oauth", "ok": False, "reason": code}]
+        assert host.tracked("notion_connect_result") == [{"mode": "mcp", "ok": False, "reason": code}]
     run = Deferred()
     sheet, host = make(run=run, connect=fake_connect(world, error=notion_connect.ConnectCancelled()))
     sheet.connect_btn.click()
@@ -1355,15 +1592,16 @@ def test_the_links_text_lines_up_with_the_text_above_it(world, make):
     lx = sheet.own_link.mapTo(sheet, QPoint(0, 0)).x() + ns.RING
     assert lx == cx
     assert sheet.own_link.mapTo(sheet, QPoint(0, 0)).x() >= sheet.stack.mapTo(sheet, QPoint(0, 0)).x()    # not clipped
-    connected, _ = make(OAUTH_CFG)
+    connected, _ = make(MCP_CFG)
     card_left = connected.disconnect_link.parentWidget().mapTo(connected, QPoint(0, 0)).x() + ns.INSET
     assert connected.disconnect_link.mapTo(connected, QPoint(0, 0)).x() + ns.RING == card_left
 
 
 # ── where the keyboard starts ────────────────────────────────────────────────
 def test_the_keyboard_starts_on_the_main_control_of_each_screen(world, make):
-    for cfg, page, attr in ((None, "intro", "connect_btn"), (OAUTH_CFG, "connected", "done_btn"),
-                            (dict(OAUTH_CFG, notion_reconnect=True), "intro", "connect_btn")):
+    for cfg, page, attr in ((None, "intro", "connect_btn"), (MCP_CFG, "connected", "done_btn"),
+                            (OAUTH_CFG, "connected", "done_btn"),
+                            (dict(MCP_CFG, notion_reconnect=True), "intro", "connect_btn")):
         sheet, _host = make(cfg)
         sheet.activateWindow()
         QApplication.processEvents()
@@ -1374,7 +1612,7 @@ def test_the_keyboard_starts_on_the_main_control_of_each_screen(world, make):
 
 
 def test_the_secret_field_has_the_keyboard_when_the_manual_screen_opens(world, make, monkeypatch):
-    monkeypatch.setattr(notion_connect, "NOTION_CLIENT_ID", "")
+    monkeypatch.setattr(notion_connect, "mcp_available", lambda: False)
     sheet, _host = make()
     QApplication.processEvents()
     QApplication.processEvents()
@@ -1428,7 +1666,7 @@ def test_the_privacy_question_is_the_apps_own(world, make):
 def test_the_copy_of_the_review(world, make):
     assert notion_connect.MESSAGES["port_busy"] == (
         "Couldn't start the connection on this computer. Close other Gusan windows and try again.")
-    assert ns.OWN_LINK == "Use a Notion secret instead"
+    assert ns.OWN_LINK == "Use your own Notion secret instead"
     assert ns.DEST_HINT == "To add pages, share them with Gusan in Notion."
 
 

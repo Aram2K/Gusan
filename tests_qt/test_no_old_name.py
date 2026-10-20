@@ -206,9 +206,8 @@ def test_the_sign_in_sheet(quiet, mode):
 def test_the_notion_sheet(quiet, monkeypatch):
     """All five screens, their messages and the picker, with the rail's Notion rows."""
     import notion_connect
-    from tests_qt.test_notion_sheet import OAUTH_CFG, PAGES, Deferred, Host
+    from tests_qt.test_notion_sheet import MCP_CFG, OAUTH_CFG, PAGES, Deferred, Host
     from ui import notion_sheet as ns
-    monkeypatch.setattr(notion_connect, "NOTION_CLIENT_ID", "test-client-id")
     sheets = []
 
     def build(cfg=None, **kw):
@@ -228,10 +227,13 @@ def test_the_notion_sheet(quiet, monkeypatch):
     assert_no_old_name("Notion sheet (waiting)", visible_strings(intro))
     intro.flow.finishing.emit()
     assert_no_old_name("Notion sheet (setting things up)", visible_strings(intro))
+    button = build(MCP_CFG, then="Send this meeting")
+    assert button.page_name() == "connected"
+    assert_no_old_name("Notion sheet (connected, one private page)", visible_strings(button))
     connected = build(OAUTH_CFG, then="Send this meeting")
     connected._fill_picker(PAGES)
     assert connected.page_name() == "connected"
-    assert_no_old_name("Notion sheet (connected)", visible_strings(connected))
+    assert_no_old_name("Notion sheet (connected, picker)", visible_strings(connected))
     manual = build()
     manual._show_manual(notion_connect.MESSAGES["rejected"])
     assert_no_old_name("Notion sheet (own integration)", visible_strings(manual))
@@ -241,13 +243,13 @@ def test_the_notion_sheet(quiet, monkeypatch):
     assert_no_old_name("Notion sheet (share a page)", visible_strings(share))
     share._on_no_page({"mode": "own", "token": "t", "refresh": "", "workspace": "", "dest": None, "pages": []})
     assert_no_old_name("Notion sheet (share a page, own)", visible_strings(share))
-    assert any("Gusan" in s for s in visible_strings(connected) + visible_strings(share))
+    assert any("Gusan" in s for s in visible_strings(connected) + visible_strings(share) + visible_strings(button))
 
 
 def test_the_notion_rows_of_the_meeting_settings(quiet, meetings_root):
     from ui import shell as shell_mod
     app = make_stub_app("pro")
-    app.cfg.update({"notion_api_key": "tok", "notion_auth_mode": "oauth", "notion_workspace_name": "Aram's workspace",
+    app.cfg.update({"notion_api_key": "tok", "notion_auth_mode": "mcp", "notion_workspace_name": "Aram's workspace",
                     "notion_parent_page": "99999999-9999-9999-9999-999999999999", "notion_auto_send": True})
     win = shell_mod.MainWindow(app)
     quiet.append(win)

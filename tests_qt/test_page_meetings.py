@@ -941,9 +941,14 @@ NOTION_HUB = "99999999-9999-9999-9999-999999999999"
 NOTION_OAUTH = {"notion_api_key": "tok", "notion_refresh_token": "ref", "notion_auth_mode": "oauth",
                 "notion_workspace_name": "Aram's workspace", "notion_parent_page": NOTION_HUB,
                 "notion_parent_title": "Gusan meetings", "notion_hub_page": NOTION_HUB}
+# What the Connect button leaves in the settings (notion_mcp.connection_settings).
+NOTION_MCP = {"notion_api_key": "tok", "notion_refresh_token": "ref", "notion_auth_mode": "mcp",
+              "notion_workspace_name": "Aram's workspace", "notion_parent_page": NOTION_HUB,
+              "notion_parent_title": "Gusan meetings", "notion_hub_page": NOTION_HUB,
+              "notion_mcp_client_id": "cid-1", "notion_token_expires": 1900000000}
 NOTION_KEYS = ("notion_api_key", "notion_refresh_token", "notion_auth_mode", "notion_workspace_name",
                "notion_parent_page", "notion_parent_title", "notion_hub_page", "notion_auto_send",
-               "notion_reconnect")
+               "notion_reconnect", "notion_token_expires")
 
 
 def _writable(app, **cfg):
@@ -1012,12 +1017,32 @@ def test_the_notion_rows_follow_the_connection(shell, meetings_root):
     assert rail.notion_connect.isVisibleTo(page) and not rail.notion_manage.isVisibleTo(page)
 
 
+def test_the_notion_rows_for_a_connection_made_with_the_button(shell, meetings_root):
+    win, app = shell("pro")
+    page = _open(win)
+    rail = page.list_view.rail
+    row = rail.notion_row
+    _sync(rail, app, **NOTION_MCP)
+    assert not rail.notion_connect.isVisibleTo(page) and not rail.notion_reconnect.isVisibleTo(page)
+    assert rail.notion_manage.isVisibleTo(page) and rail.notion_disconnect.isVisibleTo(page)
+    assert row.hint_label.text() == "Aram's workspace"
+    assert rail.notion_auto_row.isVisibleTo(page) and not rail.notion_auto_toggle.isChecked()
+    # its private page is made when it is missing, so the token alone is a connection
+    _sync(rail, app, notion_api_key="tok", notion_auth_mode="mcp")
+    assert row.hint_label.text() == "Connected" and rail.notion_manage.isVisibleTo(page)
+    assert not rail.notion_connect.isVisibleTo(page)
+    # Notion refused it for good: Reconnect, in the same words as before
+    _sync(rail, app, **NOTION_MCP, notion_reconnect=True)
+    assert row.hint_label.text() == "Reconnect Notion to keep sending."
+    assert rail.notion_reconnect.isVisibleTo(page) and not rail.notion_manage.isVisibleTo(page)
+
+
 def test_the_notion_rail_actions_all_fit_beside_their_label(shell, meetings_root):
     win, app = shell("pro")
     win.show()
     page = _open(win)
     rail = page.list_view.rail
-    for cfg in ({}, NOTION_OAUTH, dict(NOTION_OAUTH, notion_reconnect=True),
+    for cfg in ({}, NOTION_OAUTH, NOTION_MCP, dict(NOTION_MCP, notion_reconnect=True),
                 dict(NOTION_OAUTH, notion_workspace_name="Institut Imagine – Direction des systèmes d'information")):
         _sync(rail, app, **cfg)
         row = rail.notion_row
@@ -1078,6 +1103,27 @@ def test_the_rail_disconnect_forgets_the_connection(shell, meetings_root, monkey
         assert app.cfg[key] in ("", False), key
     assert revoked == ["tok"]
     assert ("track", "notion_disconnected", {"mode": "oauth", "reason": "user"}) in app.calls
+    assert rail.notion_connect.isVisibleTo(page) and not rail.notion_auto_row.isVisibleTo(page)
+
+
+def test_the_rail_disconnect_of_a_button_connection_keeps_the_registered_id(shell, meetings_root, monkeypatch):
+    import notion_connect
+    from ui import notion_sheet
+    given = []
+    monkeypatch.setattr(notion_connect, "disconnect", lambda cfg: given.append(dict(cfg)) or True)
+    monkeypatch.setattr(notion_sheet, "_run_then", lambda fn, *a, then=None, error=None, **k: then and then(fn(*a)))
+    win, app = shell("pro")
+    _writable(app, **NOTION_MCP, notion_auto_send=True)
+    page = _open(win)
+    rail = page.list_view.rail
+    rail.sync_settings()
+    rail.notion_disconnect.click()
+    for key in NOTION_KEYS:
+        assert app.cfg[key] in ("", False), key
+    assert app.cfg["notion_mcp_client_id"] == "cid-1"        # registering again would orphan earlier grants
+    assert [(g["notion_auth_mode"], g["notion_api_key"], g["notion_refresh_token"], g["notion_mcp_client_id"])
+            for g in given] == [("mcp", "tok", "ref", "cid-1")]
+    assert ("track", "notion_disconnected", {"mode": "mcp", "reason": "user"}) in app.calls
     assert rail.notion_connect.isVisibleTo(page) and not rail.notion_auto_row.isVisibleTo(page)
 
 
@@ -1209,6 +1255,7 @@ def test_nothing_to_send_says_so_before_anything_else(shell, meetings_root, sync
     ("no_access", "Couldn't send to Notion. Pick another page in Meeting settings."),
     ("rate", "Notion is busy. Try again in a minute."),
     ("offline", "Couldn't reach Notion. Check your internet."),
+    ("full", "That Notion workspace is full. Free up space or upgrade it."),
     ("other", "Couldn't send to Notion.")])
 def test_a_failed_send_shows_its_sentence_for_five_seconds(shell, meetings_root, sync_fake, opened_urls, code, sentence):
     sync_fake.result = {"ok": False, "url": "", "code": code, "sentence": sentence}
@@ -1220,6 +1267,36 @@ def test_a_failed_send_shows_its_sentence_for_five_seconds(shell, meetings_root,
         {"target": "notion", "ok": False, "auto": False, "mode": "oauth", "reason": code}]
     nv._end_flash()
     assert nv._flash.interval() == 1800                     # the next "Copied" is short again
+
+
+@pytest.mark.parametrize("sentence", [
+    "Couldn't send to Notion. Reconnect it in Meeting settings.",
+    "Couldn't send to Notion. Pick another page in Meeting settings.",
+    "Couldn't send to Notion. Notion rejected the secret.",
+    "That Notion workspace is full. Free up space or upgrade it."])
+def test_a_long_failure_sentence_is_read_in_full_and_pushes_nothing_out_of_the_window(
+        shell, meetings_root, monkeypatch, sentence):
+    """The flash sits in the toolbar beside Copy: at the app's own window size a long Notion sentence
+    must wrap into the room left, not be cut off and not push Export and the ⋯ off the right edge."""
+    import ui.winfit
+    from ui import shell as shell_mod
+    monkeypatch.setattr(ui.winfit, "settle_on_screen", lambda *a, **k: None)     # the offscreen screen is 800x600
+    monkeypatch.setattr(ui.winfit, "fit_on_screen", lambda *a, **k: None)
+    nv, _app, _folder, page = _notes_view(shell, meetings_root, **NOTION_MCP)
+    win = page.window()
+    win.resize(*shell_mod.DEFAULT_SIZE)
+    win.show()
+    QApplication.processEvents()
+    nv.flash(sentence, "red", 5000)
+    QApplication.processEvents()
+    label = nv.flash_label
+    assert label.isVisibleTo(nv) and label.text() == sentence
+    assert label.heightForWidth(label.width()) <= label.height() + 1, "the sentence is cut off"
+    assert label.height() <= nv.copy_btn.height()                    # the toolbar row did not grow
+    # (without the wrap the whole page grows wider than the window, so measure against the window)
+    assert nv.mapTo(win, nv.rect().topRight()).x() <= win.width(), "the page grew wider than the window"
+    for btn in (nv.copy_btn, nv.export_btn, nv.continue_btn, nv.more_btn):
+        assert btn.mapTo(win, btn.rect().bottomRight()).x() <= win.width(), "%s is pushed out" % btn.text()
 
 
 def test_a_failure_without_a_sentence_still_says_something(shell, meetings_root, sync_fake):
@@ -1479,6 +1556,29 @@ def test_a_failed_real_send_says_why_and_the_meeting_remembers_it(shell, meeting
     assert nv.flash_label.text() == "Couldn't reach Notion. Check your internet."
     meta = json.loads((meetings_root / "20260929_110000" / "meta.json").read_text(encoding="utf-8"))
     assert meta["notion_error"] == "offline" and "notion_url" not in meta
+    assert opened_urls == []
+
+
+def test_a_full_workspace_through_the_real_notion_sync_says_so_and_flags_nothing(shell, meetings_root, opened_urls,
+                                                                                 monkeypatch):
+    """The Connect button's connection (mode "mcp") sending to a workspace that has used up its free blocks:
+    the toolbar says it in one plain sentence, the meeting remembers why, nothing says "Reconnect"."""
+    import notion_export
+    import notion_mcp
+
+    def send(creds, title, notes, transcript, line, *, parent, hub, persist):
+        raise notion_mcp._tool_error("Your workspace has used all of its free blocks. Upgrade your plan to create "
+                                     "more content. [Upgrade plan](https://app.notion.com/notion-mcp?source=x)")
+    monkeypatch.setattr(notion_mcp, "send_meeting_mcp", send)
+    nv, app, _folder, _page = _notes_view(shell, meetings_root, **NOTION_MCP)
+    nv.export("notion")
+    assert nv.flash_label.text() == notion_export.FULL_TEXT and nv._flash.interval() == 5000
+    assert "Upgrade" not in nv.flash_label.text() and "http" not in nv.flash_label.text()
+    meta = json.loads((meetings_root / "20260929_110000" / "meta.json").read_text(encoding="utf-8"))
+    assert meta["notion_error"] == "full" and "notion_url" not in meta
+    assert _tracked(app, "meeting_exported") == [
+        {"target": "notion", "ok": False, "auto": False, "mode": "mcp", "reason": "full"}]
+    assert not app.cfg.get("notion_reconnect")
     assert opened_urls == []
 
 

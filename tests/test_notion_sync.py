@@ -219,6 +219,9 @@ class TestFailures(_Case):
          "Couldn't send to Notion. Pick another page in Meeting settings."),
         (NotionAuthError("401"), OWN, "auth", "Couldn't send to Notion. Notion rejected the secret."),
         (RuntimeError("a bug, with a secret tok-1 in it"), OAUTH, "other", "Couldn't send to Notion."),
+        # a workspace with no room left: its own sentence, whatever the mode
+        (NotionError("x", code="full"), OAUTH, "full", notion_export.FULL_TEXT),
+        (NotionError("x", code="full"), OWN, "full", notion_export.FULL_TEXT),
     )
 
     def test_each_failure_writes_its_code_and_says_one_plain_sentence(self):
@@ -274,7 +277,33 @@ class TestFailures(_Case):
         self.assertEqual(notion_sync.friendly(ConnectError("server"), "oauth")[0], "other")
         self.assertEqual(notion_sync.friendly(ValueError("x"), "oauth"), ("other", "Couldn't send to Notion."))
         for code in notion_sync.CODES:
-            self.assertIn(code, ("sent", "busy", "auth", "no_access", "rate", "offline", "other"))
+            self.assertIn(code, ("sent", "busy", "auth", "no_access", "rate", "offline", "full", "other"))
+
+    def test_a_full_workspace_is_its_own_calm_sentence_in_every_mode(self):
+        for mode in ("mcp", "oauth", "own"):
+            self.assertEqual(notion_sync.friendly(NotionError("x", code="full"), mode),
+                             ("full", notion_export.FULL_TEXT), mode)
+        self.assertEqual(notion_sync.SENTENCES["full"], notion_export.FULL_TEXT)
+        self.assertEqual(notion_connect.MESSAGES["full"], notion_export.FULL_TEXT)     # the sheet says the same
+        text = notion_export.FULL_TEXT
+        self.assertTrue(text.startswith("That Notion workspace is full."))
+        for word in ("block", "MCP", "OAuth", "token", "integration", "secret", "error", "Upgrade plan", "http"):
+            self.assertNotIn(word, text, word)
+        self.assertNotIn("you", text.lower())                                            # it does not blame anyone
+        self.assertLessEqual(len(text), 62)               # the notes toolbar's flash has two lines at the app's size
+
+    def test_a_full_workspace_flags_nothing_and_keeps_the_connection(self):
+        saved = []
+        mcp = {"notion_api_key": "tok-1", "notion_refresh_token": "ref-1", "notion_auth_mode": "mcp",
+               "notion_hub_page": HUB, "notion_parent_page": HUB}
+
+        def full_send(creds, title, notes, transcript, line, *, parent, hub, persist):
+            raise NotionError("x", code="full")
+
+        res = notion_sync.send_meeting(self.folder, mcp, persist=saved.append, mcp_send=full_send)
+        self.assertEqual((res["ok"], res["code"], res["sentence"]), (False, "full", notion_export.FULL_TEXT))
+        self.assertEqual(self.meta()["notion_error"], "full")
+        self.assertEqual(saved, [])                                   # not "Reconnect": the connection is fine
 
 
 # ── the token ────────────────────────────────────────────────────────────────
@@ -534,7 +563,7 @@ class TestContract(_Case):
             self.assertTrue(res["ok"] or res["code"] == "sent" or res["sentence"])
 
     def test_a_failure_the_ui_gets_says_the_same_as_what_the_callers_expect(self):
-        for code in ("auth", "no_access", "rate", "offline", "other"):
+        for code in ("auth", "no_access", "rate", "offline", "full", "other"):
             self.assertIn(code, notion_sync.CODES)
 
 

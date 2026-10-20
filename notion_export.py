@@ -52,6 +52,12 @@ MAX_TOKEN_LEN = 2000
 
 OFFLINE_TEXT = "Couldn't reach Notion. Check your internet."
 AUTH_AGAIN_TEXT = "Notion needs to be connected again."
+# A free Notion workspace with more than one member has a total limit on blocks; when it is used
+# up, Notion refuses to make any more pages. Nothing is wrong with the connection or with Gusan.
+# Kept short on purpose: it is a line in the notes toolbar, which has room for two lines of it (a
+# third would make the toolbar taller), as well as the message on the Connect sheet.
+FULL_TEXT = "That Notion workspace is full. Free up space or upgrade it."
+FULL_HINT = "That Notion workspace is full"       # the short form (a tray hint has one line)
 SECRET_REJECTED_TEXT = ("Notion rejected the token - re-copy the integration "
                         "secret from notion.so/my-integrations.")
 
@@ -59,7 +65,9 @@ SECRET_REJECTED_TEXT = ("Notion rejected the token - re-copy the integration "
 class NotionError(RuntimeError):
     """A Notion call failed; ``str(e)`` is a plain sentence, never raw output.
 
-    ``code``: auth | no_access | rate | offline | other. ``status`` is the HTTP
+    ``code``: auth | no_access | rate | offline | full | other ("full": the
+    workspace has no room for another page; only the hosted-server path says
+    so, see notion_mcp.py). ``status`` is the HTTP
     status (None when Notion was never reached), ``retry_after`` the seconds
     Notion asked us to wait (429 only) and ``url`` the page that DID get
     created when only the later part of a long upload failed.
@@ -117,32 +125,54 @@ def extract_page_id(raw):
     return f"{h[0:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
 
 
+def page_url(page_id):
+    """The address that opens a Notion page, from its id (dashed or not), or ""."""
+    pid = extract_page_id(page_id)
+    return "https://www.notion.so/" + pid.replace("-", "") if pid else ""
+
+
+# The two connection modes that hold a grant (a token that expires and is
+# refreshed, and a failure wording that never mentions a secret): "oauth" (the
+# public integration through our relay, notion_connect) and "mcp" (Notion's
+# hosted server, notion_mcp - what the Connect button uses).
+GRANT_MODES = ("oauth", "mcp")
+
+
 def is_connected(cfg):
-    """True when a token AND a destination page are saved (any connection
-    mode). The one test the Settings row, Send to Notion and auto-send share."""
+    """True when the connection is ready to send: a token AND a destination
+    page for "own" and "oauth"; just the token for "mcp" (its private "Gusan
+    meetings" page is made when it is missing). The one test the Settings row,
+    Send to Notion and auto-send share."""
     cfg = cfg or {}
     token = (cfg.get("notion_api_key") or "").strip()
+    if token and cfg.get("notion_auth_mode") == "mcp":
+        return True
     return bool(token and extract_page_id(cfg.get("notion_parent_page")))
 
 
 def connection_mode(cfg):
-    """How Notion was connected: "oauth" (the Connect button), "own" (a pasted
-    integration secret) or "" (no token). A token with no saved mode is a
-    setup from before OAuth existed, so it reads as "own"."""
+    """How Notion was connected: "mcp" (the Connect button), "oauth" (the older
+    public-integration button), "own" (a pasted integration secret) or "" (no
+    token). A token with no saved mode is a setup from before OAuth existed,
+    so it reads as "own"."""
     cfg = cfg or {}
     if not (cfg.get("notion_api_key") or "").strip():
         return ""
-    return "oauth" if cfg.get("notion_auth_mode") == "oauth" else "own"
+    mode = cfg.get("notion_auth_mode")
+    return mode if mode in GRANT_MODES else "own"
 
 
 # Everything a Notion connection leaves in the settings: what Disconnect, and
 # another Gusan account signing in, put back to nothing. The automatic-send
 # switch goes back to off: a new connection starts quiet. (The connection's
-# owner stamp, notion_owner, is the controller's own: main.py clears it.)
+# owner stamp, notion_owner, is the controller's own: main.py clears it. The
+# client id Gusan registered with Notion, notion_mcp_client_id, is kept on
+# purpose: registering again would orphan earlier grants. So is
+# notion_mcp_redirects, which says which return addresses that client knows.)
 BLANK_SETTINGS = {
     "notion_api_key": "", "notion_refresh_token": "", "notion_auth_mode": "", "notion_workspace_name": "",
     "notion_parent_page": "", "notion_parent_title": "", "notion_hub_page": "",
-    "notion_auto_send": False, "notion_reconnect": False,
+    "notion_auto_send": False, "notion_reconnect": False, "notion_token_expires": 0,
 }
 
 

@@ -44,10 +44,15 @@ Integration notes for Wave 4
   ``meeting_consent_reminder`` (new, default True: shows the consent line on the
   start card), ``calendar_ask_to_record`` / ``calendar_only_with_link``
   (calendar_service.DEFAULTS), and the Notion connection (ui/notion_sheet.py
-  writes ``notion_api_key``, ``notion_refresh_token``, ``notion_auth_mode``,
-  ``notion_workspace_name``, ``notion_parent_page`` / ``_title``,
-  ``notion_hub_page`` and ``notion_reconnect`` in one ``set_settings`` call;
-  ``notion_auto_send`` is the rail's switch). Add the three new keys to main.DEFAULT.
+  writes ``notion_api_key``, ``notion_refresh_token``, ``notion_auth_mode``
+  ("mcp" for the Connect button), ``notion_workspace_name``,
+  ``notion_parent_page`` / ``_title``, ``notion_hub_page``, ``notion_reconnect``,
+  ``notion_token_expires``, ``notion_mcp_client_id`` and ``notion_mcp_redirects``
+  (the return addresses that client knows) in one ``set_settings`` call;
+  ``notion_auto_send`` is the rail's switch). A Notion send that fails because the
+  workspace is full (code "full") flashes its own plain sentence in the notes toolbar
+  (notion_export.FULL_TEXT); nothing is flagged and the rail stays "Connected".
+  Add the three new keys to main.DEFAULT.
   Every write falls back to cfg + save_config only when set_setting is missing.
 * ``ui.recording_prompts.ensure_recording_consent`` writes ``meeting_consent_ack``
   through ``app.set_setting`` (cfg + ``save_config`` without it); the session

@@ -18,6 +18,9 @@ MISTRAL_API_KEY_SECRET = "mistral_api_key"
 # notion_refresh_token that they back.
 NOTION_TOKEN_SECRET = "notion_access_token"
 NOTION_REFRESH_SECRET = "notion_refresh_token"
+# Notion's hosted server (notion_mcp.py) registers Gusan as a public client and
+# hands out no secret; should one ever come back it is kept here, not in config.json.
+NOTION_MCP_SECRET = "notion_mcp_client_secret"
 # JSON blob holding the per-user stashed API keys (the user_secrets store), so
 # keys swapped out on account switch never sit in plaintext config.json either.
 USER_SECRETS_SECRET = "user_secrets_keys"

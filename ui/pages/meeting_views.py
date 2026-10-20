@@ -37,8 +37,9 @@ logger = logging.getLogger("transcribe")
 SYNC_BG = False            # tests: run background work inline
 FLASH_MS = 1800            # how long "Copied" and friends stay up
 FLASH_ERROR_MS = 5000      # a failure to read: the Notion errors
+FLASH_MIN_W = 160          # the flash line wraps rather than get narrower than this
 NOTION_THEN = "Send this meeting"       # the Notion sheet's button when it was opened from here
-NOTION_REASONS = ("auth", "no_access", "rate", "offline")      # telemetry: why a send failed (else "other")
+NOTION_REASONS = ("auth", "no_access", "rate", "offline", "full")      # telemetry: why a send failed (else "other")
 
 # ── words ────────────────────────────────────────────────────────────────────
 LANGS = (("auto", "Detect automatically"), ("multi", "Mixed languages"), ("en", "English"),
@@ -1612,9 +1613,15 @@ class NotesView(QWidget):
         self.tabs.changed.connect(self.stack_index)
         bar.addWidget(self.tabs, 0, Qt.AlignVCenter)
         bar.addStretch(1)
-        self.flash_label = tlabel("", 12.5, 600, "ok")
+        # One line when it fits. A long sentence (the Notion errors) wraps into the room the
+        # buttons leave, right-aligned against Copy: it is never cut off and never pushes
+        # Export and the ⋯ out of the window. (The stretch is the label's, not the spacer's.)
+        self.flash_label = tlabel("", 12.5, 600, "ok", wrap=True)
+        self.flash_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.flash_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.flash_label.setMinimumWidth(FLASH_MIN_W)
         self.flash_label.hide()
-        bar.addWidget(self.flash_label, 0, Qt.AlignVCenter)
+        bar.addWidget(self.flash_label, 1000, Qt.AlignVCenter)
         self.copy_btn = Button("Copy notes", "primary", "m", icon="copy", parent=self)
         self.copy_btn.clicked.connect(self.copy_notes)
         bar.addWidget(self.copy_btn)

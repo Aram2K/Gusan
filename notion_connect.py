@@ -23,6 +23,47 @@ The whole flow, in the order it happens (all blocking - run it on a worker):
                       meetings" page and pick where notes go.
 * :func:`landing_html` what the browser tab shows after Notion (light and dark).
 
+"mcp" mode - what the Connect button uses - lives in notion_mcp.py (Notion's hosted
+server: browser consent, no page to share, no secret, no page to pick). The calls the
+sheet and main.py make are these thin ones, all blocking (run them on a worker):
+
+* :func:`mcp_available` ``() -> True``   the one-button path exists in this build.
+* :func:`connect_mcp` ``(cfg=None, open_browser=webbrowser.open, timeout=LOGIN_TIMEOUT,
+  cancel=None, on_url=None, on_code=None, persist=None) -> dict``   the whole connect:
+  consent in the browser, then the private "Gusan meetings" page. ``cfg`` is a snapshot of
+  the settings (it supplies ``notion_mcp_client_id``, ``notion_hub_page`` and
+  ``notion_workspace_name``); ``on_url(url)`` once the listener is up (keep it for "Open
+  Notion again"); ``on_code()`` when Notion answered and "Setting things up" starts;
+  ``persist(dict)`` is called on the worker with ``{"notion_mcp_client_id": id,
+  "notion_mcp_redirects": "2"}`` the moment the client is registered. Returns
+  ``{"mode": "mcp", "token", "refresh",
+  "workspace", "expires_at", "client_id", "redirects", "dest": {"id", "title", "kind": "hub",
+  "url"}, "pages": None, "settings": {...}}`` - ``settings`` holds every config key of the
+  connection (notion_api_key, notion_refresh_token, notion_auth_mode "mcp",
+  notion_workspace_name, notion_parent_page, notion_parent_title, notion_hub_page,
+  notion_reconnect False, notion_mcp_client_id, notion_mcp_redirects, notion_token_expires): save it in ONE
+  set_settings call, then flush_config_save. Raises :class:`ConnectError` (code: timeout |
+  denied | offline | port_busy | expired | server | browser | full | other) or
+  :class:`ConnectCancelled` once ``cancel`` (a threading.Event) is set; a grant that was
+  made is given back first. Notion comes back to https://gusan.aibuben.xyz/notion/callback
+  (a page on our site that hands the answer on to this computer) when that page is up, else
+  straight to 127.0.0.1; the browser tab is kept open until the connect has finished and
+  then says "Connected." or "That didn't work." (notion_mcp.py has the details).
+* :func:`disconnect` ``(cfg) -> bool``   give a connection back at Notion, whatever its
+  mode ("mcp" and "oauth" revoke, "own" has nothing to give back). Pass the settings as
+  they were BEFORE they were blanked. True = done or nothing to do; False = Notion could
+  not be told (the user can remove Gusan under Settings > Connections in Notion).
+* :func:`revoke_mcp` ``(token, refresh_token="", client_id="") -> bool``   the same for
+  an mcp connection when the caller holds the pieces (main's other-account sign-in).
+* :func:`latest_tokens` / :func:`forget_tokens`   cover both token chains.
+
+Sending is notion_sync.send_meeting (it routes "mcp" itself). A refreshed token pair is
+handed to the ``persist`` callback of send_meeting BEFORE the next request, with
+``notion_token_expires`` and ``notion_reconnect`` False; a connection Notion refuses for
+good sets ``notion_reconnect`` True through ``persist``. The REST helpers further down
+(validate_token, search_pages, create_hub, choose_destination, page_alive) belong to the
+"own" and "oauth" modes: an "mcp" token does NOT work against api.notion.com.
+
 Nothing here reads or writes the config or the keyring: the caller (the sheet or
 main.py) keeps the tokens, so this module tests with fake HTTP only. Failures are
 :class:`ConnectError` with a ``code`` and a plain sentence from :data:`MESSAGES`
@@ -62,6 +103,7 @@ AUTH_URL = "https://api.notion.com/v1/oauth/authorize"
 API_BASE = notion_export.API_BASE
 LOGIN_TIMEOUT = 180
 HTTP_TIMEOUT = 15
+HOLD_SECONDS = 100              # the most a held browser request (see _Callback) waits for the app to finish
 HUB_TITLE = "Gusan meetings"
 HUB_INTRO = "Meeting notes sent from Gusan land here, one page per meeting."
 INTEGRATIONS_URL = "https://www.notion.so/my-integrations"
@@ -84,6 +126,7 @@ MESSAGES = {
     "expired": "That Notion sign-in expired. Try again.",
     "server": "Notion couldn't finish connecting. Try again in a minute.",
     "browser": "Couldn't open your browser. Try again.",
+    "full": notion_export.FULL_TEXT,
     "rejected": "Notion didn't accept that secret. Copy it again from your integration.",
     "reconnect": "Notion needs to be connected again.",
     "other": "Couldn't connect to Notion. Try again.",
@@ -95,8 +138,9 @@ class ConnectError(RuntimeError):
     ``str(e)`` its sentence - never anything a server or library said.
 
     Codes: cancelled | denied | timeout | offline | port_busy | expired |
-    server | browser | other. From :func:`refresh`, "expired" means Notion
-    refused the refresh token for good: the user has to connect again."""
+    server | browser | full | other. From :func:`refresh`, "expired" means Notion
+    refused the refresh token for good: the user has to connect again. "full":
+    connected, but the workspace has no room for even the first page."""
 
     def __init__(self, code="other"):
         self.code = code if code in MESSAGES else "other"
@@ -156,6 +200,9 @@ _LANDING = {
     "error": ("cross", "Notion wasn't connected.",
               f"Go back to {APP_NAME} and try again."),
     "denied": ("cross", "Cancelled.", "Nothing was connected."),
+    # The "mcp" connect keeps the tab waiting until the app is done (see _Callback), so it can say how it went.
+    "connected": ("check", "Connected.", f"You can close this tab and go back to {APP_NAME}."),
+    "failed": ("cross", "That didn't work.", f"Go back to {APP_NAME} and try again."),
 }
 _ICONS = {
     "check": '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
@@ -187,8 +234,9 @@ _LANDING_CSS = (
 
 def landing_html(kind):
     """The page the browser shows after Notion: kind "ok" (a code came back),
-    "error" (Notion sent an error) or "denied" (the user said no). Anything
-    else reads as "error"."""
+    "error" (Notion sent an error) or "denied" (the user said no); the "mcp"
+    connect, which answers only when it is done, also uses "connected" and
+    "failed". Anything else reads as "error"."""
     icon, title, line = _LANDING.get(kind) or _LANDING["error"]
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
@@ -231,7 +279,9 @@ class _Callback(http.server.BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(parsed.query, max_num_fields=20)
         except ValueError:
             query = {}
-        if parsed.path != CALLBACK_PATH or ("code" not in query and "error" not in query):
+        # The listener of the "mcp" mode answers on its own path (server.callback_path).
+        if parsed.path != getattr(self.server, "callback_path", CALLBACK_PATH) \
+                or ("code" not in query and "error" not in query):
             self._reply(404)                    # favicon and friends
             return
         # Only the function's redirect carries our state. Anything else - a
@@ -252,6 +302,23 @@ class _Callback(http.server.BaseHTTPRequestHandler):
             kind = "ok"
         else:
             self._reply(400)
+            return
+        if kind == "ok" and getattr(self.server, "hold_tab", False):
+            # The "mcp" connect still has a code to swap and a first page to make. Take the answer
+            # now, but keep this request open and tell the tab how it went once the app knows
+            # (HOLD_SECONDS at most: after that it reads "Almost done", like every other flow).
+            with self.server.lock:
+                first = self.server.result is None
+                if first:
+                    self.server.result = result
+            self.server.done.set()
+            kind = "ok"
+            if self.server.finished.wait(HOLD_SECONDS if first else 0):
+                kind = getattr(self.server, "tab_kind", "") or "ok"
+            try:
+                self._reply(200, landing_html(kind))
+            except OSError:
+                pass                            # the tab went away; nothing else depends on it
             return
         try:
             self._reply(200, landing_html(kind))
@@ -426,18 +493,21 @@ def _tokens(data):
 
 def forget_tokens():
     """Drop the in-memory token pair and the refresh history (a new connection
-    or a disconnect starts a new chain)."""
+    or a disconnect starts a new chain). Covers the "mcp" chain too."""
     global _LATEST
     with _LOCK:
         _LATEST = {}
         del _SUPERSEDED[:]
+    import notion_mcp
+    notion_mcp.forget_tokens()
 
 
 def latest_tokens():
-    """The newest pair :func:`refresh` returned in this process
-    ({"access_token", "refresh_token", ...}), or {}. It is newer than the saved
-    config until the caller's save has run: prefer it when sending."""
-    return dict(_LATEST)
+    """The newest pair :func:`refresh` (or the "mcp" mode's refresh) returned in
+    this process ({"access_token", "refresh_token", ...}), or {}. It is newer than
+    the saved config until the caller's save has run: prefer it when sending."""
+    import notion_mcp
+    return notion_mcp.latest_tokens() or dict(_LATEST)
 
 
 def exchange(code, redirect_uri=REDIRECT_URI):
@@ -648,3 +718,50 @@ def page_alive(token, page_id):
         if e.code == "no_access":
             return False
         raise
+
+
+# ── "mcp" mode: Notion's hosted server (the work is in notion_mcp.py) ────────
+def mcp_available():
+    """True when this build can connect Notion with one button through Notion's hosted
+    server (nothing to configure: the client registers itself). The sheet's gate
+    for the one-button screen."""
+    return True
+
+
+def connect_mcp(cfg=None, open_browser=webbrowser.open, timeout=LOGIN_TIMEOUT, cancel=None,
+                on_url=None, on_code=None, persist=None):
+    """Connect Notion in the browser and make the private "Gusan meetings" page; the
+    result dict is described in the module docstring. Blocking - run on a worker.
+    Raises ConnectError / ConnectCancelled."""
+    import notion_mcp
+    return notion_mcp.connect(cfg, open_browser=open_browser, timeout=timeout, cancel=cancel,
+                              on_url=on_url, on_code=on_code, persist=persist)
+
+
+def revoke_mcp(token="", refresh_token="", client_id=""):
+    """Give an "mcp" connection back at Notion (best effort, never raises). True when
+    Notion was told (or there was nothing to tell)."""
+    import notion_mcp
+    return notion_mcp.revoke(token, refresh_token, client_id)
+
+
+def disconnect(cfg):
+    """Give the connection described by ``cfg`` (the settings BEFORE they were blanked)
+    back at Notion, whatever its mode. Best effort, blocking, never raises: True when
+    Notion was told or there was nothing to tell (a pasted secret is the user's own),
+    False when it could not be told. The in-memory tokens are forgotten either way."""
+    cfg = cfg or {}
+    try:
+        mode = notion_export.connection_mode(cfg)
+        newest = latest_tokens()
+        token = (newest.get("access_token") or cfg.get("notion_api_key") or "").strip()
+        if mode == "mcp":
+            refresh_token = (newest.get("refresh_token") or cfg.get("notion_refresh_token") or "").strip()
+            return revoke_mcp(token, refresh_token, (cfg.get("notion_mcp_client_id") or "").strip())
+        if mode == "oauth":
+            return revoke(token)
+        forget_tokens()
+        return True
+    except Exception:
+        logger.debug("Notion disconnect failed", exc_info=True)
+        return False

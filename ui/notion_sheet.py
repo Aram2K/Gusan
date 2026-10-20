@@ -1,41 +1,50 @@
 # -*- coding: utf-8 -*-
-"""Connect Notion (Gusan 2.0): the sheet behind Meeting settings > "Send notes to
+"""Connect Notion (Gusan 2.0.1): the sheet behind Meeting settings > "Send notes to
 Notion" and the "Send to Notion" item of a meeting's Export menu.
 
     show_notion_sheet(host, then="", reason="")   # modal; True = sent / connected
-    disconnect_notion(host)                       # forget locally, revoke in the background
+    disconnect_notion(host)                       # forget locally, give the access back in the background
 
 ``host`` is the Meetings page (cfg(), set_settings(), set_setting(), track(),
 call()). One sheet, one decision per screen, painted only with the app's tokens
 (never the OS palette, so it reads the same on a dark Windows):
 
-  intro      one button, "Connect Notion" (Notion opens in the browser, the user
-             allows access, the app makes a private "Gusan meetings" page)
-  waiting    "Finish in your browser" with Cancel; "Setting things up…" while the
-             code is swapped for a token and the page is made
-  connected  workspace + "Connected", the automatic-send switch, where notes go
-  manual     "Use your own integration": the secret from notion.so/my-integrations
-             (the only path while notion_connect.NOTION_CLIENT_ID is empty)
-  share      "Share a page first": connected, but there is nowhere to put notes yet
+  intro      one button, "Connect Notion": Notion opens in the browser, the user picks
+             a workspace and says Continue, and the sheet says "Connected". Nothing to
+             share, paste or pick (notion_connect.connect_mcp; Notion's own consent
+             page does the asking, the app makes a private "Gusan meetings" page)
+  waiting    "Finish in your browser" with Cancel and "Open it again"; "Setting things
+             up…" while the answer is swapped for access and the page is made
+  connected  workspace + "Connected", the automatic-send switch (off), where notes go
+             (the private page; a picker only for a pasted secret), Open Notion, Done
+  manual     "Use your own integration": a secret pasted from notion.so/my-integrations,
+             reached only by the quiet link at the bottom of the first screen (a 1.9.x
+             setup that pasted a secret keeps working and opens on "connected")
+  share      "Share a page first": a pasted secret that can see no page yet
 
-The waiting work (notion_connect.connect, then the destination) runs on a worker
-(api_keys.run_then, or the ``run=`` a test passes); a cancelled or closed sheet
-ignores a late answer, and a grant that was made after the user gave up is revoked.
+The waiting work (notion_connect.connect_mcp) runs on a worker (api_keys.run_then,
+or the ``run=`` a test passes); a cancelled or closed sheet ignores a late answer,
+and a grant that was made after the user gave up is given back.
 
 Persistence (cfg keys, see main.DEFAULT): a connection is written in ONE
-set_settings call the moment it has a destination (notion_api_key and
-notion_refresh_token go to the keyring through main's own handling), then
-flush_config_save so the grant is stored now. Nothing is written for a token that
-has nowhere to send notes ("share"): it is held in memory, and an OAuth grant is
-revoked if the sheet closes without a page. The picker and the switch apply at
-once. An own-integration secret is never sent to our server, not even to revoke.
+set_settings call the moment it has a destination (the ``settings`` of the connect
+result for the button; notion_api_key and notion_refresh_token go to the keyring
+through main's own handling), then flush_config_save so the grant is stored now.
+The id Gusan registers with Notion (notion_mcp_client_id) is saved the moment it
+exists, from the worker through a signal. Nothing is written for a pasted secret
+that has nowhere to send notes ("share"): it is held in memory. The picker and the
+switch apply at once. A pasted secret is never sent to our server, not even to
+give it back.
 
 Privacy mode keeps everything on this computer: Connect, a pasted secret and
-Refresh ask once per sheet before going online, and opening Manage shows the
-saved page and waits ("Paused while Privacy mode is on"). "Search pages" under
-the picker (only when the list is full, the newest PAGE_LIMIT) searches Notion
-after a pause in the typing. Connecting again after the connection expired keeps
-the page notes were going to when Notion can still reach it.
+Refresh ask once per sheet before going online, and opening Manage on a pasted
+secret shows the saved page and waits ("Paused while Privacy mode is on"). "Search
+pages" under the picker (a pasted secret only, and only when the list is full, the
+newest PAGE_LIMIT) searches Notion after a pause in the typing.
+
+Keyboard: Enter presses the screen's main button, Esc on "Finish in your browser"
+is Cancel (a second Esc closes the sheet), Tab follows reading order and every
+control has a name.
 
 Integration notes
 -----------------
@@ -45,7 +54,15 @@ Integration notes
 * ui/pages/meeting_views.py: Send to Notion calls connect_notion(then="Send this
   meeting"); the connected screen then ends in that button and the send goes on.
 * Telemetry (no text, ids or names): notion_connect_result {mode, ok, reason} and
-  notion_disconnected {mode, reason}.
+  notion_disconnected {mode, reason}; mode is "mcp" (the button) or "own"; reason is
+  the ConnectError code (timeout, denied, offline, port_busy, expired, server, browser,
+  full, other). The analytics function does not list reason values, so "full" is sent as is.
+* A workspace that has used up its free blocks ("full": connected, but not even the first
+  page could be made) is one plain sentence on the first screen, like every other failure
+  (notion_connect.MESSAGES["full"]); the grant is given back first.
+* The words MCP, OAuth, token and integration never appear on the first, waiting
+  or connected screens; "integration" and "secret" appear only on the manual ones,
+  because they are the words on Notion's own page.
 """
 
 import logging
@@ -63,7 +80,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdi
 import notion_connect
 import notion_export
 from app_info import APP_NAME
-from notion_connect import MESSAGES, ConnectCancelled, ConnectError
+from notion_connect import MESSAGES, ConnectError
 from notion_export import NotionAuthError, NotionError
 from ui import privacy_prompt, theme
 from ui.auth_sheet import FieldBox, PasswordField, link_button, text_label, tint
@@ -75,19 +92,25 @@ logger = logging.getLogger("transcribe")
 # ── words (the product's, in one place) ──────────────────────────────────────
 INTRO_TITLE = "Send your meeting notes\nto Notion."
 INTRO_NAME = "Send your meeting notes to Notion."
+INTRO_BODY = "%s adds each meeting to a private page in your Notion. You choose when." % APP_NAME
 CONNECT = "Connect Notion"
 TRY_AGAIN = "Try again"
 CAPTION = "Opens Notion in your browser."
-OWN_LINK = "Use a Notion secret instead"
+OWN_LINK = "Use your own Notion secret instead"
 WAIT_TITLE = "Finish in your browser"
 WAIT_BODY = "Allow access in Notion, then come back here."
-REOPEN = "Open Notion again"
+REOPEN = "Open it again"
+REOPEN_NAME = "Open Notion again in your browser"
 FINISH_TITLE = "Setting things up…"
 FINISH_BODY = "Just a moment."
-AUTO_LABEL = "Send every meeting's notes automatically"
+CONNECTED = "Connected"
+AUTO_LABEL = "Send every meeting automatically"
 AUTO_NAME = "Send every meeting's notes to Notion automatically"
 AUTO_HINT = "Right after each meeting."
 DEST_LABEL = "Notes go to"
+DEST_PAGE = notion_connect.HUB_TITLE
+DEST_PAGE_HINT = "A private page in your Notion."
+OPEN_NOTION = "Open Notion"
 DEST_HINT = "To add pages, share them with %s in Notion." % APP_NAME
 DEST_HINT_OWN = "To add pages, share them with your integration in Notion."
 DEST_HINT_FAILED = "Couldn't load your pages. Try refresh."
@@ -187,15 +210,19 @@ BLANK = dict(notion_export.BLANK_SETTINGS)
 
 
 def connection_settings(res):
-    """The cfg keys of a finished connection ``res`` ({"mode", "token", "refresh",
-    "workspace", "dest": {"id", "title", "kind"}})."""
+    """The cfg keys of a finished connection ``res``: the ``settings`` the Connect
+    button's result carries (every key of the connection, ready for ONE set_settings
+    call), or - for a pasted secret - the same keys built from {"mode", "token",
+    "refresh", "workspace", "dest": {"id", "title", "kind"}}."""
+    if isinstance(res.get("settings"), dict):
+        return dict(res["settings"])
     dest = res["dest"]
     return {
         "notion_api_key": res["token"], "notion_refresh_token": res.get("refresh") or "",
         "notion_auth_mode": res["mode"], "notion_workspace_name": res.get("workspace") or "",
         "notion_parent_page": dest["id"], "notion_parent_title": dest.get("title") or "",
         "notion_hub_page": dest["id"] if dest.get("kind") == "hub" else "",
-        "notion_reconnect": False,
+        "notion_reconnect": False, "notion_token_expires": res.get("expires_at") or 0,
     }
 
 
@@ -233,16 +260,22 @@ def _track(host, event, props):
 def disconnect_notion(host, run=None, reason="user"):
     """Forget Notion on this computer at once; give the app's access back at
     Notion in the background (best effort). Only a connection made with the
-    button has a grant to give back: a pasted integration secret is the user's own
-    and never leaves for our server."""
-    cfg = host.cfg()
+    button (or the older relay) has a grant to give back: a pasted integration
+    secret is the user's own and never leaves for our server."""
+    cfg = dict(host.cfg())
     mode = notion_export.connection_mode(cfg) or "own"
-    token = (notion_connect.latest_tokens().get("access_token") or cfg.get("notion_api_key") or "").strip()
+    newest = notion_connect.latest_tokens()             # newer than the saved pair until a save has run
+    if newest.get("access_token"):
+        cfg["notion_api_key"] = newest["access_token"]
+    if newest.get("refresh_token"):
+        cfg["notion_refresh_token"] = newest["refresh_token"]
     _save(host, BLANK)
     notion_connect.forget_tokens()
     _track(host, "notion_disconnected", {"mode": mode, "reason": reason})
-    if mode == "oauth" and token:
-        (run or _run_then)(notion_connect.revoke, token, then=lambda done: _revoked(host, done))
+    if mode in notion_export.GRANT_MODES and (cfg.get("notion_api_key") or "").strip():
+        # The settings as they were BEFORE they were blanked: notion_connect.disconnect
+        # knows what each mode gives back (the id Gusan registered, the refresh token).
+        (run or _run_then)(notion_connect.disconnect, cfg, then=lambda done: _revoked(host, done))
 
 
 def _revoked(host, done):
@@ -266,13 +299,14 @@ class NotionFlow(QObject):
     """Connecting and listing pages on worker threads.
 
     waiting(bool)       the browser is open (True) / the wait ended (False)
-    finishing()         the code arrived; the token is being swapped and the page made
+    finishing()         Notion answered; access is being swapped and the page made
     connected(res)      a destination exists: {"mode", "token", "refresh", "workspace",
-                        "dest": {"id", "title", "kind"}, "pages": [...] or None}
-    no_page(res)        connected but nothing is shared yet (same keys, no "dest")
+                        "dest": {"id", "title", "kind"}, "pages": [...] or None} (the
+                        button's result also carries "settings", every key to save)
+    no_page(res)        a pasted secret that can see no page yet (same keys, no "dest")
     failed(code, text)  a ConnectError code and its plain sentence (MESSAGES)
     pages_loaded(list, code)   the picker's pages (code "" = fine, else why not)
-    session_lost()      Notion refused the saved token for good: connect again"""
+    session_lost()      Notion refused the saved access for good: connect again"""
 
     waiting = Signal(bool)
     finishing = Signal()
@@ -281,6 +315,7 @@ class NotionFlow(QObject):
     failed = Signal(str, str)
     pages_loaded = Signal(list, str)
     session_lost = Signal()
+    _persist = Signal(dict)             # settings the worker wants saved (the registered client id): GUI thread
 
     def __init__(self, host, parent=None, run=None, connect_fn=None):
         super().__init__(parent)
@@ -292,6 +327,7 @@ class NotionFlow(QObject):
         self._busy = False
         self._cancel = None
         self._url = ""
+        self._persist.connect(self._save_persisted)
 
     def _go(self, fn, *args, then=None, error=None):
         return (self._run or _run_then)(fn, *args, then=then, error=error)
@@ -305,12 +341,18 @@ class NotionFlow(QObject):
     def _set_url(self, url):
         self._url = url                 # from the worker: a plain assignment is enough
 
+    def _save_persisted(self, updates):
+        """The worker's ``persist`` (GUI thread): only the connection's own keys, never anything else."""
+        keep = {k: v for k, v in dict(updates).items() if isinstance(k, str) and k.startswith("notion_")}
+        if keep:
+            _save(self.host, keep)
+
     def _track_result(self, mode, ok, reason=""):
         _track(self.host, "notion_connect_result", {"mode": mode, "ok": bool(ok), "reason": reason})
 
     # ── the button ──
-    def start_oauth(self):
-        """"Connect Notion": the browser, then the token, then where notes go."""
+    def start_connect(self):
+        """"Connect Notion": the browser, then the access, then the private page."""
         if self._busy:
             return False
         self._attempt += 1
@@ -319,77 +361,52 @@ class NotionFlow(QObject):
         self._url = ""
         self._cancel = cancel = threading.Event()
         self.waiting.emit(True)
-        self._go(self._oauth_work, cancel, dict(self.host.cfg()),
-                 then=lambda res, a=attempt: self._oauth_done(a, res),
-                 error=lambda exc, a=attempt: self._oauth_failed(a, exc))
+        self._go(self._connect_work, cancel, dict(self.host.cfg()),
+                 then=lambda res, a=attempt: self._connect_done(a, res),
+                 error=lambda exc, a=attempt: self._connect_failed(a, exc))
         return True
 
-    def _oauth_work(self, cancel, cfg):
+    def _connect_work(self, cancel, cfg):
         """The worker. A cancel, a timeout, a denial, no internet: the ordinary
         ways connecting ends are answered as {"error": ConnectError}, not raised -
         a raise would be logged as a failed background task, with a traceback, for
         something the user chose. A real fault (a bug) still raises."""
         try:
-            return self._oauth_steps(cancel, cfg)
+            connect = self._connect_fn or notion_connect.connect_mcp
+            return connect(cfg, open_browser=lambda url: _open_url(url), cancel=cancel, on_url=self._set_url,
+                           on_code=self.finishing.emit, persist=self._persist.emit)
         except ConnectError as exc:                 # ConnectCancelled too
             return {"error": exc}
 
-    def _oauth_steps(self, cancel, cfg):
-        connect = self._connect_fn or notion_connect.connect
-        tok = connect(cfg, open_browser=lambda url: _open_url(url), cancel=cancel,
-                      on_url=self._set_url, on_code=self.finishing.emit)
-        token = tok["access_token"]
-        template = tok.get("duplicated_template_id") or ""
-        try:
-            dest = None if template else self._saved_destination(token, cfg)
-            if dest is None:
-                dest = notion_connect.choose_destination(token, template)
-        except NotionError as e:
-            notion_connect.revoke(token)            # connected, but nowhere to put notes and no way to ask
-            raise ConnectError("offline" if e.code == "offline" else "other") from e
-        if cancel.is_set():
-            notion_connect.revoke(token)            # the user gave up while the page was being made
-            raise ConnectCancelled()
-        return {"mode": "oauth", "token": token, "refresh": tok.get("refresh_token") or "",
-                "workspace": tok.get("workspace_name") or "", "dest": dest, "pages": None}
-
-    @staticmethod
-    def _saved_destination(token, cfg):
-        """Connecting again after the connection expired: the page notes were going
-        to is still the destination when Notion can still reach it - no second
-        "Gusan meetings" page for the same notes. None = make or pick one."""
-        saved = notion_export.extract_page_id(cfg.get("notion_parent_page"))
-        if not saved:
-            return None
-        try:
-            if not notion_connect.page_alive(token, saved):
-                return None                         # trashed, or not shared with this grant
-        except NotionError:
-            return None                             # could not check: the normal way
-        hub = notion_export.extract_page_id(cfg.get("notion_hub_page"))
-        kind = "hub" if saved == hub else "page"
-        title = (cfg.get("notion_parent_title") or "").strip() or (
-            notion_connect.HUB_TITLE if kind == "hub" else "Selected page")
-        return {"id": saved, "kind": kind, "title": title}
-
-    def _oauth_done(self, attempt, res):
+    def _connect_done(self, attempt, res):
         if "error" in res:
-            self._oauth_failed(attempt, res["error"])
+            self._connect_failed(attempt, res["error"])
             return
         if attempt != self._attempt:
-            self._go(notion_connect.revoke, res["token"])   # cancelled or closed: nobody keeps this grant
+            # Cancelled or closed while the answer was on its way: nobody keeps this grant.
+            self._go(notion_connect.disconnect, self._grant_cfg(res))
             return
         self._busy = False
-        self._track_result("oauth", True)
+        self._track_result(res.get("mode") or "mcp", True)
         self._emit_result(res)
         self.waiting.emit(False)
 
-    def _oauth_failed(self, attempt, exc):
+    @staticmethod
+    def _grant_cfg(res):
+        """The settings notion_connect.disconnect needs to give a grant back."""
+        cfg = dict(res.get("settings") or {})
+        cfg.setdefault("notion_api_key", res.get("token") or "")
+        cfg.setdefault("notion_refresh_token", res.get("refresh") or "")
+        cfg.setdefault("notion_auth_mode", res.get("mode") or "mcp")
+        cfg.setdefault("notion_mcp_client_id", res.get("client_id") or "")
+        return cfg
+
+    def _connect_failed(self, attempt, exc):
         if attempt != self._attempt:
             return
         self._busy = False
         code = exc.code if isinstance(exc, ConnectError) else "other"
-        self._track_result("oauth", False, "" if code == "cancelled" else code)
+        self._track_result("mcp", False, "" if code == "cancelled" else code)
         if code != "cancelled":
             self.failed.emit(code, MESSAGES.get(code, MESSAGES["other"]))
         self.waiting.emit(False)
@@ -404,14 +421,14 @@ class NotionFlow(QObject):
         if ev is not None:
             ev.set()
         self.waiting.emit(False)
-        self._track_result("oauth", False, "cancelled")
+        self._track_result("mcp", False, "cancelled")
 
     def drop_pages(self):
         """Forget a picker search still running (a late answer must not save anything)."""
         self._pages_gen += 1
 
     def reopen(self):
-        """"Open Notion again": the same address, the same listener."""
+        """"Open it again": the same address, the same listener."""
         if self._url:
             _open_url(self._url)
 
@@ -421,7 +438,7 @@ class NotionFlow(QObject):
         if ev is not None:
             ev.set()
             if self._busy:
-                self._track_result("oauth", False, "cancelled")     # closed with the window's own X
+                self._track_result("mcp", False, "cancelled")     # closed with the window's own X
         self._attempt += 1
         self._pages_gen += 1
         self._busy = False
@@ -840,14 +857,18 @@ class NotionSheet(QDialog):
         v.addSpacing(20)
         self.intro_title = title_label(INTRO_TITLE, page)
         v.addWidget(self.intro_title)
-        v.addSpacing(26)
+        v.addSpacing(10)
+        self.intro_body = text_label(INTRO_BODY, 14, 400, "text2", wrap=True, parent=page)
+        v.addWidget(self.intro_body)
+        v.addSpacing(24)
         self.intro_message = self._message(page)
         v.addWidget(self.intro_message)
         self.connect_btn = Button(CONNECT, "primary", "xl", parent=page, full=True)
         self.connect_btn.clicked.connect(self._connect_clicked)
         v.addWidget(self.connect_btn)
         v.addSpacing(12)
-        v.addWidget(text_label(CAPTION, 12.5, 400, "text2", parent=page))
+        self.caption = text_label(CAPTION, 12.5, 400, "text2", parent=page)
+        v.addWidget(self.caption)
         v.addSpacing(28)
         self.own_link = quiet_link(OWN_LINK, parent=page)
         self.own_link.clicked.connect(lambda: self._show_manual(""))
@@ -870,6 +891,7 @@ class NotionSheet(QDialog):
         v.addSpacing(22)
         row = PulledRow()                               # the link's text lines up with the text above
         self.reopen_link = ring_room(link_button(REOPEN, 13.5, 600, parent=page), "blue-tx")
+        self.reopen_link.setAccessibleName(REOPEN_NAME)         # "it" means nothing to a screen reader
         self.reopen_link.clicked.connect(self.flow.reopen)
         row.addWidget(self.reopen_link, 0, Qt.AlignVCenter)
         row.addStretch(1)
@@ -897,7 +919,7 @@ class NotionSheet(QDialog):
         self.name_label.setFont(theme.font(18, 600, display=True))
         tint(self.name_label, "ink")
         col.addWidget(self.name_label)
-        col.addWidget(Chip("Connected", "ok", icon="check", parent=page), 0, Qt.AlignLeft)
+        col.addWidget(Chip(CONNECTED, "ok", icon="check", parent=page), 0, Qt.AlignLeft)
         head.addLayout(col, 1)
         v.addLayout(head)
         v.addSpacing(22)
@@ -922,10 +944,27 @@ class NotionSheet(QDialog):
         lay.addSpacing(14)
         lay.addWidget(text_label(DEST_LABEL, 13.5, 600, "text", parent=card))
         lay.addSpacing(8)
+
+        # Where notes go, as the Connect button leaves it: one private page, nothing to pick.
+        self.hub_block = QWidget(card)
+        hub = QVBoxLayout(self.hub_block)
+        hub.setContentsMargins(0, 0, 0, 0)
+        hub.setSpacing(3)
+        self.hub_name = text_label(DEST_PAGE, 14, 400, "text", parent=self.hub_block)
+        hub.addWidget(self.hub_name)
+        hub.addWidget(text_label(DEST_PAGE_HINT, 12, 400, "muted", wrap=True, parent=self.hub_block))
+        lay.addWidget(self.hub_block)
+
+        # ...or, for a pasted secret (and an older relay connection): the pages that were
+        # shared, to pick from.
+        self.pick_block = QWidget(card)
+        pk = QVBoxLayout(self.pick_block)
+        pk.setContentsMargins(0, 0, 0, 0)
+        pk.setSpacing(0)
         pick = QHBoxLayout()
         pick.setContentsMargins(0, 0, 0, 0)
         pick.setSpacing(8)
-        self.picker = ElidedComboBox(card)
+        self.picker = ElidedComboBox(self.pick_block)
         self.picker.setAccessibleName(DEST_LABEL)
         self.picker.setFont(theme.font(13.5))
         self.picker.setFixedHeight(36)
@@ -936,13 +975,13 @@ class NotionSheet(QDialog):
         self.picker.view().setTextElideMode(Qt.ElideRight)
         self.picker.activated.connect(self._picked)
         pick.addWidget(self.picker, 1)
-        self.refresh_btn = IconButton("refresh", "Refresh pages", size=36, framed=True, parent=card)
+        self.refresh_btn = IconButton("refresh", "Refresh pages", size=36, framed=True, parent=self.pick_block)
         self.refresh_btn.clicked.connect(self._refresh_clicked)
         pick.addWidget(self.refresh_btn)
-        lay.addLayout(pick)
+        pk.addLayout(pick)
         # "Search pages": only there when it is needed - a workspace with more pages than
         # the picker lists (the newest PAGE_LIMIT), or while a search is on.
-        self.search_row = QWidget(card)
+        self.search_row = QWidget(self.pick_block)
         srow = QVBoxLayout(self.search_row)
         srow.setContentsMargins(0, 8, 0, 0)
         srow.setSpacing(0)
@@ -957,14 +996,15 @@ class NotionSheet(QDialog):
         self.search.installEventFilter(self)            # Enter searches now; it must not press "Done"
         self.search.textChanged.connect(self._search_typed)
         self.search_row.hide()
-        lay.addWidget(self.search_row)
+        pk.addWidget(self.search_row)
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(SEARCH_DELAY_MS)
         self._search_timer.timeout.connect(self._search_fire)
-        lay.addSpacing(8)
-        self.dest_hint = text_label(DEST_HINT, 12, 400, "muted", wrap=True, parent=card)
-        lay.addWidget(self.dest_hint)
+        pk.addSpacing(8)
+        self.dest_hint = text_label(DEST_HINT, 12, 400, "muted", wrap=True, parent=self.pick_block)
+        pk.addWidget(self.dest_hint)
+        lay.addWidget(self.pick_block)
         v.addWidget(card)
         v.addSpacing(22)
 
@@ -973,6 +1013,10 @@ class NotionSheet(QDialog):
         self.disconnect_link.clicked.connect(self._disconnect)
         foot.addWidget(self.disconnect_link, 0, Qt.AlignVCenter)
         foot.addStretch(1)
+        self.open_notion_btn = Button(OPEN_NOTION, "secondary", "m", parent=page)
+        self.open_notion_btn.clicked.connect(self._open_notion)
+        foot.addWidget(self.open_notion_btn)
+        foot.addSpacing(10)
         self.done_btn = Button("Done", "primary", "m", parent=page)
         self.done_btn.setMinimumWidth(96)
         self.done_btn.clicked.connect(self._done_clicked)
@@ -1059,9 +1103,15 @@ class NotionSheet(QDialog):
 
     def _focus_primary(self, name=None):
         """The keyboard starts on the screen's main control: the secret field on the
-        manual screen, else the primary button (no ring: it is not a Tab)."""
+        manual screen, "Open it again" while waiting (Enter twice must never cancel),
+        else the primary button (no ring: it is not a Tab)."""
         name = name or self.page_name()
-        target = self.secret.edit if name == "manual" else self._primary.get(name)
+        if name == "manual":
+            target = self.secret.edit
+        elif name == "waiting":
+            target = self.reopen_link if self.reopen_link.isVisibleTo(self) else None
+        else:
+            target = self._primary.get(name)
         if target is not None:
             target.setFocus(Qt.OtherFocusReason)
 
@@ -1088,7 +1138,7 @@ class NotionSheet(QDialog):
         again = reason == "reconnect" or bool(cfg.get("notion_reconnect"))
         if notion_export.is_connected(cfg) and not again:
             self._enter_connected(None)
-        elif notion_connect.configured():
+        elif notion_connect.mcp_available():
             self._show_intro(MESSAGES["reconnect"] if again else "")
         else:
             self._show_manual(MESSAGES["reconnect"] if again else "")
@@ -1097,12 +1147,12 @@ class NotionSheet(QDialog):
         self._origin = "intro"
         self._set_message(self.intro_message, message)
         set_text(self.connect_btn, TRY_AGAIN if message and message != MESSAGES["reconnect"] else CONNECT)
-        self.own_link.setVisible(notion_connect.configured())
+        self.own_link.setVisible(notion_connect.mcp_available())
         self._show("intro")
 
     def _show_manual(self, message=""):
         self._origin = "manual"
-        self.back_btn.setVisible(notion_connect.configured())
+        self.back_btn.setVisible(notion_connect.mcp_available())
         self._set_message(self.manual_message, message)
         self.secret.set_error(False)
         self._busy_manual(False)
@@ -1127,7 +1177,7 @@ class NotionSheet(QDialog):
             return
         self._set_message(self.intro_message, "")
         self._origin = "intro"
-        self.flow.start_oauth()
+        self.flow.start_connect()
 
     def _on_waiting(self, on):
         if on:
@@ -1135,7 +1185,10 @@ class NotionSheet(QDialog):
             self._set_waiting_text(False)
             self._show("waiting")
         elif self.page_name() == "waiting":
-            self._show_intro("")
+            # Cancel goes back quietly - but a connection Notion refused for good still needs
+            # connecting again, and the first screen keeps saying so.
+            again = bool(self.host.cfg().get("notion_reconnect"))
+            self._show_intro(MESSAGES["reconnect"] if again else "")
 
     def _on_finishing(self):
         if not self.flow.busy():
@@ -1214,9 +1267,8 @@ class NotionSheet(QDialog):
 
     def _on_no_page(self, res):
         self._busy_manual(False)
-        self._held = {k: res.get(k) for k in ("mode", "token", "refresh", "workspace")}
-        own = res["mode"] == "own"
-        plain = SHARE_BODY_OWN if own else SHARE_BODY % APP_NAME
+        self._held = {k: res.get(k) for k in ("mode", "token", "refresh", "workspace", "client_id")}
+        plain = SHARE_BODY_OWN if res["mode"] == "own" else SHARE_BODY % APP_NAME
         html = bold_names(plain)
         self.share_body.setText(html)
         self.share_body.setAccessibleName(_plain(html))
@@ -1248,9 +1300,19 @@ class NotionSheet(QDialog):
         self.auto_toggle.setChecked(bool(cfg.get("notion_auto_send")))
         self.auto_toggle.blockSignals(False)
         self.auto_toggle.update()
-        self.dest_hint.setText(DEST_HINT_OWN if notion_export.connection_mode(cfg) == "own" else DEST_HINT)
-        tint(self.dest_hint, "muted")
+        mode = notion_export.connection_mode(cfg)
         set_text(self.done_btn, self.then or "Done")
+        if mode == "mcp":
+            # Made with the button: the notes go to the one private page, there is nothing to pick,
+            # nothing to load and nothing to ask the user about.
+            self.hub_block.show()
+            self.pick_block.hide()
+            self._show("connected")
+            return
+        self.hub_block.hide()
+        self.pick_block.show()
+        self.dest_hint.setText(DEST_HINT_OWN if mode == "own" else DEST_HINT)
+        tint(self.dest_hint, "muted")
         self.search.blockSignals(True)
         self.search.clear()
         self.search.blockSignals(False)
@@ -1308,7 +1370,7 @@ class NotionSheet(QDialog):
         self._held = None
         if notion_export.connection_mode(self.host.cfg()) == "own":
             self._show_manual(MESSAGES["rejected"])
-        elif notion_connect.configured():
+        elif notion_connect.mcp_available():
             self._show_intro(MESSAGES["reconnect"])
         else:
             self._show_manual(MESSAGES["reconnect"])
@@ -1358,13 +1420,27 @@ class NotionSheet(QDialog):
     def _disconnect(self):
         self.flow.drop_pages()
         disconnect_notion(self.host, run=self.flow._run)
-        self._show_intro("") if notion_connect.configured() else self._show_manual("")
+        self._show_intro("") if notion_connect.mcp_available() else self._show_manual("")
+
+    def _open_notion(self):
+        """"Open Notion": the page the notes go to (else Notion's home)."""
+        _open_url(notion_export.page_url(self.host.cfg().get("notion_parent_page")) or notion_connect.NOTION_HOME_URL)
 
     def _done_clicked(self):
         self.result_sent = bool(self.then)
         self.accept()
 
     # ── window ──
+    def keyPressEvent(self, ev):                        # noqa: N802 (Qt name)
+        """Esc on "Finish in your browser" is its Cancel (back to the first screen); Esc
+        anywhere else, and a second Esc, closes the sheet, which also cancels any wait."""
+        if (ev.key() == Qt.Key_Escape and self.page_name() == "waiting" and not self._finishing
+                and self.flow.busy()):
+            self.flow.cancel()
+            ev.accept()
+            return
+        super().keyPressEvent(ev)
+
     def showEvent(self, ev):
         super().showEvent(ev)
         self._fit()
@@ -1387,8 +1463,8 @@ class NotionSheet(QDialog):
         # nowhere to put notes.
         self.flow.shutdown()
         held, self._held = self._held, None
-        if held and held.get("mode") == "oauth" and held.get("token"):
-            self.flow._go(notion_connect.revoke, held["token"])
+        if held and held.get("mode") in notion_export.GRANT_MODES and held.get("token"):
+            self.flow._go(notion_connect.disconnect, self.flow._grant_cfg(held))
         super().done(result)
 
 

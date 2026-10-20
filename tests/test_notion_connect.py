@@ -219,6 +219,7 @@ class TestMessages(unittest.TestCase):
         self.assertEqual(nc.MESSAGES["rejected"],
                          "Notion didn't accept that secret. Copy it again from your integration.")
         self.assertEqual(nc.MESSAGES["reconnect"], "Notion needs to be connected again.")
+        self.assertEqual(nc.MESSAGES["full"], "That Notion workspace is full. Free up space or upgrade it.")
         self.assertEqual(nc.MESSAGES["other"], "Couldn't connect to Notion. Try again.")
 
     def test_an_error_reads_as_its_sentence(self):
@@ -255,11 +256,24 @@ class TestLandingHtml(unittest.TestCase):
         self.assertIn("Cancelled.", denied)
         self.assertIn("Nothing was connected.", denied)
 
+    def test_the_pages_the_hosted_connect_ends_with(self):
+        done = nc.landing_html("connected")
+        self.assertIn("Connected.", done)
+        self.assertIn("You can close this tab and go back to Gusan.", done)
+        self.assertIn('class="tile check"', done)
+        bad = nc.landing_html("failed")
+        self.assertIn("That didn't work.", bad)
+        self.assertIn("Go back to Gusan and try again.", bad)
+        self.assertIn('class="tile cross"', bad)
+        for page in (done, bad):                    # plain words: nothing technical, nothing to decode
+            for word in ("OAuth", "token", "error", "Notion", "MCP", "code"):
+                self.assertNotIn(word, page, word)
+
     def test_an_unknown_kind_is_the_error_page(self):
         self.assertEqual(nc.landing_html("nope"), nc.landing_html("error"))
 
     def test_light_and_dark_and_no_outside_request(self):
-        for kind in ("ok", "error", "denied"):
+        for kind in ("ok", "error", "denied", "connected", "failed"):
             page = nc.landing_html(kind)
             self.assertIn("prefers-color-scheme", page)
             self.assertIn('name="color-scheme" content="light dark"', page)

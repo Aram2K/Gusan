@@ -184,12 +184,20 @@ DEFAULT = {
     # notion_refresh_token (OAuth only) it lives in the OS keyring
     # (_NOTION_SECRETS: storage.NOTION_TOKEN_SECRET / NOTION_REFRESH_SECRET),
     # like the API keys; config.json keeps "" once the keyring has them.
-    # notion_auth_mode: "" / "oauth" / "own" (a token with no mode is a setup from
-    # before OAuth, read as "own"). notion_parent_page is the page the notes land
+    # notion_auth_mode: "" / "mcp" / "oauth" / "own" ("mcp" = the Connect button,
+    # Notion's hosted server; a token with no mode is a setup from before OAuth,
+    # read as "own"). notion_parent_page is the page the notes land
     # under (a pasted link still works); notion_hub_page is the "Gusan meetings"
     # page Gusan made, and the destination is "the hub" while the two match.
     # notion_reconnect: Notion refused the token for good, so Settings asks to
     # connect again. The workspace and page names are for display only.
+    # notion_mcp_client_id: the id Gusan registered with Notion's hosted server,
+    # once per install (public, kept across disconnects); notion_mcp_redirects:
+    # which set of return addresses that client was registered with ("" = the
+    # loopback one only, "2" = our site's page and the loopback one: a client
+    # that knows only the loopback address is registered again at the next
+    # Connect that wants to return through the site); notion_token_expires:
+    # when the "mcp" access token ends (epoch seconds, 0 = unknown).
     "notion_api_key": "",
     "notion_refresh_token": "",
     "notion_auth_mode": "",
@@ -197,6 +205,9 @@ DEFAULT = {
     "notion_parent_page": "",
     "notion_parent_title": "",
     "notion_hub_page": "",
+    "notion_mcp_client_id": "",
+    "notion_mcp_redirects": "",
+    "notion_token_expires": 0,
     "notion_reconnect": False,
     # "Send every meeting's notes to Notion automatically": off until the user
     # turns it on (Meeting settings, or the connected Notion sheet).
@@ -3189,13 +3200,19 @@ class AppController(QObject):
         import notion_connect
         import notion_export
         mode = notion_export.connection_mode(self.cfg)
-        token = (notion_connect.latest_tokens().get("access_token") or self.cfg.get("notion_api_key") or "").strip()
+        newest = notion_connect.latest_tokens()
+        token = (newest.get("access_token") or self.cfg.get("notion_api_key") or "").strip()
+        refresh = (newest.get("refresh_token") or self.cfg.get("notion_refresh_token") or "").strip()
+        client_id = (self.cfg.get("notion_mcp_client_id") or "").strip()
         self.cfg["notion_owner"] = ""
         self.set_settings(dict(notion_export.BLANK_SETTINGS))      # also drops the token from the keyring
         notion_connect.forget_tokens()
         if mode == "oauth" and token:
             # Give the other account's grant back at Notion (best effort, a worker: it goes online).
             threading.Thread(target=notion_connect.revoke, args=(token,), daemon=True,
+                             name="gusan-notion-revoke").start()
+        elif mode == "mcp" and token:
+            threading.Thread(target=notion_connect.revoke_mcp, args=(token, refresh, client_id), daemon=True,
                              name="gusan-notion-revoke").start()
 
     def set_admin_tier_override(self, value):
@@ -5706,12 +5723,12 @@ class AppController(QObject):
             props = {"target": "notion", "ok": ok, "auto": True, "mode": mode}
             if not ok:
                 props["reason"] = code if code in (
-                    "privacy", "auth", "no_access", "rate", "offline") else "other"
+                    "privacy", "auth", "no_access", "rate", "offline", "full") else "other"
             self.track("meeting_exported", props)
             self.notify_history_changed()            # the meeting's meta changed
             if getattr(self, "_quitting", False):
                 return
-            if not ok and code == "auth" and mode == "oauth" \
+            if not ok and code == "auth" and mode in notion_export.GRANT_MODES \
                     and not self.cfg.get("notion_reconnect"):
                 self.set_setting("notion_reconnect", True)     # the rail says "Reconnect"
             if not ok and code == "privacy":
@@ -5724,10 +5741,12 @@ class AppController(QObject):
                 self.show_tray_hint("Sent to Notion", title, on_click=open_it)
             else:
                 # Say what to do when that is known; else which meeting it was.
-                why = {"auth": ("Reconnect it in Meeting settings" if mode == "oauth"
+                why = {"auth": ("Reconnect it in Meeting settings" if mode in notion_export.GRANT_MODES
                                 else "Notion rejected the secret"),
                        "offline": "Check your internet",
-                       "no_access": "Pick another page in Meeting settings"}.get(code)
+                       "full": notion_export.FULL_HINT,
+                       "no_access": ("Reconnect it in Meeting settings" if mode == "mcp"
+                                     else "Pick another page in Meeting settings")}.get(code)
                 self.show_tray_hint("Couldn't send to Notion", f"{why or title} · Open", on_click=open_it)
         except Exception:
             logger.warning("Showing the Notion send result failed", exc_info=True)
