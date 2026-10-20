@@ -719,14 +719,15 @@ def test_delete_history_when_empty(env, monkeypatch):
 # ── Updates & about ──
 def test_check_now_then_install(env, monkeypatch):
     import updater
-    monkeypatch.setattr(updater, "check_latest", lambda cfg=None, manual=False, **k: ("available", "v2.0.1"))
+    from app_info import APP_VERSION
+    monkeypatch.setattr(updater, "check_latest", lambda cfg=None, manual=False, **k: ("available", "v9.9.9"))
     monkeypatch.setattr(updater, "install", lambda tag, **k: (False, "Couldn't download the update."))
     win, app = env.build("free")
     page = _settings(win)
-    assert page.version_label.text() == "Gusan 2.0.0"
+    assert page.version_label.text() == "Gusan " + APP_VERSION
     assert page.update_status.text() == "Up to date"
     page.update_button.click()
-    assert _wait(lambda: page.update_status.text() == "Update available · v2.0.1")
+    assert _wait(lambda: page.update_status.text() == "Update available · v9.9.9")
     assert ("track", "update_check_result", {"manual": True, "available": True}) in app.calls
     assert page.update_button.text() == "Install update"
     page.update_button.click()

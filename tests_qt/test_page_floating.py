@@ -411,9 +411,10 @@ def _keys(tr, menu=None):
 
 
 def test_tray_rows_free(tray):
+    from app_info import APP_VERSION
     tr, _ = tray("free")
     assert tr.visible_texts() == [
-        ("header", "Gusan  v2.0.0"), ("open", "Open Gusan"), ("dictate", "Dictate"),
+        ("header", "Gusan  v" + APP_VERSION), ("open", "Open Gusan"), ("dictate", "Dictate"),
         ("meeting", "Record a meeting…"), ("assist", "Live Assistant"), ("convert", "Convert audio to text…"),
         ("recent", "Recent"), ("privacy", "Privacy mode"),
         ("account", "aram@aibuben.xyz  ·  Free"), ("upgrade", "Upgrade to Pro…"),
