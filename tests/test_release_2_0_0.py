@@ -242,7 +242,7 @@ class TestNameAndVersion(unittest.TestCase):
     def test_app_name_and_version(self):
         import app_info
         self.assertEqual(app_info.APP_NAME, "Gusan")
-        self.assertEqual(app_info.APP_VERSION, "2.0.0")
+        self.assertEqual(app_info.APP_VERSION, "2.0.1")
 
     def test_version_is_plain_three_numbers(self):
         # main._parse_version reads a suffix such as "2.0.0-beta.1" as (0, 0, 0).
@@ -253,12 +253,13 @@ class TestNameAndVersion(unittest.TestCase):
         import app_info
         path = ROOT / "docs" / "release-notes" / ("v%s.md" % app_info.APP_VERSION)
         self.assertTrue(path.is_file(), "write %s" % path.relative_to(ROOT))
-        text = _read(path)
-        first = next(line for line in text.splitlines() if line.strip())
+        for notes in (path, ROOT / "docs" / "release-notes" / "v2.0.0.md"):
+            text = _read(notes)
+            self.assertIn("Download file names still start with TranscribeApp, so updates keep working.", text)
+            for word in ("limit", "Armenia"):
+                self.assertNotIn(word.lower(), text.lower())
+        first = next(line for line in _read(ROOT / "docs" / "release-notes" / "v2.0.0.md").splitlines() if line.strip())
         self.assertIn("Transcribe is now Gusan", first)
-        self.assertIn("Download file names still start with TranscribeApp, so updates keep working.", text)
-        for word in ("limit", "Armenia"):
-            self.assertNotIn(word.lower(), text.lower())
 
     def test_release_job_uses_the_notes_file(self):
         release = _jobs(_read(BUILD_YML))["release"]
@@ -464,7 +465,7 @@ class TestBuild(unittest.TestCase):
         self.assertEqual(strings["OriginalFilename"], "TranscribeApp.exe")
         self.assertEqual(strings["FileVersion"], dotted)
         self.assertEqual(strings["ProductVersion"], dotted)
-        self.assertEqual(dotted, "2.0.0.0")
+        self.assertEqual(dotted, "2.0.1.0")
         nums = tuple(int(x) for x in dotted.split("."))
         self.assertEqual(info["ffi"]["filevers"], nums)
         self.assertEqual(info["ffi"]["prodvers"], nums)
