@@ -114,8 +114,8 @@ class TestNewConfigDefaults(unittest.TestCase):
         self.assertTrue(main.DEFAULT["cleanup_enabled"])
         self.assertTrue(main.DEFAULT["cleanup_strip_hallucinations"])
         self.assertTrue(main.DEFAULT["cleanup_strip_artifacts"])
-        # Filler removal changes the user's words, so it must be opt-in.
-        self.assertFalse(main.DEFAULT["cleanup_remove_fillers"])
+        # Gusan 2.0: filler words (um, uh) are removed out of the box.
+        self.assertTrue(main.DEFAULT["cleanup_remove_fillers"])
         self.assertEqual(main.DEFAULT["cleanup_replacements"], [])
 
     def test_vocabulary_defaults(self):

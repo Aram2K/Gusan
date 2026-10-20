@@ -49,7 +49,6 @@ AUDIO_MODES = {
 }
 NOTICE_TEXT = "Heads up: I'm using %s to take notes on this call." % APP_NAME
 UPSELL_RECORD = "Meeting recording"
-UPSELL_ASSIST = "Live Assistance"
 
 
 def lang_name(code):
@@ -1284,10 +1283,8 @@ class LiveView(QWidget):
         self.page.show_list()
 
     def _open_assistant(self):
-        """Open (never hide) the Live Assistant card - same path as its page."""
-        if not self.page.is_pro():
-            self.page.call("_pro_upsell", UPSELL_ASSIST)
-            return
+        """Open (never hide) the Live Assistant card - same path as its page,
+        for every plan: the card itself asks for Pro when Start is pressed."""
         if callable(getattr(self.app, "show_live_assist", None)):
             self.page.call("show_live_assist")
             return

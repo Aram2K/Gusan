@@ -393,18 +393,22 @@ def smart_speech_choices(cfg=None):
     return out
 
 
-def set_smart_speech(app_or_cfg, value, *, pro=None, downloaded=None):
+def set_smart_speech(app_or_cfg, value, *, pro=None, downloaded=None, turn_off_privacy=False):
     """The config change for Smart Actions' "Transcribes with". Same return
     shape as set_speech_source: problem "pro" (cloud, not Pro; upsell
-    UPSELL_SPEECH), "privacy_mode" (cloud in Privacy mode), "needs_download"
-    (a Whisper model not on disk, when ``downloaded`` is given) or "unknown"."""
+    UPSELL_SPEECH), "privacy_mode" (cloud in Privacy mode; with
+    ``turn_off_privacy`` the changes turn it off instead), "needs_download"
+    (a Whisper model not on disk, when ``downloaded`` is given) or "unknown".
+    Pro is checked before Privacy mode: a Free person gets the Pro window."""
     cfg, pro, _signed_in = _context(app_or_cfg, pro)
     value = str(value or "").strip()
     if value == SMART_SPEECH_CLOUD:
-        if cfg.get("privacy_mode"):
-            return _outcome(problem="privacy_mode")
         if not pro:
             return _outcome(problem="pro", upsell=UPSELL_SPEECH)
+        if cfg.get("privacy_mode"):
+            if not turn_off_privacy:
+                return _outcome(problem="privacy_mode")
+            return _outcome({"privacy_mode": False, SMART_SPEECH_KEY: value})
     elif value and value not in hardware.MODEL_INFO:
         return _outcome(problem="unknown")
     elif value and downloaded is not None and not downloaded(value):
@@ -728,12 +732,14 @@ def set_speech_source(app_or_cfg, source, provider=None, model=None, *, pro=None
 
     if source not in ("cloud", "own_key"):
         return _outcome(problem="unknown")
+    # Gusan Cloud: Pro is checked before Privacy mode (a Free person gets the
+    # Pro window, never a question about a mode they could not use it in).
+    if source == "cloud" and not pro:
+        return _outcome(problem="pro", upsell=UPSELL_SPEECH)
     if privacy and not turn_off_privacy:
         return _outcome(problem="privacy_mode")
 
     if source == "cloud":
-        if not pro:
-            return _outcome(problem="pro", upsell=UPSELL_SPEECH)
         prov = str(provider or cfg.get("managed_provider") or "gemini").lower()
         if prov not in CLOUD_SPEECH_MODELS:
             return _outcome(problem="unknown")

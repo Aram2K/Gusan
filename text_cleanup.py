@@ -123,7 +123,7 @@ class CleanupOptions:
     strip_hallucinations: bool = True
     strip_artifacts: bool = True
     collapse_repeats: bool = True
-    remove_fillers: bool = False          # OFF by default - it changes the user's words
+    remove_fillers: bool = True           # ON by default (um / uh / you know); cleanup_remove_fillers: false turns it off
     replacements: tuple = ()              # ((from, to), ...)
     extra_hallucination_phrases: tuple = ()
     vocabulary_terms: tuple = ()          # for prompt-echo detection
@@ -179,7 +179,7 @@ def options_from_config(cfg, *, preserve_layout=False):
     return CleanupOptions(
         strip_hallucinations=bool(cfg.get("cleanup_strip_hallucinations", True)),
         strip_artifacts=bool(cfg.get("cleanup_strip_artifacts", True)),
-        remove_fillers=bool(cfg.get("cleanup_remove_fillers", False)),
+        remove_fillers=bool(cfg.get("cleanup_remove_fillers", True)),
         replacements=tuple(pairs),
         extra_hallucination_phrases=extra,
         vocabulary_terms=terms,

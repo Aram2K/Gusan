@@ -452,9 +452,16 @@ def test_tray_free_actions_call_the_app(tray):
     a = tr.actions
     for key in ("open", "dictate", "meeting", "assist", "convert", "upgrade", "settings", "quit"):
         a[key].trigger()
+    # Live Assistant opens the card for Free too (its Start asks for Pro); Record a meeting is Pro.
     assert app.calls == [("show_main",), ("_on_hotkey",), ("_pro_upsell", "Meeting recording"),
-                         ("_pro_upsell", "Live Assistance"), ("show_main", "audio_to_text"),
+                         ("toggle_live_assist",), ("show_main", "audio_to_text"),
                          ("_pro_upsell", None), ("show_main", "settings"), ("quit_app",)]
+
+
+def test_tray_live_assistant_opens_the_card_for_guests_too(tray):
+    tr, app = tray("guest")
+    tr.actions["assist"].trigger()
+    assert app.calls == [("toggle_live_assist",)]               # never the Pro window just to open it
 
 
 def test_tray_pro_actions_call_the_app(tray):

@@ -237,7 +237,7 @@ class TestAskBox(unittest.TestCase):
         from PySide6.QtWidgets import QApplication, QLabel
         lbl = self.la._ElidedLabel("Live Assistance")
         lbl.show()                          # hidden widgets get no resize events
-        lbl.resize(70, 20)
+        lbl.resize(40, 20)                  # narrower than the title in any font (offscreen's fallback is 56 px wide)
         QApplication.processEvents()
         self.assertTrue(QLabel.text(lbl).endswith("…"), QLabel.text(lbl))
         self.assertEqual(lbl.text(), "Live Assistance")

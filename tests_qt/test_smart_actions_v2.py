@@ -45,12 +45,17 @@ class FakeDownloads(QObject):
     progress = Signal(str, int, int, int)
     finished = Signal(str, str, str)
     state_changed = Signal(str, str)
+    scanned = Signal()
 
     def __init__(self, ready=("base",)):
         super().__init__()
         self.states = {m: "ready" for m in ready}
         self.started = []
         self.pct = {}
+        self.looked = True              # the first look at the disk has run
+
+    def is_scanned(self):
+        return self.looked
 
     def state(self, name):
         return self.states.get(name, "missing")
@@ -70,6 +75,22 @@ class FakeDownloads(QObject):
         self.pct.pop(name, None)
         self.state_changed.emit(name, state)
         self.finished.emit(name, state, msg)
+
+
+@pytest.fixture(autouse=True)
+def asked(monkeypatch):
+    """The mini popups (download question, Privacy mode question) answered
+    without a window: ``asked.answer`` (default yes), every question in
+    ``asked.calls`` as (title, body, yes, no)."""
+    from types import SimpleNamespace
+    from ui.components import mini_prompt
+    rec = SimpleNamespace(calls=[], answer=True)
+
+    def fake_ask(parent, title, body, yes, no, icon="info"):
+        rec.calls.append((title, body, yes, no))
+        return rec.answer
+    monkeypatch.setattr(mini_prompt, "ask", fake_ask)
+    return rec
 
 
 @pytest.fixture
@@ -111,23 +132,27 @@ def test_transcribes_with_lists_same_whisper_and_cloud(page_for):
     assert items[0] == ("", "Same as Dictation")
     assert [v for v, _t in items[1:-1]] == list(hardware.MODEL_INFO)
     assert ("small", "Balanced · Whisper Small") in items
-    assert items[-1] == ("cloud", "Gusan Cloud · Gemini 2.5 Flash  PRO")     # a plain PRO for Free users
+    # The row's text is whole: the PRO pill is painted at its right edge (a real pill, not text).
+    assert items[-1] == ("cloud", "Gusan Cloud · Gemini 2.5 Flash")
+    assert combo.choice_mark(combo.findData("cloud")) == "pro"
     assert combo.accessibleName() == "Transcribes with"
     assert combo.currentData() == "" and combo.plain_text() == "Same as Dictation"
     assert page.speech_line.text() == "Whisper Base"      # the stub dictates with base (no "Same as" twice)
     assert page.speech_row.hint_label.isHidden()
 
 
-def test_pro_sees_no_pro_mark_and_picks_gusan_cloud(page_for):
+def test_pro_sees_no_pro_mark_and_picks_gusan_cloud(page_for, asked):
     app = live_app("pro")
     page = page_for(app)
     combo = page.speech_combo
     assert _items(combo)[-1] == ("cloud", "Gusan Cloud · Gemini 2.5 Flash")
+    assert combo.choice_mark(combo.findData("cloud")) == ""                 # no PRO pill for Pro
     combo.setCurrentIndex(combo.findData("cloud"))
     assert settings(app, "smart_actions_speech_model") == [("set_setting", "smart_actions_speech_model", "cloud")]
     assert combo.plain_text() == "Gusan Cloud"
     assert page.speech_line.text() == "Gusan Cloud · Gemini 2.5 Flash"
     assert not upsells(app)
+    assert not asked.calls                                                   # nothing to ask
 
 
 def test_free_picking_gusan_cloud_opens_the_pro_window(page_for):
@@ -140,13 +165,13 @@ def test_free_picking_gusan_cloud_opens_the_pro_window(page_for):
     assert combo.currentData() == ""                                         # back to what is set
 
 
-def test_privacy_mode_greys_gusan_cloud_out(page_for):
+def test_gusan_cloud_is_never_greyed_out_in_privacy_mode(page_for):
     app = live_app("pro", privacy_mode=True, smart_actions_speech_model="cloud")
     page = page_for(app)
     combo = page.speech_combo
     cloud = combo.findData("cloud")
-    assert not combo.choice_enabled(cloud)
-    assert page.speech_row.hint_label.text() == "Privacy mode keeps it on this computer."
+    assert combo.choice_enabled(cloud)                                      # clickable, not faded
+    assert page.speech_row.hint_label.isHidden()                            # no "Privacy mode keeps it ..." line
     # A "cloud" pick paused by Privacy mode runs like Dictation, and reads so.
     assert combo.currentData() == ""
     assert page.speech_line.text() == "Whisper Base"
@@ -156,12 +181,58 @@ def test_privacy_mode_greys_gusan_cloud_out(page_for):
     assert page.speech_row.hint_label.isHidden()
 
 
-def test_a_whisper_model_not_on_disk_downloads_and_is_saved(page_for):
+def test_pro_in_privacy_mode_asks_then_turns_it_off_and_picks_cloud(page_for, asked):
+    app = live_app("pro", privacy_mode=True)
+    page = page_for(app)
+    combo = page.speech_combo
+    combo.setCurrentIndex(combo.findData("cloud"))
+    assert asked.calls == [("Privacy mode is on",
+                            "Gusan Cloud sends your voice to our servers. Turn off Privacy mode to use it?",
+                            "Turn off Privacy mode", "Keep it on")]
+    # Privacy mode goes off through the controller, in the same call as the pick.
+    assert app.cfg["privacy_mode"] is False
+    assert settings(app, "privacy_mode") == [("set_setting", "privacy_mode", False)]
+    assert settings(app, "smart_actions_speech_model") == [("set_setting", "smart_actions_speech_model", "cloud")]
+    assert combo.currentData() == "cloud" and combo.plain_text() == "Gusan Cloud"
+    assert page.speech_line.text() == "Gusan Cloud · Gemini 2.5 Flash"
+    assert not upsells(app)
+
+
+def test_pro_in_privacy_mode_can_keep_it_on(page_for, asked):
+    asked.answer = False
+    app = live_app("pro", privacy_mode=True)
+    page = page_for(app)
+    combo = page.speech_combo
+    combo.setCurrentIndex(combo.findData("cloud"))
+    assert len(asked.calls) == 1
+    assert app.cfg["privacy_mode"] is True                                  # unchanged
+    assert not settings(app, "privacy_mode") and not settings(app, "smart_actions_speech_model")
+    assert combo.currentData() == "" and page.speech_line.text() == "Whisper Base"
+    assert not upsells(app)
+
+
+def test_free_in_privacy_mode_gets_the_pro_window_not_the_privacy_question(page_for, asked):
+    for tier in ("free", "guest"):
+        app = live_app(tier, privacy_mode=True)
+        page = page_for(app)
+        combo = page.speech_combo
+        combo.setCurrentIndex(combo.findData("cloud"))
+        assert upsells(app) == [("_pro_upsell", "Fast cloud transcription")]
+        assert not asked.calls                                              # Pro is checked first
+        assert app.cfg["privacy_mode"] is True and not settings(app, "smart_actions_speech_model")
+        assert combo.currentData() == ""
+
+
+def test_a_whisper_model_not_on_disk_asks_then_downloads_and_is_saved(page_for, asked):
     app = live_app("free")
     app.downloads = FakeDownloads(ready=("base",))
     page = page_for(app)
     combo = page.speech_combo
+    assert combo.choice_mark(combo.findData("small")) == "download"        # the icon at the row's right
+    assert combo.choice_mark(combo.findData("base")) == ""                 # on disk: nothing
     combo.setCurrentIndex(combo.findData("small"))
+    assert asked.calls == [("Download Balanced · Whisper Small?",
+                            "460 MB - Smart Actions will use it once it is ready.", "Download", "Not now")]
     assert app.downloads.started == ["small"]
     assert settings(app, "smart_actions_speech_model") == [("set_setting", "smart_actions_speech_model", "small")]
     assert page.speech_line.text() == "Whisper Small · downloading 42%"
@@ -171,12 +242,59 @@ def test_a_whisper_model_not_on_disk_downloads_and_is_saved(page_for):
     app.downloads.finish("small")
     assert page.speech_line.text() == "Whisper Small"
     assert combo.plain_text() == "Balanced"
-    # On disk already: no download.
+    assert combo.choice_mark(combo.findData("small")) == ""                # finished: the icon is gone
+    # On disk already: no question, no download.
     combo.setCurrentIndex(combo.findData("base"))
-    assert app.downloads.started == ["small"]
+    assert app.downloads.started == ["small"] and len(asked.calls) == 1
     assert page.speech_line.text() == "Whisper Base"
     combo.setCurrentIndex(0)
     assert app.cfg["smart_actions_speech_model"] == ""
+
+
+def test_not_now_leaves_everything_unchanged(page_for, asked):
+    asked.answer = False
+    app = live_app("pro", smart_actions_speech_model="base")
+    app.downloads = FakeDownloads(ready=("base",))
+    page = page_for(app)
+    combo = page.speech_combo
+    assert combo.currentData() == "base"
+    combo.setCurrentIndex(combo.findData("medium"))
+    assert len(asked.calls) == 1 and asked.calls[0][0] == "Download Accurate · Whisper Medium?"
+    assert asked.calls[0][1].startswith("1.4 GB - ")
+    assert app.downloads.started == []
+    assert not settings(app, "smart_actions_speech_model")
+    assert app.cfg["smart_actions_speech_model"] == "base"
+    assert combo.currentData() == "base"                                   # the box never shows the pick
+    assert combo.choice_mark(combo.findData("medium")) == "download"
+
+
+def test_a_download_finishing_elsewhere_clears_the_icon(page_for):
+    app = live_app("pro")
+    app.downloads = FakeDownloads(ready=("base",))
+    page = page_for(app)
+    combo = page.speech_combo
+    assert combo.choice_mark(combo.findData("tiny")) == "download"
+    app.downloads.states["tiny"] = "downloading"                           # started from Settings
+    app.downloads.state_changed.emit("tiny", "downloading")
+    assert combo.choice_mark(combo.findData("tiny")) == ""
+    app.downloads.finish("tiny")
+    assert combo.choice_mark(combo.findData("tiny")) == ""
+    app.downloads.states["tiny"] = "missing"                               # removed in Settings
+    app.downloads.state_changed.emit("tiny", "missing")
+    assert combo.choice_mark(combo.findData("tiny")) == "download"
+
+
+def test_no_icons_until_the_disk_has_been_looked_at(page_for):
+    app = live_app("pro")
+    dl = FakeDownloads(ready=())
+    dl.looked = False                                                      # app.downloads before its first scan
+    app.downloads = dl
+    page = page_for(app)
+    combo = page.speech_combo
+    assert not [combo.choice_mark(i) for i in range(combo.count()) if combo.choice_mark(i)]
+    dl.looked = True
+    dl.scanned.emit()                                                      # the scan finished
+    assert combo.choice_mark(combo.findData("small")) == "download"
 
 
 def test_a_failed_download_says_so(page_for):
@@ -204,10 +322,15 @@ def test_a_model_without_the_download_service(page_for):
 def test_the_pro_mark_follows_the_plan(page_for):
     app = live_app("free")
     page = page_for(app)
-    assert page.speech_combo.itemText(page.speech_combo.count() - 1).endswith("PRO")
+    combo = page.speech_combo
+    last = combo.count() - 1
+    assert combo.itemText(last) == "Gusan Cloud · Gemini 2.5 Flash" and combo.choice_mark(last) == "pro"
     app.set_tier("pro")
     page.refresh_account()
-    assert page.speech_combo.itemText(page.speech_combo.count() - 1) == "Gusan Cloud · Gemini 2.5 Flash"
+    assert combo.itemText(last) == "Gusan Cloud · Gemini 2.5 Flash" and combo.choice_mark(last) == ""
+    app.set_tier("guest")
+    page.refresh_account()
+    assert combo.choice_mark(last) == "pro"                                # guests see it too
 
 
 def test_same_as_dictation_follows_the_dictation_model(page_for):

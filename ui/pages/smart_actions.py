@@ -47,10 +47,18 @@ Integration notes
   calls ``app.suspend_hotkeys(True)`` and ``(False)`` after (Alt+R would
   otherwise start a dictation mid-capture). "" (e.g. a 1.9.x user whose
   dictation key is Alt+S) shows "Set shortcut".
-* "Transcribes with": a Whisper model not on disk starts
-  app.downloads.start(<id>) and is saved at once (the controller's model
-  fetcher joins the same download if a Smart Action runs first); the line
-  under the picker shows the download. Privacy mode greys Gusan Cloud out.
+* "Transcribes with": the list never cuts a row (ui.components.model_combo's
+  row marks): a real PRO pill on Gusan Cloud for Free and guests, a download
+  icon on a Whisper model that is not on this computer, nothing on one that
+  is. A model not on disk asks first (a mini popup, "Download <plain · real>?"
+  Download / Not now); Download starts app.downloads.start(<id>) and saves
+  the pick at once (the controller's model fetcher joins the same download
+  if a Smart Action runs first); the line under the picker shows the
+  download; Not now changes nothing. Gusan Cloud is always clickable: not Pro
+  -> app._pro_upsell("Fast cloud transcription") and nothing changes; Pro in
+  Privacy mode -> ui/privacy_prompt "Privacy mode is on" (Turn off Privacy
+  mode / Keep it on; turning it off goes through app.set_settings together
+  with the pick); Pro otherwise just selects it. Pro is checked first.
 * Guests: Try it opens sign-up (app.show_auth_gate): an account is what
   grants the 5 free tries. Free users with no tries left and Gusan Cloud
   open the Pro window.
@@ -87,13 +95,13 @@ from PySide6.QtWidgets import (QButtonGroup, QFrame, QGraphicsOpacityEffect, QGr
                                QWidget)
 
 import rich_text
-from ui import theme
+from ui import privacy_prompt, theme
 from ui.components import (Button, Card, IconButton, Keycaps, PageHeader, ProTag, SettingRow,
                            SettingsRail, icons, label)
-from ui.components import clipboard
+from ui.components import clipboard, mini_prompt
 from ui.components.controls import keycap_labels
 from ui.components.hotkey_capture import HotkeyCaptureButton
-from ui.components.model_combo import PlainNameCombo, combo as _rail_combo
+from ui.components.model_combo import MARK_DOWNLOAD, MARK_PRO, PlainNameCombo, combo as _rail_combo
 from ui.pages import home as H
 
 logger = logging.getLogger("transcribe")
@@ -111,7 +119,6 @@ HERO_LINE = "Press, say what you want, press again."
 HERO_LINE_TWO = "Press, say what you want,\npress again."     # when one line doesn't fit
 EXACT_TEXT = "pastes your exact words."
 SET_SHORTCUT = "Set shortcut"
-PRIVACY_HINT = "Privacy mode keeps it on this computer."
 
 # Settings that change what this page shows.
 WATCHED = frozenset({
@@ -1109,7 +1116,7 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
         sv.setContentsMargins(0, 0, 0, 0)
         sv.setSpacing(4)
         self.speech_combo = _rail_combo(PlainNameCombo(sp), "Transcribes with", width=200)
-        self.speech_combo.view().setMinimumWidth(280)
+        self.speech_combo.enable_row_marks()      # whole rows, a PRO pill / download icon at the right
         self._fill_speech_combo()
         self.speech_combo.currentIndexChanged.connect(self._on_speech_model)
         sv.addWidget(self.speech_combo, 0, Qt.AlignLeft)
@@ -1185,21 +1192,59 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
         except Exception:
             logger.debug("smart_speech_choices failed", exc_info=True)
             choices = [("", "Same as Dictation", "Same as Dictation", False)]
-        pro = _is_pro(self.app)
         box = self.speech_combo
         box.blockSignals(True)
         box.clear()
-        for value, plain, line, needs_pro in choices:
-            # Calm Pro: a plain "PRO" after the name, for Free users only.
-            text = "%s  PRO" % line if (needs_pro and not pro) else line
-            box.add_choice(text, value, plain=plain)
+        for value, plain, line, _needs_pro in choices:
+            box.add_choice(line, value, plain=plain)
         box.blockSignals(False)
         self._speech_fill = self._speech_fill_key()
+        self._mark_speech_rows()
 
     def _speech_fill_key(self):
-        """What the list's text depends on: the plan (the PRO marks) and the
+        """What the list's text depends on: the plan (the PRO pill) and the
         Gusan Cloud provider (its model's name)."""
         return (_is_pro(self.app), str(_cfg(self.app).get("managed_provider") or ""))
+
+    def _speech_state(self, mid):
+        """A Whisper model's state in app.downloads ("ready", "missing",
+        "downloading", "failed"), or None when it isn't known: no download
+        service, or its first look at the disk hasn't run yet."""
+        dl = getattr(self.app, "downloads", None)
+        if dl is None or not callable(getattr(dl, "state", None)):
+            return None
+        scanned = getattr(dl, "is_scanned", None)
+        if callable(scanned):
+            try:
+                if not scanned():
+                    return None
+            except Exception:
+                return None
+        try:
+            return dl.state(mid)
+        except Exception:
+            return None
+
+    def _mark_speech_rows(self):
+        """What each row of the list says at its right edge: the PRO pill on
+        Gusan Cloud (Free and guests only), a download icon on a Whisper model
+        that is not on this computer; nothing on a model that is."""
+        box = self.speech_combo
+        pro = _is_pro(self.app)
+        try:
+            import hardware
+            info = hardware.MODEL_INFO
+        except Exception:
+            info = {}
+        for i in range(box.count()):
+            value = str(box.itemData(i) or "")
+            mark, note = "", ""
+            if value == SPEECH_CLOUD:
+                mark = "" if pro else MARK_PRO
+            elif value and self._speech_state(value) in ("missing", "failed"):
+                mark = MARK_DOWNLOAD
+                note = getattr(info.get(value), "size", "") or ""
+            box.set_choice_mark(i, mark, note)
 
     def _speech_downloaded(self):
         """Is a Whisper model on disk (app.downloads' map), or None when unknown."""
@@ -1272,31 +1317,69 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
         return name
 
     def _refresh_speech(self):
-        cfg = _cfg(self.app)
         if self._speech_fill_key() != getattr(self, "_speech_fill", None):
-            self._fill_speech_combo()               # the PRO marks / cloud model follow the plan
+            self._fill_speech_combo()               # the cloud model's name follows the provider (and the plan)
         box = self.speech_combo
+        self._mark_speech_rows()                    # the PRO pill and the download icons follow the plan and the disk
         i = box.findData(self.speech_value())
         box.blockSignals(True)
         box.setCurrentIndex(i if i >= 0 else 0)
         box.blockSignals(False)
-        privacy = bool(cfg.get("privacy_mode"))
-        cloud_i = box.findData(SPEECH_CLOUD)
-        if cloud_i >= 0:
-            box.set_choice_enabled(cloud_i, not privacy)      # Privacy mode keeps it on this computer
         line = self._speech_line()
         self.speech_line.setText(line)
         self.speech_line.setVisible(bool(line))
         box.setAccessibleDescription(line)
-        self.speech_row.set_hint(PRIVACY_HINT if privacy else self._speech_note)
+        self.speech_row.set_hint(self._speech_note)
 
     def _on_speech_model(self, _i):
+        """A row was picked. Gusan Cloud and a model that is not on this
+        computer ask first (each puts the real choice back at once, so the
+        box never shows a pick that did not happen); the rest apply."""
         value = self.speech_combo.currentData()
         value = "" if value is None else str(value)
         self._speech_note = ""
+        if value == SPEECH_CLOUD:
+            self._refresh_speech()                  # back to what is really set
+            self._pick_gusan_cloud()
+        elif value and self._speech_state(value) in ("missing", "failed"):
+            self._refresh_speech()
+            self._pick_missing_model(value)
+        else:
+            self._apply_speech(value)
+
+    def _pick_gusan_cloud(self):
+        """Gusan Cloud: Pro first (the Pro window), then Privacy mode (turn it
+        off, or keep it), else just select it."""
+        if not _is_pro(self.app):
+            _call(self.app, "_pro_upsell", UPSELL_SPEECH)
+            return
+        turn_off = False
+        if _cfg(self.app).get("privacy_mode"):
+            if not privacy_prompt.confirm_turn_off_privacy(self, "Gusan Cloud"):
+                return
+            turn_off = True
+        self._apply_speech(SPEECH_CLOUD, turn_off_privacy=turn_off)
+
+    def _pick_missing_model(self, mid):
+        """A Whisper model that is not on this computer: a small popup asks;
+        Download starts it and picks it, Not now leaves everything as it is."""
+        try:
+            import hardware
+            info = hardware.MODEL_INFO.get(mid)
+        except Exception:
+            info = None
+        plain = getattr(info, "plain", "") or mid
+        real = getattr(info, "real", "")
+        size = getattr(info, "size", "")
+        if mini_prompt.confirm_download(self, plain, real, size):
+            self._apply_speech(mid)
+
+    def _apply_speech(self, value, turn_off_privacy=False):
+        """Save the pick through the controller (and start its download when
+        the model is not on disk); then draw what is really set."""
         try:
             import engine_choice
-            res = engine_choice.set_smart_speech(self.app, value)
+            res = engine_choice.set_smart_speech(self.app, value, turn_off_privacy=turn_off_privacy)
         except Exception:
             logger.warning("set_smart_speech failed", exc_info=True)
             res = {"ok": False, "problem": "error", "changes": {}, "upsell": ""}
@@ -1547,6 +1630,9 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
             changed = getattr(dl, "state_changed", None)
             if changed is not None:
                 changed.connect(self._on_dl_state)
+            scanned = getattr(dl, "scanned", None)
+            if scanned is not None:
+                scanned.connect(self._on_dl_scanned)
             self._dl_connected = dl
         except Exception:
             logger.debug("downloads signals unavailable", exc_info=True)
@@ -1577,7 +1663,15 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
             return
         if self._is_local_writer(name):
             self._refresh_writers()
-        if self._is_speech_model(name):
+        if self._is_speech_model(name) or self._in_speech_list(name):
+            self._refresh_speech()                  # the row's download icon follows
+
+    def _in_speech_list(self, name):
+        return bool(name) and self.speech_combo.findData(name) >= 0
+
+    def _on_dl_scanned(self, *_rest):
+        # The first look at the disk: only now do the download icons mean something.
+        if _alive(self):
             self._refresh_speech()
 
     def _on_dl_finished(self, name, state, msg="", *_rest):
@@ -1585,6 +1679,7 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
             return
         if self._is_speech_model(name):
             self._speech_note = "" if state == "ready" else (msg or "The download stopped. Try again.")
+        if self._is_speech_model(name) or self._in_speech_list(name):
             self._refresh_speech()
         if name == self._pending_download:
             self._pending_download = None

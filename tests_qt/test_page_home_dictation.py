@@ -81,8 +81,9 @@ class FakeCalendar(QObject):
 def _app(tier="free", **cfg):
     app = make_stub_app(tier)
     app.auth.user_id = "u-test" if tier != "guest" else None
+    # No "cleanup_remove_fillers" here: a config without the key removes filler words (on by default).
     app.cfg.update({"whisper_model": "small", "save_history": True, "cleanup_enabled": True,
-                    "cleanup_remove_fillers": False, "restore_clipboard": True, "overlay_theme": "auto",
+                    "restore_clipboard": True, "overlay_theme": "auto",
                     "overlay_private": True, "live_assist_private": True, "output_action": "transcribe_only",
                     "action_model": "rule_based"})
     app.cfg.update(cfg)
@@ -620,7 +621,7 @@ def test_dictation_rows_copy_and_highlight(dict_page):
 
 @pytest.mark.parametrize("key,row_attr,default", [
     ("cleanup_enabled", "row_cleanup", True),
-    ("cleanup_remove_fillers", "row_fillers", False),
+    ("cleanup_remove_fillers", "row_fillers", True),      # on out of the box
     ("restore_clipboard", "row_clipboard", True),
     ("overlay_private", "row_private", True),
 ])
@@ -632,12 +633,26 @@ def test_dictation_toggles_apply_at_once(dict_page, key, row_attr, default):
     assert ("set_setting", key, not default) in app.calls
 
 
+def test_remove_filler_words_is_on_without_a_saved_choice(dict_page):
+    import main
+    page, app, _ = dict_page()
+    assert "cleanup_remove_fillers" not in app.cfg
+    assert main.DEFAULT["cleanup_remove_fillers"] is True
+    assert page.row_fillers.control.isChecked() is True
+    assert page.row_fillers.control.accessibleName() == "Remove filler words"
+    # A saved False stays False (an existing install that turned it off).
+    off, _app_off, _ = dict_page(cleanup_remove_fillers=False)
+    assert off.row_fillers.control.isChecked() is False
+    off.row_fillers.control.click()
+    assert ("set_setting", "cleanup_remove_fillers", True) in _app_off.calls
+
+
 def test_a_refused_setting_puts_the_control_back(dict_page):
     page, app, _ = dict_page()
     app.set_setting = lambda key, value: app.calls.append(("set_setting", key, value)) and False
     page.row_fillers.control.click()
     QApplication.processEvents()
-    assert page.row_fillers.control.isChecked() is False
+    assert page.row_fillers.control.isChecked() is True
     page.language.setCurrentIndex(page.language.findData("es"))
     QApplication.processEvents()
     assert page.language.currentData() == "auto"
@@ -655,14 +670,14 @@ def test_dictation_language_and_bar_look(dict_page):
 
 def test_dictation_follows_settings_changed_elsewhere(dict_page):
     page, app, _ = dict_page()
-    app.cfg.update(hotkey="ctrl+alt+d", language="fr", cleanup_remove_fillers=True, overlay_theme="light",
+    app.cfg.update(hotkey="ctrl+alt+d", language="fr", cleanup_remove_fillers=False, overlay_theme="light",
                    smart_actions_hotkey="ctrl+shift+s")
     for key in ("hotkey", "language", "cleanup_remove_fillers", "overlay_theme", "smart_actions_hotkey"):
         page.on_setting_changed(key)
     assert page.hero_keys.keys() == ["Ctrl", "Alt", "D"]
     assert page.shortcut.hotkey() == "ctrl+alt+d"
     assert page.language.currentData() == "fr"
-    assert page.row_fillers.control.isChecked()
+    assert not page.row_fillers.control.isChecked()
     assert page.bar_look.value() == "light"
     assert page.smart_keys.accessibleName() == "Ctrl + Shift + S"
     assert not [c for c in app.calls if c[0] == "set_setting"]   # syncing never writes back
@@ -708,11 +723,61 @@ def test_gusan_cloud_speech(dict_page):
     pro.cloud.click()
     assert ("set_settings", {"backend": "local", "whisper_model": "small"}) in papp.calls
 
-    priv, qapp_, _ = dict_page("pro", privacy_mode=True)
-    priv.cloud.click()
+
+
+@pytest.fixture
+def privacy_asked(monkeypatch):
+    """The "Privacy mode is on" question answered without a window:
+    ``privacy_asked.answer`` (default yes), each question's (title, body, yes, no)."""
+    from types import SimpleNamespace
+    from ui.components import mini_prompt
+    rec = SimpleNamespace(calls=[], answer=True)
+
+    def fake_ask(parent, title, body, yes, no, icon="info"):
+        rec.calls.append((title, body, yes, no))
+        return rec.answer
+    monkeypatch.setattr(mini_prompt, "ask", fake_ask)
+    return rec
+
+
+def test_cloud_speech_in_privacy_mode_asks_then_turns_privacy_off(dict_page, privacy_asked):
+    page, app, _ = dict_page("pro", privacy_mode=True)
+    assert not page.cloud.isChecked()
+    page.cloud.click()
     QApplication.processEvents()
-    assert not priv.cloud.isChecked()
-    assert priv.row_cloud.hint_label.text() == "Off while Privacy mode is on"
+    assert privacy_asked.calls == [("Privacy mode is on",
+                                    "Gusan Cloud sends your voice to our servers. Turn off Privacy mode to use it?",
+                                    "Turn off Privacy mode", "Keep it on")]
+    # Privacy mode goes off through the controller in the same call as the cloud choice.
+    assert ("set_settings", {"privacy_mode": False, "backend": "managed", "managed_provider": "gemini"}) in app.calls
+    assert not [c for c in app.calls if c[0] == "_pro_upsell"]
+    assert page.row_cloud.hint_label.isHidden()                      # no "Off while Privacy mode is on"
+    app.cfg.update(privacy_mode=False, backend="managed", managed_provider="gemini")   # what the controller did
+    page.on_setting_changed("backend")
+    assert page.cloud.isChecked()
+
+
+def test_cloud_speech_in_privacy_mode_can_keep_privacy_on(dict_page, privacy_asked):
+    privacy_asked.answer = False
+    page, app, _ = dict_page("pro", privacy_mode=True)
+    page.cloud.click()
+    QApplication.processEvents()
+    assert len(privacy_asked.calls) == 1
+    assert not page.cloud.isChecked()                                # back off
+    assert not [c for c in app.calls if c[0] in ("set_settings", "set_setting", "_pro_upsell")]
+    assert page.row_cloud.hint_label.isHidden()
+
+
+@pytest.mark.parametrize("tier", ["free", "guest"])
+def test_cloud_speech_for_free_in_privacy_mode_opens_the_pro_window(dict_page, privacy_asked, tier):
+    page, app, _ = dict_page(tier, privacy_mode=True)
+    page.cloud.click()
+    QApplication.processEvents()
+    assert ("_pro_upsell", "Fast cloud transcription") in app.calls
+    assert not privacy_asked.calls                                   # Pro is checked before Privacy mode
+    assert not page.cloud.isChecked()
+    assert not [c for c in app.calls if c[0] == "set_settings"]
+    assert page.row_cloud.hint_label.isHidden()
 
 
 def test_shortcut_capture_applies_through_set_setting(dict_page):

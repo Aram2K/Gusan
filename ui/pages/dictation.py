@@ -5,9 +5,12 @@ Mockup: v2/canvas/project/Dictation.dc.html (source v2/pages/core.py
 dictation()). The dictation shortcut (Alt+R) always pastes the exact words;
 one quiet line under the practice box points to Smart Actions and their own
 shortcut ("For emails, lists and translations press <Alt + S> · Smart
-Actions ›"). Calm Pro: the plain PRO tag on the "Gusan Cloud speech" row; a
-Free user who turns it on gets the current Pro window (app._pro_upsell) and
-the toggle goes back. No limits.
+Actions ›"). Calm Pro: the PRO pill on the "Gusan Cloud speech" row; a Free
+user who turns it on gets the current Pro window (app._pro_upsell) and the
+toggle goes back. A Pro user in Privacy mode gets one question (ui/
+privacy_prompt: Turn off Privacy mode / Keep it on): yes turns Privacy mode
+off through app.set_settings together with the cloud choice, no puts the
+toggle back. Pro is checked first. No limits.
 
     page = create(main_app)        # what ui/shell.py calls
     page.refresh(sync=True)        # tests / previews: load the list now
@@ -19,7 +22,7 @@ Settings this page writes:
     language                    Language
     mix_languages               Languages you mix (only shown for Mixed languages)
     cleanup_enabled             Clean up mistakes
-    cleanup_remove_fillers      Remove filler words
+    cleanup_remove_fillers      Remove filler words (on unless the config says False)
     restore_clipboard           Put my clipboard back
     overlay_theme               Dictation bar look: auto | light | dark
     overlay_private             Hide bar in screen shares
@@ -66,7 +69,7 @@ from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QCheckBox, QComboB
                                QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout, QLabel, QMenu, QPlainTextEdit,
                                QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
-from ui import theme
+from ui import privacy_prompt, theme
 from ui.components import (Button, Card, Divider, IconButton, Keycaps, PageHeader, SettingRow, SettingsRail,
                            Toggle, icons, label)
 from ui.components.controls import keycap_labels
@@ -743,7 +746,8 @@ class DictationPage(QWidget):
             return rail.add_row(SettingRow(text, t, hint=hint))
 
         self.row_cleanup = toggle_row("cleanup_enabled", "Clean up mistakes", "Drops made-up “Thank you.” lines")
-        self.row_fillers = toggle_row("cleanup_remove_fillers", "Remove filler words", "um, uh, you know", False)
+        # On unless the config says False (main.DEFAULT, text_cleanup: one default).
+        self.row_fillers = toggle_row("cleanup_remove_fillers", "Remove filler words", "um, uh, you know", True)
         self.row_clipboard = toggle_row("restore_clipboard", "Put my clipboard back", "After each paste")
         self.bar_look = BarLook(str(cfg.get("overlay_theme") or "auto"), on_pick=self._on_bar_look)
         self.row_bar = rail.add_row(SettingRow("Dictation bar look", self.bar_look, stacked=True))
@@ -938,9 +942,31 @@ class DictationPage(QWidget):
     def _on_cloud(self, on):
         if self._syncing:
             return
+        if not on:
+            self._apply_cloud(False)
+            return
+        # Turning it on: Pro first (a Free person gets the Pro window, whatever
+        # Privacy mode says), then Privacy mode (ask once). The toggle goes back
+        # to what is really set before any window opens.
+        if not H.is_pro(self.app):
+            self._sync_cloud()
+            H.call(self.app, "_pro_upsell", UPSELL_CLOUD)
+            return
+        turn_off = False
+        if H.cfg_of(self.app).get("privacy_mode"):
+            self._sync_cloud()
+            if not privacy_prompt.confirm_turn_off_privacy(self, "Gusan Cloud"):
+                return
+            turn_off = True
+        self._apply_cloud(True, turn_off_privacy=turn_off)
+
+    def _apply_cloud(self, on, turn_off_privacy=False):
+        """Save Gusan Cloud speech on / off through the controller (with
+        Privacy mode off in the same call when the person agreed)."""
         try:
             import engine_choice
-            res = engine_choice.set_speech_source(self.app, "cloud" if on else "local")
+            res = engine_choice.set_speech_source(self.app, "cloud" if on else "local",
+                                                  turn_off_privacy=turn_off_privacy)
         except Exception:
             logger.warning("set_speech_source failed", exc_info=True)
             res = {"ok": False, "problem": "error", "changes": {}, "upsell": ""}
@@ -951,14 +977,12 @@ class DictationPage(QWidget):
                 QTimer.singleShot(0, self.sync_from_cfg)        # refused, or no controller: back to cfg
             else:
                 self.row_cloud.set_hint("")
+                self._sync_cloud()                              # on, if the toggle went back for a question
                 self._update_runs_on()
             return
         self._sync_cloud_later()
-        problem = res.get("problem")
-        if problem == "pro":
+        if res.get("problem") == "pro":
             H.call(self.app, "_pro_upsell", res.get("upsell") or UPSELL_CLOUD)
-        elif problem == "privacy_mode":
-            self.row_cloud.set_hint("Off while Privacy mode is on")
 
     def _sync_cloud_later(self):
         QTimer.singleShot(0, self._sync_cloud)

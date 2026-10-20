@@ -4,17 +4,19 @@
 
 What is on it (the v2 LiveAssistant mockup, minus its big headline - the founder wanted
 only the shortcut row at the top and the status in one word):
-- Hero: "Open Live Assistant" + PRO and the keycaps of cfg live_assist_hotkey
-  first, then the You see / They see picture - ONE screen split by a line that
+- Hero: "Open Live Assistant", "or" and the keycaps of cfg live_assist_hotkey
+  first (no PRO pill beside the button - it sits in the header, see below),
+  then the You see / They see picture - ONE screen split by a line that
   slides from end to end by itself and can be dragged (the card on your side;
   on theirs it is absent when hidden, faded to 45% when only partly hidden and
   full when visible - the line moves in every state).
-- The TRUTHFUL status (live_context.hide_status) is ONE word in a badge beside
-  the page title: Hidden, May be hidden or Visible; the explanation is its
-  tooltip and accessible description, never a sentence on the page.
-- About my calls (live_assist_context), Past sessions
-  (meeting_store.list_live_sessions(), read on a worker thread) and one quiet
-  fair-use line.
+- Beside the page title, for every plan: the PRO pill (the feature is Pro, but
+  anyone may open the card and look; Start is what asks for Pro), then the
+  TRUTHFUL status (live_context.hide_status) as ONE word in a badge: Hidden,
+  May be hidden or Visible; the explanation is its tooltip and accessible
+  description, never a sentence on the page.
+- About my calls (live_assist_context) and Past sessions
+  (meeting_store.list_live_sessions(), read on a worker thread).
 - The rail "Live Assistant settings": Hide from screen share, Shortcut, Answer
   questions by itself, Let it see my screen, Call language, Answer in, Answers
   written by (Gusan Cloud · DeepSeek V4.1 Flash PRO / This computer · Qwen
@@ -26,10 +28,13 @@ settings_changed(key, value) and hide_status_changed(key) signals.
 
 Integration notes for Wave 4
 ----------------------------
-* Open Live Assistant: Free -> app._pro_upsell("Live Assistance"). Pro ->
-  app.show_live_assist() when the controller has it (show-only path, see the
-  notes in ui/live_assist.py), else app.live_assist.open_card() when the card
-  exists, else app.toggle_live_assist() (which creates it and shows it).
+* Open Live Assistant works for EVERYONE (Free and guests too - no Pro window
+  on Open): app.show_live_assist() when the controller has it (show-only
+  path, see the notes in ui/live_assist.py), else app.live_assist.open_card()
+  when the card exists, else app.toggle_live_assist() (which creates it and
+  shows it). The card itself asks for Pro when Start is pressed
+  (_pro_upsell("Live Assistant")) and wears a PRO pill beside its title
+  until then.
 * "Answers written by": the selected option is always the truth,
   engine_choice.runs_on(app, "live_assistant"). Picking an option writes a NEW
   cfg key ``live_assist_writer`` ("cloud" | "local"; "" in main.DEFAULT =
@@ -80,7 +85,7 @@ import re
 from PySide6.QtCore import (QEasingCurve, QEvent, QPointF, QRectF, QSize, Qt, QTimer, QVariantAnimation,
                             Signal)
 from PySide6.QtGui import (QColor, QFontMetricsF, QGuiApplication, QLinearGradient, QPainter, QPainterPath,
-                           QPen, QTextBlockFormat, QTextCursor, QTextDocument)
+                           QPen)
 from PySide6.QtWidgets import (QBoxLayout, QButtonGroup, QComboBox, QFrame, QHBoxLayout, QLabel,
                                QLayout, QPlainTextEdit, QRadioButton, QSizePolicy, QSlider,
                                QVBoxLayout, QWidget)
@@ -91,13 +96,13 @@ from ui.components import (Button, Card, Chip, IconButton, PageHeader, ProTag, S
                            SettingRow, SettingsRail, Toggle, icons, label)
 from ui.components.controls import keycap_labels
 from ui.components.hotkey_capture import HotkeyCaptureButton
+from ui.pages import live_demo
 
 logger = logging.getLogger("transcribe")
 
 TITLE = "Live Assistant"
 SUB = "Answers questions while you talk."
 UPSELL = "Live Assistance"                  # the Pro window's feature name
-FAIR_USE = "For your own calls — not for exams or interviews where help isn’t allowed."
 SHORTCUT_REFUSED = "Couldn't use %s."             # one line under the keys
 SHORTCUT_IS_DICTATION = "Dictation uses %s."
 SHORTCUT_IS_SMART = "%s runs Smart Actions. Pick another."
@@ -456,8 +461,8 @@ class HideChip(Chip):
 # grab it, click the screen or use the arrow keys to look closer. The picture
 # only moves while you can see it, and not at all when Windows' animation
 # effects are off.
-K = 1.5                      # the slide and the card are drawn at 300 x 184, scaled up
-INNER_W, INNER_H = 300, 184
+K = 1.5                      # the slide is drawn at 384 x 226 slide units, scaled up (the card has its own scale)
+INNER_W, INNER_H = 384, 226
 BEZEL = 6
 SCREEN_W = int(INNER_W * K) + 2 * BEZEL
 SCREEN_H = int(INNER_H * K) + 2 * BEZEL
@@ -470,20 +475,18 @@ HANDLE_R = 17               # the round handle on the line
 SPLIT_MIN, SPLIT_MAX = 0.0, 1.0     # as a share of the glass: the line runs from end to end
 STOP_THEY = SPLIT_MIN       # the line rests here ("They see": the whole screen is theirs) ...
 STOP_YOU = SPLIT_MAX        # ... or here ("You see": the whole screen is yours)
-CARD_MARGIN = 14            # the card's and the banners' gap to the glass's edges, in slide units
-PAD = 4                     # room around a cached label / handle image (the faces' ring, a shadow)
+CARD_MARGIN = 14            # the banners' gap to the glass's edges, in slide units
+CARD_GAP_RIGHT = 34         # the card floats centre-right: this much glass to its right (design units) ...
+CARD_DROP = 6               # ... and this far under the middle (the banners keep the top)
+SLIDE_KEEP = 108            # the slide's title, lines and chart end here (slide units): the card never reaches them
+PAD = 4                    # room around a cached label / handle image (the faces' ring, a shadow)
 STEP, BIG_STEP = 0.05, 0.20   # arrow keys / Page Up, Page Down
 REST_STATIC = 0.62          # where the line waits when it never moves by itself (animations off): the card is cut, both sides show
 SCALE_STEPS = 64            # the painter scale snaps down to 1/64: dragging the window edge rebuilds the cached images ~25 times, not every pixel
 
-ANSWER_HTML = "<b>Say:</b> “It’s ready for 14 October if we freeze features on Friday.”"
+ANSWER_HTML = live_demo.ANSWER_HTML          # the card's example answer (the card itself: ui/pages/live_demo.py)
 _FACES_YOU = (("#60a5fa", "#2563eb"),)
 _FACES_THEM = (("A", "#f472b6", "#db2777"), ("D", "#94a3b8", "#475569"), ("M", "#fbbf24", "#d97706"))
-_CHIP_LOOK = {   # tone -> (fill, edge, text)
-    "ok": ("rgba(34,197,94,0.16)", "rgba(34,197,94,0.45)", "ok-tx"),
-    "red": ("rgba(239,68,68,0.12)", "rgba(239,68,68,0.40)", "red-tx"),
-    "amber": ("rgba(245,158,11,0.16)", "rgba(245,158,11,0.45)", "amber-tx"),
-}
 
 
 _SHADOWS = {}
@@ -547,10 +550,12 @@ class ScreensPicture(QWidget):
     picks up again RESUME_MS later. It runs from one end of the screen to the
     other in every state; when the card shows to everyone (status off / failed /
     unavailable) the card is on both sides, so the sweep changes only the
-    banners. Drawn with QPainter at 462 wide and scaled
-    down to fit narrower columns; each side, the monitor, the labels and the
-    handle are painted once into pixmaps and a frame is a few blits plus the
-    line."""
+    banners. The card is a miniature of the real one (ui/pages/live_demo.py)
+    floating at the centre-right of the glass, clear of the slide's title and
+    chart, in the look the rail's Card look says (light or dark, set_card_look).
+    Drawn with QPainter at DESIGN_W (588) wide and scaled down to fit
+    narrower columns; each side, the monitor, the labels and the handle are
+    painted once into pixmaps and a frame is a few blits plus the line."""
 
     AUTOPLAY = True              # tests switch it off
     FIRST_HOLD_MS = 1400         # the card shows for this long before the first slide
@@ -568,7 +573,7 @@ class ScreensPicture(QWidget):
         self._initial = "Y"
         self._owner = ""
         self._status = _fallback_status(True)
-        self._doc = None
+        self._card_look = "light"    # the card's look, as the page's Card look says (light | dark)
         self._split = STOP_YOU
         self._hover = False          # the pointer is over the glass
         self._dragging = False
@@ -601,9 +606,22 @@ class ScreensPicture(QWidget):
             return          # the page re-applies the same status on every refresh: leave the line where it is
         self._cache.clear()
         self._cache_key = None
-        self._doc = None
         self._apply_status()
         self.update()
+
+    def set_card_look(self, name):
+        """The card's look, "light" or "dark" (the page's Card look): the picture's card wears it too.
+        Anything else is the light one. The line stays where it is."""
+        name = name if name in live_demo.PALETTES else "light"
+        if name == self._card_look:
+            return
+        self._card_look = name
+        self._cache.clear()
+        self._cache_key = None
+        self.update()
+
+    def card_look(self):
+        return self._card_look
 
     def owner_banner(self):
         return "%s’s screen" % self._owner if self._owner else "Shared screen"
@@ -968,13 +986,13 @@ class ScreensPicture(QWidget):
         self._slide(p, inner)
         if you:
             self._banner(p, inner, "Sharing", dot=True, right=False)
-            self._mini_card(p, inner)
+            self._mini_card(p, s * dpr)
         else:
             self._banner(p, inner, self.owner_banner(), dot=False, right=True)
             opacity = self._they_opacity()
             if opacity > 0:
                 p.setOpacity(opacity)
-                self._mini_card(p, inner)
+                self._mini_card(p, s * dpr)
                 p.setOpacity(1.0)
         p.end()
         return pm
@@ -1084,31 +1102,45 @@ class ScreensPicture(QWidget):
         return QPointF(pm.width() / ratio / 2.0, pm.height() / ratio / 2.0)
 
     def _slide(self, p, inner):
+        """The shared slide (slide units). Its own words and the column chart keep to the left, clear of
+        the card; the middle and right are a quiet roadmap the card floats over on your side."""
         ix, iy = inner.left(), inner.top()
         p.setPen(theme.qcolor("ink"))
         p.setFont(theme.font(15, 700, display=True))
-        p.drawText(QRectF(ix + 18, iy + 34, 140, 18), Qt.AlignVCenter | Qt.AlignLeft, "Q4 roadmap")
+        p.drawText(QRectF(ix + 18, iy + 34, 92, 18), Qt.AlignVCenter | Qt.AlignLeft, "Q4 roadmap")
         p.setPen(Qt.NoPen)
         y = iy + 34 + 18 + 9
         for frac, col in ((0.86, "#bfdbfe"), (0.64, "#e2e8f0"), (0.78, "#e2e8f0"), (0.52, "#e2e8f0")):
             p.setBrush(QColor(col))
-            p.drawRoundedRect(QRectF(ix + 18, y, 112 * frac, 6), 3, 3)
+            p.drawRoundedRect(QRectF(ix + 18, y, 88 * frac, 6), 3, 3)
             y += 6 + 9
-        # the column chart, bottom right
-        right, bottom = inner.right() - 22, inner.bottom() - 22
-        width = 4 + 4 * 16 + 3 * 9 + 4
-        left = right - width
+        # the column chart, bottom left
+        left, bottom = ix + 18, inner.bottom() - 20
+        width = 4 + 4 * 14 + 3 * 7 + 4
         p.setBrush(QColor("#cbd5e1"))
         p.drawRect(QRectF(left, bottom - 2, width, 2))
         x = left + 4
-        for h, col in ((34, "#cbd5e1"), (52, "#93c5fd"), (70, "#60a5fa"), (92, "#2563eb")):
+        for h, col in ((26, "#cbd5e1"), (40, "#93c5fd"), (56, "#60a5fa"), (74, "#2563eb")):
             path = QPainterPath()
-            r = QRectF(x, bottom - 2 - h, 16, h)
+            r = QRectF(x, bottom - 2 - h, 14, h)
             path.addRoundedRect(r, 3, 3)
-            path.addRect(QRectF(x, bottom - 2 - 3, 16, 3))
+            path.addRect(QRectF(x, bottom - 2 - 3, 14, 3))
             p.setBrush(QColor(col))
             p.drawPath(path.simplified())
-            x += 16 + 9
+            x += 14 + 7
+        # the quiet part: a roadmap in pale bars (a label, then the weeks it runs), three columns
+        gx, gy, gw = ix + 134, iy + 46, 226
+        p.setBrush(QColor("#f1f5f9"))
+        for i in range(1, 3):
+            p.drawRect(QRectF(gx + gw * i / 3.0 - 0.5, gy - 8, 1, 132))
+        rows = ((0.00, 0.46, "#dbeafe"), (0.20, 0.78, "#bfdbfe"), (0.38, 0.62, "#e2e8f0"),
+                (0.12, 0.40, "#e2e8f0"), (0.54, 0.94, "#ddd6fe"))
+        for i, (a, b, col) in enumerate(rows):
+            ry = gy + i * 26
+            p.setBrush(QColor("#e2e8f0"))
+            p.drawRoundedRect(QRectF(gx, ry, 26, 5), 2.5, 2.5)
+            p.setBrush(QColor(col))
+            p.drawRoundedRect(QRectF(gx + 34 + a * (gw - 34), ry - 4, (b - a) * (gw - 34), 13), 6.5, 6.5)
 
     def _banner(self, p, inner, text, dot, right):
         f = theme.font(10, 600)
@@ -1131,106 +1163,58 @@ class ScreensPicture(QWidget):
         p.setFont(f)
         p.drawText(QRectF(x, r.top(), tw + 2, r.height()), Qt.AlignVCenter | Qt.AlignLeft, text)
 
-    def _answer_doc(self, width):
-        if self._doc is None or abs(self._doc.textWidth() - width) > 0.5:
-            doc = QTextDocument()
-            doc.setDocumentMargin(0)
-            doc.setDefaultFont(theme.font(10, 400))
-            doc.setDefaultStyleSheet("body { color: #0f172a; }")
-            doc.setHtml("<body>%s</body>" % ANSWER_HTML)
-            cur = QTextCursor(doc)
-            cur.select(QTextCursor.Document)
-            fmt = QTextBlockFormat()
-            try:
-                fmt.setLineHeight(13.0, QTextBlockFormat.LineHeightTypes.FixedHeight.value)
-            except Exception:
-                pass
-            cur.mergeBlockFormat(fmt)
-            doc.setTextWidth(width)
-            self._doc = doc
-        return self._doc
+    def card_word(self):
+        """The Hidden chip's word on the card (the page's one word for the status)."""
+        return STATUS_WORDS.get(getattr(self._status, "key", "on"), STATUS_WORD_DEFAULT)
 
-    def _mini_card(self, p, inner):
+    def card_rect(self):
+        """Where the card floats on the glass, in design units of the picture: the centre-right, level
+        with the middle, clear of the slide's title and chart (which keep to the left)."""
+        size = live_demo.card_size(live_demo.CARD_SCALE, self.card_word())
+        inner = self._inner_rect()
+        x = inner.right() - CARD_GAP_RIGHT - size.width()
+        y = inner.center().y() - size.height() / 2.0 + CARD_DROP
+        return QRectF(x, y, size.width(), size.height())
+
+    def _backdrop(self, px_scale):
+        """What the glass has behind it, cut to the card: the slide, as an image the card blurs."""
+        from PySide6.QtGui import QImage
+        rect = self.card_rect()
+        inner = self._inner_rect()
+        w, h = max(1, int(round(rect.width() * px_scale))), max(1, int(round(rect.height() * px_scale)))
+        img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
+        img.fill(QColor("#ffffff"))
+        q = QPainter(img)
+        q.setRenderHint(QPainter.Antialiasing, True)
+        q.scale(px_scale, px_scale)
+        q.translate(inner.left() - rect.left(), inner.top() - rect.top())      # the glass's own origin
+        q.scale(K, K)
+        self._slide(q, QRectF(0, 0, INNER_W, INNER_H))
+        q.end()
+        return img
+
+    def _mini_card(self, p, px_scale):
+        """The Live Assistant card on the glass (ui/pages/live_demo.py: the real card in miniature),
+        with its soft shadow. ``p`` is scaled by K (the slide's units); ``px_scale`` is device
+        pixels per design unit."""
         st = self._status
-        pad_x = 8.0
-        chip_font = theme.font(9.5, 700)
-        chip_text = STATUS_WORDS.get(getattr(st, "key", "on"), STATUS_WORD_DEFAULT)   # the page's one word
-        ctw = QFontMetricsF(chip_font).horizontalAdvance(chip_text)
-        chip_w = 4 + 12 + 3 + ctw + 6
-        title_font = theme.font(10.5, 700)
-        title_need = QFontMetricsF(title_font).horizontalAdvance("Live Assistant") + 1
-        # 166 like the mockup; wider (up to 186) so a long chip ("May be hidden")
-        # never cuts the title down to "Live As…".
-        cw = max(166.0, min(186.0, pad_x + title_need + 5 + chip_w + pad_x))
-        x = inner.right() - CARD_MARGIN - cw
-        y = inner.top() + 44
-        text_w = cw - 2 * pad_x - 14 - 2
-        doc = self._answer_doc(text_w)
-        box_h = 6 + doc.size().height() + 6 + 2
-        # At least 44..164: the card fully covers the slide's chart (nothing pokes out under it).
-        box_h = max(box_h, 120 - (7 + 17 + 6 + 6 + 16 + 8))
-        ch = 7 + 17 + 6 + box_h + 6 + 16 + 8
-        card = QRectF(x, y, cw, ch)
-        _soft_shadow(p, card, 12, 10, 22, "rgba(2,6,23,0.30)")
-        p.setPen(QPen(QColor(15, 23, 42, 41), 1))
-        # rgba(214,222,233,0.94) over the blurred slide: solid, so the chart never shows through.
-        p.setBrush(QColor(216, 223, 234))
-        p.drawRoundedRect(card.adjusted(0.5, 0.5, -0.5, -0.5), 12, 12)
-        sheen = QLinearGradient(QPointF(x, y), QPointF(x, y + 40))
-        sheen.setColorAt(0, QColor(255, 255, 255, 77))
-        sheen.setColorAt(1, QColor(255, 255, 255, 0))
-        p.setPen(Qt.NoPen)
-        p.setBrush(sheen)
-        p.drawRoundedRect(card.adjusted(1, 1, -1, -1), 11, 11)
-        # head: title + status chip
-        hy = y + 7
-        chip = QRectF(x + cw - pad_x - chip_w, hy, chip_w, 17)
-        fill, edge, tx = _CHIP_LOOK.get(getattr(st, "tone", "ok"), _CHIP_LOOK["ok"])
-        p.setPen(QPen(theme.qcolor(edge), 1))
-        p.setBrush(theme.qcolor(fill))
-        p.drawRoundedRect(chip.adjusted(0.5, 0.5, -0.5, -0.5), 8, 8)
-        icon_name = getattr(st, "icon", "incognito")
-        pm = _status_pixmap(icon_name, 12, tx, 1.9)
-        p.drawPixmap(QRectF(chip.left() + 4, chip.top() + 2.5, 12, 12), pm, QRectF(pm.rect()))
-        p.setPen(theme.qcolor(tx))
-        p.setFont(chip_font)
-        p.drawText(QRectF(chip.left() + 4 + 12 + 3, chip.top(), ctw + 2, 17), Qt.AlignVCenter | Qt.AlignLeft,
-                   chip_text)
-        title_w = chip.left() - (x + pad_x) - 5
-        title = QFontMetricsF(title_font).elidedText("Live Assistant", Qt.ElideRight, title_w)
-        p.setPen(theme.qcolor("ink"))
-        p.setFont(title_font)
-        p.drawText(QRectF(x + pad_x, hy, title_w, 17), Qt.AlignVCenter | Qt.AlignLeft, title)
-        # the answer
-        by = hy + 17 + 6
-        box = QRectF(x + pad_x, by, cw - 2 * pad_x, box_h)
-        p.setPen(QPen(QColor(15, 23, 42, 26), 1))
-        p.setBrush(QColor(255, 255, 255, 235))
-        p.drawRoundedRect(box.adjusted(0.5, 0.5, -0.5, -0.5), 7, 7)
+        rect = self.card_rect()
         p.save()
-        p.translate(box.left() + 1 + 7, box.top() + 1 + 6)
-        doc.drawContents(p)
+        p.scale(1.0 / K, 1.0 / K)               # the card is drawn in design units, not slide units
+        p.translate(self._inner_rect().topLeft() * -1.0)   # the scene's origin is the glass's corner
+        _soft_shadow(p, rect, live_demo.RADIUS * live_demo.CARD_SCALE, 10, 24, "rgba(2,6,23,0.30)")
+        live_demo.paint_card(p, rect.left(), rect.top(), self.card_word(), getattr(st, "tone", "ok"),
+                             getattr(st, "icon", "incognito"), live_demo.CARD_SCALE, self._backdrop(px_scale),
+                             self._card_look)
         p.restore()
-        # composer
-        cy = by + box_h + 6
-        field = QRectF(x + pad_x, cy, cw - 2 * pad_x - 5 - 16, 16)
-        p.setPen(QPen(QColor(15, 23, 42, 26), 1))
-        p.setBrush(QColor(255, 255, 255, 153))
-        p.drawRoundedRect(field.adjusted(0.5, 0.5, -0.5, -0.5), 5, 5)
-        send = QRectF(field.right() + 5, cy, 16, 16)
-        g = QLinearGradient(send.topLeft(), send.bottomRight())
-        g.setColorAt(0, QColor("#3b82f6"))
-        g.setColorAt(1, QColor("#8b5cf6"))
-        p.setPen(Qt.NoPen)
-        p.setBrush(g)
-        p.drawEllipse(send)
 
 
 class HeroActions(QWidget):
-    """Open Live Assistant + PRO, then "or" + the keycaps; the keycaps drop to
-    a second line when the column is too narrow for one."""
+    """Open Live Assistant, then "or" + the keycaps; the keycaps drop to a
+    second line when the column is too narrow for one. (The PRO pill is not
+    here: it sits beside the page title.)"""
 
-    def __init__(self, button, tag, or_label, keys, parent=None):
+    def __init__(self, button, or_label, keys, parent=None):
         super().__init__(parent)
         self._box = QBoxLayout(QBoxLayout.LeftToRight, self)
         self._box.setContentsMargins(0, 0, 0, 0)
@@ -1238,7 +1222,6 @@ class HeroActions(QWidget):
         first = QHBoxLayout()
         first.setSpacing(10)
         first.addWidget(button, 0, Qt.AlignVCenter)
-        first.addWidget(tag, 0, Qt.AlignVCenter)
         second = QHBoxLayout()
         second.setSpacing(10)
         second.addSpacing(6)
@@ -1253,15 +1236,14 @@ class HeroActions(QWidget):
         # Let the column squeeze this below one line's width: resizeEvent then wraps.
         self._box.setSizeConstraint(QLayout.SetNoConstraint)
         self._first, self._second = first, second
-        self._parts = (button, tag, or_label, keys)
+        self._parts = (button, or_label, keys)
 
     def _first_line_width(self):
-        button, tag = self._parts[:2]
-        return button.sizeHint().width() + 10 + tag.sizeHint().width()
+        return self._parts[0].sizeHint().width()
 
     def _one_line_width(self):
-        """Everything on one line: button 10 PRO 10 | 6 or 6 (10 apart) keys."""
-        _b, _t, or_label, keys = self._parts
+        """Everything on one line: button 10 | 6 or 6 (10 apart) keys."""
+        _b, or_label, keys = self._parts
         second = 6 + or_label.sizeHint().width() + 6 + 10 + keys.sizeHint().width()
         return self._first_line_width() + 10 + second + 10
 
@@ -1389,8 +1371,8 @@ class WriterOption(QFrame):
         self.setFixedHeight(50)
         self.setCursor(Qt.PointingHandCursor)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(10, 0, 10, 0)
-        lay.setSpacing(8)
+        lay.setContentsMargins(10, 0, 8, 0)
+        lay.setSpacing(6)           # "Qwen 1.5B · not downloaded" + Change must fit the 316 px rail whole
         self.radio = QRadioButton(self)
         self.radio.setFocusPolicy(Qt.StrongFocus)
         theme.focus_ring(self.radio)
@@ -1578,7 +1560,17 @@ class LiveAssistantPage(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         self.status_chip = HideChip()
-        self.header = PageHeader(TITLE, SUB, title_trail=self.status_chip, parent=self)
+        # Beside the title for every plan: the PRO pill, then the one-word status.
+        self.pro_tag = ProTag("m")
+        self.pro_tag.setAccessibleName("Pro feature")
+        trail = QWidget()
+        trail_lay = QHBoxLayout(trail)
+        trail_lay.setContentsMargins(0, 0, 0, 0)
+        trail_lay.setSpacing(8)
+        trail_lay.addWidget(self.pro_tag, 0, Qt.AlignVCenter)
+        trail_lay.addWidget(self.status_chip, 0, Qt.AlignVCenter)
+        self.header = PageHeader(TITLE, SUB, title_trail=trail, parent=self)
+        self.header.setAccessibleName("Live Assistant, Pro feature")
         root.addWidget(self.header)
 
         body = QHBoxLayout()
@@ -1591,9 +1583,6 @@ class LiveAssistantPage(QWidget):
         main.addSpacing(-12)        # the picture's own 18 px of shadow room is part of the gap below it
         main.addWidget(self._build_about())
         main.addWidget(self._build_sessions())
-        self.fair_use = label(FAIR_USE, "muted", self, wrap=True)
-        self.fair_use.setContentsMargins(4, 0, 4, 0)
-        main.addWidget(self.fair_use)
         main.addStretch(1)
         body.addLayout(main, 1)
         self.rail = self._build_rail()
@@ -1616,13 +1605,11 @@ class LiveAssistantPage(QWidget):
         v.setSpacing(0)                     # 22 between the parts (set below)
         self.open_button = HeroButton("Open Live Assistant", hero)
         self.open_button.clicked.connect(self._on_open_clicked)
-        self.open_button.setAccessibleDescription("Pro")
-        self.open_pro_tag = ProTag("m", parent=hero)
         self.or_label = QLabel("or", hero)
         self.or_label.setFont(theme.font(14))
         self.or_label.setProperty("textRole", "muted")
         self.hero_keys = MidKeycaps("", hero)
-        self.actions = HeroActions(self.open_button, self.open_pro_tag, self.or_label, self.hero_keys, hero)
+        self.actions = HeroActions(self.open_button, self.or_label, self.hero_keys, hero)
         v.addWidget(self.actions)
         v.addSpacing(22)
         self.picture = ScreensPicture(hero)
@@ -1762,6 +1749,7 @@ class LiveAssistantPage(QWidget):
         theme_name = cfg.get("live_assist_theme", "light")
         self.look = Segmented(["Light", "Dark"], 1 if theme_name == "dark" else 0, "Card look", size="s")
         self.look.changed.connect(self._on_look_changed)
+        self.picture.set_card_look(theme_name)          # the picture's card wears the same look
         self.look_row = rail.add_row(SettingRow("Card look", self.look))
 
         # More options (collapsed): Card see-through, Reset card position, Your own key.
@@ -1944,6 +1932,7 @@ class LiveAssistantPage(QWidget):
             self._set_combo(self.answer_lang, val("en"))
         elif key == "live_assist_theme":
             self.look.set_index(1 if val("light") == "dark" else 0)
+            self.picture.set_card_look(val("light"))
         elif key == "live_assist_opacity":
             try:
                 op = min(1.0, max(0.55, float(val(0.96))))
@@ -2068,9 +2057,8 @@ class LiveAssistantPage(QWidget):
         self._call("_pro_upsell", UPSELL)
 
     def _on_open_clicked(self):
-        if not _is_pro(self.app):
-            self._upsell()
-            return
+        """Opens the card for everyone - Free and guests too. The card asks for
+        Pro when Start is pressed, not here."""
         if callable(getattr(self.app, "show_live_assist", None)):
             self._call("show_live_assist")
         else:
@@ -2107,7 +2095,9 @@ class LiveAssistantPage(QWidget):
 
     def _on_look_changed(self, idx):
         name = "dark" if idx == 1 else "light"
-        if not self._set("live_assist_theme", name):
+        if self._set("live_assist_theme", name):
+            self.picture.set_card_look(name)
+        else:
             self._sync_key("live_assist_theme")
 
     def _on_hotkey_captured(self, combo):

@@ -110,12 +110,12 @@ def test_the_card_says_gusan_and_live_assistant(card):
         assert old not in text, old
 
 
-def test_start_carries_its_pro_tag(card):
-    from PySide6.QtCore import Qt
+def test_start_has_no_pill_of_its_own(card):
+    # The PRO pill sits beside the card's title (hidden for Pro): see
+    # tests_qt/test_live_free_flow.py. Start is a plain button.
     c, _ = card()
     assert c.btn_start.text() == "Start"
-    assert not c.btn_start.icon().isNull()
-    assert c.btn_start.layoutDirection() == Qt.RightToLeft     # the tag after the word
+    assert c.btn_start.icon().isNull()
 
 
 def test_start_for_a_free_user_opens_the_pro_window(card):

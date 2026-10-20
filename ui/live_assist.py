@@ -10,6 +10,12 @@ Integration notes for Wave 4 (Gusan 2.0; this module is the card, not the page)
   ``show_live_assist()`` builds the card like toggle_live_assist does (fed by
   app.meeting_session.sig_chunk / sig_summary), then open_card(). Start /
   Stop drive app.meeting_session (start(source="live_assist") / stop()).
+* The card opens for EVERYONE (the page, the hotkey, the tray, the Meetings
+  live view): Free and guests see it with a PRO pill beside the title (hidden
+  for Pro; it follows app.sig_auth_changed and refreshes on every open). Start
+  is the Pro action: it shows the Pro window. Ask / Answer / Solve screen work
+  with the user's own key or a downloaded local model; with neither, the answer
+  box says "Answers need Pro, or your own key in Settings › Speech & AI."
 * Languages: live_assist_language "" = the dictation language;
   live_assist_output_language "" = the call's own (no "Respond in" hint).
 * Public setters - each updates the card at once, writes the cfg key in place,
@@ -148,6 +154,9 @@ _THEMES = {
 # After an answer the user asked for, how long an automatic one waits before
 # it may replace it (they are still reading it, or saying it).
 USER_ANSWER_HOLD_S = 12
+
+# Free / guest with no key of their own and no downloaded local model.
+NEEDS_PRO_ANSWERS = "Answers need Pro, or your own key in Settings › Speech & AI."
 
 ASK_PLACEHOLDER = "Ask anything about the call or your screen…"
 ASK_SENT = "✓ Sent - answering…"
@@ -997,6 +1006,15 @@ class LiveAssistOverlay(QWidget):
                 sig.connect(self.on_setting_changed)
             except Exception:
                 logger.debug("Live Assistant: no settings sync", exc_info=True)
+        # A sign-in, a sign-out or a plan change (any thread; the slot runs on
+        # the GUI thread) moves the PRO pill beside the title.
+        sig = getattr(self.app, "sig_auth_changed", None) if self.app else None
+        if sig is not None:
+            try:
+                sig.connect(self._refresh_plan)
+            except Exception:
+                logger.debug("Live Assistant: no plan sync", exc_info=True)
+        self._refresh_plan()
 
     # ── build ──
     def _build(self):
@@ -1010,19 +1028,21 @@ class LiveAssistOverlay(QWidget):
         bl.setSpacing(8)
         self.lbl_title = _ElidedLabel("Live Assistant", self.bar)
         bl.addWidget(self.lbl_title)
-        # Idle: a solid Start button with its PRO tag (the card's Pro action).
-        # Live: a green timer + a red stop button.
+        # The PRO pill beside the title: shown until the plan is Pro (the card
+        # opens for everyone; Start is the Pro action). See _refresh_plan.
+        self.lbl_pro = QLabel("PRO", self.bar)
+        self.lbl_pro.setObjectName("laPro")
+        self.lbl_pro.setAlignment(Qt.AlignCenter)
+        self.lbl_pro.setFixedHeight(18)
+        self.lbl_pro.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.lbl_pro.setToolTip("Pro feature - Start needs Pro.")
+        self.lbl_pro.setAccessibleName("Pro feature")
+        bl.addWidget(self.lbl_pro, 0, Qt.AlignVCenter)
+        # Idle: a solid Start button (the card's Pro action; the PRO pill
+        # beside the title says so). Live: a green timer + a red stop button.
         self.btn_start = QPushButton("Start", self.bar)
         self.btn_start.setObjectName("laStart")
         self.btn_start.setCursor(Qt.PointingHandCursor)
-        try:
-            from ui.icons import pro_pill_icon
-            self.btn_start.setIcon(pro_pill_icon(30, 16))
-            self.btn_start.setIconSize(QSize(30, 16))
-            # Right to left puts the tag after the word, as in the mockups.
-            self.btn_start.setLayoutDirection(Qt.RightToLeft)
-        except Exception:
-            logger.debug("PRO tag on Start unavailable", exc_info=True)
         self.btn_start.setToolTip("Start listening to this call (its sound and your "
                                   "microphone).")
         self.btn_start.clicked.connect(self._start_listening)
@@ -1283,6 +1303,8 @@ class LiveAssistOverlay(QWidget):
         t = _THEMES[self._theme_name]
         accent = t["accent"]
         ok_bg, ok_fg, ok_line = chip_colors("ok", self._theme_name)
+        # The PRO pill (ProTag's purple glass): a lighter rim on dark glass.
+        pro_line = "rgba(255,255,255,0.45)" if self._theme_name == "dark" else "rgba(255,255,255,0.7)"
         self.setStyleSheet(f"""
             QLabel {{ color: {t['text']}; background: transparent; font-size: 12px; }}
             QToolTip {{
@@ -1319,6 +1341,12 @@ class LiveAssistOverlay(QWidget):
             }}
             QPushButton#laStart:hover {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2563eb, stop:1 #4f46e5);
+            }}
+            QLabel#laPro {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #a855f7, stop:1 #7e22ce);
+                color: #ffffff; border: 1px solid {pro_line}; border-radius: 9px;
+                padding: 0px 8px; font-size: 10px; font-weight: 700;
             }}
             QLabel#laTimer {{
                 color: {ok_fg}; background: {ok_bg}; border: 1px solid {ok_line};
@@ -1857,9 +1885,36 @@ class LiveAssistOverlay(QWidget):
         self.move(g.right() - self.width() - 16, g.top() + 70)
 
     def show_overlay(self):
+        self._refresh_plan()                   # the plan may have changed while it was hidden
         self.show()
         self.raise_()
         QTimer.singleShot(0, self._apply_glass)
+
+    # ── plan ──
+    def _is_pro(self):
+        """True / False for the user's plan; None when the app can't say (no
+        is_pro: a bare controller). An error counts as not Pro, like the page."""
+        fn = getattr(self.app, "is_pro", None) if self.app else None
+        if not callable(fn):
+            return None
+        try:
+            return bool(fn())
+        except Exception:
+            logger.debug("Live Assistant: is_pro failed", exc_info=True)
+            return False
+
+    def _refresh_plan(self):
+        """The PRO pill beside the title: there until the plan is Pro."""
+        self.lbl_pro.setVisible(self._is_pro() is False)
+
+    def _pro_blocks(self):
+        """Free and guests: Start is the Pro action - show the Pro window.
+        True when it blocked."""
+        if self._is_pro() is not False:
+            return False
+        if hasattr(self.app, "_pro_upsell"):
+            self.app._pro_upsell("Live Assistant")
+        return True
 
     def hide_overlay(self):
         self._end_snip()
@@ -2024,7 +2079,8 @@ class LiveAssistOverlay(QWidget):
         self._finish_context_edit()
         session = self._meeting_session()
         if session is None:
-            self._set_status("Meeting recorder isn't available.")
+            if not self._pro_blocks():          # Free: the Pro window, whatever the recorder
+                self._set_status("Meeting recorder isn't available.")
             return
         try:
             state = getattr(session, "state", None)
@@ -2034,9 +2090,7 @@ class LiveAssistOverlay(QWidget):
                 # Restarting the shared recorder now would lose the last recording.
                 self._set_status("Still saving the last session - try again in a moment.")
                 return
-            if hasattr(self.app, "is_pro") and not self.app.is_pro():
-                if hasattr(self.app, "_pro_upsell"):
-                    self.app._pro_upsell("Live Assistant")
+            if self._pro_blocks():              # Start is the Pro action
                 return
             # The one-time recording notice (the same as Meetings').
             from ui.recording_prompts import ensure_recording_consent
@@ -2349,6 +2403,8 @@ class LiveAssistOverlay(QWidget):
         if image_b64 and self.app.cfg.get("privacy_mode"):
             self._images_blocked()
             return
+        if self._no_answer_engine_for_free():
+            return                                # said so in the answer box; nothing went out
         if auto and ((self._suggesting and not getattr(self, "_suggest_auto", False))
                      or time.time() < getattr(self, "_hold_until", 0.0)):
             # The user asked for the answer on screen (typed, Solve screen,
@@ -2401,6 +2457,27 @@ class LiveAssistOverlay(QWidget):
             history=self._qa_history, session_context=self._context)
         threading.Thread(target=self._suggest_worker, args=(context, image_b64, gen),
                          daemon=True).start()
+
+    def _no_answer_engine_for_free(self):
+        """Free and guests open the card to look around: with their own key or
+        a downloaded local model Ask / Answer / Solve screen work as ever; with
+        neither, say so in the answer box at once (instead of "Thinking…" and a
+        failure) and send nothing. True when it said so."""
+        if self._is_pro() is not False:
+            return False
+        try:
+            engine, cfg = self._resolve_engine()
+        except Exception:
+            logger.debug("Live Assistant: engine check failed", exc_info=True)
+            return False
+        if engine is not None:
+            return False
+        self._stop_stream_render()
+        self.txt_suggestion.setPlainText(
+            actions.no_live_engine_message(cfg)
+            if (cfg or {}).get("privacy_mode") or (cfg or {}).get("live_assist_writer") == "local"
+            else NEEDS_PRO_ANSWERS)
+        return True
 
     def _resolve_engine(self):
         """Engine for answers (see actions.live_engine): the Pro cloud for a Pro

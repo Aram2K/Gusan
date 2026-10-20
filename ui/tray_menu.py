@@ -44,8 +44,8 @@ Integration notes for Wave 4
 ----------------------------
 Status: DONE - AppController._build_tray_menu builds it once and refreshes it
 in place (sig_setting_changed connected, attach_calendar from _setup_calendar);
-toggle_dictation exists. _pro_upsell maps FEATURE_ASSIST "Live Assistance" to
-the window's "Live Assistant" (analytics keep the old value).
+toggle_dictation exists. The Live Assistant row opens the card for every plan
+(its Start asks for Pro), so it never calls _pro_upsell.
 
 * Replace AppController._build_tray_menu (main.py) with::
 
@@ -68,7 +68,7 @@ the window's "Live Assistant" (analytics keep the old value).
     Dictate                 toggle_dictation() when it exists, else _on_hotkey()
                             (please add a public ``toggle_dictation``)
     Record a meeting…       Pro: show_main("meetings")   Free: _pro_upsell("Meeting recording")
-    Live Assistant          Pro: toggle_live_assist()   Free: _pro_upsell("Live Assistance")
+    Live Assistant          toggle_live_assist() for every plan (the card's Start asks for Pro)
     Convert audio to text…  show_main("audio_to_text")
     Recent › <item>         show_main(route, **opts) - Home's row targets
                             (dictation entry=, meetings meeting=, audio_to_text transcript=, smart_actions)
@@ -135,7 +135,6 @@ COLORS = {
 }
 
 FEATURE_MEETING = "Meeting recording"
-FEATURE_ASSIST = "Live Assistance"
 RECENT_ICONS = {"dictation": "mic", "smart": "wand", "audio": "wave", "meeting": "people"}
 
 # Action properties the style reads.
@@ -808,10 +807,9 @@ class TrayMenu(QObject):
             _call(self.app, "_pro_upsell", FEATURE_MEETING)
 
     def live_assistant(self):
-        if self._pro():
-            _call(self.app, "toggle_live_assist")
-        else:
-            _call(self.app, "_pro_upsell", FEATURE_ASSIST)
+        # The card opens for everyone (Free and guests too); it asks for Pro
+        # when Start is pressed, not here.
+        _call(self.app, "toggle_live_assist")
 
     def convert_audio(self):
         _call(self.app, "show_main", "audio_to_text")

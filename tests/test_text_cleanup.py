@@ -129,8 +129,22 @@ class TestReplacements(unittest.TestCase):
 
 
 class TestFillers(unittest.TestCase):
-    def test_off_by_default(self):
-        self.assertEqual(clean("um so uh yes"), "um so uh yes")
+    def test_on_by_default(self):
+        # Gusan 2.0: "Remove filler words" is on out of the box.
+        self.assertEqual(clean("um so uh yes"), "so yes")
+
+    def test_a_config_without_the_key_removes_fillers(self):
+        opts = tc.options_from_config({})
+        self.assertTrue(opts.remove_fillers)
+        self.assertEqual(tc.clean("um so uh yes", options=opts), "so yes")
+
+    def test_a_saved_false_stays_false(self):
+        opts = tc.options_from_config({"cleanup_remove_fillers": False})
+        self.assertFalse(opts.remove_fillers)
+        self.assertEqual(tc.clean("um so uh yes", options=opts), "um so uh yes")
+
+    def test_off_when_asked(self):
+        self.assertEqual(clean("um so uh yes", remove_fillers=False), "um so uh yes")
 
     def test_removed_when_enabled(self):
         self.assertEqual(clean("um so uh yes", remove_fillers=True), "so yes")
@@ -221,7 +235,7 @@ class TestOptionsFromConfig(unittest.TestCase):
         o = tc.options_from_config({})
         self.assertTrue(o.strip_hallucinations)
         self.assertTrue(o.strip_artifacts)
-        self.assertFalse(o.remove_fillers)
+        self.assertTrue(o.remove_fillers)             # on by default (Gusan 2.0)
         self.assertEqual(o.replacements, ())
 
     def test_reads_replacement_list(self):

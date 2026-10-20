@@ -1,8 +1,9 @@
 """Gusan 2.0 Live Assistant page (ui/pages/live_assistant.py): the truthful
 one-word status chip beside the title (Hidden / May be hidden / Visible - the
 explanation is only its tooltip), the hero (Open + shortcut, then the You see /
-They see picture), Open (Pro window for Free, the card for Pro), the rail's
-instant settings, the card sync, About my calls and Past sessions."""
+They see picture), Open (the card, for every plan - tests_qt/test_live_free_flow.py has the
+Free / Pro flow), the rail's instant settings, the card sync, About my calls and Past
+sessions."""
 import datetime
 import json
 import time
@@ -108,8 +109,8 @@ def test_the_page_opens_in_the_shell_without_an_error_card(qapp, la, tier):
         assert page.header.sub_label.text() == "Answers questions while you talk."
         assert page.status_chip.text() == "Hidden"
         assert page.status_chip.accessibleName() == "Hidden on screen share"
-        assert page.fair_use.text() == ("For your own calls — not for exams or interviews "
-                                        "where help isn’t allowed.")
+        assert page.pro_tag.text() == "PRO"                 # beside the title, for every plan
+        assert not hasattr(page, "fair_use")                # the small grey line is gone
     finally:
         win.hide()
         win.deleteLater()
@@ -127,7 +128,7 @@ def test_a_bare_controller_does_not_break_it(qapp, la):
     page = la.create(app)
     try:
         page.on_open()
-        page.open_button.click()                # no _pro_upsell: nothing happens, no crash
+        page.open_button.click()                # no show_live_assist / toggle: nothing happens, no crash
         page.hide_toggle.click()                # no set_setting: written into cfg
         assert app.cfg["live_assist_private"] is False
         page.local_change.click()
@@ -140,7 +141,7 @@ def test_a_bare_controller_does_not_break_it(qapp, la):
 
 def test_free_and_pro_views(build):
     free, _ = build("free")
-    assert free.open_pro_tag.text() == "PRO"
+    assert free.pro_tag.text() == "PRO"
     assert free.local_option.radio.isChecked() and not free.cloud_option.radio.isChecked()
     assert free.cloud_option.pro_tag is not None and free.local_option.pro_tag is None
     assert free.cloud_option.model_label.text() == "DeepSeek V4.1 Flash"
@@ -148,7 +149,7 @@ def test_free_and_pro_views(build):
     assert pro.cloud_option.radio.isChecked() and not pro.local_option.radio.isChecked()
     assert pro.cloud_option.radio.accessibleName() == "Gusan Cloud · DeepSeek V4.1 Flash"
     assert pro.local_option.model_label.text().startswith("Qwen 1.5B")
-    assert pro.open_pro_tag.text() == "PRO"     # calm Pro: the tag stays, nothing else
+    assert pro.pro_tag.text() == "PRO"          # the feature's tag stays beside the title, nothing else
 
 
 def test_every_control_has_a_name(build):
@@ -218,11 +219,13 @@ def test_the_removed_headline_pieces_are_gone(build, la):
 def test_the_chip_sits_beside_the_title(build):
     page, _ = build("pro")
     chip, title = page.status_chip, page.header.title_label
-    assert page.header.title_trail is chip
+    assert page.header.title_trail.isAncestorOf(chip)           # the PRO pill and the chip ride together
     assert page.header.isAncestorOf(chip)
     assert chip.isVisibleTo(page)
     t = title.mapTo(page, QPoint(0, 0))
     c = chip.mapTo(page, QPoint(0, 0))
+    pill = page.pro_tag.mapTo(page, QPoint(0, 0))
+    assert t.x() + title.width() <= pill.x() < pill.x() + page.pro_tag.width() <= c.x()   # title, PRO, chip
     assert c.x() >= t.x() + title.width()                       # to the right of the title...
     assert abs((c.y() + chip.height() / 2) - (t.y() + title.height() / 2)) <= 6   # ...on its line
     assert c.y() + chip.height() <= page.header.height()        # inside the header, not the body
@@ -242,7 +245,7 @@ def test_the_hero_opens_with_the_actions_then_the_picture(build):
     assert page.open_button.isVisibleTo(page) and page.hero_keys.isVisibleTo(page)
     # Nothing else rides above them in the hero: no sentence, no mark.
     texts = [w.text() for w in hero.findChildren(QLabel) if w.text() and w.isVisibleTo(page)]
-    assert set(texts) <= {"or", "+", "Ctrl", "Alt", "A", "PRO"}, texts
+    assert set(texts) <= {"or", "+", "Ctrl", "Alt", "A"}, texts     # no PRO pill beside the button
 
 
 def test_the_chip_changes_tone_with_the_status(build):
@@ -364,7 +367,6 @@ def test_the_page_says_screen_share_only_in_the_rail(build):
                     found.append(t)
         assert set(found) <= {"Hide from screen share"}, found
         assert found, "the rail's switch label is missing"
-        assert "screen share" not in page.fair_use.text().lower()
 
 
 def test_hero_keycaps_follow_the_live_assist_hotkey(build):
@@ -381,11 +383,12 @@ def test_hero_keycaps_follow_the_live_assist_hotkey(build):
     assert page.shortcut.none_label.isVisibleTo(page)
 
 
-def test_open_is_the_pro_window_for_free(build):
-    page, app = build("free")
+@pytest.mark.parametrize("tier", ["free", "guest"])
+def test_open_shows_the_card_for_free_and_guests_too(build, tier):
+    page, app = build(tier)
     page.open_button.click()
-    assert ("_pro_upsell", "Live Assistance") in app.calls
-    assert not _calls(app, "toggle_live_assist")
+    assert ("toggle_live_assist",) in app.calls              # the card - never the Pro window
+    assert not _calls(app, "_pro_upsell")
 
 
 def test_open_shows_the_card_for_pro(build):

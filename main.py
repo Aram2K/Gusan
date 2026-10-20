@@ -169,7 +169,7 @@ DEFAULT = {
     "cleanup_enabled": True,
     "cleanup_strip_hallucinations": True,
     "cleanup_strip_artifacts": True,
-    "cleanup_remove_fillers": False,   # OFF: it changes the user's words
+    "cleanup_remove_fillers": True,    # ON: um / uh / you know are dropped (a saved False stays False)
     "cleanup_replacements": [],        # [{"from": "pyside 6", "to": "PySide6"}]
     "cleanup_custom_hallucinations": [],
     # Custom vocabulary (vocabulary.py). "initial_prompt" above is kept as a

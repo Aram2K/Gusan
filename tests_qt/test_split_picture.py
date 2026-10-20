@@ -13,13 +13,14 @@ import math
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QFocusEvent, QImage, QKeyEvent, QMouseEvent, QRegion
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 import live_context
 from ui.pages import live_assistant as la
+from ui.pages import live_demo
 
 PIC = la.ScreensPicture
 
@@ -58,7 +59,7 @@ def calm(qapp, monkeypatch):
 def make(qapp):
     made = []
 
-    def _make(key="on", width=462, owner="Aram", show=True):
+    def _make(key="on", width=la.DESIGN_W, owner="Aram", show=True):
         pic = PIC()
         pic.set_owner(owner)
         pic.set_status(status(key))
@@ -148,8 +149,30 @@ def slide_rect(x0, y0, x1, y1):
     return (left + x0 * la.K, top + y0 * la.K, left + x1 * la.K, top + y1 * la.K)
 
 
-# the inside of the card, below its head (title + chip), clear of the line and the handle at either rest
-CARD_BODY = slide_rect(150, 82, 255, 150)
+GW = la.INNER_W * la.K                      # the glass's width, in design units
+
+
+def card_rect():
+    """Where the card floats, in design units (the picture's own card_rect(), worked out here again)."""
+    size = live_demo.card_size()
+    top = la.LABEL_H + la.LABEL_GAP + la.BEZEL
+    return QRectF(la.BEZEL + GW - la.CARD_GAP_RIGHT - size.width(),
+                  top + la.INNER_H * la.K / 2.0 - size.height() / 2.0 + la.CARD_DROP, size.width(), size.height())
+
+
+def card_part(name, inset=0.0):
+    """A part of the card (a live_demo.layout() name), in design units of the picture."""
+    c, k = card_rect(), live_demo.CARD_SCALE
+    r = live_demo.layout().rects[name]
+    return (c.left() + r.left() * k + inset, c.top() + r.top() * k + inset,
+            c.left() + r.right() * k - inset, c.top() + r.bottom() * k - inset)
+
+
+# the inside of the card, below its head (title + chip): the transcript, the answer row and the answer, clear of
+# the line and the handle at either rest
+def card_body():
+    return (card_part("transcript")[0] + 6, card_part("transcript")[1],
+            card_part("answer")[2] - 24, card_part("answer")[3])
 
 
 def diff(a, b, pic, rect, step=2):
@@ -261,7 +284,7 @@ def side_diff(img, pic, side, x0, x1):
 
 # ═════════════════════════ geometry ═════════════════════════
 def test_design_constants():
-    assert (la.DESIGN_W, la.DESIGN_H) == (462, 353)
+    assert (la.DESIGN_W, la.DESIGN_H) == (588, 416)
     assert la.DESIGN_W == la.SCREEN_W == int(la.INNER_W * la.K) + 2 * la.BEZEL
     # the line runs the FULL width of the glass: the stops are the ends
     assert (la.SPLIT_MIN, la.SPLIT_MAX) == (0.0, 1.0)
@@ -277,17 +300,17 @@ def test_size_hint_and_height_for_width(make):
     assert pic.sizeHint().toTuple() == (la.DESIGN_W, la.DESIGN_H)
     assert pic.hasHeightForWidth()
     assert pic.sizePolicy().hasHeightForWidth()
-    assert pic.heightForWidth(462) == 353
-    assert pic.heightForWidth(1000) == 353                    # never scales up
-    assert pic.heightForWidth(231) == math.ceil(353 / 2.0)    # 0.5 is exactly on a step
+    assert pic.heightForWidth(la.DESIGN_W) == la.DESIGN_H
+    assert pic.heightForWidth(1000) == la.DESIGN_H            # never scales up
+    assert pic.heightForWidth(la.DESIGN_W // 2) == math.ceil(la.DESIGN_H / 2.0)    # 0.5 is exactly on a step
     assert pic.heightForWidth(0) == pic.heightForWidth(1) > 0  # a zero width never divides by zero
     heights = [pic.heightForWidth(w) for w in range(100, 470, 10)]
     assert heights == sorted(heights)                         # monotonic
     # the scale snaps DOWN to 1/64, so a drag of the window edge rebuilds the
     # cached images ~25 times and the picture never overflows its column
-    s = math.floor(300 / 462.0 * la.SCALE_STEPS) / la.SCALE_STEPS
-    assert pic.heightForWidth(300) == math.ceil(353 * s)
-    assert 353 * 300 / 462.0 - 353 * s < 353 / float(la.SCALE_STEPS) + 1e-9
+    s = math.floor(300 / float(la.DESIGN_W) * la.SCALE_STEPS) / la.SCALE_STEPS
+    assert pic.heightForWidth(300) == math.ceil(la.DESIGN_H * s)
+    assert la.DESIGN_H * 300 / float(la.DESIGN_W) - la.DESIGN_H * s < la.DESIGN_H / float(la.SCALE_STEPS) + 1e-9
 
 
 def test_minimum_size_hint(make):
@@ -298,7 +321,7 @@ def test_minimum_size_hint(make):
 
 
 def test_scale_follows_width(make):
-    pic = make(width=231)
+    pic = make(width=la.DESIGN_W // 2)
     assert pic._scale() == pytest.approx(0.5)
     pic.resize(900, pic.heightForWidth(900))
     assert pic._scale() == 1.0
@@ -845,7 +868,7 @@ def test_pointer_moving_off_the_glass_resumes(make, motion):
 
 
 def test_mouse_positions_are_converted_with_the_scale(make):
-    pic = make("on", width=231)
+    pic = make("on", width=la.DESIGN_W // 2)
     assert pic._scale() == pytest.approx(0.5)
     press(pic, 0.25)
     assert pic.split() == pytest.approx(0.25, abs=0.01)
@@ -1003,7 +1026,7 @@ def test_tab_focus_ring_is_painted_on_the_handle(make, k):
 
 # ═════════════════════════ rendering ═════════════════════════
 @pytest.mark.parametrize("k", KEYS)
-@pytest.mark.parametrize("width", [462, 380, 300, 260, 700])
+@pytest.mark.parametrize("width", [la.DESIGN_W, 380, 300, 260, 700])
 @pytest.mark.parametrize("f", [la.SPLIT_MIN, 0.3, 0.5, la.SPLIT_MAX])
 def test_grab_everywhere_without_errors(make, k, width, f):
     pic = make(k, width=width)
@@ -1027,17 +1050,17 @@ def test_card_goes_when_the_line_goes_left(make):
     pic = make("on")
     you = grab_at(pic, la.STOP_YOU)
     they = grab_at(pic, la.STOP_THEY)
-    assert diff(you, they, pic, CARD_BODY) > 8
+    assert diff(you, they, pic, card_body()) > 8
     # the stops are the ends of the glass: at 1.0 the WHOLE screen is "You see", at 0.0 the WHOLE screen is
     # "They see" (checked against the cached sides, clear of the handle and of the rounded corners)
-    assert side_diff(you, pic, "you", 12, 390) < 1.0
-    assert side_diff(they, pic, "they", 60, 438) < 1.0
-    assert side_diff(you, pic, "they", 12, 390) > 3               # ... and not the other side
-    assert side_diff(they, pic, "you", 60, 438) > 3
+    assert side_diff(you, pic, "you", 12, GW - 60) < 1.0
+    assert side_diff(they, pic, "they", 60, GW - 12) < 1.0
+    assert side_diff(you, pic, "they", 12, GW - 60) > 3           # ... and not the other side
+    assert side_diff(they, pic, "you", 60, GW - 12) > 3
     # in between both show
     mid = grab_at(pic, 0.5)
-    assert side_diff(mid, pic, "you", 12, 190) < 1.0
-    assert side_diff(mid, pic, "they", 260, 438) < 1.0
+    assert side_diff(mid, pic, "you", 12, GW / 2 - 35) < 1.0
+    assert side_diff(mid, pic, "they", GW / 2 + 35, GW - 12) < 1.0
 
 
 def test_call_side_card_absent_when_hidden_present_otherwise(make):
@@ -1048,18 +1071,21 @@ def test_call_side_card_absent_when_hidden_present_otherwise(make):
     # the picture of the card on THEIR side, as the same region of an "off" render
     absent = shots["on"][1]
     present = shots["off"][0]
-    full = diff(absent, present, shots["on"][2], CARD_BODY)
+    full = diff(absent, present, shots["on"][2], card_body())
     assert full > 8
     # "partial": the card is on their side at about 45%
-    partial = diff(shots["partial"][1], absent, shots["on"][2], CARD_BODY)
-    assert 0.25 * full < partial < 0.90 * full      # between: faded, not gone and not full (layers blend one by one)
+    partial = diff(shots["partial"][1], absent, shots["on"][2], card_body())
+    assert partial > 0.25 * full                    # not gone ...
+    # ... and not full: it is a different picture from the full card (the frosted glass at 45% shows the slide
+    # through it, and its own blurred backdrop on top, so it does not sit a fixed share of the way between the two)
+    assert diff(shots["partial"][1], present, shots["on"][2], card_body()) > 0.25 * full
     # off / failed / unavailable: the same card as on the left, to the last pixel, and the same on both
     # ends of the sweep (only the banners change as the line goes by)
     for k in VISIBLE:
-        assert diff(shots[k][0], present, shots[k][2], CARD_BODY) < 1.0, k
-        assert diff(shots[k][1], shots[k][0], shots[k][2], CARD_BODY) < 1.0, k
+        assert diff(shots[k][0], present, shots[k][2], card_body()) < 1.0, k
+        assert diff(shots[k][1], shots[k][0], shots[k][2], card_body()) < 1.0, k
     # and the "you" side is the same card whatever the status
-    assert diff(shots["on"][0], present, shots["on"][2], CARD_BODY) < 1.5   # (the macOS chip is wider: its card is too)
+    assert diff(shots["on"][0], present, shots["on"][2], card_body()) < 1.5   # (the macOS chip is wider: its card is too)
 
 
 @pytest.mark.parametrize("k", VISIBLE)
@@ -1068,10 +1094,10 @@ def test_in_the_visible_statuses_the_sweep_only_changes_the_banners(make, k):
     other only "Sharing" / "<owner>'s screen" change."""
     pic = make(k, owner="Aram")
     you, they = grab_at(pic, la.STOP_YOU), grab_at(pic, la.STOP_THEY)
-    top_left = slide_rect(0, 4, 140, 17)
-    top_right = slide_rect(160, 4, 300, 17)
-    assert diff(you, they, pic, CARD_BODY) < 1.0                           # the card: the same
-    assert diff(you, they, pic, slide_rect(150, 20, 300, 160), step=3) < 6  # (the head differs only by the line / handle)
+    top_left = slide_rect(0, 4, la.INNER_W * 0.45, 17)
+    top_right = slide_rect(la.INNER_W * 0.55, 4, la.INNER_W, 17)
+    assert diff(you, they, pic, card_body()) < 1.0                           # the card: the same
+    assert diff(you, they, pic, slide_rect(125, 28, 360, 150), step=3) < 6  # (the head differs only by the line / handle)
     assert diff(you, they, pic, top_left) > 3 and diff(you, they, pic, top_right) > 3    # the banners: swapped
     # the card is where it is on the call side at partial strength only in "partial"
     assert pic.they_see_card() and pic._they_opacity() == 1.0
@@ -1116,8 +1142,8 @@ def test_left_of_the_line_is_you_right_is_they(make):
     ref_you = grab_at(pic, la.SPLIT_MAX)
     ref_they = grab_at(pic, la.SPLIT_MIN)
     mid = grab_at(pic, 0.5)
-    left = slide_rect(5, 60, 100, 160)                                 # left of the line (slide x 150), clear of the banner
-    right = slide_rect(200, 60, 290, 160)                              # right of it, where the card is on "you"
+    left = slide_rect(5, 60, 100, 160)                                 # left of the line (slide x 192), clear of the banner
+    right = slide_rect(215, 60, 350, 160)                              # right of it, where the card is on "you"
     assert diff(mid, ref_you, pic, left) < 1.0
     assert diff(mid, ref_they, pic, right) < 1.0
     assert diff(mid, ref_you, pic, right) > 8                          # not the 'you' side there
@@ -1129,8 +1155,8 @@ def test_banners_differ_by_side(make):
     mid = grab_at(pic, 0.5)
     ref_you = grab_at(pic, la.SPLIT_MAX)
     ref_they = grab_at(pic, la.SPLIT_MIN)
-    top_left = slide_rect(0, 4, 140, 17)                               # "Sharing" pill on the left, in "you"
-    top_right = slide_rect(160, 4, 300, 17)                            # owner pill on the right, in "they"
+    top_left = slide_rect(0, 4, la.INNER_W * 0.45, 17)                 # "Sharing" pill on the left, in "you"
+    top_right = slide_rect(la.INNER_W * 0.55, 4, la.INNER_W, 17)       # owner pill on the right, in "they"
     assert diff(mid, ref_you, pic, top_left) < 1.0
     assert diff(mid, ref_they, pic, top_right) < 1.0
     assert diff(ref_you, ref_they, pic, top_left) > 3                  # the two sides have different banners there
@@ -1240,7 +1266,7 @@ def test_cache_rebuilt_when_the_owner_changes(make):
 
 
 def test_cache_rebuilt_when_the_scale_changes_and_not_above_design_width(make):
-    pic = make("on", width=462)
+    pic = make("on", width=la.DESIGN_W)
     image(pic)
     first = _ids(pic)
     pic.resize(900, pic.heightForWidth(900))                          # still scale 1.0
@@ -1261,7 +1287,7 @@ def test_cache_rebuilt_when_the_scale_changes_and_not_above_design_width(make):
 
 
 def test_cache_pixmaps_are_in_device_pixels(make):
-    pic = make("on", width=462)
+    pic = make("on", width=la.DESIGN_W)
     image(pic)
     dpr = pic.devicePixelRatioF()
     you = pic._cache["you"]
@@ -1382,7 +1408,7 @@ def test_letting_go_away_from_the_glass_clears_hover_and_cursor(make, motion, k)
 def test_taking_hold_of_the_handle_does_not_make_the_line_jump(make, k):
     """Grab the round handle off-centre and the line stays where it was; press
     elsewhere on the glass and it jumps to the pointer."""
-    pic = make(k, width=462)
+    pic = make(k, width=la.DESIGN_W)
     pic.set_split(0.5)
     off = 12.0                                                       # design units to the left of the line
     mouse(pic, QEvent.MouseButtonPress, split_x(pic, 0.5) - off * pic._scale(), mid_y(pic))
@@ -1401,7 +1427,7 @@ def test_the_owner_banner_never_outgrows_its_half_of_the_glass(make):
     pic.set_split(la.SPLIT_MIN)                                      # nearly all of the call's side shows
     img = image(pic)
     banner_row = (la.INNER_H * 0.0 + 15)                             # slide units: the banners' middle
-    left_half = slide_rect(60, banner_row, 140, banner_row + 1)
+    left_half = slide_rect(60, banner_row, la.INNER_W * 0.45, banner_row + 1)
     x0, y0, x1, y1 = left_half
     # No dark banner pixels in the left 2/5 of the glass: the name is elided, not run off the edge.
     for x in range(int(x0), int(x1), 6):
@@ -1439,12 +1465,12 @@ def test_partial_says_it_may_show(make):
 
 
 def test_the_painter_scale_snaps_down_to_a_step(make):
-    pic = make("on", width=462)
+    pic = make("on", width=la.DESIGN_W)
     seen = set()
-    for w in range(300, 463):
+    for w in range(int(0.65 * la.DESIGN_W), la.DESIGN_W + 1):
         pic.resize(w, pic.heightForWidth(w))
         s = pic._scale()
-        assert s <= w / 462.0 + 1e-9 and (w / 462.0 - s) < 1 / float(la.SCALE_STEPS) + 1e-9
+        assert s <= w / float(la.DESIGN_W) + 1e-9 and (w / float(la.DESIGN_W) - s) < 1 / float(la.SCALE_STEPS) + 1e-9
         seen.add(round(s, 6))
     assert len(seen) <= la.SCALE_STEPS * 0.4 + 2                     # ~25 rebuilds across the whole drag
 
@@ -1513,7 +1539,7 @@ def test_handle_x_is_the_line_in_the_middle_and_clamped_near_the_ends(make):
     assert xs[0] - la.HANDLE_R * 1.1 >= inner.left() - 1e-9 and xs[-1] + la.HANDLE_R * 1.1 <= inner.right() + 1e-9
 
 
-@pytest.mark.parametrize("k, width", [(k, 462) for k in KEYS] + [("on", 300), ("unavailable", 300)])
+@pytest.mark.parametrize("k, width", [(k, la.DESIGN_W) for k in KEYS] + [("on", 382), ("unavailable", 382)])
 @pytest.mark.parametrize("hot", [False, True])
 @pytest.mark.parametrize("f", [0.0, 1.0])
 def test_at_either_end_the_handle_rests_inside_the_glass(make, k, width, f, hot):
@@ -1540,7 +1566,7 @@ def test_at_either_end_the_handle_rests_inside_the_glass(make, k, width, f, hot)
 def test_at_either_end_the_line_is_the_edge_of_the_glass(make, k, f):
     """The line is clipped to the glass: a dark column right at the screen's edge, no white halo
     smeared over the bezel."""
-    pic = make(k, width=462)
+    pic = make(k, width=la.DESIGN_W)
     img = grab_at(pic, f)
     left, top, right, bottom = glass()
     line_x = left + 0.5 if f == 0.0 else right - 0.5
@@ -1557,7 +1583,7 @@ def test_at_either_end_the_line_is_the_edge_of_the_glass(make, k, f):
 def test_pressing_the_clamped_handle_at_an_end_does_not_move_the_handle(make, k, f):
     """The handle rests against the glass's edge while the line is the edge itself. Taking hold of the
     handle keeps it under the pointer (the line moves under it), wherever on the disc you press."""
-    pic = make(k, width=462)
+    pic = make(k, width=la.DESIGN_W)
     inner = pic._inner_rect()
     cx, cy = handle_centre_x(f), glass_mid_y()
     for dx, dy in ((0, 0), (-9, 0), (9, 0), (0, -10), (0, 10), (-8, 8)):
@@ -1573,7 +1599,7 @@ def test_pressing_the_clamped_handle_at_an_end_does_not_move_the_handle(make, k,
 @pytest.mark.parametrize("f, step", [(1.0, -60.0), (0.0, 60.0)])
 @pytest.mark.parametrize("k", KEYS)
 def test_dragging_the_clamped_handle_follows_without_a_jump(make, k, f, step):
-    pic = make(k, width=462)
+    pic = make(k, width=la.DESIGN_W)
     inner = pic._inner_rect()
     cx, cy = handle_centre_x(f), glass_mid_y()
     off = 7.0                                                      # grabbed 7 units off its centre
@@ -1596,27 +1622,27 @@ def test_dragging_the_clamped_handle_follows_without_a_jump(make, k, f, step):
 
 @pytest.mark.parametrize("f", [0.0, 1.0])
 def test_pressing_the_line_itself_at_an_end_leaves_it_there(make, f):
-    pic = make("on", width=462)
+    pic = make("on", width=la.DESIGN_W)
     left, top, right, bottom = glass()
     x = left if f == 0.0 else right
     pic.set_split(f)
     press_at(pic, x + (1.0 if f == 0.0 else -1.0), top + 20)       # on the line, high above the disc
     assert pic._dragging and pic.split() == f
-    drag_to(pic, left + 225, top + 20)
+    drag_to(pic, left + GW / 2, top + 20)
     assert pic.split() == pytest.approx(0.5, abs=0.003)
 
 
 @pytest.mark.parametrize("k", KEYS)
 def test_pressing_the_glass_away_from_the_handle_jumps_the_line_even_from_an_end(make, k):
-    pic = make(k, width=462)
+    pic = make(k, width=la.DESIGN_W)
     pic.set_split(1.0)
     left, top, right, bottom = glass()
     press_at(pic, left + 100, glass_mid_y())
-    assert pic.split() == pytest.approx(100 / 450.0, abs=0.003)
+    assert pic.split() == pytest.approx(100 / GW, abs=0.003)
     release_at(pic, left + 100)
     pic.set_split(0.0)
     press_at(pic, right - 100, glass_mid_y())
-    assert pic.split() == pytest.approx(350 / 450.0, abs=0.003)
+    assert pic.split() == pytest.approx((GW - 100) / GW, abs=0.003)
 
 
 @pytest.mark.parametrize("k", KEYS)
