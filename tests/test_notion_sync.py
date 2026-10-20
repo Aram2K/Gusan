@@ -492,7 +492,10 @@ class TestMetaLine(unittest.TestCase):
         self.assertEqual(notion_sync.meta_line(None), "Gusan")
 
     def test_the_start_comes_from_the_folder_name_when_the_meta_has_none(self):
-        self.assertEqual(notion_sync.meta_line({}, "C:\\x\\meetings\\20260929_110000"), "Tue 29 Sep · 11:00 · Gusan")
+        # A path for the system the tests run on (a "C:\x\..." string is one name on Linux).
+        folder = os.path.join(os.sep, "x", "meetings", "20260929_110000")
+        self.assertEqual(notion_sync.meta_line({}, folder), "Tue 29 Sep · 11:00 · Gusan")
+        self.assertEqual(notion_sync.meta_line({}, folder + os.sep), "Tue 29 Sep · 11:00 · Gusan")
 
     def test_junk_in_the_meta_never_raises(self):
         meta = {"started": "yesterday", "duration_sec": "soon", "attendees_list": [3, None]}
