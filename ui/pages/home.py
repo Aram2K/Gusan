@@ -541,27 +541,21 @@ def model_download_state(app, info):
 
 
 # ── painted pieces ───────────────────────────────────────────────────────────
-class FlowLayout(QLayout):
+class FlowLayout(QHBoxLayout):
     """Left-to-right items that wrap to a new line when the row is too narrow
-    (the hero chips at the window's minimum width)."""
+    (the hero chips at the window's minimum width).
+
+    The items stay in Qt's own box layout, nothing here keeps a QLayoutItem: a
+    layout that holds the items' Python wrappers in a list (the usual FlowLayout
+    recipe) finds them "already deleted" on a later layout pass, because PySide
+    invalidates item wrappers while their C++ items are alive (it happened when
+    an unrelated label was deleted, so only sometimes). Wrappers are fetched
+    fresh in each pass instead and dropped before the event loop runs."""
 
     def __init__(self, parent=None, spacing=8):
         super().__init__(parent)
-        self._items = []
         self._sp = spacing
         self.setContentsMargins(0, 0, 0, 0)
-
-    def addItem(self, item):
-        self._items.append(item)
-
-    def count(self):
-        return len(self._items)
-
-    def itemAt(self, i):
-        return self._items[i] if 0 <= i < len(self._items) else None
-
-    def takeAt(self, i):
-        return self._items.pop(i) if 0 <= i < len(self._items) else None
 
     def expandingDirections(self):
         return Qt.Orientations(0)
@@ -572,12 +566,17 @@ class FlowLayout(QLayout):
     def heightForWidth(self, width):
         return self._do(QRect(0, 0, width, 0), True)
 
+    def minimumHeightForWidth(self, width):
+        return self.heightForWidth(width)
+
     def setGeometry(self, rect):
-        super().setGeometry(rect)
+        QLayout.setGeometry(self, rect)             # not QBoxLayout's: the items are placed by _do
         self._do(rect, False)
 
     def _visible(self):
-        return [it for it in self._items if not it.isEmpty()]
+        """The items on screen now (fresh wrappers: use them within this call)."""
+        items = (self.itemAt(i) for i in range(self.count()))
+        return [it for it in items if it is not None and not it.isEmpty()]
 
     def sizeHint(self):
         items = self._visible()
@@ -590,6 +589,9 @@ class FlowLayout(QLayout):
         for it in self._visible():
             s = s.expandedTo(it.minimumSize())
         return s
+
+    def maximumSize(self):
+        return QSize(16777215, 16777215)
 
     def _do(self, rect, test):
         x, y, line = rect.x(), rect.y(), 0
