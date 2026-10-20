@@ -1,4 +1,10 @@
-"""Dictionary page (Gusan 2.0): teach Gusan your names, words and fixes.
+"""Dictionary (Gusan 2.0): teach Gusan your names, words and fixes.
+
+It lives in Settings (the Dictionary section; ui/pages/settings.py builds
+DictionaryPage(app, embedded=True)), not in the sidebar: embedded it has no
+page header of its own, and its settings panel sits under the lists instead
+of beside them. Opened as a standalone page (embedded=False) it is the page
+the tests and the 2.0 mockup describe.
 
 Mockup: Dictionary.dc.html (work.py dictionary, revision 2). "My words" are
 chips with an add field (vocabulary.py: the term list every speech engine
@@ -474,9 +480,10 @@ class MoreButton(QPushButton):
 
 # ── the page ──────────────────────────────────────────────────────────────────
 class DictionaryPage(QWidget):
-    def __init__(self, main_app, parent=None):
+    def __init__(self, main_app, parent=None, embedded=False):
         super().__init__(parent)
         self.app = main_app
+        self._embedded = bool(embedded)      # a section of Settings, not a page
         self.setProperty("gusan", "page")
         self._proof = ""
         self._proof_gen = 0              # a newer reload makes an older answer stale
@@ -487,10 +494,13 @@ class DictionaryPage(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        self.header = PageHeader("Dictionary", parent=self)
-        root.addWidget(self.header)
+        self.header = None
+        if not self._embedded:
+            self.header = PageHeader("Dictionary", parent=self)
+            root.addWidget(self.header)
         self._body = QHBoxLayout()
-        self._body.setContentsMargins(32, 0, 32, 28)
+        # Settings brings its own margins and its own section title.
+        self._body.setContentsMargins(*((0, 0, 0, 0) if self._embedded else (32, 0, 32, 28)))
         self._body.setSpacing(24)
         main = QVBoxLayout()
         main.setSpacing(16)
@@ -503,11 +513,18 @@ class DictionaryPage(QWidget):
         main.addStretch(1)
         self._body.addLayout(main, 1)
         self.rail = self._build_rail()
+        if self._embedded:
+            # Under the lists, as wide as they are (not a 316 px side panel).
+            self.rail.setMinimumWidth(0)
+            self.rail.setMaximumWidth(16777215)
+            self.rail.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         self._body.addWidget(self.rail, 0, Qt.AlignTop)
         root.addLayout(self._body, 1)
 
         self.refresh()
         self.reload_proof()
+        if self._embedded:
+            self._relayout()
 
     # ── My words ──
     def _build_words(self):
@@ -949,12 +966,15 @@ class DictionaryPage(QWidget):
         return p.width() if p is not None and p.width() > 0 else self.width()
 
     def _relayout(self):
-        stacked = self._available_width() < NARROW_AT
+        stacked = self._embedded or self._available_width() < NARROW_AT
         if stacked == self._stacked:
             return
         self._stacked = stacked
         self._body.setDirection(QBoxLayout.TopToBottom if stacked else QBoxLayout.LeftToRight)
-        self._body.setAlignment(self.rail, (Qt.AlignLeft | Qt.AlignTop) if stacked else Qt.AlignTop)
+        if self._embedded:
+            self._body.setAlignment(self.rail, Qt.AlignTop)         # full width under the lists
+        else:
+            self._body.setAlignment(self.rail, (Qt.AlignLeft | Qt.AlignTop) if stacked else Qt.AlignTop)
 
     def is_stacked(self):
         return self._stacked

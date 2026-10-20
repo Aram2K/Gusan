@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
 """Settings (Gusan 2.0): one scrolling page - General, Microphone, Speech & AI,
-Privacy, Updates & about - with a section list on the left that follows the
-scroll. Every change applies at once (app.set_setting / set_settings); there is
+Dictionary, Privacy, Updates & about - with a section list on the left that
+follows the scroll. Every change applies at once (app.set_setting / set_settings); there is
 no Save button.
 
     win.open("settings")                                  # General
-    win.open("settings", section="speech")                # general | microphone | speech | privacy | updates
+    win.open("settings", section="speech")                # general | microphone | speech | dictionary | privacy | updates
     win.open("settings", section="speech", focus="gpu")   # focus: gpu | keys | models | writer
 
 Feature options live on their own pages; the shortcut rows and the footer link
-there. Nothing here touches the network or scans the disk on the GUI thread:
+there. The Dictionary is NOT a page: it is the "Dictionary" section here (the
+words, replacements and removals of ui/pages/dictionary.py, embedded; the old
+"dictionary" route opens this section). Nothing here touches the network or scans the disk on the GUI thread:
 key tests, update checks, history counts, the hardware probe and the microphone
 all run on workers (api_keys.run_then) and come back only while the page exists.
 
@@ -111,14 +113,14 @@ logger = logging.getLogger("transcribe")
 IS_MAC = sys.platform == "darwin"
 
 SECTIONS = (("general", "gear", "General"), ("microphone", "mic", "Microphone"),
-            ("speech", "wave", "Speech & AI"), ("privacy", "shield", "Privacy"),
-            ("updates", "refresh", "Updates & about"))
+            ("speech", "wave", "Speech & AI"), ("dictionary", "book", "Dictionary"),
+            ("privacy", "shield", "Privacy"), ("updates", "refresh", "Updates & about"))
 SECTION_IDS = tuple(s for s, _i, _t in SECTIONS)
 _SECTION_ALIASES = {
     "mic": "microphone", "audio": "microphone", "speech_ai": "speech", "ai": "speech", "models": "speech",
     "model": "speech", "engines": "speech", "keys": "speech", "api_keys": "speech", "gpu": "speech",
     "privacy_updates": "privacy", "history": "privacy", "about": "updates", "update": "updates",
-    "account": "general",
+    "account": "general", "words": "dictionary", "vocabulary": "dictionary", "replacements": "dictionary",
 }
 APP_LOOKS = (("system", "Match system"), ("light", "Light"), ("dark", "Dark"))
 # 2.0.0 is light only (ui/theme.py has no dark palette yet): the App look row
@@ -134,7 +136,7 @@ SHORTCUTS = (
 SMART_SPEECH_KEY = engine_choice.SMART_SPEECH_KEY      # Smart Actions' "Transcribes with"
 FEATURE_PAGES = (("mic", "Dictation", "dictation"), ("wand", "Smart Actions", "smart_actions"),
                  ("people", "Meetings", "meetings"), ("incognito", "Live Assistant", "live_assistant"),
-                 ("wave", "Audio to text", "audio_to_text"), ("book", "Dictionary", "dictionary"))
+                 ("wave", "Audio to text", "audio_to_text"))
 WEBSITE_URL = "https://gusan.aibuben.xyz"          # Gusan's own site
 AIBUBEN_URL = "https://aibuben.xyz"               # "Part of the AIBUBEN community"
 LINKEDIN_URL = "https://www.linkedin.com/in/aram-adamyan-2k/"
@@ -150,7 +152,7 @@ _WATCHED = {
     "backend", "whisper_model", "managed_provider", "mistral_stt_model", "google_stt_model", "privacy_mode",
     "action_model", "action_api_provider", "action_api_model", "action_api_base_url", "action_api_key",
     "mistral_api_key", "google_api_key", "save_history", "analytics_enabled", "overlay_private",
-    "live_assist_private", "vocabulary_share_with_cloud", "install_updates_on_quit",
+    "live_assist_private", "install_updates_on_quit",
     "pending_update_version", "admin_tier_override",
 } | set(SMART_SHORTCUT_KEYS)
 
@@ -2015,6 +2017,7 @@ class SettingsPage(QWidget):
         self.opts = {}
         self.setProperty("gusan", "page")
         self._sections = {}
+        self.dictionary = None          # the embedded Dictionary (built with its section)
         self._pending = None            # (section, focus) waiting for a layout / show
         self._jump = None               # (section, scroll value) we jumped to
         self._refresh_queued = False
@@ -2067,7 +2070,7 @@ class SettingsPage(QWidget):
         # General and Microphone now; the rest right after the first paint (one
         # section per event-loop turn) or at once when a section is asked for.
         self._built = set()
-        self._lazy = ["speech", "privacy", "updates"]
+        self._lazy = ["speech", "dictionary", "privacy", "updates"]
         self._build_general()
         self._build_microphone()
         self.scroll.setWidget(content)
@@ -2171,7 +2174,8 @@ class SettingsPage(QWidget):
         return w, v
 
     # ── building the later sections ──
-    _BUILDERS = {"speech": "_build_speech", "privacy": "_build_privacy", "updates": "_build_updates"}
+    _BUILDERS = {"speech": "_build_speech", "dictionary": "_build_dictionary",
+                 "privacy": "_build_privacy", "updates": "_build_updates"}
 
     def is_built(self, sid):
         return sid in self._built or sid in ("general", "microphone")
@@ -2245,6 +2249,21 @@ class SettingsPage(QWidget):
             head.addWidget(label(sub, "muted", w))
         v.addLayout(head)
         return w, v
+
+    # ── Dictionary ──
+    def _build_dictionary(self):
+        """Your words, replacements and removals: the Dictionary page's content,
+        embedded. A failure here must not stop the sections after it."""
+        sec, v = self._section("dictionary", "Dictionary")
+        try:
+            import ui.pages.dictionary as dictionary_page      # plain import: PyInstaller bundles it
+            page = dictionary_page.DictionaryPage(self.app, embedded=True)    # no parent: a failure leaves nothing in the section
+            v.addWidget(page)
+            self.dictionary = page
+        except Exception:
+            logger.warning("The Dictionary section failed to build", exc_info=True)
+            self.dictionary = None
+            v.addWidget(label("The dictionary couldn't open. Restart Gusan and try again.", "muted", sec, wrap=True))
 
     # ── General ──
     def _build_general(self):
@@ -3185,7 +3204,6 @@ class SettingsPage(QWidget):
             pair.addWidget(tg, 0, Qt.AlignVCenter)
             pair.addWidget(text_label(text, 13, role="body", parent=hide), 0, Qt.AlignVCenter)
             hl.addLayout(pair)
-        self.t_words = self._toggle("vocabulary_share_with_cloud", "Use my words with cloud speech", True)
         self.row_history = self._row("Save my history", self.t_history, hint="Kept on this computer.")
         self.row_delete = self._row("Delete all history", self.btn_delete, hint="Can’t be undone.")
         self.row_stats = self._row("Share usage statistics", self.t_stats)
@@ -3196,10 +3214,7 @@ class SettingsPage(QWidget):
         self.row_stats.hint_label.linkActivated.connect(lambda _l: self._toggle_collect())
         self.row_hide = self._row("Hide from screen shares", hide, hint=self._hide_hint())
         self._prepend_icon(self.row_hide, "incognito", "ok-tx")
-        self.row_words = self._row("Use my words with cloud speech", self.t_words,
-                                   hint="Helps cloud speech spell your names.")
-        inner.addWidget(self._group([self.row_history, self.row_delete, self.row_stats, self.row_hide,
-                                     self.row_words]))
+        inner.addWidget(self._group([self.row_history, self.row_delete, self.row_stats, self.row_hide]))
         v.addLayout(inner)
 
     def _prepend_icon(self, row, icon, color):
@@ -3631,7 +3646,7 @@ class SettingsPage(QWidget):
         self._refresh_gpu()
 
     def _refresh_privacy(self):
-        for t in (self.t_history, self.t_stats, self.t_bar, self.t_card, self.t_words, self.t_privacy):
+        for t in (self.t_history, self.t_stats, self.t_bar, self.t_card, self.t_privacy):
             self._sync_toggle(t)
 
     def _refresh_updates(self):
@@ -3645,6 +3660,8 @@ class SettingsPage(QWidget):
         self.opts = dict(opts)
         self._connect_services()
         self._queue_refresh()               # catch up with anything changed while hidden
+        if self.dictionary is not None:
+            self.dictionary.on_open()       # its lists and the "now spelled right" proof
         sid = opts.get("section")
         focus = opts.get("focus")
         if sid or focus:
@@ -3654,6 +3671,8 @@ class SettingsPage(QWidget):
     def on_setting_changed(self, key):
         if key in _WATCHED:
             self._queue_refresh()
+        if self.dictionary is not None:
+            self.dictionary.on_setting_changed(key)       # words / replacements / removals / cloud share
 
     def refresh_account(self):
         name = self._account_name()

@@ -1,8 +1,9 @@
 """Gusan 2.0 pages, one module per sidebar route.
 
 To add a page, create ``ui/pages/<route>.py`` (route = home, dictation,
-smart_actions, meetings, live_assistant, audio_to_text, dictionary, settings
-or account) with:
+smart_actions, meetings, live_assistant, audio_to_text, settings or account;
+the Dictionary is a section of settings, ui/pages/dictionary.py is embedded
+there) with:
 
     def create(main_app):            # -> QWidget, built the first time it opens
         return MyPage(main_app)

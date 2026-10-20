@@ -677,7 +677,7 @@ def test_privacy_toggles(env):
     page = _settings(win)
     for toggle, key in ((page.t_privacy, "privacy_mode"), (page.t_history, "save_history"),
                         (page.t_stats, "analytics_enabled"), (page.t_bar, "overlay_private"),
-                        (page.t_card, "live_assist_private"), (page.t_words, "vocabulary_share_with_cloud")):
+                        (page.t_card, "live_assist_private")):
         before = bool(app.cfg.get(key))
         toggle.click()
         assert app.cfg[key] is (not before), key

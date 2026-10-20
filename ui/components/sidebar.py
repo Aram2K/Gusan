@@ -1,6 +1,6 @@
 """The main window's left navigation (232 px), as in the mockups.
 
-Logo + "Gusan", the seven pages (no PRO tags: Pro features open the Pro
+Logo + "Gusan", the six pages (no PRO tags: Pro features open the Pro
 window when a Free user uses them), then the account at the bottom - for Free and guests a small
 card with one quiet "Upgrade to Pro", for Pro just the name and the PRO pill -
 and Settings last.
@@ -25,7 +25,6 @@ NAV = (
     ("meetings", "people", "Meetings", True),
     ("live_assistant", "incognito", "Live Assistant", True),
     ("audio_to_text", "wave", "Audio to text", False),
-    ("dictionary", "book", "Dictionary", False),
 )
 
 

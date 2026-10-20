@@ -207,6 +207,7 @@ The **Settings** page (tray icon → Settings…) has the rest:
 *   **General:** start at login, the app look, notifications.
 *   **Microphone:** pick and test your microphone.
 *   **Speech & AI:** speech models by their real names (Whisper models on your computer; Gusan Cloud, or Mistral and Google Gemini with your own key), the AI models that write notes and answers, API keys, and the optional NVIDIA speed-up.
+*   **Dictionary:** your names and words, replacements, and phrases to always remove, plus whether cloud speech may use your words.
 *   **Privacy:** Privacy mode (everything stays on this computer), saving or deleting your history, usage statistics, and hiding the dictation bar and Live Assistant from screen shares.
 *   **Updates & about:** the version you have, Check now / Install update, installing updates when you quit, and Send feedback.
 

@@ -7,9 +7,9 @@ Baseline: 635 tests passed, 110 skipped (`venv\Scripts\python.exe -m pytest -q t
 
 ## 1. What 2.0.0 is
 
-- One main window "Gusan": sidebar (Home, Dictation, Smart Actions PRO, Meetings PRO, Live Assistant PRO, Audio to text, Dictionary;
+- One main window "Gusan": sidebar (Home, Dictation, Smart Actions PRO, Meetings PRO, Live Assistant PRO, Audio to text;
   account row + one quiet Upgrade; Settings). Each feature page carries its own settings in a right-hand panel; changes apply instantly.
-- Slim Settings (General, Microphone, Speech & AI, Privacy & updates) and Account & plan.
+- Slim Settings (General, Microphone, Speech & AI, Dictionary, Privacy & updates). The Dictionary moved from the sidebar into Settings (2026-10-20) and Account & plan.
 - New 5-step onboarding (Hello → speech model with "Best for your computer" → mic check → try Alt+R → sign up with Google or email).
 - Real model names under plain names everywhere. Calm Pro: PRO tags, one sidebar Upgrade, the current Pro window (renamed only).
 - Audio to text (unlimited, friendly), Live Assistant page that makes "hidden on screen share" obvious (incognito icon, "Hidden" chip).

@@ -137,21 +137,22 @@ def _assert_named_and_reachable(page):
 
 # ── both pages, every plan ───────────────────────────────────────────────────
 @pytest.mark.parametrize("tier", ["guest", "free", "pro"])
-def test_pages_build_in_the_shell_for_every_plan(shell, tries, tier):
+def test_pages_build_in_the_shell_for_every_plan(pages, shell, tries, tier):
+    """Smart Actions builds in the shell (the Dictionary is no page of the shell
+    any more: it is a Settings section, see test_settings_dictionary.py) and the
+    standalone Dictionary page still builds for every plan."""
     from ui.pages.dictionary import DictionaryPage
     from ui.pages.smart_actions import SmartActionsPage
     from ui.shell import ErrorPage
     win = shell(make_stub_app(tier))           # the plain stub: no set_settings, no services
     win.show()
     sa = win.open("smart_actions")
-    dc = win.open("dictionary")
     QApplication.processEvents()
-    for page in (sa, dc):
-        assert not isinstance(page, ErrorPage)
-    assert isinstance(sa, SmartActionsPage) and isinstance(dc, DictionaryPage)
+    assert not isinstance(sa, ErrorPage) and isinstance(sa, SmartActionsPage)
     assert sa.header.title_label.text() == "Smart Actions"
-    assert dc.header.title_label.text() == "Dictionary"
     _assert_named_and_reachable(sa)
+    dc = pages("dictionary", make_stub_app(tier))
+    assert isinstance(dc, DictionaryPage) and dc.header.title_label.text() == "Dictionary"
     _assert_named_and_reachable(dc)
     # Hooks the shell calls never raise.
     win.refresh_account()
@@ -159,7 +160,8 @@ def test_pages_build_in_the_shell_for_every_plan(shell, tries, tier):
     win.on_setting_changed("smart_actions_speech_model")
     win.on_setting_changed("vocabulary")
     win.open("smart_actions")
-    win.open("dictionary")
+    dc.on_open()
+    dc.on_setting_changed("vocabulary")
 
 
 def test_rail_moves_under_the_page_in_a_narrow_window(shell, tries, monkeypatch):
@@ -174,10 +176,36 @@ def test_rail_moves_under_the_page_in_a_narrow_window(shell, tries, monkeypatch)
     assert not sa.is_stacked()
     win.resize(960, 820)
     assert _wait(lambda: sa.is_stacked())
-    dc = win.open("dictionary")
-    assert _wait(lambda: dc.is_stacked())
-    win.resize(1280, 820)
-    assert _wait(lambda: not dc.is_stacked())
+
+
+def test_standalone_dictionary_rail_follows_its_parent_width(qapp, no_history):
+    """The standalone Dictionary page (not embedded) keeps its width rule: the
+    rail sits beside the lists from NARROW_AT up and under them below it."""
+    from PySide6.QtWidgets import QVBoxLayout, QWidget
+    from ui.pages.dictionary import NARROW_AT, DictionaryPage
+    host = QWidget()
+    lay = QVBoxLayout(host)
+    lay.setContentsMargins(0, 0, 0, 0)
+    page = DictionaryPage(live_app("free"), parent=host)
+    lay.addWidget(page)
+    host.resize(1048, 900)
+    host.show()
+    QApplication.processEvents()
+    try:
+        assert NARROW_AT == 940
+        assert not page.is_stacked()
+        host.resize(NARROW_AT - 1, 900)
+        assert _wait(lambda: page.is_stacked())
+        host.resize(NARROW_AT, 900)
+        assert _wait(lambda: not page.is_stacked())
+        host.resize(728, 900)
+        assert _wait(lambda: page.is_stacked())
+        host.resize(1280, 900)
+        assert _wait(lambda: not page.is_stacked())
+    finally:
+        host.hide()
+        host.deleteLater()
+        QApplication.processEvents()
 
 
 # ── Smart Actions: the hero ──────────────────────────────────────────────────

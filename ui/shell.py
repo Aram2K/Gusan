@@ -29,7 +29,11 @@ from ui.components import Button, Card, IconTile, PageHeader, Sidebar, label
 logger = logging.getLogger("transcribe")
 
 ROUTES = ("home", "dictation", "smart_actions", "meetings", "live_assistant", "audio_to_text",
-          "dictionary", "settings", "account")
+          "settings", "account")
+
+# Pages that moved: the old route opens its new place. The Dictionary is a
+# section of Settings (ui/pages/settings.py), not a page of its own.
+ROUTE_ALIASES = {"dictionary": ("settings", {"section": "dictionary"})}
 
 TITLES = {
     "home": "Welcome",
@@ -38,7 +42,6 @@ TITLES = {
     "meetings": "Meetings",
     "live_assistant": "Live Assistant",
     "audio_to_text": "Convert audio to text",
-    "dictionary": "Dictionary",
     "settings": "Settings",
     "account": "Account & plan",
 }
@@ -76,8 +79,6 @@ def _import_page_module(route):
             import ui.pages.live_assistant as mod
         elif route == "audio_to_text":
             import ui.pages.audio_to_text as mod
-        elif route == "dictionary":
-            import ui.pages.dictionary as mod
         elif route == "settings":
             import ui.pages.settings as mod
         elif route == "account":
@@ -234,6 +235,10 @@ class MainWindow(QMainWindow):
 
     def open(self, route, **opts):
         """Show ``route`` (building it the first time) and return its page."""
+        alias = ROUTE_ALIASES.get(route)
+        if alias is not None:
+            route, extra = alias
+            opts = dict(extra, **opts)
         if route not in ROUTES:
             logger.warning("Unknown page %r - opening home", route)
             route = "home"
