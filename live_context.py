@@ -14,6 +14,12 @@ HISTORY_TURNS = 2                # earlier answers kept for follow-up questions
 # description, and still well inside a local model's 8k-token window next to
 # the transcript tail.
 CONTEXT_CHARS = 5000
+# The documents the user added (live_docs.py): the best-matching passages for the
+# question, as one block in the model's input. The whole block - header, labels and
+# text - is never longer than this. A local model has a small (~8k-token) window
+# shared with the transcript tail and the session context; the cloud routes have room.
+LOCAL_DOC_CHARS = 3000
+CLOUD_DOC_CHARS = 12000
 
 SOLVE_SCREEN = ("Solve the problem or answer the question shown on my screen. "
                 "Give the solution directly.")
@@ -33,13 +39,21 @@ def clip_context(text, limit=CONTEXT_CHARS):
 
 def rolling_context(live_text, question="", title="", attendees="",
                     tail_chars=TAIL_CHARS, screen=False, output_lang="en", history=(),
-                    session_context=""):
+                    session_context="", documents=None, doc_chars=None, pictures=()):
     """The text handed to the model: recent conversation + optional question,
     plus the last answers of this session (``history``: (asked, answer) pairs)
     so a follow-up like "and the second part?" has something to refer to.
     ``session_context`` is what the user wrote about the call - it holds for
     every answer of the session. Cuts at a sentence boundary when it can so
-    the model doesn't start mid-word."""
+    the model doesn't start mid-word.
+
+    ``documents``: the ACTIVE documents the user added (live_docs.DocText, from
+    DocStore.active_docs()). The passages that best match the question and the
+    latest talk go in one delimited "reference material" block - data, never
+    instructions - after the session context and before the conversation, never
+    longer than ``doc_chars`` (LOCAL_DOC_CHARS for a local model, CLOUD_DOC_CHARS
+    otherwise; default cloud). ``pictures``: the names of picture documents attached
+    to this answer, named in that block. Without either, nothing changes."""
     tail = (live_text or "").strip()
     if len(tail) > tail_chars:
         tail = tail[-tail_chars:]
@@ -60,6 +74,13 @@ def rolling_context(live_text, question="", title="", attendees="",
         if attendees:
             meta.append(f"Attendees: {attendees}")
         parts.append("\n".join(meta))
+    if documents or pictures:
+        import live_docs
+        block = live_docs.documents_context(
+            documents, question, tail[-live_docs.QUERY_CONVERSATION_CHARS:],
+            CLOUD_DOC_CHARS if doc_chars is None else doc_chars, pictures)
+        if block:
+            parts.append(block)
     earlier = [(q, a) for q, a in list(history)[-HISTORY_TURNS:] if (a or "").strip()]
     if earlier:
         lines = ["Your earlier answers in this conversation (for follow-ups only):"]
@@ -94,6 +115,32 @@ def should_attach_screen(screen_on, force=False):
     ("how do I solve this?"), so with Screen on every answer sees the screen.
     ``force`` is an explicit request (the Solve screen button)."""
     return bool(screen_on or force)
+
+
+# ── the reply path ──
+# The card renders an answer as Markdown in a QTextEdit, and Qt's text widgets load
+# an image named in it from the local disk: a file:// path, or a \\host\share path
+# on Windows, which is a network connection (the PC's sign-in can leak to that
+# host). Text the model read - a document, a web page on screen - could make it
+# write one. An answer here never needs an image, so every form is replaced by its
+# alt text BEFORE anything is rendered (the card calls this in render_markdown).
+_MD_IMAGE = re.compile(r"!\[([^\]\n]{0,200})\](?:\([^)\n]{0,2000}\)|\[[^\]\n]{0,200}\])")
+# (the blanks around the "/" are bounded: "<" followed by thousands of spaces - a reply can
+# have them - made "<\s*/?\s*" backtrack quadratically and froze the card for minutes)
+_HTML_MEDIA = re.compile(
+    r"<\s{0,8}/?\s{0,8}(?:img|image|picture|source|video|audio|iframe|embed|object|link|svg|"
+    r"script|style)\b[^>\n]{0,2000}>?", re.I)
+
+
+def safe_answer_markdown(text):
+    """``text`` (an answer, as Markdown) with every image taken out: ![alt](url) and
+    ![alt][ref] become their alt text, raw <img>/<svg>/<iframe>... tags vanish, and
+    any other "![" (a shortcut reference, a long or multi-line alt) gets a space, so
+    it can never start an image (a backslash would not do: "\\\\![" is an image
+    again). Plain text, links and code stay as they were."""
+    text = _MD_IMAGE.sub(lambda m: m.group(1).strip(), text or "")
+    text = _HTML_MEDIA.sub("", text)
+    return text.replace("![", "! [")
 
 
 # Speech recognition without a "?": a request is one however it ends ("Walk me

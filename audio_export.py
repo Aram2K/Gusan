@@ -33,6 +33,38 @@ def write_wav(path, audio_f32, rate=RATE):
     return path
 
 
+def write_wav_int16(path, samples_int16, rate=RATE):
+    """16-bit mono PCM WAV from int16 samples - the lossless form a meeting's
+    separate microphone / system sound tracks are kept in. Written to a temp
+    name next to the target and renamed, so a crash never leaves half a file
+    (the file is either there whole or not at all). Returns the path."""
+    import os
+    path = Path(path)
+    tmp = path.with_name(path.name + ".part")
+    data = np.asarray(samples_int16, dtype=np.int16)
+    try:
+        with wave.open(str(tmp), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(data.tobytes())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    return path
+
+
+def read_wav_float32(path):
+    """(float32 samples in [-1, 1], rate) of a 16-bit WAV (stereo is
+    downmixed) - what Whisper and the speaker pass take."""
+    data, rate = read_wav_int16(path)
+    return data.astype(np.float32) / np.float32(32767.0), rate
+
+
 def read_wav_int16(path):
     """(int16 samples, rate). Stereo files are downmixed."""
     with wave.open(str(path), "rb") as w:

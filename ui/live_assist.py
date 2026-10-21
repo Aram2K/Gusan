@@ -79,6 +79,14 @@ What it is (product contract):
   guidance applies.
 * An image can go with a question: a screenshot cropped inside the card
   itself (nothing new appears on the screen) or one pasted with Ctrl+V.
+* Documents the user added (live_docs.py; added on the Live Assistant page or dropped on
+  this card): a chip above the ask box says how many the answers can read, and a click
+  lists them with a switch each. Every answer - typed or automatic - carries the parts of
+  the ACTIVE ones that match it, as one delimited block of data, built on the worker thread
+  once the engine is known (_documents_for_answer; live_docs.doc_use decides, Privacy mode
+  is absolute, a cloud route needs the person's one-time yes - asked on Start and for a
+  typed question, never in the middle of an automatic answer). Pictures from documents ride
+  after the screenshot on a route that can see images. See docs/redesign/live-documents-spec.md.
 * Liquid glass: because the window is excluded from capture, the pixels
   BEHIND it can be sampled (QScreen.grabWindow honours the exclusion) and
   rendered back through the shape - real blur, an edge refraction ring, a
@@ -98,7 +106,7 @@ import threading
 import time
 
 from PySide6.QtCore import (
-    Qt, QBuffer, QEvent, QIODevice, QObject, QPointF, QRect, QRectF, QSize, QTimer, Signal,
+    Qt, QBuffer, QEvent, QIODevice, QObject, QPoint, QPointF, QRect, QRectF, QSize, QTimer, Signal,
 )
 from PySide6.QtGui import (
     QBrush, QColor, QCursor, QIcon, QImage, QKeySequence, QLinearGradient, QPainter,
@@ -113,9 +121,10 @@ import actions
 from live_context import (  # noqa: F401 - re-exported for callers of this module
     CONTEXT_CHARS, HISTORY_TURNS, SOLVE_SCREEN, TAIL_CHARS, HideStatus, clip_context,
     hide_status, last_question, looks_like_question, mac_partial_tip, private_state,
-    rolling_context, should_attach_screen,
+    rolling_context, safe_answer_markdown, should_attach_screen,
 )
-from ui import glass
+import live_docs
+from ui import glass, live_docs_ui
 
 logger = logging.getLogger("transcribe")
 
@@ -173,6 +182,17 @@ CONTEXT_PLACEHOLDER = (
     "e.g. Call with Acme's data team about moving their reports to our platform. "
     "I'm the solutions engineer; they care most about cost and security. Keep "
     "answers short, in my voice.")
+
+# Documents the user added on the Live Assistant page (live_docs.py): the chip above the ask
+# box says how many answers can read, and the answer's footer says when they were used.
+DOCS_OFF = "Documents off"
+DOCS_TIP = "Click to choose which documents the assistant can use."
+FOOT_DOCS_USED = "from your documents"
+FOOT_DOCS_KEPT = "documents stayed on this computer"
+FOOT_DOCS_ASK = "documents not used yet - Gusan asks when you type a question"
+FOOT_PICTURES = "pictures need Gusan Cloud or your own key"
+DOC_DROP = "Drop to add documents"
+DOC_ASK_WAIT_S = 180                        # how long an answer waits for the documents question
 
 QUICK_ACTIONS = (
     ("Answer", ""),
@@ -278,11 +298,16 @@ _CODE_CSS = ("pre, code { font-family: 'Cascadia Mono', Consolas, 'Courier New',
 def render_markdown(text_edit, md):
     """Show Markdown in a QTextEdit with monospace, boxed code blocks. Qt's
     setMarkdown has no styling hook, so the document is converted to HTML
-    first and re-set with a default stylesheet for pre/code."""
+    first and re-set with a default stylesheet for pre/code.
+
+    An answer never loads an image: Qt's text widgets would fetch a file:// or
+    \\\\host\\share one named in it (a document could make the model write one), so
+    images are taken out of the Markdown first (safe_answer_markdown) and the
+    answer box refuses every resource anyway (_AnswerEdit)."""
     try:
         doc = text_edit.document()
         doc.setDefaultStyleSheet(_CODE_CSS)
-        doc.setMarkdown(md or "")
+        doc.setMarkdown(safe_answer_markdown(md))
         html = doc.toHtml()
         text_edit.setHtml(html)
     except Exception:
@@ -395,6 +420,15 @@ def _lock_pixmap(size=12, color="#2563eb"):
     p.end()
     pm.setDevicePixelRatio(scale)
     return pm
+
+
+class _AnswerEdit(QTextEdit):
+    """The answer box. It never loads a resource (an image, a style sheet) named in
+    an answer: by default Qt falls back to reading the local disk - or a network
+    share - for it. A null image is a valid "answer" that stops that fallback."""
+
+    def loadResource(self, type_, name):
+        return QImage()
 
 
 class _Superseded(BaseException):
@@ -867,6 +901,59 @@ class _ContextEdit(QPlainTextEdit):
         super().keyPressEvent(e)
 
 
+class _DocsChip(QPushButton):
+    """"3 documents", above the ask box: how many of the documents the user added the
+    answers can read. A click opens the list to choose from (a menu: nothing opens on
+    the screen itself)."""
+
+    def __init__(self, parent):
+        super().__init__("", parent)
+        self.setObjectName("laDocs")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(24)
+        self.setAccessibleName("Documents")
+
+
+class _DropVeil(QWidget):
+    """Over the card while files are dragged onto it: they become documents."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._accent = QColor(_THEMES["light"]["accent"])
+        self.hide()
+
+    def set_theme(self, t):
+        self._accent = QColor(t["accent"])
+        self.update()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        m = SHADOW + 6
+        r = QRectF(self.rect()).adjusted(m, m, -m, -m)
+        fill = QColor(self._accent)
+        fill.setAlpha(36)
+        pen = QPen(self._accent, 2)
+        pen.setStyle(Qt.CustomDashLine)
+        pen.setDashPattern([4.0, 3.0])
+        p.setBrush(fill)
+        p.setPen(pen)
+        p.drawRoundedRect(r, RADIUS - 4, RADIUS - 4)
+        f = p.font()
+        f.setPixelSize(15)
+        f.setBold(True)
+        p.setFont(f)
+        pill = QRectF(0, 0, p.fontMetrics().horizontalAdvance(DOC_DROP) + 40, 38)
+        pill.moveCenter(r.center())
+        p.setBrush(QColor(255, 255, 255, 235))
+        p.setPen(QPen(self._accent, 1))
+        p.drawRoundedRect(pill, 19, 19)
+        p.setPen(self._accent)
+        p.drawText(pill, Qt.AlignCenter, DOC_DROP)
+        p.end()
+
+
 class _DragBar(QFrame):
     """Header strip that drags the whole overlay."""
 
@@ -907,6 +994,9 @@ class LiveAssistOverlay(QWidget):
     sig_status = Signal(str)                 # short footer note from the worker
     sig_partial = Signal(str, int)           # streamed text so far, generation
     sig_export_done = Signal(str, str)       # saved path, error
+    # The worker asks the GUI thread to put the one-time "use your documents with the cloud?"
+    # question (a dict: gen, managed, event, answer - see _documents_for_answer).
+    sig_doc_ask = Signal(object)
     # The card's own state for a live_assist_* key changed (its buttons, a
     # public setter or a cfg sync): (config key, new value). Pages listen.
     settings_changed = Signal(str, object)
@@ -928,6 +1018,7 @@ class LiveAssistOverlay(QWidget):
         self._gen = 0                      # bumped by every request
         self._pending_auto = False
         self._qa_history = []              # (asked, answer) of this session
+        self._qa_docs = []                 # per answer above: written from the user's documents
         self._audio_folder = None          # last session's meeting folder
         self._audio_ready = False
         self._blur_mode = ""
@@ -953,6 +1044,12 @@ class LiveAssistOverlay(QWidget):
         self._crop_safe = None             # index of the card's own monitor in the shots
         # What the user wrote about the call: every answer is shaped by it.
         self._context = clip_context(str(cfg.get("live_assist_context") or ""))
+        # The documents the user added (live_docs.py): read off the GUI thread, used by
+        # answers through the worker (see _documents_for_answer).
+        self._doc_queue = None             # live_docs_ui.AddQueue, made with the card
+        self._doc_menu = None
+        self._doc_foot = (None, "")        # (answer generation, the footer's words about documents)
+        self._doc_asking = False
         self._exclusion_ok = False
         self._mac_partial = False          # macOS: sharingType none is set (best effort)
 
@@ -969,8 +1066,20 @@ class LiveAssistOverlay(QWidget):
         self.sig_status.connect(self._set_status)
         self.sig_partial.connect(self._on_partial)
         self.sig_export_done.connect(self._on_export_done)
+        self.sig_doc_ask.connect(self._on_doc_ask)
         self._first_token_at = 0.0
         self._build()
+        self._doc_queue = live_docs_ui.AddQueue(self)
+        self._doc_queue.started.connect(self._on_doc_started)
+        self._doc_queue.added.connect(self._on_doc_added)
+        self._doc_queue.batch_done.connect(self._on_doc_batch_done)
+        live_docs_ui.bridge().changed.connect(self._refresh_docs_chip)
+        self.setAcceptDrops(True)
+        for name in ("input_ask", "txt_summary", "txt_suggestion", "ctx_edit"):
+            w = getattr(self, name, None)
+            if w is not None:              # a file dropped on them reaches the card (a document),
+                w.setAcceptDrops(False)    # it is never pasted as a path into what's being typed
+        self._refresh_docs_chip()
         self._tip_from_card = False
         self._popup_privacy = _PopupPrivacy(self)
         if QApplication.instance():
@@ -1179,11 +1288,24 @@ class LiveAssistOverlay(QWidget):
         self.btn_auto.setFixedHeight(22)
         head_row.addWidget(self.btn_auto)
         body.addLayout(head_row)
-        self.txt_suggestion = QTextEdit(self.body)
+        self.txt_suggestion = _AnswerEdit(self.body)
         self.txt_suggestion.setReadOnly(True)
         self.txt_suggestion.setObjectName("laCard")
         self.txt_suggestion.setPlaceholderText(ANSWER_PLACEHOLDER)
         body.addWidget(self.txt_suggestion, 1)
+
+        # What the answers can read: the documents the user added on the Live Assistant page
+        # (hidden while there are none). A click opens the list to choose from.
+        self.docs_bar = QWidget(self.body)
+        db = QHBoxLayout(self.docs_bar)
+        db.setContentsMargins(0, 0, 0, 0)
+        db.setSpacing(6)
+        self.docs_chip = _DocsChip(self.docs_bar)
+        self.docs_chip.clicked.connect(self._open_docs_menu)
+        db.addWidget(self.docs_chip)
+        db.addStretch()
+        self.docs_bar.hide()
+        body.addWidget(self.docs_bar)
 
         ask_row = QHBoxLayout()
         ask_row.setSpacing(8)
@@ -1224,6 +1346,7 @@ class LiveAssistOverlay(QWidget):
         self.lbl_status.setObjectName("laFoot")
         # Wrap: a long note must never widen the layout past the card.
         self.lbl_status.setWordWrap(True)
+        self.lbl_status.setTextFormat(Qt.PlainText)       # file names appear here: never rich text
         self.lbl_status.setMaximumHeight(32)
         foot_row.addWidget(self.lbl_status, 1)
         # Appears once a session's recording is on disk.
@@ -1281,6 +1404,9 @@ class LiveAssistOverlay(QWidget):
         crl.addStretch(1)
         self.crop_panel.hide()
         root.addWidget(self.crop_panel, 1)
+
+        # Files dragged onto the card become documents: a dashed veil says so.
+        self.drop_veil = _DropVeil(self)
 
         cfg = self.app.cfg if self.app else {}
         try:
@@ -1372,7 +1498,15 @@ class LiveAssistOverlay(QWidget):
             QPushButton#laCtxDone {{
                 background: {accent}; color: white; border-color: {accent}; font-weight: 600;
             }}
+            QPushButton#laDocs {{
+                background: {t['card']}; border: 1px solid {t['card_border']};
+                border-radius: 12px; color: {t['muted']}; padding: 2px 11px 2px 9px;
+                font-size: 11.5px; font-weight: 600;
+            }}
+            QPushButton#laDocs:hover {{ border-color: {accent}; color: {t['text']}; }}
+            QPushButton#laDocs[off="true"] {{ color: {t['faint']}; border-style: dashed; }}
         """)
+        self.drop_veil.set_theme(t)
         for lbl in (self.lbl_now_head, self.lbl_sum_head, self.lbl_sug_head,
                     self.lbl_ctx_head, self.lbl_crop_head):
             lbl.setStyleSheet(f"color: {t['faint']}; font-size: 10px; font-weight: 700; "
@@ -1384,6 +1518,7 @@ class LiveAssistOverlay(QWidget):
         self._shadow_key = None          # shadow tint depends on theme
         self._refresh_private_chip()
         self._refresh_live_controls()
+        self._refresh_docs_chip()        # its little icon wears the theme's ink
         self.update()
 
     def _toggle_theme(self):
@@ -2140,6 +2275,10 @@ class LiveAssistOverlay(QWidget):
         try:
             engine, cfg = self._resolve_engine()
             if engine is not None:
+                try:
+                    self._prepare_documents(engine, cfg)     # before the (possibly slow) wake-up
+                except Exception:
+                    logger.debug("documents warm-up failed", exc_info=True)
                 actions.warm_up(engine, cfg)
         except Exception:
             logger.debug("engine warm-up failed", exc_info=True)
@@ -2166,6 +2305,7 @@ class LiveAssistOverlay(QWidget):
             self._live_text = ""
             self._summary = ""
             self._qa_history = []
+            self._qa_docs = []
             self._audio_folder, self._audio_ready, self._audio_size = None, False, -1
             self._audio_polls = 0
             self.btn_audio.hide()
@@ -2220,6 +2360,229 @@ class LiveAssistOverlay(QWidget):
         # The meeting window's rolling recap isn't shown here: the overlay is
         # for answers, and the live transcript beats a recap mid-call.
         self._summary = text or ""
+
+    # ── documents the user added (live_docs.py; the Live Assistant page manages them) ──
+    def _refresh_docs_chip(self):
+        """The chip above the ask box: how many documents the answers can read."""
+        try:
+            docs = live_docs.get_store().list()
+        except Exception:
+            logger.debug("Live Assistant: documents unavailable", exc_info=True)
+            docs = []
+        active = [d for d in docs if d.active]
+        self.docs_bar.setVisible(bool(docs))
+        text = live_docs.chip_text(len(active)) if active else DOCS_OFF
+        self.docs_chip.setText(text)
+        off = "false" if active else "true"
+        if self.docs_chip.property("off") != off:
+            self.docs_chip.setProperty("off", off)              # restyle: dashed / faint
+            self.docs_chip.style().unpolish(self.docs_chip)
+            self.docs_chip.style().polish(self.docs_chip)
+        try:
+            from ui.components import icons as comp_icons
+            t = _THEMES[self._theme_name]
+            self.docs_chip.setIcon(comp_icons.icon("file", 13, t["muted"] if active else t["faint"], 1.9))
+            self.docs_chip.setIconSize(QSize(13, 13))
+        except Exception:
+            logger.debug("Live Assistant: documents chip icon", exc_info=True)
+        shown = ", ".join(d.name for d in active[:4]) + (" +%d" % (len(active) - 4) if len(active) > 4 else "")
+        import html as html_mod
+        self.docs_chip.setToolTip(
+            "<p style='white-space:normal'>%s</p>" % html_mod.escape(
+                ((shown + ". ") if shown else "") + DOCS_TIP, quote=False))
+        self.docs_chip.setAccessibleName("%s. %s" % (text, DOCS_TIP))
+
+    def _open_docs_menu(self):
+        """The chip's list: tick the documents the answers may use (the same switches as
+        on the Live Assistant page). A menu - nothing opens on the screen itself."""
+        from PySide6.QtWidgets import QMenu
+        try:
+            docs = sorted(live_docs.get_store().list(), key=lambda d: d.added)
+        except Exception:
+            docs = []
+        if not docs:
+            return
+        menu = QMenu(self)
+        head = menu.addAction("Use in answers")
+        head.setEnabled(False)
+        menu.addSeparator()
+        for d in docs:
+            act = menu.addAction(d.name.replace("&", "&&"))      # a name is text, never a shortcut key
+            act.setCheckable(True)
+            act.setChecked(bool(d.active))
+            act.setData(d.id)
+            act.toggled.connect(lambda on, i=d.id, n=d.name: self._set_doc_active(i, n, on))
+        menu.aboutToHide.connect(menu.deleteLater)
+        self._doc_menu = menu
+        at = self.docs_chip.mapToGlobal(QPoint(0, 0))
+        menu.popup(QPoint(at.x(), at.y() - menu.sizeHint().height() - 4))
+
+    def _set_doc_active(self, doc_id, name, on):
+        try:
+            live_docs.get_store().set_active(doc_id, bool(on))
+        except Exception:
+            logger.warning("Live Assistant: a document switch couldn't be saved", exc_info=True)
+        live_docs_ui.bridge().changed.emit()           # this chip and the page's rows
+        self._set_status("✓ %s is used in answers." % name if on else
+                         "%s isn't used in answers." % name)
+
+    # -- files dropped on the card become documents --
+    def _takes_files(self, mime):
+        return (self._expanded and self.crop_panel.isHidden()
+                and live_docs_ui.wants_files(mime))
+
+    def dragEnterEvent(self, event):
+        if self._takes_files(event.mimeData()):
+            self.drop_veil.setGeometry(self.rect())
+            self.drop_veil.raise_()
+            self.drop_veil.show()
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if self._takes_files(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self.drop_veil.hide()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        self.drop_veil.hide()
+        paths, _more = live_docs_ui.dropped_paths(event.mimeData())
+        if paths and self._takes_files(event.mimeData()):
+            event.acceptProposedAction()
+            self._doc_queue.add(paths)
+        else:
+            event.ignore()
+
+    def _on_doc_started(self, name, index, total):
+        self._set_status("Reading %s…" % name + (" (%d of %d)" % (index, total) if total > 1 else ""))
+
+    def _on_doc_added(self, result):
+        if getattr(result, "reason", "") != "cancelled" and self.app is not None:
+            try:
+                self.app.track(*live_docs.event_for(result))     # counts only: never a name or text
+            except Exception:
+                logger.debug("Live Assistant: document event", exc_info=True)
+        if result.ok:
+            self._set_status("✓ Added %s." % result.info.name + (" " + result.note if result.note else ""))
+        elif result.reason != "cancelled":
+            self._set_status("%s: %s" % (result.name, result.message))
+
+    def _on_doc_batch_done(self, results, cancelled):
+        if cancelled:
+            self._set_status("Stopped.")
+        if any(r.ok for r in results or ()):
+            live_docs_ui.bridge().changed.emit()       # the chip here, the rows on the page
+
+    # -- the one-time question, and what an answer may read --
+    def _on_doc_ask(self, req):
+        """GUI thread: put the "use your documents with the cloud?" question. A worker (an
+        answer, or the warm-up at Start) is waiting for ``req["event"]``."""
+        took = False
+        try:
+            cfg = self.app.cfg if self.app else {}
+            decided = live_docs.doc_use(cfg, "managed" if req.get("managed", True) else "cloud", 1)
+            if not decided.ask:
+                req["answer"] = bool(decided.send)      # answered meanwhile (a yes for another route is not one)
+            elif self._doc_asking or (req.get("gen") and req["gen"] != self._gen):
+                req["answer"] = None            # one question at a time; a newer answer took over
+            else:
+                took = self._doc_asking = True
+                hidden = self._private and (self._exclusion_ok or self._mac_partial)
+                req["answer"] = live_docs_ui.ask_cloud(self, self.app, managed=bool(req.get("managed", True)),
+                                                       private=hidden)
+        except Exception:
+            logger.warning("Live Assistant: the documents question failed", exc_info=True)
+            req["answer"] = None
+        finally:
+            if took:
+                self._doc_asking = False
+            ev = req.get("event")
+            if ev is not None:
+                ev.set()
+
+    def _ask_documents(self, gen, managed):
+        """Worker thread: have the question put on the GUI thread and wait for the person's
+        answer. True / False, or None when it wasn't answered (a newer question took over, or
+        too long)."""
+        req = {"gen": gen, "managed": managed, "event": threading.Event(), "answer": None}
+        self.sig_doc_ask.emit(req)
+        waited = 0.0
+        while not req["event"].wait(0.25):
+            waited += 0.25
+            if (gen and gen != self._gen) or waited >= DOC_ASK_WAIT_S:
+                return None
+        return req["answer"]
+
+    @staticmethod
+    def _without_document_answers(ctx_args, history_docs, kind, cfg):
+        """rolling_context's arguments without the earlier answers that were written from the
+        user's documents - or None when those may go along. A follow-up carries the last
+        answers, and an answer that quotes a document is the document: it goes only where the
+        documents themselves may go (live_docs.doc_use: this computer, or a cloud route the
+        person agreed to; never in Privacy mode). Switching "Answers written by" from this
+        computer to the cloud, or turning Privacy mode off, must not carry them over."""
+        if kind not in ("cloud", "managed") or live_docs.doc_use(cfg, kind, 1).send:
+            return None
+        history = list(ctx_args.get("history") or ())
+        flags = list(history_docs)[-len(history):] if history else []
+        flags = [False] * (len(history) - len(flags)) + flags          # (the last answers line up)
+        return dict(ctx_args, history=[h for h, from_docs in zip(history, flags) if not from_docs])
+
+    def _documents_for_answer(self, context, doc_args, kind, cfg, gen, auto):
+        """Worker thread. The documents for THIS answer: (context, pictures, footer words).
+        ``doc_args`` are rolling_context's arguments; the context is built again with the
+        reference block once the engine (so its window) is known. live_docs.doc_use is the one
+        decision: Privacy mode is absolute, a cloud route needs the person's one-time yes
+        (asked here for a question they typed, never in the middle of an automatic answer)."""
+        store = live_docs.get_store()
+        n = store.active_count()
+        use = live_docs.doc_use(cfg, kind, n)
+        if use.ask:
+            if auto:
+                return context, [], FOOT_DOCS_ASK
+            answer = self._ask_documents(gen, kind == "managed")
+            if answer is None:
+                return context, [], FOOT_DOCS_ASK
+            use = live_docs.doc_use(live_docs.with_choice(cfg, answer, kind), kind, n)
+        if not use.send:
+            return context, [], (FOOT_DOCS_KEPT if use.why in ("declined", "private") else "")
+        question = doc_args.get("question") or last_question(doc_args.get("live_text", ""))
+        docs = store.active_docs()
+        # (a picture goes out whole, so an answer nobody asked for - an automatic one - takes
+        # only the pictures its talk is about; a typed question may take the newest ones)
+        pictures = store.active_pictures(question, matching_only=bool(auto)) if use.pictures else []
+        # This computer can't read pictures: say so, instead of silently leaving them out.
+        unread = (FOOT_PICTURES if kind == "local_llm"
+                  and any(d.active and d.picture for d in store.list()) else "")
+        if not docs and not pictures:
+            return context, [], unread
+        built = rolling_context(**doc_args, documents=docs,
+                                doc_chars=live_docs.doc_chars_for(kind),
+                                pictures=[p.name for p in pictures])
+        words = [FOOT_DOCS_USED] if (live_docs.DOC_BEGIN in built or pictures) else []
+        if unread:
+            words.append(unread)
+        return built, [p.b64 for p in pictures], " · ".join(words)
+
+    def _prepare_documents(self, engine, cfg):
+        """Worker thread, at Start: load and index the active documents now, and - when the
+        answers will come from a cloud AI and the person hasn't been asked yet - put the
+        one-time question before the first question of the call (not waited for)."""
+        store = live_docs.get_store()
+        n = store.active_count()
+        if not n:
+            return
+        kind = actions.ACTION_MODELS.get(engine, {}).get("kind")
+        if live_docs.doc_use(cfg, kind, n).ask:
+            self.sig_doc_ask.emit({"gen": 0, "managed": kind == "managed",
+                                   "event": threading.Event(), "answer": None})
+        store.warm()
 
     # ── suggestions ──
     def _set_status(self, text):
@@ -2450,12 +2813,23 @@ class LiveAssistOverlay(QWidget):
         self._first_token_at = 0.0
         self._text_since_suggest = 0
         self.txt_suggestion.setPlainText("Thinking…")
-        context = rolling_context(
-            self._live_text, question, self._title, self._attendees,
-            screen="snip" if attached else bool(image_b64),
-            output_lang=self._answer_language(),
-            history=self._qa_history, session_context=self._context)
+        ctx_args = dict(
+            live_text=self._live_text, question=question, title=self._title,
+            attendees=self._attendees, screen="snip" if attached else bool(image_b64),
+            output_lang=self._answer_language(), history=list(self._qa_history),
+            session_context=self._context)
+        context = rolling_context(**ctx_args)
+        # The documents the user added are added by the worker, once the engine that will
+        # answer is known (its kind sets how much of them fits, and whether they may go).
+        has_docs = False
+        try:
+            has_docs = live_docs.get_store().active_count() > 0
+        except Exception:
+            logger.debug("Live Assistant: documents unavailable", exc_info=True)
+        self._doc_foot = (gen, "")
         threading.Thread(target=self._suggest_worker, args=(context, image_b64, gen),
+                         kwargs={"doc_args": ctx_args if has_docs else None, "auto": auto,
+                                 "ctx_args": ctx_args, "history_docs": tuple(self._qa_docs)},
                          daemon=True).start()
 
     def _no_answer_engine_for_free(self):
@@ -2488,7 +2862,13 @@ class LiveAssistOverlay(QWidget):
         engine, cfg = self.app._resolve_action_engine()
         return actions.live_engine(engine, cfg), cfg
 
-    def _suggest_worker(self, context, image_b64, gen):
+    def _suggest_worker(self, context, image_b64, gen, doc_args=None, auto=False,
+                        ctx_args=None, history_docs=()):
+        """The answer, on a worker thread. ``doc_args``: rolling_context's arguments when the
+        user has active documents - the context is then built again with them (see
+        _documents_for_answer); None = no documents, ``context`` is used as it is.
+        ``ctx_args`` / ``history_docs``: the same arguments always, and which of the earlier
+        answers were written from the documents (see _without_document_answers)."""
         try:
             engine, cfg = self._resolve_engine()
             if engine is None:
@@ -2499,9 +2879,38 @@ class LiveAssistOverlay(QWidget):
             self._answer_engine = (gen, engine)    # named in this answer's footer
             kind = actions.ACTION_MODELS.get(engine, {}).get("kind")
             cfg = dict(cfg or {})
+            doc_images = []                        # pictures from the user's documents
+            if ctx_args is not None and any(history_docs):
+                try:
+                    clean = self._without_document_answers(ctx_args, history_docs, kind, cfg)
+                    if clean is not None:          # the documents may not go to this route
+                        context = rolling_context(**clean)
+                        ctx_args = clean
+                        if doc_args is not None:
+                            doc_args = clean
+                except Exception:
+                    logger.warning("Live Assistant: earlier answers could not be checked",
+                                   exc_info=True)
+                    self.sig_suggestion.emit("", "please try again.", gen)    # nothing goes out unchecked
+                    return
+            if doc_args is not None:
+                try:
+                    context, doc_images, words = self._documents_for_answer(
+                        context, doc_args, kind, cfg, gen, auto)
+                except _Superseded:
+                    raise
+                except Exception:
+                    logger.warning("Live Assistant: the documents were left out", exc_info=True)
+                    doc_images, words = [], ""     # the answer goes on without them
+                if gen != self._gen:
+                    return                         # a newer question took over meanwhile
+                self._doc_foot = (gen, words)
             image_status = {}
-            if image_b64 and kind in ("cloud", "managed"):
-                cfg["_image_png_b64"] = image_b64
+            if (image_b64 or doc_images) and kind in ("cloud", "managed"):
+                # The screenshot first, then pictures from the documents (a list when
+                # there are both; a plain string as ever when there is only the screenshot).
+                cfg["_image_png_b64"] = (([image_b64] if image_b64 else []) + doc_images
+                                         if doc_images else image_b64)
                 cfg["_image_status"] = image_status   # set if the model refused it
             elif image_b64:
                 # Text-only engine (local model): read the screen with Mistral
@@ -2550,8 +2959,12 @@ class LiveAssistOverlay(QWidget):
                 # The engine can't read images: the answer came from the
                 # conversation alone - don't claim "screen seen".
                 self._last_attached_screen = False
-                self._note_screen(gen, "Screen not read - this AI engine can't see images; "
-                                       "answered from the conversation only.")
+                if image_b64:
+                    self._note_screen(gen, "Screen not read - this AI engine can't see images; "
+                                           "answered from the conversation only.")
+                else:
+                    self._note_screen(gen, "Pictures from your documents weren't read - this AI "
+                                           "engine can't see images.")
             self.sig_suggestion.emit((text or "".join(acc)).strip(), "", gen)
         except _Superseded:
             return
@@ -2635,9 +3048,14 @@ class LiveAssistOverlay(QWidget):
             return
         render_markdown(self.txt_suggestion, text.strip() or "(no answer)")
         if text.strip():
+            doc_gen, doc_words = getattr(self, "_doc_foot", (None, ""))
+            from_docs = bool(FOOT_DOCS_USED in (doc_words or "") and (gen is None or doc_gen == gen))
+            flags = list(getattr(self, "_qa_docs", []))
+            flags += [False] * (len(self._qa_history) - len(flags))       # (kept in step with the answers)
             self._qa_history = (self._qa_history
                                 + [(getattr(self, "_suggest_question", ""), text.strip())]
                                 )[-HISTORY_TURNS:]
+            self._qa_docs = (flags + [from_docs])[-HISTORY_TURNS:]
             if not getattr(self, "_suggest_auto", False):
                 # Give the user time to read what they asked for before an
                 # automatic answer may replace it.
@@ -2662,6 +3080,9 @@ class LiveAssistOverlay(QWidget):
             parts.append(f"done {took:.1f}s")
         if getattr(self, "_last_attached_screen", False):
             parts.append("screen seen")
+        doc_gen, doc_words = getattr(self, "_doc_foot", (None, ""))
+        if doc_words and (gen is None or doc_gen == gen):
+            parts.append(doc_words)               # "from your documents" and the like
         parts.append("AI can be wrong - check facts")
         return " · ".join(parts)
 

@@ -31,6 +31,7 @@ from ui import privacy_prompt, theme
 from ui.components import clipboard as rich_clipboard
 from ui.components import (AudioPlayer, Button, Card, Chip, Divider, IconButton, Keycaps, PageHeader, ProTag,
                            Segmented, icons, label, mini_prompt)
+from ui.pages import meeting_speakers_ui
 
 logger = logging.getLogger("transcribe")
 
@@ -1505,6 +1506,7 @@ class NotesView(QWidget):
         self._notion_settings.connect(self._save_notion_settings)
         self.folder = None
         self.data = {}
+        self._keep_view = None          # (tab, notes scroll, transcript scroll) a reload puts back
         self._bg = BgRunner(self)
         self._load_token = 0
         self._notes_save = QTimer(self)
@@ -1581,6 +1583,7 @@ class NotesView(QWidget):
         sidew.setMinimumWidth(280)
         body.addWidget(sidew, 0)
         root.addLayout(body, 1)
+        meeting_speakers_ui.install(self)          # ⋯ › Identify speakers, and its line in the Transcript tab
 
     # ── building ──
     def _build_header(self):
@@ -1674,16 +1677,24 @@ class NotesView(QWidget):
         return card
 
     # ── loading ──
-    def load(self, folder, item=None):
+    def load(self, folder, item=None, keep_view=False):
         """Show the meeting in ``folder`` (read on a worker thread). My notes
         typed a moment ago are saved first, on the same worker, so a reload
-        or another meeting never loses them."""
+        or another meeting never loses them. ``keep_view``: the same meeting read
+        again while someone is looking at it (its speaker names arrived) - the tab
+        and the scroll position stay where they are."""
         pending = self._take_pending_notes()
-        if str(folder) != self.folder:
+        same = str(folder) == self.folder
+        if not same:
             self.audio_player.stop(release=True)     # another meeting: let go of this recording
+        # (only when what is on screen IS this meeting: a meeting still being opened has nothing
+        # to keep, and the previous one's scroll position is not its own)
+        shown = str((self.data or {}).get("folder") or "") == str(folder)
         self.folder = str(folder)
-        self.tabs.set_index(0)
-        self.stack.setCurrentIndex(0)
+        self._keep_view = self._view_state() if (keep_view and same and shown) else None
+        if self._keep_view is None:
+            self.tabs.set_index(0)
+            self.stack.setCurrentIndex(0)
         if item:
             self.title_label.setText(item.get("title") or "Meeting")
         self._load_token += 1
@@ -1707,9 +1718,42 @@ class NotesView(QWidget):
         self._notes_save.stop()
         return self.folder, self.my_notes.toPlainText()
 
-    def reload(self):
+    def reload(self, keep_view=False):
         if self.folder:
-            self.load(self.folder)
+            self.load(self.folder, keep_view=keep_view)
+
+    def _view_state(self):
+        """Where the reader is: the tab and the two scroll positions."""
+        try:
+            return (self.stack.currentIndex(), self.notes_scroll.verticalScrollBar().value(),
+                    self.transcript.verticalScrollBar().value())
+        except Exception:
+            return None
+
+    def _restore_view(self, state):
+        """Put the tab and the scroll positions back after a render (the text was set
+        again, which jumps to the top); the scroll bars grow with the next layout pass."""
+        if not state:
+            return
+        index, notes_y, transcript_y = state
+        if self.stack.currentIndex() != index:
+            self.stack_index(index)
+
+        def put():
+            try:
+                self.notes_scroll.verticalScrollBar().setValue(notes_y)
+                self.transcript.verticalScrollBar().setValue(transcript_y)
+            except RuntimeError:
+                pass                              # the window went away meanwhile
+        put()
+        QTimer.singleShot(0, put)
+
+    def render_keeping_view(self):
+        """render() for a change that is not a new meeting (a banner came or went):
+        whoever is reading keeps the place."""
+        state = self._view_state()
+        self.render()
+        self._restore_view(state)
 
     def _apply(self, token, res, err):
         if token != self._load_token:
@@ -1719,7 +1763,9 @@ class NotesView(QWidget):
                          "my_notes": "", "meta": {}, "parts": []}
         else:
             self.data = res
+        keep, self._keep_view = self._keep_view, None
         self.render()
+        self._restore_view(keep)
         meta = self.data.get("meta") or {}
         if self.data.get("notes", "").strip() and meta.get("seen") is False:
             folder = self.folder
@@ -1774,7 +1820,7 @@ class NotesView(QWidget):
         banner = None
         has_transcript = bool((d.get("transcript") or "").strip())
         if busy:
-            banner = self._banner("Writing notes…", "The notes show up here when they're ready.", "blue")
+            banner = meeting_speakers_ui.busy_banner(self)      # Writing notes… / Identifying speakers…
         elif meta.get("notes_pending") and has_transcript:
             # Gusan quit (or Windows logged off) mid-meeting: the next launch
             # writes them; until then one click does.
@@ -1796,6 +1842,9 @@ class NotesView(QWidget):
                 banner = self._banner("No notes yet", "", "neutral", "Write notes", self.rewrite_notes)
             else:
                 banner = self._banner("Nothing to show yet.", "This meeting has only its recording.", "neutral")
+        if banner is None:
+            # The notes are out; the people on the call are being told apart in the background.
+            banner = meeting_speakers_ui.working_banner(self)
         notices = [n for n in (meta.get("notices") or []) if isinstance(n, str) and n.strip()]
         self.doc.me = self.page.me()
         blocks = None
@@ -1823,6 +1872,7 @@ class NotesView(QWidget):
         self.audio_player.set_parts(audio, d.get("duration_sec") or 0)     # the same parts: keeps playing
         self.copy_btn.setEnabled(bool(notes.strip()))
         self.sync_actions()
+        meeting_speakers_ui.after_render(self)
 
     def _render_people(self, people):
         clear_layout(self._people)
@@ -2124,9 +2174,18 @@ class NotesView(QWidget):
         folder = self.folder
         # A loaded recording holds its file open: Windows would refuse the delete.
         self.audio_player.stop(release=True)
+        s = self.page.session()
 
         def work():
             import meeting_store
+            # The names that come after the notes read the call's sound from this folder
+            # (and would go on for minutes): they stop first, off the window's thread.
+            stop = getattr(s, "stop_speaker_pass", None)
+            if callable(stop):
+                try:
+                    stop(folder)
+                except Exception:
+                    logger.debug("stopping the speaker pass before a delete failed", exc_info=True)
             return meeting_store.delete_meeting(folder)
 
         def done(ok, err):

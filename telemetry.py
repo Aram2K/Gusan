@@ -105,6 +105,9 @@ ALLOWED_EVENTS = {
     "live_prompter_opened",
     "live_prompter_started",
     "live_prompter_suggestion",
+    # Live Assistant documents (no name, text or path: a type, a size bucket, a reason).
+    "live_document_added",
+    "live_document_failed",
     # Transcribe Files.
     "file_transcription_started",
     "file_transcription_completed",

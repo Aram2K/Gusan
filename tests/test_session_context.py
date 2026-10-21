@@ -109,7 +109,7 @@ class TestOverlayContext(unittest.TestCase):
         sent = []
 
         class _Thread:
-            def __init__(self, target=None, args=(), daemon=None):
+            def __init__(self, target=None, args=(), kwargs=None, daemon=None):
                 sent.append(args[0])
 
             def start(self):

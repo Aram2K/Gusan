@@ -640,7 +640,8 @@ def run_file_job(path, opts, recorder, on_progress=None, should_cancel=None, *,
         detected = getattr(recorder, "_last_segments_language", None)
         decode_s = getattr(recorder, "_last_segments_seconds", None)
 
-    # 5. Speaker labels (cannot be cancelled mid-run; checked before and after).
+    # 5. Speaker labels (the speaker pass runs in its own process: Cancel ends it
+    # within a second; checked before and after as well).
     if opts["speakers"]:
         if diarizer is None:
             import diarization as diarizer
@@ -653,7 +654,8 @@ def run_file_job(path, opts, recorder, on_progress=None, should_cancel=None, *,
             def on_sp_progress(done, total):
                 frac = done / total if total else 0.0
                 emit(t_end + (_P_SPEAKERS_END - t_end) * frac, STAGE_SPEAKERS)
-            turns = diarizer.diarize(audio, on_progress=on_sp_progress)
+            kw = {"should_cancel": cancelled} if _takes(diarizer.diarize, "should_cancel") else {}
+            turns = diarizer.diarize(audio, on_progress=on_sp_progress, **kw)
             if turns:
                 segments = diarizer.attribute_segments(segments, turns)
     # A cancel pressed during the speakers stage must not surface a result the
@@ -684,6 +686,16 @@ def run_file_job(path, opts, recorder, on_progress=None, should_cancel=None, *,
         "language_setting": setting,
         "decode_seconds": decode_s if isinstance(decode_s, (int, float)) else None,
     }
+
+
+def _takes(fn, name):
+    """Does ``fn`` accept a keyword called ``name``? (A speaker tool that predates
+    should_cancel - or a test's stand-in - is called without it.)"""
+    try:
+        import inspect
+        return name in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 # ── the queue (Qt-free core of FileJobController) ─────────────────────────────

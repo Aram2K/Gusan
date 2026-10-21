@@ -674,7 +674,7 @@ def test_list_rows_search_and_notes(shell, meetings_root):
     exports = [a.text().split("\t")[0] for a in nv.export_menu.actions()]
     assert exports == ["Word", "Markdown", "Notion", "Audio"]
     more = [a.text() for a in nv.more_menu.actions() if not a.isSeparator()]
-    assert more == ["Rewrite notes", "Rename", "Show in folder", "Delete"]
+    assert more == ["Rewrite notes", "Identify speakers", "Rename", "Show in folder", "Delete"]
     nv.tabs.set_index(1, emit=True)
     assert nv.stack.currentWidget() is nv.transcript and "Hello team." in nv.transcript.toPlainText()
     # Free: Continue recording is a Pro action.

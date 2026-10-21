@@ -323,7 +323,7 @@ class MeetingsPage(QWidget):
         for name, slot in (("state_changed", self._on_phase), ("live_line", self._on_line),
                            ("recap", self.live_view.set_recap), ("status", self.live_view.set_status),
                            ("levels", self.live_view.set_levels), ("finished", self._on_finished),
-                           ("error", self._on_error)):
+                           ("error", self._on_error), ("speakers_changed", self._on_speakers_changed)):
             sig = getattr(s, name, None)
             if sig is None:
                 continue
@@ -556,6 +556,21 @@ class MeetingsPage(QWidget):
                 self.live_view.sync()
         elif self._view == "notes" and self.notes_view.folder and folder and self.is_same(folder):
             self.notes_view.reload()
+
+    def _on_speakers_changed(self, folder):
+        """The background speaker pass of a meeting (the names that come after its
+        notes) was queued, started or ended. The meeting open in the notes view
+        shows its banner meanwhile and, once the pass ended, its new transcript."""
+        if self._view != "notes" or not self.notes_view.folder or not folder or not self.is_same(folder):
+            return
+        s = self._session
+        working = bool(callable(getattr(s, "speakers_state", None)) and s.speakers_state(folder))
+        # Whoever is reading this meeting (its Transcript, or typing in My notes) keeps the
+        # tab and the place: the page only changes under them, never moves them.
+        if not working:
+            self.notes_view.reload(keep_view=True)
+        elif str((self.notes_view.data or {}).get("folder") or "") == str(self.notes_view.folder):
+            self.notes_view.render_keeping_view()    # (a meeting still loading renders when it is read)
 
     def is_same(self, folder):
         import os
@@ -1794,8 +1809,23 @@ class MeetingsList(QWidget):
                 self._render(res if err is None else [], searching=True)
         self._bg.run(work, done)
 
+    # A library of 300 meetings used to build all 300 rows in one go on the GUI
+    # thread (about 12 ms each: the window froze for seconds at every refresh -
+    # after each meeting, a rename, a delete). The first rows come at once; the
+    # rest follow in slices of at most SLICE_S, so the window keeps answering.
+    FIRST_ROWS = 12
+    SLICE_S = 0.03
+
     def _render(self, items, searching=False):
         focused = next((r.meeting.get("dir") for r in self.rows if r.hasFocus()), None)
+        timer = getattr(self, "_row_timer", None)
+        if timer is None:
+            timer = self._row_timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(0)
+            timer.timeout.connect(self._continue_rows)
+        timer.stop()                         # a newer list replaces one still being built
+        self._row_state = None
         views.clear_layout(self._rows)
         self.rows = []
         s = self.page.session()
@@ -1811,14 +1841,39 @@ class MeetingsList(QWidget):
             import meeting_store
         except Exception:
             meeting_store = None
-        for i, m in enumerate(items):
-            status = meeting_store.meeting_status(m, active, phase) if meeting_store else "notes_ready"
+        self._row_state = {"it": iter(enumerate(items)), "active": active, "phase": phase,
+                           "store": meeting_store, "focused": focused}
+        self._build_rows(self.FIRST_ROWS)
+        self.no_match.setVisible(bool(searching and not items and self._all))
+
+    def _continue_rows(self):
+        self._build_rows(1)
+
+    def _build_rows(self, at_least):
+        """Build rows until the list is done, or - after ``at_least`` rows - this
+        slice has used SLICE_S; the timer brings the next slice."""
+        st = self._row_state
+        if not st:
+            return
+        t0 = time.perf_counter()
+        built = 0
+        while True:
+            if built >= at_least and time.perf_counter() - t0 >= self.SLICE_S:
+                self._row_timer.start()
+                return
+            nxt = next(st["it"], None)
+            if nxt is None:
+                self._row_state = None
+                return
+            i, m = nxt
+            store = st["store"]
+            status = store.meeting_status(m, st["active"], st["phase"]) if store else "notes_ready"
             row = MeetingRow(self.page, m, status, first=(i == 0), parent=self.rows_box)
             self._rows.addWidget(row)
             self.rows.append(row)
-            if focused and m.get("dir") == focused:
+            if st["focused"] and m.get("dir") == st["focused"]:
                 row.setFocus(Qt.TabFocusReason)     # a re-render never drops keyboard focus
-        self.no_match.setVisible(bool(searching and not items and self._all))
+            built += 1
 
 
 # ── the rail ─────────────────────────────────────────────────────────────────

@@ -15,8 +15,10 @@ only the shortcut row at the top and the status in one word):
   TRUTHFUL status (live_context.hide_status) as ONE word in a badge: Hidden,
   May be hidden or Visible; the explanation is its tooltip and accessible
   description, never a sentence on the page.
-- About my calls (live_assist_context) and Past sessions
-  (meeting_store.list_live_sessions(), read on a worker thread).
+- About my calls (live_assist_context), Documents (ui/pages/live_documents.py: the files
+  the assistant may read - added with a picker or by dropping them on the page, read on a
+  worker thread, each with a "Use in answers" switch; docs/redesign/live-documents-spec.md)
+  and Past sessions (meeting_store.list_live_sessions(), read on a worker thread).
 - The rail "Live Assistant settings": Hide from screen share, Shortcut, Answer
   questions by itself, Let it see my screen, Call language, Answer in, Answers
   written by (Gusan Cloud · DeepSeek V4.1 Flash PRO / This computer · Qwen
@@ -91,12 +93,13 @@ from PySide6.QtWidgets import (QBoxLayout, QButtonGroup, QComboBox, QFrame, QHBo
                                QVBoxLayout, QWidget)
 
 import live_context
-from ui import theme
+from ui import live_docs_ui, theme
 from ui.components import (Button, Card, Chip, IconButton, PageHeader, ProTag, Segmented,
                            SettingRow, SettingsRail, Toggle, icons, label)
 from ui.components.controls import keycap_labels
 from ui.components.hotkey_capture import HotkeyCaptureButton
 from ui.pages import live_demo
+from ui.pages.live_documents import DocumentsSection
 
 logger = logging.getLogger("transcribe")
 
@@ -1582,6 +1585,7 @@ class LiveAssistantPage(QWidget):
         main.addWidget(self._build_hero())
         main.addSpacing(-12)        # the picture's own 18 px of shadow room is part of the gap below it
         main.addWidget(self._build_about())
+        main.addWidget(self._build_documents())
         main.addWidget(self._build_sessions())
         main.addStretch(1)
         body.addLayout(main, 1)
@@ -1645,6 +1649,15 @@ class LiveAssistantPage(QWidget):
             lambda _s: QTimer.singleShot(0, self, self._fit_context))
         card.add(self.context_edit)
         return card
+
+    def _build_documents(self):
+        """The files the assistant may read (ui/pages/live_documents.py). The page takes
+        files dropped anywhere on it (see dragEnterEvent); a file dropped on the About box
+        would only have pasted its path, so that box hands drops over too."""
+        self.documents = DocumentsSection(self.app, self)
+        self.setAcceptDrops(True)
+        self.context_edit.setAcceptDrops(False)       # a file dropped here is a document, not a path
+        return self.documents
 
     def _build_sessions(self):
         card = Card(self, gap=0)
@@ -1815,9 +1828,12 @@ class LiveAssistantPage(QWidget):
         self._attach_card()
         self._refresh_all()
         self.reload_sessions()
+        self.documents.reload()
         if opts.get("focus") in ("hotkey", "shortcut"):
             # Settings › General's shortcut list links here.
             self.shortcut.capture.button.setFocus(Qt.TabFocusReason)
+        elif opts.get("focus") == "documents":
+            self.documents.focus_add()
 
     def on_setting_changed(self, key):
         self._sync_key(key)
@@ -1839,7 +1855,31 @@ class LiveAssistantPage(QWidget):
         if self._context_dirty:
             self._save_context()
         self.shortcut.capture.cancel_capture()
+        self.documents.drag_leave()
         super().hideEvent(e)
+
+    # ── files dropped on the page become documents ──
+    def dragEnterEvent(self, e):
+        if self.documents.drag_enter(e.mimeData()):
+            e.acceptProposedAction()
+        else:
+            e.ignore()
+
+    def dragMoveEvent(self, e):
+        if live_docs_ui.wants_files(e.mimeData()):
+            e.acceptProposedAction()
+        else:
+            e.ignore()
+
+    def dragLeaveEvent(self, e):
+        self.documents.drag_leave()
+        super().dragLeaveEvent(e)
+
+    def dropEvent(self, e):
+        if self.documents.drop(e.mimeData()):
+            e.acceptProposedAction()
+        else:
+            e.ignore()
 
     def eventFilter(self, obj, ev):
         if obj is self.context_edit:
@@ -2195,6 +2235,8 @@ class LiveAssistantPage(QWidget):
         self.local_option.set_checked(not cloud)
         if self.writer_hint.text() and not self._writer_hint_holds(self.writer_hint.text()):
             self._set_writer_hint("")       # the plan, Privacy mode or the engine changed
+        # The Documents footer says where the words go: this computer, or the cloud AI.
+        self.documents.set_route(view.get("kind") or ("cloud" if cloud else "local"))
 
     def _writer_hint_holds(self, hint):
         cfg = self._cfg_dict()

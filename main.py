@@ -8,6 +8,12 @@ import os
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
 import gc
 import sys
+if __name__ == "__main__" and sys.argv[1:2] == ["--diarize-worker"]:
+    # The speaker pass (diarization_proc.py) starts this program again as its
+    # own process: sherpa-onnx keeps Python's interpreter lock for the whole
+    # run, which froze the window for minutes. Before anything heavy loads.
+    import diarization_proc
+    sys.exit(diarization_proc.worker_main(sys.argv[1:]))
 if __name__ == "__main__":
     # The app runs this file as __main__. Services do `import main` /
     # `from main import ...` (file jobs, model checks): they
@@ -57,6 +63,9 @@ import hotkeys
 import speech_langs
 import autostart
 import gpu_accel
+import diarization_proc
+import chunk_pipeline
+import recorder_tracks
 
 # ── Name and version ──────────────────────────────────────────────────────────
 # Defined in app_info.py (no Qt) so pages and services can read them without
@@ -237,6 +246,15 @@ DEFAULT = {
     # What the user wrote about the call (the overlay's Context line): every
     # answer is shaped by it until they change or clear it.
     "live_assist_context": "",
+    # The documents the user added to the Live Assistant (live_docs.py): may parts of
+    # them go to a CLOUD model? None = not asked yet (asked once, in plain words, the
+    # first time a cloud answer would use them), True = yes, False = keep them on
+    # this computer. Privacy mode overrides it: never a cloud route.
+    "live_docs_cloud_ok": None,
+    # ...and which kind of cloud route that yes was given for: "managed" (Gusan Cloud) or
+    # "cloud" (the AI service the user added a key for); "" = either. A yes for one is asked
+    # again for the other (the question names the route).
+    "live_docs_cloud_route": "",
     # Dictation HUD glass (ui/overlay.py): "auto" adapts to what is behind it
     # (light over bright content, dark over dark), or pin "dark" / "light".
     "overlay_theme": "auto",
@@ -1096,6 +1114,17 @@ class AudioRecorder:
         # The language the last transcribe_segments() decode detected (file
         # jobs show it for Detect automatically / Mixed languages).
         self._last_segments_language = None
+        # Meetings only (set by start_recording; None for dictation): the live
+        # transcription queue (chunk_pipeline), the retained mic + system sound
+        # tracks and the loudness per minute (recorder_tracks), and the
+        # one-line-a-minute health log. Chunks that failed (any take).
+        self._chunk_pipeline = None
+        self._tracks = None
+        self._activity = None
+        self._health_at = 0.0
+        self._tick_at = 0.0
+        self._dead_logged = False
+        self._chunk_failures = 0
 
     def set_paused(self, paused):
         """Pause or resume a meeting recording. Only a flag: the record thread
@@ -1602,6 +1631,16 @@ class AudioRecorder:
         self._full_audio_len = 0
         self._full_audio_truncated = False
         self._full_audio_max = cfg["sample_rate"] * 60 * 120  # ~2 hours
+        # Nothing of the previous take (a meeting's live queue, its tracks) is
+        # carried into this one; a meeting gets its own below, once the
+        # streams are open.
+        previous = getattr(self, "_chunk_pipeline", None)
+        if previous is not None:
+            previous.abort()
+        self._chunk_pipeline = None
+        self._tracks = None
+        self._activity = None
+        self._chunk_failures = 0
 
         open_args = {
             "format": pyaudio.paFloat32,
@@ -1679,7 +1718,18 @@ class AudioRecorder:
                 logger.info("Successfully opened secondary default mic stream to mix with loopback!")
             except Exception as me:
                 logger.warning("Could not open secondary mic stream: %s", me)
-                
+
+        # Meetings (never dictation): the live transcription queue, the loudness
+        # per minute, and - with the microphone AND the system sound - the two
+        # sources as separate retained tracks (get_full_audio_tracks).
+        if capture_mode is not None:
+            self._activity = recorder_tracks.SourceActivity(rate=cfg["sample_rate"])
+            self._chunk_pipeline = self._new_chunk_pipeline()
+            self._health_at = self._tick_at = time.monotonic()
+            self._dead_logged = False
+            if is_loopback and self.mic_stream is not None:
+                self._tracks = recorder_tracks.DualTrackBuffer(self._full_audio_max)
+
         self.stop_requested = False
         # The recording thread OWNS the streams: it is the only reader and the
         # only closer. Stream handles are passed as locals so a later
@@ -1688,6 +1738,122 @@ class AudioRecorder:
             target=self._record, args=(is_loopback, self.stream, self.mic_stream),
             daemon=True)
         self._record_thread.start()
+
+    # ── a meeting's live transcription queue, tracks and health ──
+    def _new_chunk_pipeline(self):
+        """The queue this meeting's pieces go through (chunk_pipeline): one
+        worker for the local model (inference is serialized anyway), two for a
+        cloud engine (its requests overlap)."""
+        cloud = AudioRecorder._backend(self) in ("managed", "google", "mistral")
+        return chunk_pipeline.ChunkPipeline(
+            self._transcribe_chunk, workers=2 if cloud else 1,
+            sample_rate=cfg["sample_rate"], on_merge=self._on_chunks_merged)
+
+    def _on_chunks_merged(self, first_idx, other_idxs):
+        """Waiting pieces were joined into piece ``first_idx``: it carries their
+        mic / call energy too (the live You / Them hint)."""
+        with self._chunk_lock:
+            sources = getattr(self, "_chunk_sources", None)
+            if not sources:
+                return
+            total = sources.get(first_idx)
+            for i in other_idxs:
+                s = sources.get(i)
+                if s:
+                    total = s if total is None else (total[0] + s[0], total[1] + s[1])
+            if total is not None:
+                sources[first_idx] = total
+
+    def get_full_audio_tracks(self):
+        """(mic, system): the microphone and the system sound of a mic + system
+        sound meeting as separate retained tracks - int16, 16 kHz mono, the same
+        length, sample-aligned with get_full_audio() - or None (dictation,
+        microphone only, system sound only, nothing retained). Not copied more
+        than needed: treat them as read-only."""
+        tracks = getattr(self, "_tracks", None)
+        if tracks is None or not tracks.sample_count:
+            return None
+        return tracks.tracks()
+
+    def chunk_health(self):
+        """Counters of the live transcription (numbers only): the queue's
+        (queued, done, failed, merged, dropped, restarts, lag_sec ...), the
+        pieces whose transcription failed, and the retained audio."""
+        out = {}
+        pipe = getattr(self, "_chunk_pipeline", None)
+        if pipe is not None:
+            out.update(pipe.health())
+        out["chunk_failures"] = int(getattr(self, "_chunk_failures", 0) or 0)
+        out["recorded_sec"] = float(getattr(self, "_full_audio_len", 0) or 0) / float(cfg["sample_rate"])
+        tracks = getattr(self, "_tracks", None)
+        out["track_bytes"] = int(tracks.nbytes) if tracks is not None else 0
+        act = getattr(self, "_activity", None)
+        if act is not None:
+            out["quiet_sec"] = act.quiet_run_sec()
+            out["levels_db"] = act.last_levels_db()
+        return out
+
+    def quiet_seconds(self):
+        """How long (whole minutes' worth of seconds) neither the microphone
+        nor the call has made any sound up to now; 0 once there is sound (and
+        for dictation)."""
+        act = getattr(self, "_activity", None)
+        return act.quiet_run_sec() if act is not None else 0.0
+
+    def quiet_stretches(self, min_sec=None):
+        """[(start_sec, end_sec)] of the recording (pauses excluded) in which
+        neither the microphone nor the call made any sound for at least
+        ``min_sec`` - the sign of a device that stopped delivering."""
+        act = getattr(self, "_activity", None)
+        if act is None:
+            return []
+        return act.dead_stretches(recorder_tracks.DEAD_MIN_SEC if min_sec is None else min_sec)
+
+    def _meeting_tick(self):
+        """Record thread, every pass of a meeting's loop: a dead queue worker
+        is replaced (once a second at most) and, once a minute at most, ONE
+        health line is logged - counts and levels, never any text."""
+        now = time.monotonic()
+        if now - getattr(self, "_tick_at", 0.0) < 1.0:
+            return
+        self._tick_at = now
+        pipe = getattr(self, "_chunk_pipeline", None)
+        if pipe is None:
+            return
+        try:
+            pipe.ensure_workers()
+            if now - getattr(self, "_health_at", 0.0) < 60.0:
+                return
+            self._health_at = now
+            h = self.chunk_health()
+            levels = h.get("levels_db")
+            quiet = h.get("quiet_sec", 0.0)
+            line = ("Meeting health: recorded=%.1f min, pieces queued=%d in-progress=%d done=%d "
+                    "failed=%d merged=%d dropped=%d, worker restarts=%d, lag=%.0fs, mic=%s call=%s, "
+                    "tracks=%.0f MB" % (
+                        h.get("recorded_sec", 0.0) / 60.0, h.get("queued", 0), h.get("inflight", 0),
+                        h.get("done", 0), h.get("failed", 0) + h.get("chunk_failures", 0),
+                        h.get("merged", 0), h.get("dropped", 0), h.get("restarts", 0),
+                        h.get("lag_sec", 0.0),
+                        ("%.0f dB" % levels[0]) if levels else "n/a",
+                        ("%.0f dB" % levels[1]) if levels else "n/a",
+                        h.get("track_bytes", 0) / (1024.0 * 1024.0)))
+            if h.get("lag_sec", 0.0) > 60.0 or h.get("dropped", 0):
+                logger.warning(line)
+            else:
+                logger.info(line)
+            if quiet >= recorder_tracks.DEAD_MIN_SEC:
+                if not getattr(self, "_dead_logged", False):
+                    self._dead_logged = True
+                    logger.warning(
+                        "No sound has reached the recorder for %.0f min (mic %s, call %s) - "
+                        "the microphone or the output device may have stopped delivering",
+                        quiet / 60.0, ("%.0f dB" % levels[0]) if levels else "n/a",
+                        ("%.0f dB" % levels[1]) if levels else "n/a")
+            elif quiet == 0:
+                self._dead_logged = False
+        except Exception:
+            logger.debug("meeting health tick failed", exc_info=True)
 
     def _record(self, is_loopback, stream, mic_stream):
         try:
@@ -1801,6 +1967,13 @@ class AudioRecorder:
                 chunk_sources = getattr(self, "_chunk_sources", None)
                 if sources is not None and chunk_sources is not None:
                     chunk_sources[idx] = sources
+            # A meeting's pieces go through its bounded, supervised queue
+            # (chunk_pipeline); dictation - and a queue that has closed - keeps
+            # one thread per piece.
+            pipe = getattr(self, "_chunk_pipeline", None)
+            if pipe is not None and pipe.submit(idx, chunk_audio):
+                self._chunk_threads[:] = pipe.threads()
+                return
             t = threading.Thread(target=self._transcribe_chunk,
                                  args=(chunk_audio, idx), daemon=True)
             self._chunk_threads.append(t)
@@ -1830,8 +2003,12 @@ class AudioRecorder:
                 if post_roll_chunks == 0:
                     self.recording = False
 
+            if getattr(self, "_chunk_pipeline", None) is not None:
+                self._meeting_tick()           # a meeting: supervise the queue, health line
+
             try:
                 mic_part = call_part = None
+                sys_used, mix_n = None, 0      # the call's samples mixed into this read
                 if is_loopback and mic_stream is not None:
                     # smart_meeting: the MIC is the loop's clock (it always
                     # delivers frames); the loopback is drained opportunistically
@@ -1852,6 +2029,7 @@ class AudioRecorder:
                             loop_fifo = loop_fifo[-sr * 10:]
                     n = min(len(arr_mic), len(loop_fifo))
                     if n > 0:
+                        sys_used, mix_n = loop_fifo[:n], n
                         mixed = arr_mic.copy()
                         mixed[:n] = np.clip((arr_mic[:n] + loop_fifo[:n]) * 0.75, -1.0, 1.0)
                         loop_fifo = loop_fifo[n:]
@@ -1935,6 +2113,12 @@ class AudioRecorder:
                     if two_sources:
                         src_mic_e += mic_rms * mic_rms * len(m_part)
                         src_call_e += call_rms * call_rms * (len(c_part) if c_part is not None else 0)
+                    act = getattr(self, "_activity", None)
+                    if act is not None:
+                        # Loudness per minute of recording (who delivered sound).
+                        act.add(mic_rms * mic_rms * (len(m_part) if m_part is not None else 0),
+                                call_rms * call_rms * (len(c_part) if c_part is not None else 0),
+                                len(m_part) if m_part is not None else len(arr))
                     on_src = getattr(self, "on_source_levels", None)
                     if on_src is not None:
                         try:
@@ -1970,12 +2154,19 @@ class AudioRecorder:
                     self.on_levels(levels)
 
                 vad_buf.append(data)
+                tracks = getattr(self, "_tracks", None)
                 with self._chunk_lock:
                     self._chunk_frames.append(data)
                     # Retain the full wall-clock track (post-meeting diarization)
                     # until the memory cap, then stop growing it.
                     if not self._full_audio_truncated:
-                        self._full_audio_frames.append(data)
+                        if tracks is not None and two_sources and mic_part is not None:
+                            # Mic + system sound: keep the two sources apart
+                            # (the same memory as the mix); get_full_audio()
+                            # rebuilds the mix from them.
+                            tracks.add(mic_part, sys_used, mix_n)
+                        else:
+                            self._full_audio_frames.append(data)
                         self._full_audio_len += len(arr)
                         if self._full_audio_len > self._full_audio_max:
                             self._full_audio_truncated = True
@@ -2037,6 +2228,11 @@ class AudioRecorder:
             if lang and lang.startswith("!"):
                 with self._chunk_lock:
                     self._chunk_errors.append(lang)
+                # Never silent: counted, and one warning line (the engine's own
+                # short reason - no audio, no speech text).
+                self._chunk_failures = getattr(self, "_chunk_failures", 0) + 1
+                logger.warning("Piece %s was not transcribed (#%d this take): %s",
+                               idx, self._chunk_failures, str(lang)[:200])
                 return
 
             with self._chunk_lock:
@@ -2056,8 +2252,12 @@ class AudioRecorder:
             except Exception as e:
                 logger.warning("on_chunk_complete failed: %s", e)
         except Exception as e:
+            friendly = _friendly_transcription_error(e)
             with self._chunk_lock:
-                self._chunk_errors.append(f"!transcribe:{_friendly_transcription_error(e)}")
+                self._chunk_errors.append(f"!transcribe:{friendly}")
+            self._chunk_failures = getattr(self, "_chunk_failures", 0) + 1
+            logger.warning("Piece %s failed to transcribe (#%d this take): %s",
+                           idx, self._chunk_failures, str(friendly)[:200])
 
     def request_abort(self):
         """Cooperative cancel for an in-flight transcribe(): stop waiting on
@@ -2065,6 +2265,9 @@ class AudioRecorder:
         of blocking on a slow/stuck local transcription."""
         self._abort = True
         self.stop_requested = True
+        pipe = getattr(self, "_chunk_pipeline", None)
+        if pipe is not None:
+            pipe.abort()              # a meeting's waiting pieces are discarded
 
     def stop_recording(self):
         self.stop_requested = True
@@ -2081,9 +2284,17 @@ class AudioRecorder:
 
         self.recording = False
         self.mic_stream = None
+        pipe = getattr(self, "_chunk_pipeline", None)
+        if pipe is not None:
+            pipe.close()              # the recording is over: the worker drains the queue, then ends
 
     def transcribe(self):
+        pipe = getattr(self, "_chunk_pipeline", None)
+        if pipe is not None:
+            pipe.close()                  # a meeting: no more pieces - the worker drains the queue and ends
         pending = list(self._chunk_threads)
+        if pipe is not None:
+            pending += [t for t in pipe.threads() if t not in pending]
         # A cold model load (e.g. after an idle unload) holds _model_lock and
         # the chunks queue behind it: start their time budget once it's done,
         # or a slow load would silently drop the first sentences.
@@ -2096,8 +2307,13 @@ class AudioRecorder:
                    and not getattr(self, "_abort", False)):
                 time.sleep(0.05)
         self._last_load_wait = time.time() - load_wait
-        budget = max(30, min(180, 5 * len(pending)))
+        # One thread per piece (dictation): the budget grows with the pieces. A
+        # meeting's queue has one worker, so count its pieces instead.
+        pieces = max(len(pending), int(getattr(self, "_chunk_idx", 0) or 0)) if pipe is not None \
+            else len(pending)
+        budget = max(30, min(180, 5 * pieces))
         deadline = time.time() + budget
+        last_report = 0.0
         for t in pending:
             # Poll in short slices so Esc (request_abort) is honored within
             # ~0.15s instead of blocking up to the full budget on a slow chunk.
@@ -2107,6 +2323,17 @@ class AudioRecorder:
                 if time.time() > deadline:
                     break
                 t.join(timeout=0.15)
+                if pipe is not None and time.time() - last_report >= 1.0:
+                    # The queue's worker is one thread: report the pieces done
+                    # so far (the per-thread report below would sit at 0).
+                    last_report = time.time()
+                    try:
+                        with self._chunk_lock:
+                            done = sum(1 for i in range(self._chunk_idx) if i in self._chunk_results)
+                        if self.on_finalising:
+                            self.on_finalising(done, self._chunk_idx)
+                    except Exception:
+                        pass
             try:
                 with self._chunk_lock:
                     done = sum(1 for i in range(self._chunk_idx) if i in self._chunk_results)
@@ -2185,7 +2412,12 @@ class AudioRecorder:
     def get_full_audio(self):
         """The full retained wall-clock recording as 16 kHz mono float32 (empty
         array if nothing was retained). Used post-meeting for diarization + a
-        clean speaker-attributed re-transcription."""
+        clean speaker-attributed re-transcription. A mic + system sound meeting
+        keeps its two sources as separate tracks (get_full_audio_tracks); this
+        is the mix of them, exactly as the record loop mixed it."""
+        tracks = getattr(self, "_tracks", None)
+        if tracks is not None and tracks.sample_count:
+            return tracks.mix()
         with self._chunk_lock:
             frames = b"".join(self._full_audio_frames)
         if not frames:
@@ -5548,7 +5780,11 @@ class AppController(QObject):
         # Services first: a queued file job is cancelled (its worker stops at
         # the next check), the calendar's timers and a waiting sign-in end,
         # the mic check closes - on this thread, before PortAudio goes below.
-        for stop in (lambda: self.file_jobs.shutdown(),
+        for stop in (lambda: diarization_proc.cancel_all(),   # a speaker pass runs in its own process
+                     # ...and the names that come after a meeting's notes stop waiting / retrying
+                     lambda: getattr(getattr(self, "meeting_session", None),
+                                     "shutdown_speaker_followup", lambda: None)(),
+                     lambda: self.file_jobs.shutdown(),
                      lambda: self.calendar is not None and self.calendar.stop(),
                      self._stop_mic_monitor_for_quit):
             try:
@@ -5593,6 +5829,10 @@ class AppController(QObject):
         self._session_ending = True
         logger.info("Session ending: saving work")
         try:
+            getattr(getattr(self, "meeting_session", None), "shutdown_speaker_followup", lambda: None)()
+        except Exception:
+            logger.debug("Ending the speaker pass at log-off failed", exc_info=True)
+        try:
             self._stop_recording_for_quit()
         except Exception:
             logger.warning("Saving work at log-off failed", exc_info=True)
@@ -5636,6 +5876,8 @@ class AppController(QObject):
             QTimer.singleShot(2000, self._next_pending_notes)
         if getattr(self, "_quitting", False):
             return
+        if getattr(getattr(self, "meeting_session", None), "last_run_speakers", False) is True:
+            return                    # "Identify speakers" finished: the page reloads; no notes news
         failed = bool(error) or not (notes or "").strip()
         if failed and not folder:
             return
@@ -6179,6 +6421,31 @@ def main():
     # here, after the tray, not inside the controller.
     if "--background" not in sys.argv and controller.cfg.get("onboarding_done", False):
         QTimer.singleShot(200, lambda: controller.show_main())
+
+    # A speaker pass copies the meeting's audio into the temp folder while it works.
+    # One that was killed with the app (Windows closes a frozen window) leaves that
+    # copy behind - the user's own audio. This is the only running Gusan and no pass
+    # of this run exists yet, so whatever is older than a minute is removed.
+    try:
+        threading.Thread(target=diarization_proc.sweep_stale, kwargs={"max_age_s": 60.0},
+                         name="gusan-sweep-temp", daemon=True).start()
+    except Exception:
+        logger.debug("temp folder sweep not started", exc_info=True)
+
+    # A frozen window leaves one entry in transcribe.log (where the GUI thread is
+    # stuck, what the other threads do, how long it lasted): stall_watchdog.py.
+    # The GUI beats once a second; a daemon thread watches. Off in tests.
+    try:
+        import stall_watchdog
+        watchdog = stall_watchdog.start(logger)
+        if watchdog is not None:
+            beat = QTimer(qapp)
+            beat.setInterval(stall_watchdog.BEAT_MS)
+            beat.timeout.connect(watchdog.beat)
+            beat.start()
+            qapp.aboutToQuit.connect(watchdog.stop)
+    except Exception:
+        logger.debug("stall watchdog unavailable", exc_info=True)
 
     sys.exit(qapp.exec())
 

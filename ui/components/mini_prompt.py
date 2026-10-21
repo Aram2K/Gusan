@@ -126,9 +126,20 @@ class MiniPrompt(QDialog):
             logger.debug("MiniPrompt placement failed", exc_info=True)
 
 
-def ask(parent, title, body, yes_text, no_text, icon="info"):
-    """Show the card; True when the first button (or Enter) was pressed. Tests replace this."""
+def ask(parent, title, body, yes_text, no_text, icon="info", private=False):
+    """Show the card; True when the first button (or Enter) was pressed. Tests replace this.
+
+    ``private``: asked from a window that is hidden from screen shares (the Live Assistant
+    card), so the question itself is kept out of a share and a recording too, where the OS
+    can do that."""
     dlg = MiniPrompt(parent, title, body, yes_text, no_text, icon=icon)
+    if private:
+        try:
+            from ui import glass
+            dlg.winId()                          # the native window, before it is shown
+            glass.exclude_from_capture(dlg, True)
+        except Exception:
+            logger.debug("MiniPrompt could not be hidden from capture", exc_info=True)
     try:
         return dlg.exec() == QDialog.Accepted
     finally:

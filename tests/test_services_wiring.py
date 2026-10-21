@@ -581,6 +581,38 @@ class TestSignals(unittest.TestCase):
             on_click()
             self.assertEqual(a.opened, [("meetings", {"meeting": "C:/m/20261008_101500"})])
 
+    def test_identify_speakers_finishing_is_not_notes_news(self):
+        """"Identify speakers" ends through the same finished signal: the lists
+        refresh (and queued pending notes go on) but nobody is told "Notes ready"
+        - or "couldn't be written" - about a run that wrote no notes."""
+        def app(speakers):
+            a = SimpleNamespace(cfg={"notify_when_ready": True}, hints=[], history=0, opened=[],
+                                meeting_session=SimpleNamespace(_meeting_title="Weekly sync",
+                                                                last_run_speakers=speakers),
+                                _pending_notes_queue=["C:/m/next"], nexts=0)
+            a.notify_history_changed = lambda: setattr(a, "history", a.history + 1)
+            a.show_tray_hint = lambda t, m, on_click=None: a.hints.append((t, m, on_click))
+            a.show_main = lambda route=None, **o: a.opened.append((route, o))
+            a._next_pending_notes = lambda: setattr(a, "nexts", a.nexts + 1)
+            a.main_win = SimpleNamespace(isVisible=lambda: True, isMinimized=lambda: False,
+                                         current_route=lambda: "dictation")
+            return a
+        for notes in ("## Notes", ""):
+            a = app(True)
+            with mock.patch.object(main.QTimer, "singleShot", lambda ms, fn: fn()):
+                main.AppController._on_meeting_finished(a, "C:/m/20261008_101500", notes, "")
+            self.assertEqual((a.history, a.hints, a.nexts), (1, [], 1))
+        a = app(False)                                    # a real notes run still says so
+        with mock.patch.object(main.QTimer, "singleShot", lambda ms, fn: fn()):
+            main.AppController._on_meeting_finished(a, "C:/m/20261008_101500", "## Notes", "")
+        self.assertEqual(a.hints[0][:2], ("Notes ready", "Weekly sync"))
+        # (a stand-in session that has no such attribute behaves as before, too)
+        a = app(False)
+        a.meeting_session = SimpleNamespace(_meeting_title="Weekly sync")
+        with mock.patch.object(main.QTimer, "singleShot", lambda ms, fn: fn()):
+            main.AppController._on_meeting_finished(a, "C:/m/20261008_101500", "## Notes", "")
+        self.assertEqual(a.hints[0][:2], ("Notes ready", "Weekly sync"))
+
 
 # ── Wave 4 review: the Smart Actions shortcut, a safe Quit, updates ───────────
 

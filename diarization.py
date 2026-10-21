@@ -24,6 +24,7 @@ import urllib.request
 
 import numpy as np
 
+import diarization_proc
 import storage
 
 logger = logging.getLogger("transcribe")
@@ -45,6 +46,7 @@ _EMB_REL = "embedding.onnx"
 _lock = threading.Lock()       # serialize model build + inference
 _diarizer = None               # cached OfflineSpeakerDiarization
 _diarizer_key = None           # (num_speakers, threshold) the cache was built for
+last_error = ""                # why the latest diarize() returned nothing ("" = it did not fail)
 
 
 def _models_dir():
@@ -86,18 +88,32 @@ def download_models(on_progress=None):
         d = _models_dir()
         d.mkdir(parents=True, exist_ok=True)
 
+        def hook_for(label):
+            """urlretrieve's reporthook: the status line shows the percent
+            (at most every 5 points - a status line is not a progress bar)."""
+            seen = [-10]
+
+            def hook(blocks, block_size, total):
+                if not on_progress or total <= 0:
+                    return
+                pct = min(100, int(blocks * block_size * 100 / total))
+                if pct >= seen[0] + 5:
+                    seen[0] = pct
+                    on_progress("%s %d%%" % (label, pct))
+            return hook
+
         if not emb_model_path().exists():
             if on_progress:
                 on_progress("Downloading speaker model (40 MB)...")
             tmp = d / "embedding.onnx.part"
-            urllib.request.urlretrieve(_EMB_URL, tmp)
+            urllib.request.urlretrieve(_EMB_URL, tmp, hook_for("Downloading speaker model (40 MB)"))
             tmp.replace(emb_model_path())
 
         if not seg_model_path().exists():
             if on_progress:
                 on_progress("Downloading segmentation model (7 MB)...")
             arch = d / "seg.tar.bz2"
-            urllib.request.urlretrieve(_SEG_URL, arch)
+            urllib.request.urlretrieve(_SEG_URL, arch, hook_for("Downloading segmentation model (7 MB)"))
             with tarfile.open(arch) as tf:
                 tf.extractall(d)
             try:
@@ -122,7 +138,9 @@ def _build_diarizer(num_speakers, threshold):
     import sherpa_onnx
     # Recording is finished by the time diarization runs, so use plenty of CPU
     # threads to keep the post-meeting wait short.
-    nthreads = max(2, min(8, (os.cpu_count() or 4)))
+    # (the child process of diarization_proc passes its own count)
+    nthreads = (int(os.environ.get(diarization_proc.ENV_THREADS) or 0)
+                or max(2, min(8, (os.cpu_count() or 4))))
     config = sherpa_onnx.OfflineSpeakerDiarizationConfig(
         segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
             pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(
@@ -143,24 +161,39 @@ def _build_diarizer(num_speakers, threshold):
     return sherpa_onnx.OfflineSpeakerDiarization(config)
 
 
-def diarize(audio, num_speakers=None, threshold=0.7, on_progress=None):
+def diarize(audio, num_speakers=None, threshold=0.7, on_progress=None, should_cancel=None):
     """Diarize 16 kHz mono float32 ``audio`` into speaker turns.
 
     Returns a list of ``(start_s, end_s, speaker_id)`` sorted by start time, or
     ``[]`` if diarization is unavailable, the audio is too short, or anything
     fails. Never raises. ``on_progress(done, total)`` receives sherpa's
     chunk-level progress when the installed version supports a callback.
+
+    The work runs in a child process (diarization_proc): sherpa's process()
+    keeps the interpreter lock for its whole run, which froze the window for
+    minutes. ``should_cancel()`` (polled about 4 times a second) ends it early.
     """
+    global last_error
+    last_error = ""
     if not is_available():
+        last_error = "unavailable"
         return []
     try:
         audio = np.asarray(audio, dtype=np.float32)
     except Exception:
+        last_error = "bad audio"
         return []
     if audio.ndim > 1:
         audio = audio.reshape(audio.shape[0], -1).mean(axis=1)
     if len(audio) < SAMPLE_RATE:  # < 1s: nothing meaningful to cluster
+        last_error = "too short"
         return []
+
+    if diarization_proc.isolation_enabled():
+        turns, error = diarization_proc.run(audio, num_speakers, threshold,
+                                            on_progress, should_cancel, sample_rate=SAMPLE_RATE)
+        last_error = error
+        return turns
 
     global _diarizer, _diarizer_key
     key = (int(num_speakers) if num_speakers else 0, round(float(threshold), 3))
@@ -189,6 +222,7 @@ def diarize(audio, num_speakers=None, threshold=0.7, on_progress=None):
                 result = _diarizer.process(audio).sort_by_start_time()
         return [(float(r.start), float(r.end), int(r.speaker)) for r in result]
     except Exception as e:
+        last_error = str(e)[:200] or type(e).__name__
         logger.warning("Diarization failed: %s", e)
         return []
 
@@ -224,6 +258,24 @@ def attribute_segments(segments, turns, offset=0.0):
         # Only None when there are no turns at all.
         labeled["speaker"] = best_spk if best_spk is not None else nearest_spk
         out.append(labeled)
+    return out
+
+
+def speaker_label_map(labeled_segments, names=None):
+    """{speaker id: "Speaker N"} in first-appearance order - the numbering
+    build_speaker_transcript uses - for every id not already in ``names``. Pass
+    it (merged into ``names``) to several build_speaker_transcript calls to keep
+    "Speaker 2" the same person across the parts of one meeting; a later step
+    can swap a label for a name read off the shared screen the same way."""
+    names = names or {}
+    out = {}
+    for seg in labeled_segments:
+        if not (seg.get("text") or "").strip():
+            continue
+        spk = seg.get("speaker")
+        if spk is None or spk in names or spk in out:
+            continue
+        out[spk] = f"Speaker {len(out) + 1}"
     return out
 
 

@@ -291,6 +291,28 @@ class TestRunFileJob(unittest.TestCase):
         with self.assertRaises(fj.JobCancelled):
             run(cancel=lambda: flag["on"], diarizer=SetFlag())
 
+    def test_cancel_reaches_the_speaker_pass_and_ends_it(self):
+        # The speaker pass runs in its own process and polls this: Cancel does not
+        # have to wait for it to finish.
+        flag = {"on": False}
+        seen = {}
+
+        class Polls(FakeDiarizer):
+            def diarize(self, audio, on_progress=None, should_cancel=None):
+                seen["cancel"] = should_cancel
+                flag["on"] = True                       # the user pressed Cancel meanwhile
+                seen["answer"] = should_cancel()
+                return []                               # what a cancelled pass returns
+        with self.assertRaises(fj.JobCancelled):
+            run(cancel=lambda: flag["on"], diarizer=Polls())
+        self.assertTrue(callable(seen["cancel"]))
+        self.assertIs(seen["answer"], True)
+
+    def test_a_speaker_tool_without_should_cancel_is_still_called(self):
+        diar = FakeDiarizer()                           # diarize(audio, on_progress=None): no should_cancel
+        result, *_ = run(diarizer=diar)
+        self.assertEqual((diar.diarized, result["speaker_count"]), (1, 2))
+
     def test_without_speaker_labels(self):
         diar = FakeDiarizer()
         result, *_ = run({"speakers": False}, diarizer=diar)

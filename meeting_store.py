@@ -2,7 +2,11 @@
 
 Each folder holds meta.json, transcript.txt, notes.md, my_notes.md (what the
 user typed during the meeting), chunks.jsonl (live chunks) and
-audio_partN.wav (one per recording segment - a resumed meeting adds a part).
+audio_partN.wav (one per recording segment - a resumed meeting adds a part;
+a mic + system sound meeting also keeps audio_partN_mic.wav and
+audio_partN_system.wav, the two sources apart, for later speaker labels) and
+segments.json (what the re-read of the recording found, so "Them" can become
+"Speaker 1..N" later without reading the recording again).
 This module is the single reader used by the History tab, the detail view,
 Resume and the Gusan 2.0 Meetings page.
 
@@ -163,6 +167,12 @@ def load_transcript(folder):
     return text if text.strip() else chunks_text(folder)
 
 
+def has_transcript_file(folder):
+    """True when transcript.txt holds text (a meeting that only has its live
+    chunks - the app closed before it was finished - does not)."""
+    return bool(_read(folder, "transcript.txt").strip())
+
+
 def chunks_text(folder):
     """The text of chunks.jsonl in spoken order. Chunk indices restart with
     every recording segment, so they're only sorted when unique (one
@@ -221,6 +231,107 @@ def next_audio_part_path(folder):
     if parts:
         n = int(_PART_RE.match(parts[-1].name).group(1)) + 1
     return Path(folder) / f"audio_part{n}.wav"
+
+
+# A mic + system sound meeting keeps the two sources apart next to each part's
+# mixed recording: audio_part1.wav (the mix: playback, export, transcription),
+# audio_part1_mic.wav and audio_part1_system.wav (16-bit, lossless; later
+# re-labelling of who spoke uses them). They never match _PART_RE, so no list,
+# export or player sees them as recording parts; deleting the meeting's folder
+# removes them with it; an older meeting simply has none.
+TRACK_KINDS = ("mic", "system")
+
+
+def track_path(part_path, kind):
+    """audio_part2.wav + "mic" -> audio_part2_mic.wav (same folder)."""
+    if kind not in TRACK_KINDS:
+        raise ValueError(kind)
+    p = Path(part_path)
+    return p.with_name(f"{p.stem}_{kind}{p.suffix}")
+
+
+def audio_tracks(folder):
+    """[(part path, mic track path or None, system track path or None)] for each
+    recording part, in order. A track counts only when its file is non-empty."""
+    out = []
+    for part in audio_parts(folder):
+        paths = []
+        for kind in TRACK_KINDS:
+            t = track_path(part, kind)
+            try:
+                paths.append(t if t.is_file() and t.stat().st_size > 44 else None)
+            except OSError:
+                paths.append(None)
+        out.append((part, paths[0], paths[1]))
+    return out
+
+
+# transcript.txt is replaced atomically by Identify speakers; the old text is
+# kept under this name for the length of the run (and left if the app dies in it).
+BEFORE_SPEAKERS = "transcript.before_speakers.txt"
+
+
+def write_transcript(folder, text):
+    """Save transcript.txt (atomic). True when written."""
+    try:
+        _atomic_write_text(Path(folder) / "transcript.txt", text or "")
+        return True
+    except OSError:
+        return False
+
+
+def keep_before_speakers(folder, text):
+    """Keep ``text`` (the transcript as it is) as transcript.before_speakers.txt
+    while a speaker pass works (atomic). True when written."""
+    try:
+        _atomic_write_text(Path(folder) / BEFORE_SPEAKERS, text or "")
+        return True
+    except OSError:
+        return False
+
+
+def drop_before_speakers(folder):
+    """Remove transcript.before_speakers.txt (the pass ended without needing it)."""
+    try:
+        (Path(folder) / BEFORE_SPEAKERS).unlink()
+    except OSError:
+        pass
+
+
+# segments.json: what the re-read of a recording found, kept so that "Them" can become
+# "Speaker 1..N" later WITHOUT reading the recording again (the speech model is the
+# slow part). One entry per recording part:
+#   {"version": 1, "parts": [{"audio": "audio_part1.wav", "kind": "sources" | "call",
+#     "seconds": 2712.4, "text": "You: ...\nThem: ...", "done": false,
+#     "segments": [{"s": 1.2, "e": 4.8, "t": "Hello", "src": "you" | "them"}, ...]}]}
+# "text" is the block this part has in transcript.txt (the pass replaces exactly it);
+# "kind" says where the call's own sound is: "sources" = audio_partN_system.wav,
+# "call" = audio_partN.wav itself (a meeting recorded from the system sound only).
+# Written atomically, like meta.json: a crash leaves the old file or the new one.
+SEGMENTS_FILE = "segments.json"
+
+
+def load_segments(folder):
+    """segments.json as a dict ({"version": 1, "parts": [...]}), or None when the
+    meeting has none (an older one, a mic-only meeting) or it can't be read."""
+    try:
+        with open(Path(folder) / SEGMENTS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("parts"), list):
+        return None
+    return data
+
+
+def write_segments(folder, data):
+    """Save segments.json (atomic, compact). True when written."""
+    try:
+        _atomic_write_text(Path(folder) / SEGMENTS_FILE,
+                           json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
 
 
 def summary_preview(notes, limit=140):

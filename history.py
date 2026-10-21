@@ -1,4 +1,5 @@
 import csv
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -11,6 +12,12 @@ MAX_ENTRIES = 200
 
 storage.migrate_legacy_file(LEGACY_HISTORY_PATH, HISTORY_PATH)
 
+# save_entry / delete read the whole file, change the list and write it back. A
+# meeting's entry is written by its worker thread, a dictation's by another thread
+# and a delete from the History tab by the window: without one writer at a time,
+# two of them read the same list and the later write drops the earlier entry.
+_write_lock = threading.RLock()
+
 
 def load():
     entries = storage.read_json(HISTORY_PATH, [])
@@ -20,7 +27,8 @@ def load():
 
 
 def save_all(entries):
-    storage.atomic_write_json(HISTORY_PATH, entries[:MAX_ENTRIES], ensure_ascii=False)
+    with _write_lock:
+        storage.atomic_write_json(HISTORY_PATH, entries[:MAX_ENTRIES], ensure_ascii=False)
 
 
 def search(query):
@@ -38,11 +46,12 @@ def search(query):
 
 
 def delete(index):
-    entries = load()
-    if 0 <= index < len(entries):
-        del entries[index]
-        save_all(entries)
-        return True
+    with _write_lock:
+        entries = load()
+        if 0 <= index < len(entries):
+            del entries[index]
+            save_all(entries)
+            return True
     return False
 
 
@@ -87,7 +96,6 @@ def save_entry(text, language, backend, audio_dir=None, **extra):
     ``said`` (the words dictated); empty values are left out."""
     if not text.strip():
         return
-    entries = load()
     entry = {
         "text":      text,
         "language":  language,
@@ -99,8 +107,10 @@ def save_entry(text, language, backend, audio_dir=None, **extra):
     for key, value in extra.items():
         if key not in entry and value not in (None, ""):
             entry[key] = value
-    entries.insert(0, entry)
-    save_all(entries)
+    with _write_lock:
+        entries = load()
+        entries.insert(0, entry)
+        save_all(entries)
     return entry
 
 

@@ -65,6 +65,8 @@ const allowedEvents = new Set([
   'live_prompter_opened',
   'live_prompter_started',
   'live_prompter_suggestion',
+  'live_document_added',
+  'live_document_failed',
   'file_transcription_started',
   'file_transcription_completed',
   'file_transcription_failed',

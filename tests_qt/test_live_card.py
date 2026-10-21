@@ -472,3 +472,23 @@ def test_streaming_markdown_hides_half_written_markers():
     assert streaming_markdown("Run `pip") == "Run pip"
     assert streaming_markdown("```python\nprint(1)") == "```python\nprint(1)\n```"
     assert streaming_markdown("") == ""
+
+
+# ── documents the user added (tests_qt/test_live_documents_ui.py goes deeper) ──
+def test_the_documents_chip_is_hidden_until_there_are_documents_and_the_card_takes_drops(card):
+    from PySide6.QtCore import Qt
+    c, _ = card()
+    assert c.docs_bar.isHidden() and c.docs_chip.objectName() == "laDocs"
+    assert c.acceptDrops() and not c.input_ask.acceptDrops()     # a file dropped on the ask box reaches the card
+    assert c.lbl_status.textFormat() == Qt.PlainText             # file names show here as text
+
+
+def test_the_worker_keeps_its_old_three_argument_call(card):
+    # The answer worker is still callable as (context, image, generation): no documents, no change.
+    import actions
+    c, app = card()
+    c._resolve_engine = lambda: (None, {})
+    c._gen = 3
+    c._suggest_worker("Conversation (latest part):\nHow much is it?", None, 3)
+    QApplication.processEvents()
+    assert actions.NO_ENGINE_MESSAGE in c.txt_suggestion.toPlainText()

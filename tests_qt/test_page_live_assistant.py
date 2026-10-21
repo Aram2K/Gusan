@@ -827,3 +827,24 @@ def test_dates_and_lengths(la):
     assert la.length_text(0) == "" and la.length_text(20) == "1 min"
     assert la.length_text(38 * 60) == "38 min" and la.length_text(3600) == "1 h"
     assert la.length_text(3900) == "1 h 5 min"
+
+
+# ── Documents (ui/pages/live_documents.py; tests_qt/test_live_documents_ui.py goes deeper) ──
+def test_the_page_has_a_documents_section_that_follows_who_writes_the_answers(build):
+    pro, _ = build("pro")
+    free, _ = build("free")
+    for page in (pro, free):
+        assert _wait(lambda p=page: p.documents._loaded)
+        assert page.documents.accessibleName() == "Documents"
+        assert page.documents.add_button.text() == "Add documents"
+    assert pro.documents._route == "cloud"                       # Gusan Cloud writes for Pro
+    assert free.documents._route in ("local", "none", "own_key")  # never the cloud for Free
+    pro.app.cfg["privacy_mode"] = True
+    pro.on_setting_changed("privacy_mode")
+    assert pro.documents._route != "cloud"                       # Privacy mode keeps it local
+
+
+def test_files_can_be_dropped_on_the_page_but_not_pasted_into_about_my_calls(build):
+    page, _ = build("free")
+    assert page.acceptDrops()
+    assert not page.context_edit.acceptDrops()                   # a dropped file is a document, not a path in the box

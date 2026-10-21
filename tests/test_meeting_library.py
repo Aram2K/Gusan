@@ -557,5 +557,151 @@ class TestMeetingStartState(unittest.TestCase):
         self.assertEqual([m["id"] for m in ms.list_meetings()], ["20260101_090000"])
 
 
+# ── Gusan 2.0.1: the two sources next to a meeting's recording ───────────────
+
+@unittest.skipUnless(_real_numpy(), "real numpy not importable (stubbed)")
+class TestTrackFiles(unittest.TestCase):
+    """audio_partN_mic.wav / audio_partN_system.wav: kept with the meeting,
+    never mistaken for a recording part, cleaned up with it, optional."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name) / "meetings"
+        self.root.mkdir()
+        p = patch.object(ms.storage, "path_for", return_value=self.root)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _meeting(self, name="20261021_103134", parts=(1,), tracks=(1,), transcript="You: hi"):
+        d = self.root / name
+        d.mkdir()
+        (d / "meta.json").write_text(json.dumps({"title": "Call", "duration_sec": 3}), encoding="utf-8")
+        if transcript:
+            (d / "transcript.txt").write_text(transcript, encoding="utf-8")
+        tone = (np.sin(np.arange(16000 * 3) / 30.0) * 0.3).astype(np.float32)
+        for n in parts:
+            ax.write_wav(d / f"audio_part{n}.wav", tone)
+        for n in tracks:
+            ax.write_wav_int16(ms.track_path(d / f"audio_part{n}.wav", "mic"), ax.float_to_int16(tone))
+            ax.write_wav_int16(ms.track_path(d / f"audio_part{n}.wav", "system"), ax.float_to_int16(tone * 0.5))
+        return d
+
+    def test_track_paths_sit_next_to_their_part(self):
+        self.assertEqual(ms.track_path(Path("x") / "audio_part2.wav", "mic").name, "audio_part2_mic.wav")
+        self.assertEqual(ms.track_path("audio_part10.wav", "system").name, "audio_part10_system.wav")
+        with self.assertRaises(ValueError):
+            ms.track_path("audio_part1.wav", "both")
+
+    def test_tracks_are_never_recording_parts(self):
+        d = self._meeting(parts=(1, 2), tracks=(1, 2))
+        self.assertEqual([p.name for p in ms.audio_parts(d)], ["audio_part1.wav", "audio_part2.wav"])
+        self.assertEqual(ms.next_audio_part_path(d).name, "audio_part3.wav")
+        item = ms.list_meetings()[0]
+        self.assertEqual([Path(p).name for p in item["audio_parts"]], ["audio_part1.wav", "audio_part2.wav"])
+        self.assertEqual(item["duration_sec"], 3)
+
+    def test_audio_tracks_pairs_each_part_with_its_two_files(self):
+        d = self._meeting(parts=(1, 2, 3), tracks=(1, 3))
+        got = [(p.name, m.name if m else None, s.name if s else None) for p, m, s in ms.audio_tracks(d)]
+        self.assertEqual(got, [("audio_part1.wav", "audio_part1_mic.wav", "audio_part1_system.wav"),
+                               ("audio_part2.wav", None, None),
+                               ("audio_part3.wav", "audio_part3_mic.wav", "audio_part3_system.wav")])
+        self.assertEqual(ms.audio_tracks(self.root / "nothing"), [])
+
+    def test_a_half_written_or_empty_track_does_not_count(self):
+        d = self._meeting(tracks=())
+        (d / "audio_part1_mic.wav").write_bytes(b"")
+        (d / "audio_part1_system.wav.part").write_bytes(b"RIFF" + b"\0" * 500)    # an unfinished write
+        self.assertEqual([(m, s) for _p, m, s in ms.audio_tracks(d)], [(None, None)])
+
+    def test_deleting_one_or_all_meetings_removes_the_tracks(self):
+        a = self._meeting("20261021_103134")
+        b = self._meeting("20261021_113134")
+        self.assertTrue((a / "audio_part1_system.wav").is_file())
+        self.assertTrue(ms.delete_meeting(a))
+        self.assertFalse(a.exists())
+        self.assertEqual(ms.delete_all_meetings(), 1)
+        self.assertFalse(b.exists())
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_a_meeting_that_has_only_its_tracks_is_not_listed_as_a_recording(self):
+        d = self.root / "20261021_090000"
+        d.mkdir()
+        (d / "meta.json").write_text(json.dumps({"title": "x"}), encoding="utf-8")
+        ax.write_wav_int16(d / "audio_part1_mic.wav", np.zeros(1000, np.int16))
+        self.assertEqual(ms.list_meetings(), [])
+
+    def test_the_old_text_kept_by_identify_speakers_is_not_a_transcript(self):
+        d = self.root / "20261021_090000"
+        d.mkdir()
+        (d / ms.BEFORE_SPEAKERS).write_text("old", encoding="utf-8")
+        self.assertEqual(ms.list_meetings(), [])
+        self.assertEqual(ms.load_transcript(d), "")
+        self.assertFalse(ms.has_transcript_file(d))
+
+    def test_transcript_files_are_written_whole(self):
+        d = self.root / "20261021_090000"
+        d.mkdir()
+        self.assertTrue(ms.write_transcript(d, "You: one\nSpeaker 1: two"))
+        self.assertEqual(ms.load_transcript(d), "You: one\nSpeaker 1: two")
+        self.assertTrue(ms.has_transcript_file(d))
+        self.assertTrue(ms.write_transcript(d, "You: three"))
+        self.assertEqual(ms.load_transcript(d), "You: three")
+        self.assertEqual([p.name for p in d.iterdir()], ["transcript.txt"])      # no temp file left
+        self.assertFalse(ms.write_transcript(self.root / "gone", "x"))
+        (d / "transcript.txt").write_text("  \n", encoding="utf-8")
+        self.assertFalse(ms.has_transcript_file(d))                  # blank is no transcript
+
+    def test_has_transcript_file_ignores_live_chunks(self):
+        d = self.root / "20261021_090000"
+        d.mkdir()
+        with open(d / "chunks.jsonl", "w", encoding="utf-8") as f:
+            f.write(json.dumps({"index": 0, "text": "live words"}) + "\n")
+        self.assertEqual(ms.load_transcript(d), "live words")
+        self.assertFalse(ms.has_transcript_file(d))
+
+    def test_int16_round_trip_and_float_read(self):
+        p = Path(self._tmp.name) / "t.wav"
+        data = (np.arange(-1000, 1000) * 30).astype(np.int16)
+        self.assertEqual(ax.write_wav_int16(p, data), p)
+        got, rate = ax.read_wav_int16(p)
+        self.assertEqual(rate, ax.RATE)
+        self.assertTrue(np.array_equal(got, data))
+        f, _ = ax.read_wav_float32(p)
+        self.assertEqual(f.dtype, np.float32)
+        self.assertAlmostEqual(float(f[-1]), data[-1] / 32767.0, places=6)
+        self.assertEqual(list(p.parent.glob("t.wav.part")), [])
+
+    def test_a_failed_write_leaves_neither_the_file_nor_a_temp(self):
+        p = Path(self._tmp.name) / "u.wav"
+        with patch("os.replace", side_effect=OSError("locked")):
+            with self.assertRaises(OSError):
+                ax.write_wav_int16(p, np.zeros(100, np.int16))
+        self.assertEqual([x.name for x in p.parent.iterdir() if x.name.startswith("u.wav")], [])
+        ax.write_wav_int16(p, np.ones(10, np.int16))
+        with patch("os.replace", side_effect=OSError("locked")):
+            with self.assertRaises(OSError):
+                ax.write_wav_int16(p, np.zeros(100, np.int16))
+        self.assertEqual(len(ax.read_wav_int16(p)[0]), 10)         # the earlier file is intact
+
+
+class TestMeetingListNeverBreaksOnOldFolders(unittest.TestCase):
+    def test_a_meeting_from_before_the_tracks_lists_and_reads_as_ever(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            d = root / "20260101_090000"
+            d.mkdir()
+            (d / "meta.json").write_text(json.dumps({"title": "Old", "duration_sec": 60}), encoding="utf-8")
+            (d / "audio_part1.wav").write_bytes(b"RIFF")
+            (d / "audio_part2.wav").write_bytes(b"RIFF")
+            (d / "transcript.txt").write_text("Speaker 1: hello", encoding="utf-8")
+            with patch.object(ms.storage, "path_for", return_value=root):
+                items = ms.list_meetings()
+                tracks = ms.audio_tracks(d)
+        self.assertEqual(len(items[0]["audio_parts"]), 2)
+        self.assertEqual([(m, s) for _p, m, s in tracks], [(None, None), (None, None)])
+
+
 if __name__ == "__main__":
     unittest.main()

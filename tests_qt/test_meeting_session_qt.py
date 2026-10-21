@@ -318,3 +318,66 @@ def test_classic_window_start_and_retry(qapp, meetings_root, monkeypatch):
     assert finished[-1] == ("## Retried", "")
     assert s.notes == "## Retried"
     s.deleteLater()
+
+
+def test_notes_first_and_the_names_after_with_the_real_threads(qapp, meetings_root, monkeypatch):
+    """A mic + system sound meeting: Stop gives the notes and a You / Them transcript, the session
+    is idle, and the worker thread then turns Them into Speaker 1 - every signal on the GUI thread."""
+    pytest.importorskip("numpy")
+    import meeting_session
+    import meeting_store
+    from tests.test_meeting_speakers import FakeDiarizer, call_tracks
+    import numpy as np
+
+    class SegRec(_Rec):
+        def __init__(self):
+            super().__init__()
+            self.mic, self.system = call_tracks(np, 40, [(2, 6), (12, 15)], [(7, 11), (16, 36)])
+
+        def get_full_audio(self):
+            return (self.mic.astype(np.float32) + self.system.astype(np.float32)) / 32767.0 * 0.75
+
+        def get_full_audio_tracks(self):
+            return self.mic, self.system
+
+        def transcribe_segments(self, audio, language=None, model_name=None, on_progress=None,
+                                should_cancel=None):
+            return [{"start": 2.0, "end": 6.0, "text": "Hello team."},
+                    {"start": 7.0, "end": 11.0, "text": "Welcome."},
+                    {"start": 12.0, "end": 15.0, "text": "Thanks."},
+                    {"start": 16.0, "end": 36.0, "text": "We ship Friday."}]
+
+        def quiet_stretches(self, min_sec=None):
+            return []
+
+        def chunk_health(self):
+            return {}
+
+        def quiet_seconds(self):
+            return 0.0
+
+    app = _app()
+    app.recorder = SegRec()
+    monkeypatch.setattr(meeting_session, "has_loopback", lambda: True)
+    monkeypatch.setattr(meeting_session.meeting_speakers, "diarization", FakeDiarizer())
+    s = meeting_session.MeetingSession(app)
+    log = _log(s, names=("finished", "speakers_changed", "state_changed"))
+    assert s.start(title="Weekly sync", audio_mode="smart_meeting", source="page")[0]
+    assert s.stop("")
+    folder = s.meeting_dir
+    assert _wait_for(lambda: any(e[0] == "finished" for e in log), timeout=10)
+    assert _wait_for(lambda: meeting_store.load_transcript(folder).startswith("You: Hello team.\nSpeaker 1:"),
+                     timeout=20)
+    assert _wait_for(lambda: s.speakers_state(str(folder)) == "" and log[-1][0] == "speakers_changed",
+                     timeout=10)
+    assert all(e[1] for e in log), "every signal is delivered on the GUI thread"
+    names = [e[0] for e in log]
+    assert names.index("finished") < names.index("speakers_changed")      # the notes came first
+    assert [e[2] for e in log if e[0] == "state_changed"] == ["recording", "processing", "done"]
+    assert s.phase == "done" and not s.is_busy                                # idle all along after the notes
+    assert meeting_store.load_transcript(folder) == (
+        "You: Hello team.\nSpeaker 1: Welcome.\nYou: Thanks.\nSpeaker 1: We ship Friday.")
+    assert meeting_store.load_notes(folder) == "## Summary\n- We ship Friday."          # not written again
+    assert not (folder / meeting_store.BEFORE_SPEAKERS).exists()
+    assert "speakers_at" in meeting_store.load_meta(folder)
+    s.deleteLater()

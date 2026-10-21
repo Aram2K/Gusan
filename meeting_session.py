@@ -107,6 +107,52 @@ Quitting mid-meeting (Wave 5 review)
   * ``holds_recorder``: recording, or transcribing a recording. Notes written
     from a saved transcript (Retry, Rewrite, pending) don't use the recorder,
     so dictation stays available meanwhile (main.py _on_hotkey).
+Who said what (Gusan 2.0.1)
+  * A mic + system sound meeting keeps the two sources as separate tracks
+    (recorder.get_full_audio_tracks()); Stop saves them next to the recording as
+    audio_partN_mic.wav / audio_partN_system.wav. The speaker pass
+    (meeting_speakers.build_transcript) labels each segment by source - the
+    microphone is "You" - and diarizes only the call's sound into Speaker 1..N.
+    It never ends silently: a failure leaves the plain transcript, one log line
+    and a notice (meta ``notices``) with the way to try again.
+  * Notes first, speaker names after. Telling the call's people apart is the slow
+    part (minutes on a slow computer), so at Stop a mic + system sound meeting - and
+    one recorded from the system sound only - does just the fast half: the recording
+    is read again with timestamps and each segment is labelled by source ("You" /
+    "Them", energy based). transcript.txt gets those lines, segments.json keeps the
+    segments (meeting_store.load_segments), the notes are written from it AT ONCE and
+    ``finished`` is emitted: the session is idle, another one can start. Then
+    ``_followup`` (speaker_followup.SpeakerFollowUp) runs meeting_speakers.
+    refine_meeting in the background: "Them" -> "Speaker 1..N" from the saved segments
+    and the call's saved sound, no second reading, transcript.txt replaced in one
+    atomic step (the old one kept as transcript.before_speakers.txt until then). It
+    runs only while the session is idle (no recording, no Stop, no Rewrite notes, no
+    Identify speakers) and no dictation / Audio to text job is active (polled every
+    5 s), stops at once when one starts and tries again when free (at most 5 times
+    per queued job, then the page keeps offering Identify speakers), is ended by Cancel
+    (cancel_speaker_followup), by quitting (shutdown_speaker_followup) and by the
+    meeting being deleted (stop_speaker_pass waits until it has let go of the folder;
+    refine_meeting also stops by itself when the folder is gone), is waited out by
+    Identify speakers by hand before that starts (same meeting, same backup file), and
+    never starts by itself at launch - only a meeting that just finished queues itself.
+    Progress is ``speakers_state(folder)`` ("" / "waiting" / "running") and the
+    ``speakers_changed(folder)`` signal; the notes are NOT written again afterwards
+    (Rewrite notes does that). A microphone-only meeting (default_mic) and a mic +
+    system sound meeting without its tracks keep the one slow pass at Stop.
+  * ``identify_speakers(folder)`` adds the labels to any saved meeting that has a
+    recording (progress in ``status``, ``cancel_identify()``, ``identifying`` /
+    ``busy_label`` for the banner; transcript.txt is replaced atomically, the old
+    text kept as transcript.before_speakers.txt until it is). It ends through
+    ``finished(folder, its notes, "")`` and ``last_run_speakers`` (so the app says
+    nothing about notes); a run that could not label also emits
+    ``error("speakers", why)``.
+  * An interrupted meeting (recording saved, no transcript.txt - only live pieces)
+    is finished by retry_notes(folder=...) / write_pending_notes: the recording is
+    read again, labelled and saved as transcript.txt, then the notes are written
+    from it. While a dictation or a file job holds the speech model the notes
+    come from the live pieces, as before.
+  * A long stretch without any sound from either source is a notice (meta
+    ``notices``) and, while recording, one tray hint (``_watch_sound``).
 """
 import importlib.util
 import json
@@ -121,7 +167,9 @@ from pathlib import Path
 
 import actions
 import diarization
+import meeting_speakers
 import meeting_store
+import speaker_followup
 import storage
 import telemetry
 from app_info import APP_VERSION
@@ -148,6 +196,9 @@ ERR_DEVICE = "device"
 # Processing failures (error signal only; finished carries the message too).
 ERR_NOTES = "notes"
 ERR_EMPTY = "empty"
+# identify_speakers(): refused (no recording to read) / ended without labels.
+ERR_NO_AUDIO = "no_audio"
+ERR_SPEAKERS = "speakers"
 
 RECAP_INTERVAL = 20.0      # seconds between "So far" updates...
 RECAP_MIN_GROWTH = 160     # ...once this much NEW text arrived
@@ -161,6 +212,11 @@ META_NOTES_PENDING = "notes_pending"
 QUIT_NOTICE = ("Gusan was closed during this meeting, so the transcript may miss its last "
                "few seconds. The recording has everything.")
 QUIT_CHUNK_WAIT = 3.0      # s: pieces being transcribed at Quit may still land
+# An interrupted meeting finished from its saved recording (see _recover_then_notes).
+RECOVERED_NOTICE = ("Gusan was closed before this meeting was finished, so the transcript was "
+                    "rebuilt from the saved recording.")
+# A device that stopped delivering sound: a tray hint from this long on (seconds).
+QUIET_HINT_SEC = 180.0
 
 _SIGNALS = (
     # name, Qt argument types
@@ -172,6 +228,8 @@ _SIGNALS = (
     ("levels", (float, float)),
     ("finished", (str, str, str)),
     ("error", (str, str)),
+    # The background speaker pass of a meeting folder queued / started / ended (any thread).
+    ("speakers_changed", (str,)),
     # 1.9 names, read by main.py / Live Assistant: emitted from worker threads.
     ("sig_chunk", (str,)),
     ("sig_summary", (str,)),
@@ -426,12 +484,37 @@ class MeetingCore:
         self._segment_saved = threading.Event()
         self._transcript_saved = threading.Event()     # this run's transcript.txt
         self._notes_saved = threading.Event()
+        # Runs that work from a SAVED recording (nothing live to keep at Quit):
+        # "Identify speakers" (_identify_only: labels, no notes) and finishing
+        # an interrupted meeting (_recover_audio: transcript + labels, then
+        # notes). last_run_speakers: the run that just finished was Identify
+        # speakers (AppController then says nothing about notes).
+        self._saved_audio_run = False
+        self._identify_only = False
+        self._recover_audio = False
+        self._identify_error = ""
+        self._cancel_run = threading.Event()
+        self.last_run_speakers = False
+        self._quiet_hinted = False
+        self._speaker_names = None        # {diarization id: name} - a later step (screen names)
         self._saved_callbacks = None
+        # Notes first, speaker names after: what Stop hands to the background pass.
+        # _segment_part_path / _tracks_saved: this run's recording on disk (worker);
+        # _sources_part: the part's segments.json entry (set by the fast speaker step);
+        # _followup_folder: the meeting to queue once its notes are out (GUI thread).
+        self._segment_part_path = None
+        self._tracks_saved = False
+        self._sources_part = None
+        self._followup_folder = ""
+        self._followup = speaker_followup.SpeakerFollowUp(
+            is_busy=self._speaker_pass_blocked, run=self._run_speaker_pass,
+            on_change=self._speakers_changed, spawn=lambda fn: self._spawn(fn))
         self._make_signals()
         self._piece.connect(self._on_piece)
         self.sig_summary.connect(self._set_live_summary)
         self.sig_status.connect(self._forward_status)
         self.proc_signals.finished.connect(self._on_processing_finished)
+        self.speakers_changed.connect(self._resync_after_speakers)
 
     def _make_signals(self):
         raise NotImplementedError
@@ -484,6 +567,20 @@ class MeetingCore:
     def active_dir(self):
         """The folder being recorded or processed (never delete it), or None."""
         return self._meeting_dir if self.is_busy else None
+
+    @property
+    def identifying(self):
+        """An Identify speakers run is working (cancel_identify stops it)."""
+        return bool(self._identify_only and self.state == STATE_PROCESSING)
+
+    @property
+    def busy_label(self):
+        """What the processing run is doing, for the notes view's banner."""
+        if self._identify_only:
+            return "Identifying speakers…"
+        if self._saved_audio_run:
+            return "Rebuilding the transcript and notes…"
+        return "Writing notes…"
 
     @property
     def title(self):
@@ -745,6 +842,11 @@ class MeetingCore:
         self._summary_running = False
         self._user_notes = ""
         self._rewrite_only = False
+        self._saved_audio_run = self._identify_only = self._recover_audio = False
+        self.last_run_speakers = False
+        self._quiet_hinted = False
+        self._sources_part = None
+        self._followup_folder = ""
         self._my_notes_draft = (meeting_store.load_my_notes(self._meeting_dir)
                                 if self._resume_dir is not None else "")
         # What a continued meeting's my_notes.md held: Abort puts it back.
@@ -1094,6 +1196,7 @@ class MeetingCore:
         re-summarising the same text. True when a recap started."""
         if self.state != STATE_RECORDING or not self._record_started_at or self.paused:
             return False
+        self._watch_sound()
         now = time.time() if now is None else now
         grown = len(self._live_text) - self._summary_len_at_last
         # Not during a Live Assistance session: nothing shows the recap there,
@@ -1108,6 +1211,31 @@ class MeetingCore:
         self._summary_running = True
         self._spawn(self._compute_live_summary, self._live_text)
         return True
+
+    def _watch_sound(self):
+        """Recording, about once a second: when neither the microphone nor the
+        call has made any sound for QUIET_HINT_SEC - a headset switched, a
+        device that stopped delivering - say so ONCE with a tray hint (it
+        resets when sound returns). The recorder logs the same fact as a
+        warning. Never raises."""
+        try:
+            rec = getattr(self.app, "recorder", None) if self.app else None
+            getter = getattr(rec, "quiet_seconds", None)
+            if not callable(getter):
+                return
+            quiet = float(getter() or 0.0)
+            if quiet >= QUIET_HINT_SEC:
+                if not self._quiet_hinted:
+                    self._quiet_hinted = True
+                    hint = getattr(self.app, "show_tray_hint", None)
+                    if callable(hint):
+                        hint("Gusan can't hear anything",
+                             "No sound from your microphone or the call for %d minutes. Check "
+                             "them in Windows sound settings." % int(quiet // 60))
+            elif quiet == 0.0:
+                self._quiet_hinted = False
+        except Exception:
+            logger.debug("sound watch failed", exc_info=True)
 
     def _live_engine(self):
         """A REAL engine for live features (no rule-based): the configured
@@ -1165,10 +1293,44 @@ class MeetingCore:
             audio = self.app.recorder.get_full_audio()
             if audio is not None and len(audio) > 1600 and self._meeting_dir:
                 self._emit_status("Saving the recording…")
-                audio_export.write_wav(
-                    meeting_store.next_audio_part_path(self._meeting_dir), audio)
+                path = meeting_store.next_audio_part_path(self._meeting_dir)
+                audio_export.write_wav(path, audio)
+                return path
         except Exception as e:
             logger.warning("Could not save meeting audio: %s", e)
+        return None
+
+    def _save_recording_tracks(self, part_path):
+        """Next to a mic + system sound meeting's recording (``part_path``, the
+        file _save_recording_segment wrote): the two sources apart as lossless
+        16-bit WAVs, so speaker labels can be added again later (Identify
+        speakers). Best effort - the recording itself is already safe - and
+        never half: a failed second file removes the first. True when saved."""
+        if part_path is None:
+            return False
+        rec = getattr(self.app, "recorder", None) if self.app else None
+        getter = getattr(rec, "get_full_audio_tracks", None)
+        if not callable(getter):
+            return False
+        paths = []
+        try:
+            tracks = getter()
+            if not tracks:
+                return False
+            import audio_export
+            for kind, samples in zip(meeting_store.TRACK_KINDS, tracks):
+                target = meeting_store.track_path(part_path, kind)
+                paths.append(target)
+                audio_export.write_wav_int16(target, samples)
+            return True
+        except Exception as e:
+            logger.warning("Could not save the meeting's mic and system sound tracks: %s", e)
+            for p in paths:
+                try:
+                    Path(p).unlink()
+                except OSError:
+                    pass
+            return False
 
     def _duration_sec(self):
         started = self._record_started_at
@@ -1228,12 +1390,20 @@ class MeetingCore:
     def _process_meeting_notes(self):
         try:
             self._transcript_notices = []
-            self._save_recording_segment()
+            self._sources_part = None
+            self._followup_folder = ""
+            part_path = self._save_recording_segment()
+            self._segment_part_path = part_path
             # Title/attendees/duration now, not only once notes succeed: a
             # meeting whose transcription or summary fails must still show up
             # in History under its own name.
             self._write_meta()
             self._segment_saved.set()               # a Quit from here on keeps it
+            # The two sources apart (mic + system sound meetings), after the
+            # recording itself is safe - the speaker step below reads them from
+            # memory, these files are for the names that come after the notes
+            # (the call's own sound) and for labelling the meeting again later.
+            self._tracks_saved = self._save_recording_tracks(part_path)
             self._emit_status("Finalizing transcript…")
             rec = self.app.recorder
             prior = self._resume_prior
@@ -1291,6 +1461,13 @@ class MeetingCore:
                 self.proc_signals.finished.emit("", msg)
                 return
 
+            # The plain transcript is safe on disk BEFORE the speaker pass: that
+            # pass is the longest step (minutes to half an hour for a long
+            # meeting) and an app that is closed, crashes or is killed during it
+            # used to take the whole transcript with it (transcript.txt was only
+            # written after it). The final write below replaces it.
+            self._save_plain_transcript_early(prior)
+
             if getattr(rec, "_full_audio_truncated", False) is True:
                 # The recorder stops keeping full audio at its memory cap
                 # (~2 h). Speaker labels come from that audio, so they would
@@ -1300,10 +1477,15 @@ class MeetingCore:
                 self._emit_status("Long meeting - keeping the full transcript "
                                   "(the saved recording ends at the 2-hour cap)…")
             else:
-                # Upgrade to a speaker-attributed transcript when local
-                # diarization is available: re-transcribe the full audio with
-                # timestamps, diarize it, and label each segment ("Speaker 1/2/3:
-                # ..."). Falls back silently to the plain transcript on failure.
+                # Upgrade to a speaker-labelled transcript: re-transcribe the
+                # full audio with timestamps and label each segment by SOURCE (the
+                # microphone is "You"). A mic + system sound meeting stops there
+                # ("You" / "Them"): the notes come next and the people on the call
+                # are told apart afterwards, in the background (segments.json +
+                # SpeakerFollowUp). Any other meeting still gets the whole pass
+                # here ("Speaker 1/2/3: ..."). When it cannot be done the plain
+                # transcript stays - and the notices say why, with a way to retry.
+                attributed = ""
                 try:
                     attributed = self._build_attributed_transcript()
                     if attributed:
@@ -1315,6 +1497,10 @@ class MeetingCore:
                             failure = ""
                 except Exception as e:
                     logger.warning("Speaker attribution failed, using plain transcript: %s", e)
+                    self._add_notice(meeting_speakers.notice_for(meeting_speakers.R_ERROR))
+                if not attributed:
+                    self._note_live_gaps()
+            self._note_quiet_stretches()
 
             if failure:
                 reason = failure.rstrip(". ")
@@ -1341,9 +1527,11 @@ class MeetingCore:
             # lose the recording. This is the durable copy alongside chunks.jsonl.
             try:
                 if self._meeting_dir:
-                    with open(self._meeting_dir / "transcript.txt", "w", encoding="utf-8") as f:
-                        f.write(self._final_transcript)
+                    # Atomic: the file is the old one or this one, whatever happens.
+                    if not meeting_store.write_transcript(self._meeting_dir, self._final_transcript):
+                        raise OSError("could not write transcript.txt")
                     self._transcript_saved.set()        # a Quit from here on keeps it
+                    self._keep_segments()               # what the names that come after the notes need
             except Exception:
                 logger.warning("Could not save the meeting transcript", exc_info=True)
 
@@ -1354,42 +1542,144 @@ class MeetingCore:
             self._segment_saved.set()
             self.proc_signals.finished.emit("", str(e))
 
+    # ── speaker labels ──
+    def _add_notice(self, text):
+        """A caveat about the transcript (shown above the notes, saved in meta),
+        once."""
+        if text and text not in self._transcript_notices:
+            self._transcript_notices.append(text)
+
+    def _drop_speaker_notices(self):
+        """A new speaker pass supersedes the old one's "labels weren't added"."""
+        self._transcript_notices = [n for n in self._transcript_notices
+                                    if not meeting_speakers.is_speaker_notice(n)]
+
+    def _decode_language(self):
+        """The language to decode a recording again in: "multi" stays mixed (the
+        recorder decodes mixed languages per window), otherwise the language the
+        meeting's live pieces found."""
+        setting = self._session_language or self._cfg().get("meeting_language") \
+            or self._cfg().get("language") or ""
+        return "multi" if setting == "multi" else (self._final_lang or None)
+
     def _build_attributed_transcript(self):
-        """Re-transcribe + diarize the full meeting audio into a
-        "Speaker N: ..." transcript. Returns "" when diarization is unavailable
-        or anything fails (the caller then keeps the plain transcript). Runs on
-        the processing thread after the live chunk threads have drained."""
+        """Re-transcribe the meeting's full audio and label who spoke. A mic +
+        system sound meeting (both tracks kept and saved) and one recorded from the
+        system sound only get the fast half: "You:" for the microphone, "Them:" for
+        everyone on the call - the notes are written from that at once, and
+        segments.json keeps the segments so the background pass can turn "Them"
+        into "Speaker N" later (see the module notes). Any other meeting (the mixed
+        audio only: a microphone-only one, or the tracks could not be kept) gets the
+        whole pass here, as before: the mixed audio is diarized into "Speaker N:".
+        Returns "" when no labels could be made - the caller then keeps the plain
+        transcript - and then says why (one log line and a notice for the meeting
+        with the way to try again) unless the recording was simply too short or
+        silent to label. Runs on the processing thread after the live pieces drained."""
         rec = self.app.recorder if self.app else None
         if rec is None:
             return ""
+        self._drop_speaker_notices()
+        self._sources_part = None
         audio = rec.get_full_audio()
         if audio is None or len(audio) < diarization.SAMPLE_RATE:  # < 1s
+            # Nothing to label - no problem, no notice (and not a warning).
+            logger.info("Speaker labels skipped (%s): %s s retained", meeting_speakers.R_TOO_SHORT,
+                        0 if audio is None else round(len(audio) / 16000.0, 2))
             return ""
+        mic = system = None
+        mode = self._session_audio_mode
+        getter = getattr(rec, "get_full_audio_tracks", None)
+        if mode == "smart_meeting" and callable(getter):
+            try:
+                tracks = getter()
+                if tracks:
+                    mic, system = tracks
+            except Exception:
+                logger.warning("The mic and system sound tracks could not be read", exc_info=True)
+        # Notes first needs the recording's files (the names are found from them later).
+        part_path = self._segment_part_path
+        call_only = bool(mode == "system_only" and mic is None and part_path is not None)
+        notes_first = bool(part_path is not None and (
+            (mic is not None and system is not None and self._tracks_saved) or call_only))
+        out = meeting_speakers.build_transcript(
+            rec, [meeting_speakers.Part(audio=audio, mic=mic, system=system, call_only=call_only)],
+            language=self._decode_language(), privacy=bool(self._cfg().get("privacy_mode")),
+            status=self._emit_status, names=self._speaker_names, diarize=not notes_first)
+        if out.notice and not meeting_speakers.is_benign(out.reason):
+            self._add_notice(out.notice)
+        if notes_first and out.texts and out.parts:
+            self._sources_part = self._segments_entry(part_path, out, len(audio) / float(diarization.SAMPLE_RATE))
+        return out.text
 
-        # First-use one-time model download (~47 MB); no-op once present.
-        # Privacy Mode keeps the app off the network: labels only when the
-        # models are already here.
-        if diarization.sherpa_installed() and not diarization.models_downloaded():
-            if self._cfg().get("privacy_mode"):
-                return ""
-            diarization.download_models()
-        if not diarization.is_available():
-            return ""
+    @staticmethod
+    def _segments_entry(part_path, out, seconds):
+        """The segments.json entry of the part the fast speaker step just labelled:
+        compact start / end / text / source per segment, and the part's block of
+        transcript.txt (what the background pass replaces)."""
+        segments = []
+        for seg in (out.parts[0] if out.parts else []):
+            text = str(seg.get("text") or "").strip()
+            if not text:
+                continue
+            try:
+                start, end = round(float(seg.get("start", 0.0)), 2), round(float(seg.get("end", 0.0)), 2)
+            except (TypeError, ValueError):
+                continue
+            segments.append({"s": start, "e": end, "t": text,
+                             "src": "you" if seg.get("source") == "you" else "them"})
+        return {"audio": Path(part_path).name, "kind": out.mode, "seconds": round(float(seconds), 2),
+                "text": out.text.strip(), "done": False, "segments": segments}
 
-        self._emit_status("Re-transcribing for speaker labels…")
-        # Mixed languages stay mixed (the recorder decodes them per window);
-        # otherwise the language the live pieces found.
-        setting = self._session_language or self._cfg().get("language") or ""
-        lang = "multi" if setting == "multi" else (self._final_lang or None)
-        segments = rec.transcribe_segments(audio, language=lang)
-        if not segments:
-            return ""
-        self._emit_status("Identifying speakers…")
-        turns = diarization.diarize(audio)
-        if not turns:
-            return ""
-        labeled = diarization.attribute_segments(segments, turns)
-        return diarization.build_speaker_transcript(labeled).strip()
+    def _keep_segments(self):
+        """Worker, right after transcript.txt: save this part's segments (added to
+        the meeting's earlier parts, if it is a continued one). Only a meeting whose
+        segments are on disk is queued for the names that come after the notes."""
+        part, folder = self._sources_part, self._meeting_dir
+        if not part or folder is None:
+            return
+        data = meeting_store.load_segments(folder) or {}
+        parts = [p for p in (data.get("parts") or []) if isinstance(p, dict) and p.get("audio") != part["audio"]]
+        parts.append(part)
+        if meeting_store.write_segments(folder, {"version": 1, "parts": parts}):
+            self._followup_folder = str(folder)
+        else:
+            logger.warning("Could not save the meeting's segments; its speakers stay You / Them")
+
+    def _note_live_gaps(self):
+        """The live pieces skipped audio because the computer could not keep up,
+        and no re-read of the recording replaced them: say so."""
+        rec = getattr(self.app, "recorder", None) if self.app else None
+        try:
+            health = rec.chunk_health() if callable(getattr(rec, "chunk_health", None)) else {}
+            lost = float(health.get("dropped_sec", 0.0) or 0.0)
+        except Exception:
+            return
+        if lost >= 30.0:
+            self._add_notice("The live transcript skipped about %d min of the meeting because the "
+                             "computer couldn't keep up. The recording has everything."
+                             % max(1, round(lost / 60.0)))
+
+    def _note_quiet_stretches(self):
+        """A long stretch in which neither the microphone nor the call made any
+        sound is almost always a device that stopped delivering - say when, so a
+        transcript that "ends early" is understood."""
+        rec = getattr(self.app, "recorder", None) if self.app else None
+        try:
+            stretches = rec.quiet_stretches() if callable(getattr(rec, "quiet_stretches", None)) else []
+        except Exception:
+            return
+        if not stretches:
+            return
+        total = self._duration_sec()
+        start, end = max(stretches, key=lambda s: s[1] - s[0])
+        at_end = total and end >= total - 90          # it runs to the end of the recording
+        span = ("from %s to the end" % meeting_store.format_duration(start)) if at_end else \
+            ("from %s to %s" % (meeting_store.format_duration(start), meeting_store.format_duration(end)))
+        self._add_notice(
+            "No sound reached Gusan %s of the recording, neither from the microphone nor from the "
+            "call. If the meeting was still going, check the microphone and the speaker output in "
+            "Windows sound settings." % span)
+
 
     def _summarize_and_finish(self):
         """Generate the AI notes for the already-finalized transcript and emit
@@ -1461,10 +1751,54 @@ class MeetingCore:
             self._write_meta(**self._result_meta(
                 notes_engine=used, notes_engine_label=engine_label(used), notes_error=None))
             self._notes_saved.set()
+            self._save_history_entry(notes)
 
             self.proc_signals.finished.emit(notes, "")
         except Exception as e:
             self.proc_signals.finished.emit("", str(e))
+
+    def _save_plain_transcript_early(self, prior=""):
+        """Worker thread: this run's transcript as it is now (a resumed meeting's
+        earlier part first), written atomically to transcript.txt before the
+        speaker pass starts. Best-effort: never raises, never blocks the run."""
+        folder = self._meeting_dir
+        text = (self._final_transcript or "").strip()
+        if not folder or not text:
+            return
+        if prior:
+            text = f"{prior}\n\n\u2014 Resumed {time.strftime('%Y-%m-%d %H:%M')} \u2014\n\n{text}"
+        try:
+            import os
+            import tempfile
+            path = Path(folder) / "transcript.txt"
+            fd, tmp = tempfile.mkstemp(prefix=".transcript.", suffix=".tmp", dir=str(folder))
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(text)
+                os.replace(tmp, path)
+            finally:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            self._transcript_saved.set()        # a Quit from here on keeps this complete one
+        except Exception:
+            logger.warning("Could not save the plain transcript before the speaker pass", exc_info=True)
+
+    def _save_history_entry(self, notes):
+        """Worker thread, right before ``finished``: persist the notes + full
+        transcript to the app history (like dictations) so they are findable in
+        the History tab later - unless the user disabled history or is in
+        Privacy Mode. A rewrite of a saved meeting is already there. Never
+        raises."""
+        try:
+            cfg = self._cfg()
+            if not self._rewrite_only and cfg.get("save_history", True) and not cfg.get("privacy_mode", False):
+                import history as hist
+                entry = (f"{self._meeting_title} - Meeting Notes\n\n{notes}"
+                         f"\n\n--- Full Transcript ---\n\n{self._final_transcript}")
+                hist.save_entry(entry, self._final_lang or "", "meeting",
+                                audio_dir=self._meeting_dir)
+        except Exception:
+            pass
 
     def _result_meta(self, **extra):
         """Meta after a processing run. New notes are unseen - except a rewrite
@@ -1487,9 +1821,14 @@ class MeetingCore:
                 self.app.release_models_after_session()
             except Exception:
                 pass
+        if self._identify_only:
+            self._finish_identify(notes)
+            return
+        self.last_run_speakers = False
+        self._saved_audio_run = False
+        self._recover_audio = False
         transcript = self._final_transcript or ""
         folder = str(self._meeting_dir or "")
-        rewrite = self._rewrite_only
         self._rewrite_only = False
 
         if error_msg:
@@ -1517,6 +1856,7 @@ class MeetingCore:
             self._emit_state()
             self.finished.emit(folder, "", error_msg)
             self.error.emit(code, error_msg)
+            self._queue_speaker_pass()          # the transcript is kept: its names can follow
             return
 
         self.state = STATE_DONE
@@ -1529,25 +1869,100 @@ class MeetingCore:
         self._had_notes = self._had_notes or bool((notes or "").strip())
         self._clear_resume_state()
 
-        # Persist to the app history (like dictations) so the notes are
-        # findable in the History tab later - unless the user disabled
-        # history or is in Privacy Mode. A rewrite of a saved meeting is
-        # already there.
-        try:
-            cfg = self._cfg()
-            if not rewrite and cfg.get("save_history", True) and not cfg.get("privacy_mode", False):
-                import history as hist
-                entry = (f"{self._meeting_title} - Meeting Notes\n\n{notes}"
-                         f"\n\n--- Full Transcript ---\n\n{self._final_transcript}")
-                hist.save_entry(entry, self._final_lang or "", "meeting",
-                                audio_dir=self._meeting_dir)
-        except Exception:
-            pass
+        # (The app history entry was saved by the worker, before this slot: see
+        # _save_history_entry - the whole history file is rewritten, ~0.5 s once
+        # it holds a few long meetings, which must never be the window's wait.)
 
         telemetry.track("meeting_notes_completed", {"minutes": self._meeting_minutes},
                         self._cfg(), APP_VERSION)
         self._emit_state()
         self.finished.emit(folder, notes, "")
+        self._queue_speaker_pass()              # notes first, the people on the call after
+
+    # ── the names, after the notes ──
+    def _queue_speaker_pass(self):
+        """GUI thread, after ``finished``: a meeting this run labelled by source only
+        (segments.json is on disk) is queued for the background speaker pass. It
+        starts at once when nothing else needs the computer, else when that is over."""
+        folder, self._followup_folder = self._followup_folder, ""
+        if folder:
+            self._followup.enqueue(folder)
+
+    def _speaker_pass_blocked(self):
+        """Any thread: does something need the computer more than the speaker pass?
+        A recording (a meeting or Live Assistant session, paused too), the Stop of
+        one (its recording is being read again, its notes written), notes being
+        rewritten (the local model uses the processor, and the transcript the notes
+        come from must not change under them), an Identify speakers run, a dictation
+        still being written, an Audio to text job."""
+        try:
+            if self.is_busy:
+                return True
+            app = self.app
+            if app is None:
+                return False
+            return (getattr(app, "is_rec", False) is True or getattr(app, "_busy", False) is True
+                    or getattr(app, "_file_job_running", False) is True)
+        except Exception:
+            return True
+
+    def _run_speaker_pass(self, folder, should_cancel, status):
+        """The follow-up's worker: one meeting's pass (meeting_speakers.refine_meeting).
+        Uses nothing of the session's own meeting (a new one may be starting): the
+        folder, and Privacy mode as it is NOW."""
+        return meeting_speakers.refine_meeting(
+            folder, privacy=bool(self._cfg().get("privacy_mode")), status=status,
+            should_cancel=should_cancel, names=self._speaker_names)
+
+    def _speakers_changed(self, folder):
+        try:
+            self.speakers_changed.emit(str(folder))
+        except RuntimeError:
+            pass                                 # session already destroyed
+
+    def _resync_after_speakers(self, folder):
+        """GUI thread: a meeting's pass changed. When it has ended and that meeting
+        is the one this session still holds (its notes just came out), take the
+        transcript and notices as the pass left them - a Retry on the open meeting
+        must not write its notes from the You / Them text, nor lose the notice."""
+        try:
+            if self.state not in (STATE_DONE, STATE_IDLE) or self._meeting_dir is None:
+                return
+            if self._followup.state(folder):
+                return
+            if Path(folder).resolve() != Path(self._meeting_dir).resolve():
+                return
+            if not (self._final_transcript or "").strip():
+                return
+            self._final_transcript = meeting_store.load_transcript(folder).strip() or self._final_transcript
+            meta = meeting_store.load_meta(folder)
+            notices = meta.get("notices") if isinstance(meta.get("notices"), list) else []
+            old_notice = meta.get("notes_notice") or ""
+            self._transcript_notices = [str(n) for n in notices if n and n != old_notice]
+        except Exception:
+            logger.debug("could not refresh the meeting after its speaker pass", exc_info=True)
+
+    def speakers_state(self, folder=None):
+        """"" / "waiting" / "running": whether the background speaker pass of
+        ``folder`` (or of any meeting) is queued behind other work, or working now."""
+        return self._followup.state(folder)
+
+    def cancel_speaker_followup(self, folder=None):
+        """Stop the background speaker pass of ``folder`` (any, with none): the
+        meeting stays as it is, "You" and "Them". True when there was one."""
+        return self._followup.cancel(folder)
+
+    def stop_speaker_pass(self, folder, timeout=8.0):
+        """Cancel ``folder``'s background speaker pass and wait until it has really let
+        go of the meeting's files (a delete needs them free). Off the window's thread
+        only. True when nothing of it is left."""
+        self._followup.cancel(folder)
+        return self._followup.wait_idle(folder, timeout)
+
+    def shutdown_speaker_followup(self):
+        """The app is quitting: the running pass ends now, the queue is dropped
+        (the meetings keep their You / Them transcript)."""
+        self._followup.shutdown()
 
     # ── retry / rewrite ──
     def retry_notes(self, engine=None, folder=None, persist=False):
@@ -1562,7 +1977,16 @@ class MeetingCore:
                                    or not self._final_transcript.strip()):
             if not self._load_for_rewrite(folder):
                 return False
-        if not (self._final_transcript or "").strip():
+        # A meeting the app never finished (closed or killed mid-meeting: no
+        # transcript.txt, only live pieces and the saved recording) is finished
+        # properly: the recording is read again, labelled, saved as
+        # transcript.txt - and then the notes are written from THAT. Needs the
+        # speech model, so not while a dictation or a file job holds it; then
+        # the notes come from the live pieces, as before.
+        recover = bool(self._recover_audio) and self._recorder_free()
+        if not recover:
+            self._recover_audio = False
+        if not (self._final_transcript or "").strip() and not recover:
             return False
         # Apply the pick: a retry that can't change the engine would fail
         # identically (same model, same transcript, same context limit).
@@ -1571,7 +1995,10 @@ class MeetingCore:
             if persist:
                 self._set_cfg("action_model", engine)
         self.state = STATE_PROCESSING
-        self._notes_only = True                 # the saved transcript: no recorder
+        self._notes_only = not recover          # the saved transcript: no recorder
+        self._saved_audio_run = recover
+        self.last_run_speakers = False
+        self._cancel_run.clear()
         self._notes_saved.clear()
         self._failed = False
         self.last_error = ""
@@ -1581,15 +2008,31 @@ class MeetingCore:
             local_llm.forget_load_failures()           # Retry = really try the model again
         except Exception:
             pass
-        self._spawn(self._summarize_and_finish)
+        self._spawn(self._recover_then_notes if recover else self._summarize_and_finish)
+        return True
+
+    def _recorder_free(self):
+        """Can a run that reads a saved recording (the speech model) start now?"""
+        app = self.app
+        if app is None or getattr(app, "recorder", None) is None:
+            return False
+        if getattr(app, "is_rec", False) is True or getattr(app, "_file_job_running", False) is True:
+            return False
         return True
 
     def _load_for_rewrite(self, folder):
         """Point the session at a saved meeting so its notes can be rewritten."""
         transcript = meeting_store.load_transcript(folder).strip()
-        if not transcript:
+        # An interrupted meeting: its recording was saved, its transcript never
+        # was (only the live pieces) - retry_notes finishes it from the audio.
+        recover = bool(meeting_store.audio_parts(folder)) and not meeting_store.has_transcript_file(folder)
+        if not transcript and not recover:
             return False
         meta = meeting_store.load_meta(folder)
+        self._recover_audio = recover
+        # This meeting's own details, not the last recorded one's.
+        self._session_language = None
+        self._session_audio_mode = ""
         self._meeting_dir = Path(folder)
         self._chunks_path = self._meeting_dir / "chunks.jsonl"
         self._meeting_title = str(meta.get("title") or "Untitled Meeting")
@@ -1636,6 +2079,206 @@ class MeetingCore:
             return False
         return self.retry_notes(None)
 
+    # ── a saved recording: finish an interrupted meeting, Identify speakers ──
+    def _saved_parts(self, folder):
+        """The saved recording's parts for the speaker pass: each part's mix and,
+        when the meeting kept them, its microphone and system sound tracks."""
+        return [meeting_speakers.Part.from_files(part, mic, system)
+                for part, mic, system in meeting_store.audio_tracks(folder)]
+
+    @staticmethod
+    def _join_parts(texts, old=""):
+        """One transcript from the parts' texts: a "— Resumed —" line between
+        parts (the old transcript's own marker lines are reused, in order, when
+        there are as many). Parts without speech are left out."""
+        import rich_text
+        texts = [t for t in texts]
+        if len(texts) == 1:
+            return texts[0]
+        markers = [ln.strip() for ln in (old or "").splitlines() if rich_text.is_marker(ln)]
+        out = []
+        for i, t in enumerate(texts):
+            if not (t or "").strip():
+                continue
+            if out:
+                out.append(markers[i - 1] if len(markers) == len(texts) - 1 else "— Resumed —")
+            out.append(t.strip())
+        return "\n\n".join(out)
+
+    def _recover_then_notes(self):
+        """Worker: finish an interrupted meeting. Its recording was saved but its
+        transcript never was (only the live pieces): read the recording again,
+        label who spoke, save transcript.txt - then write the notes from that.
+        When the recording can't be read the live pieces are saved as
+        transcript.txt instead, with a notice saying why there are no labels."""
+        folder = self._meeting_dir
+        text = live_text = self._final_transcript or ""
+        try:
+            self._drop_speaker_notices()
+            self._add_notice(RECOVERED_NOTICE)
+            self._emit_status("Reading the saved recording…")
+            out = meeting_speakers.build_transcript(
+                self.app.recorder, self._saved_parts(folder), language=self._decode_language(),
+                privacy=bool(self._cfg().get("privacy_mode")), status=self._emit_status,
+                names=self._speaker_names)
+            self._add_notice(out.notice)
+            if out.texts:
+                text = self._join_parts(out.texts)
+        except Exception as e:
+            logger.warning("Finishing the interrupted meeting from its recording failed: %s", e,
+                           exc_info=True)
+            self._add_notice(meeting_speakers.notice_for(meeting_speakers.R_ERROR))
+            text = live_text
+        if text.strip() and folder is not None:
+            self._final_transcript = text
+            if not meeting_store.write_transcript(folder, text):
+                logger.warning("Could not save the recovered transcript of %s", folder)
+        self._summarize_and_finish()
+
+    def identify_speakers(self, folder):
+        """Add speaker labels to a saved meeting: its recording is read again (the
+        two tracks when it kept them - the microphone is "You" - else the mix),
+        who spoke is worked out and transcript.txt is replaced. The old text is
+        kept as transcript.before_speakers.txt while this runs. Works for any
+        meeting with a recording, also one without a transcript yet. Progress
+        comes through ``status``; cancel_identify() stops it. Returns
+        (ok, code, message); a refusal also emits error(code, message)."""
+        app = self.app
+        rec = getattr(app, "recorder", None) if app is not None else None
+        if rec is None:
+            return self._refuse(ERR_NO_RECORDER, "The recorder isn't ready yet.")
+        if self.is_busy:
+            return self._refuse(ERR_BUSY, "Wait for the meeting being recorded or saved to finish first.")
+        if getattr(app, "_file_job_running", False) is True:
+            return self._refuse(ERR_FILE_JOB, _file_job_message())
+        if not self._recorder_free():
+            return self._refuse(ERR_BUSY, "Finish your dictation first, then try again.")
+        folder = Path(folder)
+        if not folder.is_dir() or not meeting_store.audio_parts(folder):
+            return self._refuse(ERR_NO_AUDIO, "This meeting has no recording to read.")
+        if not self._load_for_rewrite(folder):         # no transcript is fine: audio is here
+            return self._refuse(ERR_NO_AUDIO, "This meeting has no recording to read.")
+        meta = meeting_store.load_meta(folder)
+        self._notes_notice = str(meta.get("notes_notice") or "")      # stays with the notes
+        self._recover_audio = False
+        self._identify_only = True
+        self._saved_audio_run = True
+        self._notes_only = False                         # uses the speech model
+        self._rewrite_only = True
+        self._identify_error = ""
+        self.last_run_speakers = False
+        self._cancel_run.clear()
+        self._failed = False
+        self.last_error = ""
+        # The same meeting's background pass (queued after its notes) would do this very
+        # work: the user asked for it now, so that one stands down.
+        self._followup.cancel(folder)
+        self.state = STATE_PROCESSING
+        self._emit_state()
+        self._spawn(self._run_identify)
+        return True, "", ""
+
+    def cancel_identify(self):
+        """Stop an Identify speakers run (the saved transcript stays as it was).
+        True when one was running."""
+        if not (self._identify_only and self.state == STATE_PROCESSING):
+            return False
+        self._cancel_run.set()
+        return True
+
+    def _run_identify(self):
+        """Worker: the Identify speakers run (see identify_speakers). The old
+        transcript is copied to transcript.before_speakers.txt first; the new one
+        replaces transcript.txt in one atomic step and only then is the copy
+        removed (a cancelled run removes it too - nothing changed). A run that
+        fails leaves it, with the old transcript untouched."""
+        folder = self._meeting_dir
+        backup = None
+        # The same meeting's background pass was cancelled by identify_speakers, but it may
+        # still be ending (a child process to stop, a file to let go): it shares this run's
+        # backup file and could write the transcript. Start only once it is really gone.
+        if not self._followup.wait_idle(folder, 30.0):
+            logger.warning("The background speaker pass of %s did not stop in time", Path(folder).name)
+        try:
+            old_text = meeting_store.load_transcript(folder) if meeting_store.has_transcript_file(folder) else ""
+            if old_text.strip():
+                backup = self._backup_transcript(folder)
+            self._drop_speaker_notices()
+            out = meeting_speakers.build_transcript(
+                self.app.recorder, self._saved_parts(folder), language=self._decode_language(),
+                privacy=bool(self._cfg().get("privacy_mode")), status=self._emit_status,
+                should_cancel=self._cancel_run.is_set, names=self._speaker_names)
+            if out.cancelled:
+                logger.info("Identify speakers cancelled; %s is unchanged", folder)
+                self._remove_backup(backup)
+            elif out.texts:
+                text = self._join_parts(out.texts, old_text)
+                if not meeting_store.write_transcript(folder, text):
+                    raise OSError("could not write transcript.txt")
+                self._remove_backup(backup)
+                self._final_transcript = text
+                self._add_notice(out.notice)
+                self._write_meta(notices=self.notices(),
+                                 speakers_at=time.strftime("%Y-%m-%d %H:%M:%S"))
+            else:
+                self._add_notice(out.notice)
+                self._write_meta(notices=self.notices())
+                self._identify_error = out.notice or meeting_speakers.notice_for(meeting_speakers.R_ERROR)
+        except Exception as e:
+            logger.warning("Identify speakers failed: %s", e, exc_info=True)
+            self._add_notice(meeting_speakers.notice_for(meeting_speakers.R_ERROR))
+            self._identify_error = meeting_speakers.notice_for(meeting_speakers.R_ERROR)
+            try:
+                self._write_meta(notices=self.notices())
+            except Exception:
+                pass
+        self.proc_signals.finished.emit(self._final_notes or "", "")
+
+    @staticmethod
+    def _backup_transcript(folder):
+        """Copy transcript.txt to transcript.before_speakers.txt; the copy's path,
+        or None when it could not be made (the run goes on: transcript.txt is only
+        ever replaced whole)."""
+        import shutil
+        src = Path(folder) / "transcript.txt"
+        dst = Path(folder) / meeting_store.BEFORE_SPEAKERS
+        try:
+            shutil.copyfile(src, dst)
+            return dst
+        except OSError:
+            logger.warning("Could not keep the old transcript before Identify speakers", exc_info=True)
+            return None
+
+    @staticmethod
+    def _remove_backup(path):
+        if path is None:
+            return
+        try:
+            Path(path).unlink()
+        except OSError:
+            pass
+
+    def _finish_identify(self, notes):
+        """GUI thread: the Identify speakers run is over (labels added, nothing
+        found, or cancelled): the page reloads the meeting through ``finished``
+        and the notes are the ones it had."""
+        folder = str(self._meeting_dir or "")
+        msg = self._identify_error
+        self._identify_error = ""
+        self._identify_only = False
+        self._saved_audio_run = False
+        self._rewrite_only = False
+        self.last_run_speakers = True
+        self.last_notes_new = False
+        self._failed = False
+        self.last_error = ""
+        self.state = STATE_DONE
+        self._clear_resume_state()
+        self._emit_state()
+        self.finished.emit(folder, notes or "", "")
+        if msg:
+            self.error.emit(ERR_SPEAKERS, msg)
+
     # ── quitting ──
     def save_for_quit(self, wait=8.0):
         """The app is quitting (Quit, after the user said so) or Windows is
@@ -1648,6 +2291,12 @@ class MeetingCore:
         Returns the meeting folder (str), or "" when there was nothing to keep."""
         folder = self._meeting_dir
         if not self.app or folder is None or self.state not in (STATE_RECORDING, STATE_PROCESSING):
+            return ""
+        if self._saved_audio_run:
+            # Identify speakers / finishing an interrupted meeting read the SAVED
+            # recording: nothing live is lost by quitting (transcript.txt is only
+            # ever replaced whole, at the very end) - never write the stale live
+            # pieces of an earlier session over it.
             return ""
         if self.state == STATE_RECORDING:
             self._save_recording_for_quit()
@@ -1708,7 +2357,7 @@ class MeetingCore:
                     t.join(timeout=left)
                 except Exception:
                     pass
-        self._save_recording_segment()
+        part_path = self._save_recording_segment()
         self._write_quit_transcript()
         notices = list(self._transcript_notices or [])
         if QUIT_NOTICE not in notices:
@@ -1720,6 +2369,9 @@ class MeetingCore:
             extra["language"] = max(set(langs), key=langs.count)
         self._write_meta(seen=False, notices=notices, notes_error=None,
                          **extra, **{META_NOTES_PENDING: True})
+        # Last, so a slow disk never costs the recording or the transcript: the
+        # two sources apart (the next launch's speaker labels can use them).
+        self._save_recording_tracks(part_path)
         self._restore_recorder_callbacks()
         self.state = STATE_IDLE
         self.paused = False
@@ -1800,6 +2452,7 @@ if _QObject is not None:
         levels = _QtSignal(float, float)
         finished = _QtSignal(str, str, str)
         error = _QtSignal(str, str)
+        speakers_changed = _QtSignal(str)
         sig_chunk = _QtSignal(str)
         sig_summary = _QtSignal(str)
         sig_status = _QtSignal(str)
