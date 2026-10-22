@@ -6,19 +6,28 @@
 // parallel - one round trip, not three) -> model -> text, streamed when asked.
 //
 // Routing - each request tries the configured engines in order, moving on if
-// one is missing, fails, or (streamed) hasn't produced its first words in time:
+// one is missing, fails, or (streamed) hasn't produced its first words in time
+// (not streamed: hasn't answered within its whole-answer budget):
 // * Live Assistance answers (mode "live_assist"): the live model on Modal
-//   (DeepSeek V4.1 Flash - vision, thinking off) -> Claude Haiku 5.5 (thinking
-//   off, vision) -> Gemini Flash (thinking off) -> Mistral Small. Streamed.
+//   (DeepSeek V4.1 Flash - vision, thinking off) -> OpenAI (OPENAI_LIVE_MODEL,
+//   reasoning off, vision) -> Claude Haiku 5.5 (thinking off, vision) -> Mistral
+//   Small -> Gemini Flash (thinking off). Streamed.
 // * Smart Actions (the app names their mode, SMART_MODES): the live model ->
-//   Claude Haiku 5.5 -> Mistral Small -> Gemini Flash. Not streamed: the live
-//   model gets SMART_LIVE_MS for the whole answer, Claude CLAUDE_SMART_MS.
-// * Meeting notes (mode "meeting_notes"): Claude Sonnet 5.5 (thinking off,
-//   CLAUDE_NOTES_MS for the whole notes) -> Mistral Small -> Gemini Flash.
+//   OpenAI (OPENAI_FAST_MODEL) -> Claude Haiku 5.5 -> Mistral Small -> Gemini
+//   Flash. The app streams them: every engine gets SMART_START_MS to its first
+//   words. Not streamed: the live model gets SMART_LIVE_MS for the whole answer,
+//   OpenAI OPENAI_SMART_MS, Claude CLAUDE_SMART_MS.
+// * Meeting notes (mode "meeting_notes"): OpenAI (OPENAI_NOTES_MODEL,
+//   OPENAI_NOTES_MS for the whole notes) -> Claude Sonnet 5.5 (thinking off,
+//   CLAUDE_NOTES_MS) -> Mistral Small -> Gemini Flash (NOTES_TAIL_MS each).
 // * Everything else (the live recap, apps before 2.0 that send no mode):
-//   Mistral Small -> Gemini Flash.
+//   Mistral Small -> OpenAI (OPENAI_FAST_MODEL) -> Gemini Flash.
+// Not streamed, EVERY engine has a whole-answer time limit (its own, else
+// WHOLE_CAP_MS), and the chain as a whole stays inside NON_STREAM_DEADLINE_MS,
+// so the app's 45 s wait always ends with an answer or a clean error.
 // Claude runs through the official Anthropic SDK; its answers are turned into
 // the same OpenAI-style JSON / event stream the app reads from the others.
+// Without a key an engine is simply left out of the chain.
 // * {"warmup": true} wakes the live endpoint (Pro users only) and returns at
 //   once; the app sends it when a session starts. A Modal Shared Endpoint
 //   never sleeps, but a dedicated one can scale to zero.
@@ -32,10 +41,20 @@
 //          LIVE_LLM_MODEL (e.g. deepseek-ai/DeepSeek-V4.1-Flash; when unset the
 //                          endpoint's /v1/models is asked),
 //          LIVE_LLM_TIMEOUT_MS (optional: first-words budget for the live model,
-//                          default 8000 - raise it for a scale-to-zero endpoint),
+//                          1000-60000, default 8000 - raise it for a scale-to-zero
+//                          endpoint),
 //          GEMINI_CHAT_MODEL (optional, default gemini-2.5-flash),
 //          CLAUDE_LLM_KEY (the founder's Anthropic API key; optional - without
-//                          it the Claude steps are skipped).
+//                          it the Claude steps are skipped),
+//          OPENAI_TOKEN   (the founder's OpenAI key; OPENAI_API_KEY or OPENAI_KEY
+//                          work too; optional - without it the OpenAI steps are
+//                          skipped),
+//          OPENAI_FAST_MODEL  (optional, default gpt-5.4-mini: Smart Actions and
+//                          the generic fallback),
+//          OPENAI_LIVE_MODEL  (optional, default gpt-5.4-nano: Live Assistance),
+//          OPENAI_NOTES_MODEL (optional, default gpt-4.1: meeting notes; e.g.
+//                          gpt-5.5 for more quality). A model name is used only
+//                          if it is a plain model id, else the default is.
 // Auto-provided: SUPABASE_URL, SUPABASE_ANON_KEY. Deploy with verify_jwt=false.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -56,9 +75,21 @@ const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat
 // Budgets for a STREAMED request's first words (headers alone don't count: an
 // OpenAI-compatible server sends 200 + event-stream headers before the request
 // even reaches its queue). Past it, the next engine answers instead.
-const LIVE_TIMEOUT_MS = Number(Deno.env.get("LIVE_LLM_TIMEOUT_MS")) || 8_000;
+const LIVE_TIMEOUT_MS = (() => {
+  const n = Number(Deno.env.get("LIVE_LLM_TIMEOUT_MS"));
+  return Number.isFinite(n) && n >= 1_000 && n <= 60_000 ? Math.floor(n) : 8_000;   // a bad value = the default
+})();
 const LIVE_FALLBACK_MS = 12_000;  // Gemini/Mistral standing in for the live model
 const START_TIMEOUT_MS = 30_000;  // hosted APIs, other streamed actions
+const SMART_START_MS = 6_000;     // a streamed Smart Action: a warm engine starts within ~1 s
+// Not streamed: no engine may hold the chain. WHOLE_CAP_MS is the whole-answer
+// limit of an engine without a budget of its own; the chain as a whole stays
+// inside NON_STREAM_DEADLINE_MS (the app waits 45 s), but every engine keeps at
+// least MIN_LEFT_MS.
+const WHOLE_CAP_MS = 20_000;
+const NON_STREAM_DEADLINE_MS = 40_000;
+const MIN_LEFT_MS = 3_000;
+const NOTES_TAIL_MS = 10_000;     // Mistral / Gemini behind the two premium engines for meeting notes
 // Alt+S and the actions it picks (actions.py ACTION_MODES). A Smart Action is
 // short and arrives whole, so a stalled GPU queue gets SMART_LIVE_MS before
 // Mistral answers instead - well inside the app's 45 s.
@@ -72,13 +103,31 @@ const CLAUDE_KEY = (Deno.env.get("CLAUDE_LLM_KEY") ?? "").trim();
 const CLAUDE_FAST_MODEL = "claude-haiku-5-5";
 const CLAUDE_NOTES_MODEL = "claude-sonnet-5-5";
 const CLAUDE_SMART_MS = 12_000;   // a Smart Action from Claude, the whole answer
-const CLAUDE_NOTES_MS = 25_000;   // meeting notes, the whole answer (the app waits 45 s)
+const CLAUDE_NOTES_MS = 14_000;   // meeting notes, the whole answer (with OPENAI_NOTES_MS and NOTES_TAIL_MS under the app's 45 s)
+// OpenAI (the founder's key). Chat completions, reasoning switched off by model
+// family (see openaiRoute). The model names are secrets so they can change
+// without a deploy; a name that isn't a plain model id is ignored.
+const OPENAI_KEY = [Deno.env.get("OPENAI_TOKEN"), Deno.env.get("OPENAI_API_KEY"), Deno.env.get("OPENAI_KEY")]
+  .map((v) => (v ?? "").trim()).find((v) => v) ?? "";
+function openaiModelName(setting: string | undefined, fallback: string): string {
+  const v = (setting ?? "").trim();
+  return /^[a-z0-9][a-z0-9._-]{1,60}$/i.test(v) ? v : fallback;
+}
+const OPENAI_FAST_MODEL = openaiModelName(Deno.env.get("OPENAI_FAST_MODEL"), "gpt-5.4-mini");
+const OPENAI_LIVE_MODEL = openaiModelName(Deno.env.get("OPENAI_LIVE_MODEL"), "gpt-5.4-nano");
+const OPENAI_NOTES_MODEL = openaiModelName(Deno.env.get("OPENAI_NOTES_MODEL"), "gpt-4.1");
+const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
+const OPENAI_SMART_MS = 12_000;   // a Smart Action from OpenAI, the whole answer
+const OPENAI_NOTES_MS = 18_000;   // meeting notes, the whole answer (the two premium engines together stay under the app's 45 s)
 const claude = CLAUDE_KEY ? new Anthropic({ apiKey: CLAUDE_KEY, maxRetries: 0 }) : null;
 // Per isolate: has the Claude key been checked yet (a free models lookup, logged).
 let claudeChecked = false;
 // A cost-abuse ceiling, not a usage limit: ~10x a heavy day of dictation plus
 // Live Assistance answers (one per question asked in a call).
 const DAILY_CAP = 1000;
+// A long meeting transcript is well under 1 MB; screenshots are downscaled JPEGs.
+const MAX_BODY_BYTES = 8 * 1024 * 1024;
+const MAX_MESSAGES = 200;
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -107,7 +156,8 @@ type Route = {
   variants?: Record<string, unknown>[];
   variantIdx?: number[];
   family?: string;          // "deepseek" / "qwen": a template-opened thinking model
-  wholeMs?: number;         // not streamed: time for the whole answer (0 = no limit)
+  wholeMs?: number;         // not streamed: time for the whole answer (unset / 0: capMs, else WHOLE_CAP_MS)
+  capMs?: number;           // not streamed: the whole-answer limit of an engine with no wholeMs
   claude?: Record<string, unknown>;   // a Claude request (Anthropic SDK), not an OpenAI one
 };
 
@@ -123,6 +173,38 @@ function mistralRoute(messages: unknown[], maxTokens: number, stream: boolean, s
     key: MISTRAL_KEY,
     body: { model: MODEL, messages, temperature: 0.1, max_tokens: maxTokens, stream },
     startMs,
+  };
+}
+
+// ── OpenAI ──────────────────────────────────────────────────────────────────
+// Reasoning must not run (it delays the first word by seconds): gpt-5.x and
+// gpt-6 take reasoning_effort "none", gpt-5 / -mini / -nano need "minimal", the
+// o-series' lowest is "low", and the gpt-4 family has no such field at all (a
+// 400). Only the gpt-4 family takes a temperature - the gpt-5 / o models refuse
+// a custom one. If a model still rejects reasoning_effort (HTTP 400/422), the
+// same request without it is the one variant; it has no variantIdx, so it
+// never touches the live model's variant state.
+function openaiEffort(model: string): string | null {
+  const m = model.toLowerCase();
+  if (/^gpt-5\.\d|^gpt-6/.test(m)) return "none";
+  if (/^gpt-5(-|$)/.test(m)) return "minimal";
+  if (/^o\d/.test(m)) return "low";
+  return null;
+}
+
+function openaiRoute(model: string, messages: unknown[], maxTokens: number, stream: boolean,
+                     startMs: number, wholeMs: number, temperature?: number): Route {
+  const effort = openaiEffort(model);
+  const plain: Record<string, unknown> = { model, messages, max_completion_tokens: maxTokens, stream };
+  if (effort === null && temperature !== undefined && /^gpt-4/i.test(model)) plain.temperature = temperature;
+  return {
+    name: "openai",
+    url: OPENAI_URL,
+    key: OPENAI_KEY,
+    body: effort ? { ...plain, reasoning_effort: effort } : plain,
+    variants: effort ? [plain] : undefined,
+    startMs,
+    wholeMs,
   };
 }
 
@@ -144,9 +226,31 @@ const NO_THINK_VARIANTS: Record<string, unknown>[] = [
 let liveVariant = 0;          // per isolate: the variant the endpoint accepted last
 let liveModelCache = "";      // per isolate: model id discovered via /v1/models
 // Per isolate: the live endpoint refused an image (a text-only model, or its
-// vision tower switched off). Screenshots then go to Gemini first - no point
-// paying a failed round trip, with the image upload, on every Screen answer.
-let liveNoVision = false;
+// vision tower switched off). Screenshots then skip it for a while - no point
+// paying a failed round trip, with the image upload, on every Screen answer. It
+// is only for a while: one bad image from one user must not switch the live
+// model off for everybody until the isolate recycles.
+let liveNoVisionUntil = 0;
+const LIVE_NO_VISION_MS = 5 * 60_000;
+
+// Only inline images go upstream: the live endpoint (and Claude) would fetch any
+// other URL from inside our network. Other image parts are dropped; a message
+// left with no parts is dropped too.
+function onlyDataImages(messages: unknown[]): unknown[] {
+  const out: unknown[] = [];
+  for (const m of messages) {
+    const c = (m as { content?: unknown })?.content;
+    if (!Array.isArray(c)) { out.push(m); continue; }
+    const kept = c.filter((p: { type?: string; image_url?: { url?: unknown } | string }) => {
+      if (p?.type !== "image_url") return true;
+      const u = typeof p.image_url === "string" ? p.image_url : p.image_url?.url;
+      return typeof u === "string" && /^data:image\/[a-zA-Z0-9.+-]+;base64,/.test(u);
+    });
+    if (kept.length === c.length) out.push(m);
+    else if (kept.length) out.push({ ...(m as object), content: kept });
+  }
+  return out;
+}
 
 function hasImage(messages: unknown[]): boolean {
   return messages.some((m) => Array.isArray((m as { content?: unknown })?.content) &&
@@ -168,13 +272,20 @@ function liveSampling(model: string): Record<string, unknown> {
   return { temperature: 0.3 };
 }
 
-async function liveModel(): Promise<string> {
+// A failed lookup is not repeated for LIVE_MODEL_RETRY_MS (an endpoint that is
+// down must not cost every request a wait); a warmup (force) tries again, and
+// gives a cold endpoint longer. Setting LIVE_LLM_MODEL skips the lookup.
+let liveModelFailedAt = 0;
+const LIVE_MODEL_RETRY_MS = 30_000;
+
+async function liveModel(force = false): Promise<string> {
   if (LIVE_MODEL_SETTING) return LIVE_MODEL_SETTING;
   if (liveModelCache) return liveModelCache;
+  if (!force && liveModelFailedAt && Date.now() - liveModelFailedAt < LIVE_MODEL_RETRY_MS) return "";
   try {
     const r = await fetch(`${LIVE_URL}/models`, {
       headers: { "Authorization": `Bearer ${LIVE_TOKEN}` },
-      signal: AbortSignal.timeout(5_000),
+      signal: AbortSignal.timeout(force ? 10_000 : 2_000),
     });
     if (r.ok) {
       const d = await r.json();
@@ -183,8 +294,9 @@ async function liveModel(): Promise<string> {
       console.error("live model lookup failed", r.status);
     }
   } catch (e) {
-    console.error("live model lookup unreachable", String(e).slice(0, 160));
+    console.error("live model lookup unreachable", scrub(String(e), LIVE_TOKEN).slice(0, 160));
   }
+  if (!liveModelCache) liveModelFailedAt = Date.now();
   return liveModelCache;
 }
 
@@ -224,11 +336,10 @@ function geminiRoutes(messages: unknown[], maxTokens: number, stream: boolean, s
 // ── Claude (Anthropic SDK) ──────────────────────────────────────────────────
 // The app sends OpenAI-style messages: system turns, text, and screenshots as
 // image_url data URLs. Claude takes the system text apart, images as base64
-// (or URL) blocks, no empty text, and must end on a user turn.
+// blocks, no empty text, and must end on a user turn.
 function claudeImage(url: string): Record<string, unknown> | null {
   const m = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/s.exec(url);
   if (m) return { type: "image", source: { type: "base64", media_type: m[1], data: m[2] } };
-  if (/^https?:\/\//.test(url)) return { type: "image", source: { type: "url", url } };
   return null;
 }
 
@@ -299,11 +410,11 @@ function openaiFinish(stop: string | null | undefined): string {
 // One Claude request, with the same rules as attempt(): streamed, it succeeds
 // once the first words arrive within route.startMs and the returned stream
 // replays them; not streamed, the whole answer must arrive within
-// route.wholeMs. A refusal, an empty answer or any API error falls through to
-// the next engine.
-async function attemptClaude(route: Route, stream: boolean): Promise<Attempt> {
+// its whole-answer budget (wholeBudget). A refusal, an empty answer or any API
+// error falls through to the next engine.
+async function attemptClaude(route: Route, stream: boolean, leftMs: number): Promise<Attempt> {
   const ctrl = new AbortController();
-  const ms = stream ? route.startMs : (route.wholeMs ?? 0);
+  const ms = stream ? route.startMs : wholeBudget(route, leftMs);
   const timer = ms > 0 ? setTimeout(() => ctrl.abort(), ms) : undefined;
   try {
     if (!stream) {
@@ -374,9 +485,12 @@ async function attemptClaude(route: Route, stream: boolean): Promise<Attempt> {
     return { kind: "ok", res: new Response(null), body };
   } catch (e) {
     // (A connection error or an error event mid-stream is an APIError with no status.)
+    // Never the SDK's message: an API error text can quote the request.
     const detail = ctrl.signal.aborted ? `no answer within ${ms} ms`
-      : e instanceof Anthropic.APIError && e.status ? `HTTP ${e.status}: ${String(e.message).slice(0, 140)}`
-      : String(e).slice(0, 160);
+      : e instanceof Anthropic.APIError && e.status
+        // deno-lint-ignore no-explicit-any
+        ? `HTTP ${e.status} ${String((e.error as any)?.error?.type ?? "").slice(0, 40)}`.trim()
+      : scrub(String(e), CLAUDE_KEY).slice(0, 160);
     console.error(`${route.name} unreachable`, detail);
     return { kind: "failed", detail, reasoning: 0 };
   } finally {
@@ -411,18 +525,22 @@ async function checkClaudeKey(): Promise<void> {
 
 async function routesFor(live: boolean, smart: boolean, notes: boolean, messages: unknown[],
                          maxTokens: number, stream: boolean): Promise<Route[]> {
-  const ms = live ? LIVE_FALLBACK_MS : START_TIMEOUT_MS;
+  const ms = live ? LIVE_FALLBACK_MS : smart ? SMART_START_MS : START_TIMEOUT_MS;
   const gemini = GEMINI_KEY ? geminiRoutes(messages, maxTokens, stream, ms) : [];
   const mistral = MISTRAL_KEY ? [mistralRoute(messages, maxTokens, stream, ms)] : [];
+  const openai = (model: string, wholeMs: number, temperature?: number): Route[] =>
+    OPENAI_KEY ? [openaiRoute(model, messages, maxTokens, stream, ms, wholeMs, temperature)] : [];
   if (notes) {
     const c = claudeRoute(CLAUDE_NOTES_MODEL, messages, maxTokens, ms, CLAUDE_NOTES_MS);
-    return [...(c ? [c] : []), ...mistral, ...gemini];
+    const tail = [...mistral, ...gemini].map((r) => ({ ...r, capMs: NOTES_TAIL_MS }));
+    return [...openai(OPENAI_NOTES_MODEL, OPENAI_NOTES_MS), ...(c ? [c] : []), ...tail];
   }
-  if (!live && !smart) return [...mistral, ...gemini];
+  if (!live && !smart) return [...mistral, ...openai(OPENAI_FAST_MODEL, OPENAI_SMART_MS), ...gemini];
   const fast = claudeRoute(CLAUDE_FAST_MODEL, messages, maxTokens, ms, smart ? CLAUDE_SMART_MS : 0);
   const backup = fast ? [fast] : [];
+  const gpt = live ? openai(OPENAI_LIVE_MODEL, OPENAI_SMART_MS) : openai(OPENAI_FAST_MODEL, OPENAI_SMART_MS, 0.1);
   let first: Route[] = [];
-  if (LIVE_URL && LIVE_TOKEN && !(liveNoVision && hasImage(messages))) {
+  if (LIVE_URL && LIVE_TOKEN && !(Date.now() < liveNoVisionUntil && hasImage(messages))) {
     const model = await liveModel();
     if (model) {
       // Smart Actions keep the user's words, so they get Mistral's near-fixed
@@ -432,7 +550,7 @@ async function routesFor(live: boolean, smart: boolean, notes: boolean, messages
       first = [{ ...route, wholeMs: smart ? SMART_LIVE_MS : 0 }];
     }
   }
-  return live ? [...first, ...backup, ...gemini, ...mistral] : [...first, ...backup, ...mistral, ...gemini];
+  return [...first, ...gpt, ...backup, ...mistral, ...gemini];
 }
 
 function call(route: Route, body: Record<string, unknown>, signal?: AbortSignal) {
@@ -519,37 +637,65 @@ type Attempt =
 // One request to one engine. Streamed: succeeds only once the first words of
 // the answer have arrived within route.startMs (a queued request, or a model
 // that thinks instead of answering, falls through to the next engine), and
-// the stream handed back replays everything read so far. Not streamed: no
-// time limit unless the route sets wholeMs - a non-streamed server answers
-// only when the whole text is done, so a timer would cap long meeting notes.
-async function attempt(route: Route, body: Record<string, unknown>, stream: boolean): Promise<Attempt> {
+// the stream handed back replays everything read so far. Not streamed: the
+// whole answer (headers AND body) must arrive within wholeBudget(), whatever the
+// engine; the validation of the answer is the same for every engine.
+// An upstream error text only goes to the server log (never to the app), and no
+// key may be in it (an API may echo the key it was sent, whole or masked).
+function scrub(text: string, key: string): string {
+  let s = text;
+  for (const k of new Set([key, OPENAI_KEY, MISTRAL_KEY, GEMINI_KEY, LIVE_TOKEN, CLAUDE_KEY])) {
+    if (k.length >= 8) s = s.split(k).join("[key]");
+  }
+  return s.replace(/\bsk-[A-Za-z0-9_*.-]{4,}/g, "[key]").replace(/Bearer\s+[A-Za-z0-9._~+\/=-]{8,}/gi, "Bearer [key]");
+}
+
+// What of a 400/422 body goes to the log: a validation error can quote the
+// user's own text ("input"), so only its kind and the field it is about.
+function logSafe(status: number, text: string): string {
+  if (status !== 400 && status !== 422) return text.slice(0, 160);
+  const all = (re: RegExp) => [...text.matchAll(re)].map((m) => m[1]).slice(0, 3).join(",");
+  const parts = [`type=${all(/"type":\s*"([a-z_.]{1,40})"/g)}`, `code=${all(/"code":\s*"([a-z_.]{1,40})"/g)}`,
+                 `param=${all(/"param":\s*"([a-z_.]{1,40})"/g)}`, `loc=${all(/"loc":\s*(\[[^\]]{0,80}\])/g)}`];
+  return `rejected ${parts.join(" ")}`;
+}
+
+// The time a non-streamed engine gets for its whole answer: its own budget, else
+// WHOLE_CAP_MS - and never more than what is left of the chain's deadline.
+function wholeBudget(route: Route, leftMs: number): number {
+  return Math.min(route.wholeMs || route.capMs || WHOLE_CAP_MS, Math.max(leftMs, MIN_LEFT_MS));
+}
+
+async function attempt(route: Route, body: Record<string, unknown>, stream: boolean, leftMs: number): Promise<Attempt> {
   const ctrl = new AbortController();
-  const ms = stream ? route.startMs : (route.wholeMs ?? 0);
+  const ms = stream ? route.startMs : wholeBudget(route, leftMs);
   const timer = ms > 0 ? setTimeout(() => ctrl.abort(), ms) : undefined;
   const scanner = sseScanner();
   try {
     const res = await call(route, body, ctrl.signal);
     if (!res.ok) {
-      const detail = (await res.text()).slice(0, 160);
-      console.error(`${route.name} failed`, res.status, detail);
+      const full = scrub((await res.text()).slice(0, 4096), route.key);
+      const detail = full.slice(0, 160);
+      console.error(`${route.name} failed`, res.status, logSafe(res.status, full));
       const kind = res.status === 400 || res.status === 422 ? "rejected" : "failed";
       return { kind, detail, reasoning: 0 };
     }
-    if ((!stream || !res.body) && route.wholeMs) {
-      // A Smart Action from the live model: read it inside the time limit. No
-      // answer left once reasoning is removed, or one cut off at max_tokens (a
-      // template-opened think block shows no tag to find), goes to the next engine.
+    if (!stream || !res.body) {
+      // Read the whole answer inside the time limit (a stalled body counts). No
+      // answer left once reasoning is removed goes to the next engine - and so
+      // does one cut off at max_tokens from a template-opened think model (no
+      // tag to find). A cut-off answer from any other engine is a usable answer
+      // (long meeting notes can fill their budget): it is kept, not rewritten.
       const d = await res.json();
       const c = d?.choices?.[0] ?? {};
       const content = String(c.message?.content ?? "");
-      if (!visibleAnswer(content, !!route.family) || c.finish_reason === "length") {
+      if (!visibleAnswer(content, !!route.family) || (route.family && c.finish_reason === "length")) {
         const detail = `no usable answer (finish ${c.finish_reason ?? "?"}, think tags ${/<\/?think>/.test(content)})`;
         console.error(`${route.name} failed`, detail);
         return { kind: "failed", detail, reasoning: String(c.message?.reasoning_content ?? c.message?.reasoning ?? "").length };
       }
       return { kind: "ok", res: new Response(JSON.stringify(d)), body: null };
     }
-    if (!stream || !res.body) return { kind: "ok", res, body: res.body };
     const reader = res.body.getReader();
     const held: Uint8Array[] = [];
     while (true) {
@@ -565,7 +711,7 @@ async function attempt(route: Route, body: Record<string, unknown>, stream: bool
       if (scanner.stats.content > 0) return { kind: "ok", res, body: replay(held, reader) };
     }
   } catch (e) {
-    const detail = ctrl.signal.aborted ? `no answer within ${ms} ms` : String(e).slice(0, 160);
+    const detail = ctrl.signal.aborted ? `no answer within ${ms} ms` : scrub(String(e), route.key).slice(0, 160);
     console.error(`${route.name} unreachable`, detail, JSON.stringify(scanner.stats));
     return { kind: "failed", detail, reasoning: scanner.stats.reasoning };
   } finally {
@@ -576,7 +722,7 @@ async function attempt(route: Route, body: Record<string, unknown>, stream: bool
 // Watches a relayed live answer without changing a byte: logs how long the
 // first words took and whether reasoning slipped through - a live model that
 // thinks is slow and can end with an empty answer.
-function observeStream(name: string, startedAt: number) {
+function observeStream(name: string, startedAt: number, model = "") {
   const scanner = sseScanner();
   let firstChunkMs = -1;
   return new TransformStream<Uint8Array, Uint8Array>({
@@ -588,7 +734,7 @@ function observeStream(name: string, startedAt: number) {
     flush() {
       scanner.end();
       const s = scanner.stats;
-      const info = { route: name, first_words_ms: firstChunkMs, content_chars: s.content,
+      const info = { route: name, model, first_words_ms: firstChunkMs, content_chars: s.content,
                      reasoning_chars: s.reasoning, think_tags: s.thinkTags, finish: s.finish,
                      total_ms: Date.now() - startedAt };
       if (s.reasoning > 0 || s.thinkTags || s.content === 0) {
@@ -615,9 +761,19 @@ Deno.serve(async (req) => {
 
   const authHeader = req.headers.get("Authorization") ?? "";
   if (!authHeader.startsWith("Bearer ")) return json({ error: "unauthorized" }, 401);
+  // A user's access token is a JWT: anything else is dropped before the body is
+  // read and before any backend call.
+  if (!/^[\w-]+\.[\w-]+\.[\w-]+$/.test(authHeader.slice(7).trim())) return json({ error: "unauthorized" }, 401);
+  // A cap on the request: a declared-large body is not even read; one that
+  // declares nothing (chunked) is checked once read. Before the quota is spent.
+  if (Number(req.headers.get("content-length") ?? 0) > MAX_BODY_BYTES) return json({ error: "too_large" }, 413);
 
   let body: any;
-  try { body = await req.json(); } catch { return json({ error: "bad_request" }, 400); }
+  try {
+    const raw = await req.text();
+    if (raw.length > MAX_BODY_BYTES) return json({ error: "too_large" }, 413);
+    body = JSON.parse(raw);
+  } catch { return json({ error: "bad_request" }, 400); }
   const warmup = body?.warmup === true;
   const live = body?.mode === "live_assist";
   const smart = SMART_MODES.has(body?.mode);
@@ -636,10 +792,11 @@ Deno.serve(async (req) => {
 
   if (warmup) {
     if (LIVE_URL && LIVE_TOKEN) {
-      const wake = liveModel().then((model) => {
+      const wake = liveModel(true).then((model) => {
         if (!model) return;
         const route = liveRoute(model, [{ role: "user", content: "ping" }], 1, false);
-        return call(route, route.body).then((r) => r.body?.cancel());
+        // A cold start can take a while - but not forever.
+        return call(route, route.body, AbortSignal.timeout(90_000)).then((r) => r.body?.cancel());
       }).catch(() => {});
       if (typeof EdgeRuntime !== "undefined") EdgeRuntime.waitUntil(wake);
     }
@@ -649,42 +806,49 @@ Deno.serve(async (req) => {
   if (quotaRes.error) return json({ error: "quota_check_failed" }, 500);
   if (quotaRes.data !== true) return json({ error: "quota_exceeded" }, 429);
 
-  const messages = body?.messages;
-  const maxTokens = Math.min(Number(body?.max_tokens) || 600, 2000);
+  // A whole number from 1 to 2000; anything else (negative, zero, fractional,
+  // infinite, text) is the default - never an error, never "no limit".
+  const rawMax = Math.trunc(Number(body?.max_tokens));
+  const maxTokens = Number.isFinite(rawMax) && rawMax >= 1 ? Math.min(rawMax, 2000) : 600;
   const stream = body?.stream === true;
-  if (!Array.isArray(messages) || messages.length === 0) return json({ error: "no_messages" }, 400);
+  if (!Array.isArray(body?.messages) || body.messages.length === 0 || body.messages.length > MAX_MESSAGES) {
+    return json({ error: "no_messages" }, 400);
+  }
+  const messages = onlyDataImages(body.messages);
+  if (messages.length === 0) return json({ error: "no_messages" }, 400);
 
+  const startedAt = Date.now();
   const routes = await routesFor(live, smart, notes, messages, maxTokens, stream);
   if (!routes.length) {
-    console.error("no chat engine configured: set MISTRAL_STT_KEY, GOOGLE_STT_KEY or CLAUDE_LLM_KEY");
+    console.error("no chat engine configured: set MISTRAL_STT_KEY, GOOGLE_STT_KEY, OPENAI_TOKEN or CLAUDE_LLM_KEY");
     return json({ error: "actions_not_configured" }, 503);
   }
   const withImage = hasImage(messages);
-  const startedAt = Date.now();
   let ok: { res: Response; body: ReadableStream<Uint8Array> | null } | null = null;
   let used = "";
   let usedFamily = "";
-  let lastDetail = "";
+  let usedModel = "";
   routeLoop:
   for (const route of routes) {
     const bodies = [route.body, ...(route.variants ?? [])];
     for (let i = 0; i < bodies.length; i++) {
       const variant = route.variantIdx?.[i];
-      const a = route.claude ? await attemptClaude(route, stream) : await attempt(route, bodies[i], stream);
+      const left = NON_STREAM_DEADLINE_MS - (Date.now() - startedAt);
+      const a = route.claude ? await attemptClaude(route, stream, left) : await attempt(route, bodies[i], stream, left);
       if (a.kind === "ok") {
         if (variant !== undefined) liveVariant = variant;   // the one this endpoint takes
         ok = a;
         used = route.name;
         usedFamily = route.family ?? "";
+        usedModel = String((route.claude ?? route.body).model ?? "");
         break routeLoop;
       }
-      lastDetail = a.detail;
       // The live model can't take the screenshot: the next engine (Claude or
       // Gemini, both vision) answers this one, and image requests skip the
       // live model from now on.
       if (a.kind === "rejected" && withImage && route.name === "live" && imageRejected(a.detail)) {
-        liveNoVision = true;
-        console.warn("live model refused the screenshot - screen answers go to the next engine");
+        liveNoVisionUntil = Date.now() + LIVE_NO_VISION_MS;
+        console.warn("live model refused the screenshot - screen answers skip it for a while");
         break;
       }
       // A rejected field: the next variant may be accepted. Anything else
@@ -692,10 +856,11 @@ Deno.serve(async (req) => {
       if (a.kind !== "rejected") break;
     }
   }
-  if (ok === null) return json({ error: "action_failed", detail: lastDetail }, 502);
+  // What the engines said stays in the log: it can hold account and quota state.
+  if (ok === null) return json({ error: "action_failed" }, 502);
   if (stream && ok.body) {
     // Relay the OpenAI-style event stream as is - the app renders each delta.
-    const relayed = live ? ok.body.pipeThrough(observeStream(used, startedAt)) : ok.body;
+    const relayed = live ? ok.body.pipeThrough(observeStream(used, startedAt, usedModel)) : ok.body;
     return new Response(relayed, {
       headers: { ...cors, "Content-Type": "text/event-stream", "Cache-Control": "no-cache",
                  "X-Answer-Family": usedFamily },
@@ -706,7 +871,7 @@ Deno.serve(async (req) => {
   // Which engine wrote it and how long it took (no text) - for the founder.
   if (smart || notes) {
     console.log(smart ? "smart action" : "meeting notes",
-                JSON.stringify({ mode: body.mode, route: used, total_ms: Date.now() - startedAt }));
+                JSON.stringify({ mode: body.mode, route: used, model: usedModel, total_ms: Date.now() - startedAt }));
   }
   return new Response(JSON.stringify({ text }), {
     headers: { ...cors, "Content-Type": "application/json", "X-Answer-Family": usedFamily },
