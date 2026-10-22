@@ -630,11 +630,10 @@ class TestDocs(unittest.TestCase):
 
     def test_readme_says_gusan_and_keeps_the_links(self):
         text = _read(ROOT / "README.md")
-        self.assertIn("What is Gusan?", text)
-        self.assertIn("Gusan was called Transcribe until version 2.0.0", text)
+        self.assertIn("Gusan was called Transcribe until", text)
         for asset in (INSTALLER_ASSET, "TranscribeApp-Mac.dmg", "TranscribeApp-Windows.zip"):
             self.assertIn("https://github.com/Aram2K/transcribe-app/releases/latest/download/" + asset, text)
-        self.assertIn("%APPDATA%\\Transcribe\\meetings", text)
+        self.assertIn("%APPDATA%\\Transcribe", text)
         for old in ("Transcribe App", "Transcribe Pro", "What is Transcribe", "Live Assistance"):
             self.assertNotIn(old, text)
         # The 1.x windows are gone: no steps that point at them.

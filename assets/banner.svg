@@ -51,9 +51,9 @@
         fill="#ffffff" letter-spacing="-1">Gusan</text>
 
   <!-- Tagline -->
-  <text x="163" y="118"
+  <text x="163" y="128"
         font-family="Arial, Helvetica, sans-serif"
-        font-size="15" fill="#94a3b8">⚡ Offline-first AI&#160;&#160;·&#160;&#160;🎙 Private Dictation &amp; Summaries&#160;&#160;·&#160;&#160;🕶 Hidden Live Assistant</text>
+        font-size="15" fill="#94a3b8">Dictation&#160;&#160;·&#160;&#160;Smart Actions&#160;&#160;·&#160;&#160;Meetings&#160;&#160;·&#160;&#160;Live Assistant</text>
 
   <!-- ── Waveform bars ── -->
   <g transform="translate(162, 170)">
@@ -133,21 +133,21 @@
   <!-- Windows -->
   <rect x="596" y="48" width="100" height="26" rx="5" fill="#1e293b"/>
   <text x="646" y="65" font-family="Arial, Helvetica, sans-serif" font-size="12"
-        fill="#94a3b8" text-anchor="middle">🪟 Windows</text>
+        fill="#94a3b8" text-anchor="middle">Windows</text>
 
   <!-- macOS -->
   <rect x="706" y="48" width="94" height="26" rx="5" fill="#1e293b"/>
   <text x="753" y="65" font-family="Arial, Helvetica, sans-serif" font-size="12"
-        fill="#94a3b8" text-anchor="middle">🍎 macOS</text>
+        fill="#94a3b8" text-anchor="middle">macOS</text>
 
-  <!-- Offline -->
+  <!-- Private -->
   <rect x="596" y="82" width="100" height="26" rx="5" fill="#1e293b"/>
   <text x="646" y="99" font-family="Arial, Helvetica, sans-serif" font-size="12"
-        fill="#94a3b8" text-anchor="middle">⚡ 100% Offline</text>
+        fill="#94a3b8" text-anchor="middle">Private</text>
 
   <!-- Free -->
   <rect x="706" y="82" width="94" height="26" rx="5" fill="#14532d"/>
   <text x="753" y="99" font-family="Arial, Helvetica, sans-serif" font-size="12"
-        fill="#22c55e" text-anchor="middle">✓ Free</text>
+        fill="#22c55e" text-anchor="middle">Free</text>
 
 </svg>

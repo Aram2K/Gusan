@@ -46,8 +46,8 @@ The version lives in one place: `APP_VERSION` in `app_info.py` (with `APP_NAME =
 4. Create and push the tag:
 
    ```powershell
-   git tag v2.0.0
-   git push origin v2.0.0
+   git tag v<version>
+   git push origin v<version>
    ```
 
 5. Wait for GitHub Actions to finish. A tag that differs from `APP_VERSION` stops the build at "Check the version".
