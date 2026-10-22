@@ -9,7 +9,7 @@ Do not publish a release manually unless you intentionally want to bypass the te
 - Keep the Windows installer asset named `TranscribeApp-Windows-Setup.exe`.
 - Keep the portable Windows asset named `TranscribeApp-Windows.zip`.
 - Keep the macOS asset named `TranscribeApp-Mac.dmg`.
-- Keep the repo `Aram2K/transcribe-app`, the exe `TranscribeApp.exe`, the Mac bundle `TranscribeApp.app` and its bundle id, the installer `AppId` and task names (`desktopicon`, `startup`), the data folder `Transcribe`, the keyring service `TranscribeApp` and the start-at-login Run value `Transcribe`.
+- The repo is `Aram2K/Gusan` (renamed from `Aram2K/transcribe-app`). Installed copies still call the old address and rely on GitHub's redirect, so never create another repo named `transcribe-app` under this account. Keep the exe `TranscribeApp.exe`, the Mac bundle `TranscribeApp.app` and its bundle id, the installer `AppId` and task names (`desktopicon`, `startup`), the data folder `Transcribe`, the keyring service `TranscribeApp` and the start-at-login Run value `Transcribe`.
 - Keep what running copies and the server rely on: the single-instance port `47823` and its `transcribe-ok` reply, the IPC action names, config keys, usage event names, the cloud function names (`transcribe-proxy`, `transcribe-analytics`, `confirmed`, `stripe-webhook`) and the sign-in callback `http://127.0.0.1:53682/auth/callback`.
 - Push semantic version tags like `v2.0.0`; do not reuse an old tag for a different build.
 - Let GitHub Actions create the release and upload assets.
@@ -61,5 +61,5 @@ The version lives in one place: `APP_VERSION` in `app_info.py` (with `APP_NAME =
    - `update-manifest.json`
 
 7. Test these latest-download URLs:
-   - `https://github.com/Aram2K/transcribe-app/releases/latest/download/TranscribeApp-Windows-Setup.exe`
-   - `https://github.com/Aram2K/transcribe-app/releases/latest/download/update-manifest.json`
+   - `https://github.com/Aram2K/Gusan/releases/latest/download/TranscribeApp-Windows-Setup.exe`
+   - `https://github.com/Aram2K/Gusan/releases/latest/download/update-manifest.json`

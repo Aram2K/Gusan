@@ -4,8 +4,8 @@
 
 <br/>
 
-[![Latest release](https://img.shields.io/github/v/release/Aram2K/transcribe-app?style=flat-square&label=release)](https://github.com/Aram2K/transcribe-app/releases/latest)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-blue?style=flat-square)](https://github.com/Aram2K/transcribe-app/releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/Aram2K/Gusan?style=flat-square&label=release)](https://github.com/Aram2K/Gusan/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-blue?style=flat-square)](https://github.com/Aram2K/Gusan/releases/latest)
 [![License: Non-Commercial](https://img.shields.io/badge/license-Non--Commercial-red?style=flat-square)](LICENSE)
 
 ### Press a key. Speak. Your words appear, wherever your cursor is.
@@ -13,17 +13,17 @@
 Dictation, Smart Actions, meeting notes and a Live Assistant that stays out of your screen share on Windows.<br/>
 Speech is turned into text on your computer by default.
 
-**[⬇ Download for Windows](https://github.com/Aram2K/transcribe-app/releases/latest/download/TranscribeApp-Windows-Setup.exe)** &nbsp;·&nbsp;
-**[⬇ Download for macOS](https://github.com/Aram2K/transcribe-app/releases/latest/download/TranscribeApp-Mac.dmg)** &nbsp;·&nbsp;
-[Website](https://gusan.aibuben.xyz) &nbsp;·&nbsp; [All releases](https://github.com/Aram2K/transcribe-app/releases)
+**[⬇ Download for Windows](https://github.com/Aram2K/Gusan/releases/latest/download/TranscribeApp-Windows-Setup.exe)** &nbsp;·&nbsp;
+**[⬇ Download for macOS](https://github.com/Aram2K/Gusan/releases/latest/download/TranscribeApp-Mac.dmg)** &nbsp;·&nbsp;
+[Website](https://gusan.aibuben.xyz) &nbsp;·&nbsp; [All releases](https://github.com/Aram2K/Gusan/releases)
 
-<sub>Prefer a portable build? Get the [Windows .zip](https://github.com/Aram2K/transcribe-app/releases/latest/download/TranscribeApp-Windows.zip).</sub>
+<sub>Prefer a portable build? Get the [Windows .zip](https://github.com/Aram2K/Gusan/releases/latest/download/TranscribeApp-Windows.zip).</sub>
 
 </div>
 
 ---
 
-> **Gusan was called Transcribe until version 2.0.0.** Same app, new name: your settings, history and sign-in carry over. The repository, the download files (`TranscribeApp-…`) and the data folder (`%APPDATA%\Transcribe`) keep the old name on purpose, so installed copies keep updating.
+> **Gusan was called Transcribe until version 2.0.0.** Same app, new name: your settings, history and sign-in carry over. The download files (`TranscribeApp-…`) and the data folder (`%APPDATA%\Transcribe`) keep the old name on purpose, so installed copies keep updating.
 
 ## What it does
 
@@ -55,12 +55,12 @@ Also: mixed languages in one sentence · a dictionary for names and terms · you
 
 ### Windows 10 / 11 (64-bit)
 
-1. Download and run **[TranscribeApp-Windows-Setup.exe](https://github.com/Aram2K/transcribe-app/releases/latest/download/TranscribeApp-Windows-Setup.exe)**. If Windows says "Windows protected your PC" (the app isn't code-signed), click **More info → Run anyway**.
+1. Download and run **[TranscribeApp-Windows-Setup.exe](https://github.com/Aram2K/Gusan/releases/latest/download/TranscribeApp-Windows-Setup.exe)**. If Windows says "Windows protected your PC" (the app isn't code-signed), click **More info → Run anyway**.
 2. The first time Gusan opens, the welcome window checks your computer, recommends a speech model and sets up your microphone and shortcut.
 
 ### macOS (Apple Silicon)
 
-1. Download **[TranscribeApp-Mac.dmg](https://github.com/Aram2K/transcribe-app/releases/latest/download/TranscribeApp-Mac.dmg)**, open it and drag the app (it's still named TranscribeApp) to Applications.
+1. Download **[TranscribeApp-Mac.dmg](https://github.com/Aram2K/Gusan/releases/latest/download/TranscribeApp-Mac.dmg)**, open it and drag the app (it's still named TranscribeApp) to Applications.
 2. macOS blocks the first launch because the app isn't notarized. Open **System Settings → Privacy & Security → Open Anyway**, or run `xattr -dr com.apple.quarantine /Applications/TranscribeApp.app`.
 3. Gusan lives in the **menu bar**. It needs three permissions under **Privacy & Security**: **Microphone**, **Accessibility** (to paste) and **Input Monitoring** (for the shortcut). A short guide opens on first launch.
 
@@ -88,8 +88,8 @@ Smart Actions, meeting notes and the Live Assistant can also run on a local AI m
 Needs Python 3.11 to 3.13, Windows 10/11 or macOS, and a microphone. On a Mac, first run `xcode-select --install` and `brew install portaudio`.
 
 ```bash
-git clone https://github.com/Aram2K/transcribe-app.git
-cd transcribe-app
+git clone https://github.com/Aram2K/Gusan.git
+cd Gusan
 ```
 
 ```powershell
@@ -128,7 +128,7 @@ Free for personal, educational and non-commercial use. You may modify and share 
 ## Author
 
 Made by **[Aram Adamyan](https://www.linkedin.com/in/aram-adamyan-2k/)**, founder of [Aibuben.xyz](https://aibuben.xyz).
-[Website](https://gusan.aibuben.xyz) · [LinkedIn](https://www.linkedin.com/in/aram-adamyan-2k/) · [GitHub](https://github.com/Aram2K) · [Report an issue](https://github.com/Aram2K/transcribe-app/issues)
+[Website](https://gusan.aibuben.xyz) · [LinkedIn](https://www.linkedin.com/in/aram-adamyan-2k/) · [GitHub](https://github.com/Aram2K) · [Report an issue](https://github.com/Aram2K/Gusan/issues)
 
 <div align="center">
 <sub>Made with ❤️ for anyone who types too slowly.</sub>

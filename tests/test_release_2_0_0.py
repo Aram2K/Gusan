@@ -632,7 +632,7 @@ class TestDocs(unittest.TestCase):
         text = _read(ROOT / "README.md")
         self.assertIn("Gusan was called Transcribe until", text)
         for asset in (INSTALLER_ASSET, "TranscribeApp-Mac.dmg", "TranscribeApp-Windows.zip"):
-            self.assertIn("https://github.com/Aram2K/transcribe-app/releases/latest/download/" + asset, text)
+            self.assertIn("https://github.com/Aram2K/Gusan/releases/latest/download/" + asset, text)
         self.assertIn("%APPDATA%\\Transcribe", text)
         for old in ("Transcribe App", "Transcribe Pro", "What is Transcribe", "Live Assistance"):
             self.assertNotIn(old, text)
