@@ -101,7 +101,7 @@ from ui.components import (Button, Card, IconButton, Keycaps, PageHeader, ProTag
 from ui.components import clipboard, mini_prompt
 from ui.components.controls import keycap_labels
 from ui.components.hotkey_capture import HotkeyCaptureButton
-from ui.components.model_combo import MARK_DOWNLOAD, MARK_PRO, PlainNameCombo, combo as _rail_combo
+from ui.components.model_combo import MARK_DOWNLOAD, PlainNameCombo, combo as _rail_combo
 from ui.pages import home as H
 
 logger = logging.getLogger("transcribe")
@@ -113,6 +113,7 @@ HOTKEY_KEY = "smart_actions_hotkey"
 DEFAULT_HOTKEY = "alt+s"
 SPEECH_KEY = "smart_actions_speech_model"      # engine_choice.SMART_SPEECH_KEY
 SPEECH_CLOUD = "cloud"                          # engine_choice.SMART_SPEECH_CLOUD
+SPEECH_COMBO_WIDTH = 260                        # room for a real model name and its chips
 RECENT_MAX = 5
 
 HERO_LINE = "Press, say what you want, press again."
@@ -254,6 +255,10 @@ NARROW_AT = 940
 
 class RailLayoutMixin:
     """Put the rail beside the main column, or under it when the window is narrow."""
+    _stacked = False
+    _watched_parent = None
+    _body = None
+    _rail_widget = None
 
     def _init_responsive(self, body, rail):
         self._body = body
@@ -266,16 +271,18 @@ class RailLayoutMixin:
         return p.width() if p is not None and p.width() > 0 else self.width()
 
     def _relayout(self):
+        if not getattr(self, "_body", None) or not getattr(self, "_rail_widget", None):
+            return
         from PySide6.QtWidgets import QBoxLayout
         stacked = self._available_width() < NARROW_AT
-        if stacked == self._stacked:
+        if stacked == getattr(self, "_stacked", False):
             return
         self._stacked = stacked
         self._body.setDirection(QBoxLayout.TopToBottom if stacked else QBoxLayout.LeftToRight)
         self._body.setAlignment(self._rail_widget, (Qt.AlignLeft | Qt.AlignTop) if stacked else Qt.AlignTop)
 
     def is_stacked(self):
-        return self._stacked
+        return getattr(self, "_stacked", False)
 
     def _watch_parent(self):
         p = self.parentWidget()
@@ -299,14 +306,13 @@ class RailLayoutMixin:
 
 
 def _first_name(app):
+    """The sign-off on the example emails: the signed-in person's first name -
+    "" for a guest, a super admin previewing Guest included."""
+    import account_actions
     auth = getattr(app, "auth", None)
     if not getattr(auth, "is_authenticated", False):
         return ""
-    name = (getattr(auth, "user_name", None) or "").strip()
-    if not name:
-        email = (getattr(auth, "user_email", None) or "").strip()
-        name = email.split("@")[0] if email else ""
-    return name.split()[0] if name else ""
+    return account_actions.first_name(app)
 
 
 def smart_hotkey(app):
@@ -1115,8 +1121,8 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
         sv = QVBoxLayout(sp)
         sv.setContentsMargins(0, 0, 0, 0)
         sv.setSpacing(4)
-        self.speech_combo = _rail_combo(PlainNameCombo(sp), "Transcribes with", width=200)
-        self.speech_combo.enable_row_marks()      # whole rows, a PRO pill / download icon at the right
+        self.speech_combo = _rail_combo(PlainNameCombo(sp), "Transcribes with", width=SPEECH_COMBO_WIDTH)
+        self.speech_combo.enable_row_marks()      # whole rows: chips and a download icon at the right
         self._fill_speech_combo()
         self.speech_combo.currentIndexChanged.connect(self._on_speech_model)
         sv.addWidget(self.speech_combo, 0, Qt.AlignLeft)
@@ -1185,26 +1191,31 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
                 card.practice.setPlaceholderText(practice_placeholder(self.app))
 
     # ── Transcribes with ──
-    def _fill_speech_combo(self):
+    def _speech_rows(self):
+        """The picker's rows (engine_choice.smart_speech_rows): real model names, a LOCAL / CLOUD
+        chip and PRO where a plan is needed; "Same as Dictation" names the model Dictation uses."""
         try:
             import engine_choice
-            choices = engine_choice.smart_speech_choices(_cfg(self.app))
+            return engine_choice.smart_speech_rows(_cfg(self.app), _is_pro(self.app))
         except Exception:
-            logger.debug("smart_speech_choices failed", exc_info=True)
-            choices = [("", "Same as Dictation", "Same as Dictation", False)]
+            logger.debug("smart_speech_rows failed", exc_info=True)
+            return [{"value": "", "name": "Same as Dictation", "title": "Same as Dictation",
+                     "line": "Same as Dictation", "note": "", "tags": (), "pro": False, "group": "",
+                     "tip": ""}]
+
+    def _fill_speech_combo(self, rows=None):
+        rows = self._speech_rows() if rows is None else rows
         box = self.speech_combo
         box.blockSignals(True)
-        box.clear()
-        for value, plain, line, _needs_pro in choices:
-            box.add_choice(line, value, plain=plain)
+        box.fill_rows(rows)
         box.blockSignals(False)
-        self._speech_fill = self._speech_fill_key()
+        self._speech_fill = rows
         self._mark_speech_rows()
 
     def _speech_fill_key(self):
-        """What the list's text depends on: the plan (the PRO pill) and the
-        Gusan Cloud provider (its model's name)."""
-        return (_is_pro(self.app), str(_cfg(self.app).get("managed_provider") or ""))
+        """What the list depends on: its rows (the plan, the model Dictation uses, the Gusan Cloud
+        provider's model name)."""
+        return self._speech_rows()
 
     def _speech_state(self, mid):
         """A Whisper model's state in app.downloads ("ready", "missing",
@@ -1226,22 +1237,20 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
             return None
 
     def _mark_speech_rows(self):
-        """What each row of the list says at its right edge: the PRO pill on
-        Gusan Cloud (Free and guests only), a download icon on a Whisper model
-        that is not on this computer; nothing on a model that is."""
+        """A download icon on a Whisper model that is not on this computer; nothing on the rest
+        (the chips - LOCAL, CLOUD, PRO - are part of the row)."""
         box = self.speech_combo
-        pro = _is_pro(self.app)
         try:
             import hardware
             info = hardware.MODEL_INFO
         except Exception:
             info = {}
         for i in range(box.count()):
+            if box.is_heading(i):
+                continue
             value = str(box.itemData(i) or "")
             mark, note = "", ""
-            if value == SPEECH_CLOUD:
-                mark = "" if pro else MARK_PRO
-            elif value and self._speech_state(value) in ("missing", "failed"):
+            if value and value != SPEECH_CLOUD and self._speech_state(value) in ("missing", "failed"):
                 mark = MARK_DOWNLOAD
                 note = getattr(info.get(value), "size", "") or ""
             box.set_choice_mark(i, mark, note)
@@ -1290,10 +1299,10 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
             return ""
         value = self.speech_value()
         if not value:
-            # The picker already says "Same as Dictation": just the model.
-            return ro.get("model_name") or ""
+            # The picker already says "Same as Dictation": just the model, with its tag.
+            return ro.get("tagged") or ro.get("model_name") or ""
         if ro.get("kind") == "cloud":
-            return ro.get("label") or ""
+            return ro.get("tagged") or ro.get("label") or ""
         name = ro.get("model_name") or ""
         mid = ro.get("model_id") or value
         dl = getattr(self.app, "downloads", None)
@@ -1314,13 +1323,14 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
         if ro.get("problem") == "needs_download":
             size = ro.get("size") or ""
             return ("%s · %s download" % (name, size)) if size else "%s · not downloaded" % name
-        return name
+        return ro.get("tagged") or name
 
     def _refresh_speech(self):
-        if self._speech_fill_key() != getattr(self, "_speech_fill", None):
-            self._fill_speech_combo()               # the cloud model's name follows the provider (and the plan)
+        rows = self._speech_rows()
+        if rows != getattr(self, "_speech_fill", None):
+            self._fill_speech_combo(rows)           # the plan, Dictation's model and the cloud model's name follow
         box = self.speech_combo
-        self._mark_speech_rows()                    # the PRO pill and the download icons follow the plan and the disk
+        self._mark_speech_rows()                    # the download icons follow the disk
         i = box.findData(self.speech_value())
         box.blockSignals(True)
         box.setCurrentIndex(i if i >= 0 else 0)

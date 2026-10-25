@@ -21,32 +21,42 @@ logger = logging.getLogger("transcribe.smart")
 
 
 SMART_SYSTEM_PROMPT = (
-    "You are a private voice-dictation assistant. The user just dictated "
-    "something. Decide what they want and output ONLY the final result - "
-    "no preamble, no quotation marks, no commentary, no markdown fences.\n"
-    "\n"
-    "Rules:\n"
-    "- If they explicitly ask to TRANSLATE → output only the translation "
-    "in the target language they named. Do not include the original.\n"
-    "- If they ask to WRITE/COMPOSE/DRAFT an email → output a clean "
-    "email (Subject line, greeting, body, sign-off). Use \"Best,\" by default.\n"
-    "- If they ask to MAKE A LIST / TODO / CHECKLIST → output a Markdown "
-    "checklist with `- [ ]` items. One item per line, no heading, no intro "
-    "line.\n"
-    "- If they ask to SUMMARIZE / SUMMARY / RECAP / TLDR → output a 2-4 "
-    "sentence summary capturing the main points.\n"
-    "- If they ask to REWRITE / CLEAN UP / POLISH / FIX → improve "
-    "grammar and clarity while keeping the meaning. Strip filler words "
-    "(um, uh, like, you know).\n"
-    "- If they ask for MEETING NOTES → use the structure: ## Summary, "
-    "## Key decisions, ## Action items.\n"
-    "- Otherwise → return their words verbatim with correct punctuation "
-    "and capitalization. Strip filler words. Never repeat their "
-    "instruction in the output.\n"
-    "\n"
+    "You are an articulate, intelligent voice-to-text executive assistant. "
+    "The user just dictated something using speech. Decide their intent and "
+    "output the finished, beautifully written and formatted result.\n\n"
+    "Output ONLY the result - no preamble, no quotation marks wrapping the output, "
+    "no commentary, no markdown code fences.\n\n"
+    "Formatting & Writing Rules:\n"
+    "- If they ask to WRITE / COMPOSE / DRAFT an email:\n"
+    "  • Craft a complete, natural, professional email draft.\n"
+    "  • Fully articulate and expand on all details, thoughts, context, and points "
+    "the user mentioned. Do not over-summarize, truncate, or cut short.\n"
+    "  • Organize into clear, well-spaced paragraphs. Use clean bullet points (•) "
+    "if multiple items, updates, or deliverables are covered.\n"
+    "  • Include an appropriate, descriptive Subject line, a natural greeting, "
+    "and a professional sign-off (e.g. 'Best regards,').\n"
+    "- If they ask to MAKE A LIST / TODO / CHECKLIST / ACTION PLAN:\n"
+    "  • Output a clean, beautifully organized list.\n"
+    "  • Use clean bullet points (•) or numbered steps (1., 2., 3.) if sequential or prioritized.\n"
+    "  • If multiple areas or categories are covered, group them with bold section headers.\n"
+    "  • Do not output raw markdown brackets like '- [ ]' or rough dashes.\n"
+    "- If they ask to SUMMARIZE / SUMMARY / RECAP / TLDR:\n"
+    "  • Output a comprehensive, well-structured executive summary.\n"
+    "  • Retain all critical details, decisions, numbers, dates, and context. Match "
+    "the depth of the summary to the substance of the input (use bullet highlights and bold terms where helpful).\n"
+    "- If they ask to REWRITE / CLEAN UP / POLISH / FIX:\n"
+    "  • Improve flow, vocabulary, and grammar to sound articulate and natural "
+    "while preserving the author's voice and intent. Strip verbal filler words (um, uh, like, you know).\n"
+    "- If they explicitly ask to TRANSLATE:\n"
+    "  • Output only the natural translation in the target language they named. Do not include the original.\n"
+    "- If they ask for MEETING NOTES:\n"
+    "  • Use the structure: ## Summary, ## Key decisions, ## Action items, ## Open questions.\n"
+    "- Otherwise (standard dictation / no command):\n"
+    "  • Return their words verbatim with polished punctuation, proper capitalization, "
+    "and paragraphs where thoughts shift. Strip filler words. Never echo instruction phrases.\n\n"
     "Never include the action verb or instruction phrase in the output. "
-    "If they said \"translate to russian: I will meet you at 5pm\", the "
-    "output is the Russian translation only - not the word \"translate\"."
+    "If they said 'translate to russian: I will meet you at 5pm', the "
+    "output is the Russian translation only - not the word 'translate'."
 )
 
 
@@ -57,27 +67,50 @@ SMART_SYSTEM_PROMPT = (
 DEFAULT_EXAMPLES = [
     (
         "translate to russian I will meet you at 5pm",
-        "Встретимся в 5 вечера",
+        "Встретимся в 5 вечера.",
     ),
     (
         "translate this to french the report is ready and i will send it tonight",
         "Le rapport est prêt et je l'enverrai ce soir.",
     ),
     (
-        "write an email to john that the q3 report is ready and i will send draft tonight",
-        "Subject: Q3 Report Ready\n\nHi John,\n\nThe Q3 report is ready - I'll send the draft over tonight.\n\nBest,",
+        "write an email to alex about our product roadmap review tomorrow we need to cover the mobile onboarding metrics the payment gateway migration and the new ai action features please ask him to bring the latest analytics slides",
+        (
+            "Subject: Agenda for Tomorrow's Product Roadmap Review\n\n"
+            "Hi Alex,\n\n"
+            "I wanted to reach out to align on the agenda for our product roadmap review meeting tomorrow.\n\n"
+            "We have several critical areas to cover:\n"
+            "• Mobile onboarding metrics and drop-off analysis\n"
+            "• Payment gateway migration timeline and next milestones\n"
+            "• Launch readiness for our new AI action features\n\n"
+            "Could you please make sure to bring the latest analytics slides so we can review the data together?\n\n"
+            "Best regards,"
+        ),
     ),
     (
-        "make a todo list call mom buy groceries finish slides for friday",
-        "- [ ] Call mom\n- [ ] Buy groceries\n- [ ] Finish slides for Friday",
+        "make a todo list for the launch finalize pricing page test stripe checkout send announcement to newsletter and coordinate with marketing team",
+        (
+            "• Finalize pricing page\n"
+            "• Test Stripe checkout flow\n"
+            "• Send launch announcement to newsletter subscribers\n"
+            "• Coordinate launch timeline with marketing team"
+        ),
     ),
     (
-        "summarize this we talked about q3 numbers being below target we need to revisit hiring plan and marketing budget john will draft proposal",
-        "Q3 numbers were below target. The team needs to revisit the hiring plan and marketing budget. John will draft a proposal.",
+        "summarize this we met with the engineering team to discuss the latency issues in our audio pipeline the main bottleneck was buffer draining during stop recording and cold starts on local llms we decided to implement background post roll capture and pre warm the local models into ram david will push the fix by thursday",
+        (
+            "**Meeting Summary: Audio Pipeline Latency & Mitigations**\n\n"
+            "The engineering team reviewed recent audio pipeline latency and identified two primary bottlenecks: "
+            "buffer draining delays during recording stops and local LLM cold-start times.\n\n"
+            "**Key Decisions:**\n"
+            "• Implement background post-roll audio capture to eliminate cutoff.\n"
+            "• Pre-warm local LLM models into RAM to reduce inference latency.\n"
+            "• David will finalize and deploy the fix by Thursday."
+        ),
     ),
     (
-        "clean this up um so basically we like need to ship the feature next week i think",
-        "We need to ship the feature next week.",
+        "clean this up um so basically we like need to ship the feature next week i think because the client is asking for it urgently",
+        "We need to ship the feature next week because the client has requested it urgently.",
     ),
     (
         "the meeting is at three pm in conference room b",
@@ -164,7 +197,8 @@ _REWRITE_PREFIX = re.compile(
 _LANG_NAME_TO_CODE = {
     "english": "en", "armenian": "hy", "russian": "ru", "french": "fr",
     "german": "de", "spanish": "es", "italian": "it", "portuguese": "pt",
-    "arabic": "ar",
+    "arabic": "ar", "chinese": "zh", "japanese": "ja", "korean": "ko",
+    "dutch": "nl", "polish": "pl", "turkish": "tr", "ukrainian": "uk",
 }
 
 
