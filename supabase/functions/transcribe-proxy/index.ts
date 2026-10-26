@@ -7,10 +7,25 @@
 // open source.
 //
 // Routing: a catalog of engines (CATALOG) and two profiles with an ordered list each:
-//   FAST (dictation, the Live Assistant)  voxtral-mini-latest, gpt-transcribe,
+//   FAST (dictation, the Live Assistant)  scribe_v2, voxtral-mini-latest, gpt-transcribe,
 //                                         gpt-4o-mini-transcribe, gpt-4o-transcribe
-//   BEST (the Audio to text page)         gpt-transcribe, gpt-4o-transcribe,
+//   BEST (the Audio to text page)         scribe_v2, gpt-transcribe, gpt-4o-transcribe,
 //                                         voxtral-mini-latest, gpt-4o-mini-transcribe
+// scribe_v2 is ElevenLabs Scribe (speech to text, POST /v1/speech-to-text, header xi-api-key): FIRST
+// in both profiles while its credits last. It takes any language (it detects it), so no language
+// excludes it; without a key it is simply skipped and nothing else changes. language_code is sent only
+// when the client named ONE explicit code (a refused one is retried once without it); no audio-event
+// tags, no diarization, no timestamps. Its batch endpoint is slow to answer a short clip, so its
+// attempt never gets less than 8 s (unless STT_TIMEOUT_MS fixes every attempt).
+// CREDITS BREAKER (per function instance, in memory): when ElevenLabs answers 402, 401 or 403, or says
+// quota_exceeded / insufficient_credits / credits in its answer, it is SKIPPED (not tried, not an
+// error, no quota spent for it) for STT_ELEVEN_PAUSE_MS (default 900000 = 15 min), so no request pays
+// a failing call; after that the next request tries it again (the credits may be topped up). A 429
+// pauses it for at most 15 s. An unhealthy Scribe has a SHORT breaker of its own: a timeout, a network
+// error or a 5xx skips it for STT_ELEVEN_OUTAGE_PAUSE_MS (default 30000 = 30 s), and a 200 answer
+// with no usable text (not JSON, no string `text`) for 60 s, so an outage costs one failing request,
+// not every one. Neither ever shortens a longer pause. One log line {stt_pause, status, minutes} when
+// a pause starts or changes kind (status 0 = a timeout or network error), never the key.
 // The first engine that is usable runs; one that fails, errors or is too slow hands over to the
 // next. Usable = its key exists and (Voxtral) the language is KNOWN and covered: Voxtral never runs
 // for a language outside MISTRAL_LANGS (Armenian ...), nor when the language is not known - "auto",
@@ -35,18 +50,22 @@
 // ran: `model` in the JSON and the X-Gusan-Model header. One log line per success {stt_ok, ms,
 // tried} (no audio, no text) and one per failed attempt (provider, model, status, first 120 chars of
 // the answer with keys and ids blanked). The client only ever gets a fixed code as `detail`
-// (timeout, network_error, rate_limited, provider_auth, provider_unavailable, provider_rejected),
-// never a provider's own text.
+// (timeout, network_error, rate_limited, provider_auth, provider_credits, provider_unavailable,
+// provider_rejected), never a provider's own text.
 //
 // Secrets: OPENAI_TOKEN (or OPENAI_API_KEY / OPENAI_KEY), MISTRAL_STT_KEY, GOOGLE_STT_KEY (or
-//          GEMINI_KEY). At least one must be set or the proxy returns 503.
+//          GEMINI_KEY), ELEVENLABS_API_KEY (or ELEVENLABS_KEY / ELEVEN_API_KEY / XI_API_KEY, the first
+//          one that is not empty). At least one must be set or the proxy returns 503.
 //          Optional: STT_FAST_ORDER, STT_BEST_ORDER (comma-separated; an entry is a catalog id or
-//          "provider:model" such as openai:gpt-transcribe-2 - provider mistral, openai or gemini -
+//          "provider:model" such as openai:gpt-transcribe-2 - provider mistral, openai, gemini or
+//          elevenlabs (elevenlabs:scribe_v3) -
 //          so a new model name needs no redeploy; an entry that is neither is dropped and logged;
 //          nothing valid = the default order). Only these secrets can name a model outside the
 //          catalog: a name a client sends is checked against the catalog.
 //          STT_TIMEOUT_MS (a fixed per-attempt timeout, mostly for tests), STT_TOTAL_MS (the
-//          deadline of the whole request), STT_AUTO_VOXTRAL ("1": Voxtral first for "auto").
+//          deadline of the whole request), STT_AUTO_VOXTRAL ("1": Voxtral first for "auto"),
+//          STT_ELEVEN_PAUSE_MS (how long the credits breaker skips ElevenLabs, default 900000),
+//          STT_ELEVEN_OUTAGE_PAUSE_MS (the short breaker after a timeout, network error or 5xx, default 30000).
 // Auto-provided by Supabase: SUPABASE_URL, SUPABASE_ANON_KEY.
 // Deploy with verify_jwt=false; we validate the token via auth.getUser().
 
@@ -65,15 +84,17 @@ function env(name: string): string {
   return (Deno.env.get(name) ?? "").trim();
 }
 const OPENAI_URL = "https://api.openai.com/v1/audio/transcriptions";
+const ELEVEN_URL = "https://api.elevenlabs.io/v1/speech-to-text";
 const MISTRAL_MODEL = "voxtral-mini-latest";
 
-type Kind = "mistral" | "openai" | "gemini";
+type Kind = "mistral" | "openai" | "gemini" | "elevenlabs";
 type Engine = { id: string; kind: Kind };
 
 // Every engine a request can end up on, with the company that serves it. A model name a CLIENT
 // sends is only ever used if it is a key here, so nothing a client sends reaches a URL or a request
 // field unchecked. (A server secret may also name "provider:model", see orderFor.)
 const CATALOG: Record<string, Kind> = {
+  "scribe_v2": "elevenlabs",
   "voxtral-mini-latest": "mistral",
   "gpt-transcribe": "openai",
   "gpt-4o-transcribe": "openai",
@@ -84,9 +105,9 @@ const CATALOG: Record<string, Kind> = {
   "gemini-2.5-flash": "gemini",
   "gemini-2.5-pro": "gemini",
 };
-const FAST_ORDER = ["voxtral-mini-latest", "gpt-transcribe", "gpt-4o-mini-transcribe", "gpt-4o-transcribe"];
-const BEST_ORDER = ["gpt-transcribe", "gpt-4o-transcribe", "voxtral-mini-latest", "gpt-4o-mini-transcribe"];
-const KINDS = new Set(["mistral", "openai", "gemini"]);
+const FAST_ORDER = ["scribe_v2", "voxtral-mini-latest", "gpt-transcribe", "gpt-4o-mini-transcribe", "gpt-4o-transcribe"];
+const BEST_ORDER = ["scribe_v2", "gpt-transcribe", "gpt-4o-transcribe", "voxtral-mini-latest", "gpt-4o-mini-transcribe"];
+const KINDS = new Set(["mistral", "openai", "gemini", "elevenlabs"]);
 const MODEL_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
 function inCatalog(id: string): boolean {
@@ -101,6 +122,9 @@ function own(table: Record<string, string>, key: string): string | undefined {
 function engineKey(provider: string): string {
   if (provider === "openai") return env("OPENAI_TOKEN") || env("OPENAI_API_KEY") || env("OPENAI_KEY");
   if (provider === "mistral") return env("MISTRAL_STT_KEY");
+  if (provider === "elevenlabs") {
+    return env("ELEVENLABS_API_KEY") || env("ELEVENLABS_KEY") || env("ELEVEN_API_KEY") || env("XI_API_KEY");
+  }
   return env("GOOGLE_STT_KEY") || env("GEMINI_KEY");
 }
 
@@ -185,14 +209,22 @@ function json(obj: unknown, status = 200, extra: Record<string, string> = {}) {
 // Keys and account ids blanked: a provider's own words can name them (an OpenAI 401 shows the end of
 // the key, a 429 the organisation).
 function redact(s: string): string {
-  return s.replace(/sk-[A-Za-z0-9_*.-]{4,}/g, "[key]")
+  let out = s.replace(/sk-[A-Za-z0-9_*.-]{4,}/g, "[key]")
+    .replace(/\bsk_[A-Za-z0-9_*.-]{4,}/g, "[key]")          // an ElevenLabs key
     .replace(/key=[^&\s"]+/g, "key=[key]")
     .replace(/\b(org|proj)[-_][A-Za-z0-9_*-]+/g, "$1-***");
+  // ... and our own keys, whatever they look like, if a provider's answer repeats one.
+  for (const kind of ["openai", "mistral", "gemini", "elevenlabs"]) {
+    const k = engineKey(kind);
+    if (k.length >= 8) out = out.split(k).join("[key]");
+  }
+  return out;
 }
 
 // What the client may learn about a failed attempt: a fixed code, never the provider's text.
 function publicDetail(status: number): string {
   if (status === 429) return "rate_limited";
+  if (status === 402) return "provider_credits";
   if (status === 401 || status === 403) return "provider_auth";
   if (status >= 500) return "provider_unavailable";
   return "provider_rejected";
@@ -219,6 +251,59 @@ function mistralCovers(language: string, languages: string[] | null): boolean {
   }
   if (!language || language === "auto") return env("STT_AUTO_VOXTRAL") === "1";
   return MISTRAL_LANGS.has(language);
+}
+
+// The breaker (per function instance, in memory; a new instance simply tries ElevenLabs again). While
+// it is paused the engine is skipped: not tried, not an error. 402, 401, 403 or an answer that says
+// quota_exceeded / insufficient_credits / credits = no credits or no access: STT_ELEVEN_PAUSE_MS
+// (default 15 min). 429 = busy: at most 15 s. A 5xx, a timeout or a network error = unhealthy:
+// STT_ELEVEN_OUTAGE_PAUSE_MS (default 30 s). A 200 with no usable text: 60 s. A pause only ever grows.
+const ELEVEN_MIN_TIMEOUT_MS = 8000;
+const ELEVEN_PAUSE_DEFAULT_MS = 900000;
+const ELEVEN_BUSY_PAUSE_MS = 15000;
+const ELEVEN_OUTAGE_PAUSE_DEFAULT_MS = 30000;
+const ELEVEN_BAD_ANSWER_PAUSE_MS = 60000;
+let elevenPause = { until: 0, detail: "provider_unavailable" };
+
+function elevenPaused(): boolean {
+  return Date.now() < elevenPause.until;
+}
+
+// Start (or lengthen) the pause. A shorter one never replaces a longer one. One log line when the
+// engine was not paused, or when the pause changes kind (busy -> credits, outage -> credits, ...);
+// a repeat of the same kind only extends it, silently.
+function startPause(ms: number, detail: string, status: number): void {
+  const now = Date.now();
+  if (now + ms <= elevenPause.until) return;               // already paused for at least as long
+  const log = now >= elevenPause.until || detail !== elevenPause.detail;
+  elevenPause = { until: now + ms, detail };
+  if (log) {
+    console.error(JSON.stringify({ stt_pause: "elevenlabs", status, minutes: Number((ms / 60000).toFixed(2)) }));
+  }
+}
+
+// A timeout, a network error (status 0) or a 5xx: skip it briefly, so an outage does not add its wait
+// to every request.
+function pauseElevenOutage(status: number): void {
+  const asked = Number(env("STT_ELEVEN_OUTAGE_PAUSE_MS"));
+  startPause(Number.isFinite(asked) && asked > 0 ? asked : ELEVEN_OUTAGE_PAUSE_DEFAULT_MS,
+             "provider_unavailable", status);
+}
+
+function pauseElevenBadAnswer(status: number): void {
+  startPause(ELEVEN_BAD_ANSWER_PAUSE_MS, "provider_unavailable", status);
+}
+
+// An answer that came back with a status below 500 and was not a success.
+function pauseEleven(status: number, body: string): void {
+  if (status >= 500) return pauseElevenOutage(status);
+  const credits = /quota_exceeded|insufficient_credits|credits/i.test(body);
+  const dead = credits || status === 402 || status === 401 || status === 403;
+  if (!dead && status !== 429) return;
+  const asked = Number(env("STT_ELEVEN_PAUSE_MS"));
+  const full = Number.isFinite(asked) && asked > 0 ? asked : ELEVEN_PAUSE_DEFAULT_MS;
+  const ms = dead ? full : Math.min(full, ELEVEN_BUSY_PAUSE_MS);
+  startPause(ms, credits || status === 402 ? "provider_credits" : dead ? "provider_auth" : "rate_limited", status);
 }
 
 function b64ToBytes(b64: string): Uint8Array {
@@ -356,6 +441,58 @@ async function transcribeOpenAI(bytes: Uint8Array, language: string, model: stri
   return { ok: true, model, text: (d.text ?? "").trim() };
 }
 
+// ElevenLabs Scribe. language_code only for ONE explicit ISO code (else it detects the language); if it
+// refuses the code (a 422 or 400 that talks about the language) the same audio is sent once more
+// without it, inside the SAME timer. No audio-event tags (no "(laughter)" in the text), no speaker
+// labels, no word timestamps. A usable answer is JSON whose `text` is a string (a multichannel answer
+// has none: that is a failed answer, we never ask for it). Credits gone, a bad key, a busy account, an
+// outage or an unusable answer start the breaker (see pauseEleven) so the next requests do not pay for
+// a failing call. No redirects are followed (the key travels in a custom header).
+async function transcribeElevenLabs(bytes: Uint8Array, language: string, model: string, timeoutMs: number) {
+  const explicit = /^[a-z]{2,3}$/.test(language) && language !== "auto" && language !== "multi";
+  const signal = AbortSignal.timeout(timeoutMs);
+  const once = (withLanguage: boolean) => {
+    const form = new FormData();
+    form.append("model_id", model);
+    form.append("file", new Blob([bytes], { type: "audio/wav" }), "audio.wav");
+    form.append("tag_audio_events", "false");
+    if (withLanguage) form.append("language_code", language);
+    return fetch(ELEVEN_URL, {
+      method: "POST",
+      headers: { "xi-api-key": engineKey("elevenlabs") },
+      body: form,
+      signal,
+      redirect: "error",     // the key is a custom header: a redirect would carry it to another host
+    });
+  };
+  let r = await once(explicit);
+  let why = "";
+  if (!r.ok) {
+    why = (await r.text()).slice(0, 400);
+    if (explicit && (r.status === 422 || r.status === 400) && /language/i.test(why)) {
+      failed("elevenlabs", model, r.status, why);       // the refusal is logged; the retry may still work
+      r = await once(false);
+      why = r.ok ? "" : (await r.text()).slice(0, 400);
+    }
+  }
+  if (!r.ok) {
+    pauseEleven(r.status, why);
+    return failed("elevenlabs", model, r.status, why);
+  }
+  let d: any;
+  // A 200 that is not a usable answer (it was probably billed): a short pause, or every request would
+  // pay for it and then pay the next engine as well.
+  try { d = await r.json(); } catch {
+    pauseElevenBadAnswer(r.status);
+    return failed("elevenlabs", model, r.status, "bad_json");
+  }
+  if (typeof d?.text !== "string") {
+    pauseElevenBadAnswer(r.status);
+    return failed("elevenlabs", model, r.status, "no_text");
+  }
+  return { ok: true, model, text: d.text.trim() };
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
@@ -406,6 +543,12 @@ Deno.serve(async (req) => {
   if (available.length === 0) {
     return json({ error: "stt_failed", detail: "no engine for this language" }, 502);
   }
+  // ElevenLabs while its breaker is paused is not tried at all. If that leaves nothing, the request
+  // cannot succeed now: a 502 with the fixed code of the pause, sent BEFORE the quota is spent.
+  const ready = available.filter((e) => e.kind !== "elevenlabs" || !elevenPaused());
+  if (ready.length === 0) {
+    return json({ error: "stt_failed", detail: elevenPause.detail }, 502);
+  }
 
   // Daily quota.
   const { data: underCap, error: qErr } = await supa.rpc("use_cloud_quota", { max_per_day: DAILY_CAP });
@@ -418,23 +561,34 @@ Deno.serve(async (req) => {
   const floorMs = Math.min(1500, timeoutMs);        // not worth starting an attempt with less left
   let result: any = { ok: false, detail: "no provider" };
   let tried = 0;
-  for (const { id, kind } of available) {
+  for (const { id, kind } of ready) {
+    if (kind === "elevenlabs" && elevenPaused()) continue;   // paused meanwhile: not tried, not counted
     const left = deadline - Date.now();
     if (tried > 0 && left < floorMs) break;         // the whole request is out of time: stop here
     tried++;
-    const t = Math.min(timeoutMs, Math.max(left, floorMs));
+    let t = Math.min(timeoutMs, Math.max(left, floorMs));
+    // ElevenLabs' batch endpoint is not tuned for sub-second answers: at least 8 s (within what is
+    // left), unless STT_TIMEOUT_MS fixes every attempt.
+    if (kind === "elevenlabs" && !(Number(env("STT_TIMEOUT_MS")) > 0)) {
+      t = Math.min(Math.max(t, ELEVEN_MIN_TIMEOUT_MS), Math.max(left, floorMs));
+    }
     try {
       result = kind === "mistral" ? await transcribeMistral(bytes, language, id, t)
         : kind === "openai" ? await transcribeOpenAI(bytes, language, id, t)
+        : kind === "elevenlabs" ? await transcribeElevenLabs(bytes, language, id, t)
         : await transcribeGemini(audio, language, languages, id, t);
     } catch (e) {
       // A timeout or a network error: never the error's own text (a URL may carry a key).
       const name = (e as any)?.name;
       result = failed(kind, id, 0, name === "TimeoutError" || name === "AbortError" ? "timeout" : "network_error");
+      if (kind === "elevenlabs") pauseElevenOutage(0);
     }
     if (result.ok) break;
   }
-  if (!result.ok) return json({ error: "stt_failed", detail: result.detail }, 502);
+  if (!result.ok) {
+    // Nothing was tried (ElevenLabs was paused by a request running at the same time): its pause code.
+    return json({ error: "stt_failed", detail: tried === 0 ? elevenPause.detail : result.detail }, 502);
+  }
   console.log(JSON.stringify({ stt_ok: result.model, ms: Date.now() - started, tried }));
 
   const detected = language && language !== "auto" ? language : "en";
