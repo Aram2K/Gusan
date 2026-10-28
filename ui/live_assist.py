@@ -1205,7 +1205,7 @@ class LiveAssistOverlay(QWidget):
     sig_partial = Signal(str, int)           # streamed text so far, generation
     sig_export_done = Signal(str, str)       # saved path, error
     # The worker asks the GUI thread to put the one-time "use your documents with the cloud?"
-    # question (a dict: gen, managed, event, answer - see _documents_for_answer).
+    # question (a dict: gen, managed, route, event, answer - see _documents_for_answer).
     sig_doc_ask = Signal(object)
     # "Apply to everything I hear": the result of one piece, from the worker thread. The last
     # int is the rule generation: Pause, turning the mode off or a new session bumps it, and a
@@ -3306,7 +3306,8 @@ class LiveAssistOverlay(QWidget):
         took = False
         try:
             cfg = self.app.cfg if self.app else {}
-            decided = live_docs.doc_use(cfg, "managed" if req.get("managed", True) else "cloud", 1)
+            managed = bool(req.get("managed", True))
+            decided = live_docs.doc_use(cfg, "managed" if managed else "cloud", 1, req.get("route"))
             if not decided.ask:
                 req["answer"] = bool(decided.send)      # answered meanwhile (a yes for another route is not one)
             elif self._doc_asking or (req.get("gen") and req["gen"] != self._gen):
@@ -3314,8 +3315,8 @@ class LiveAssistOverlay(QWidget):
             else:
                 took = self._doc_asking = True
                 hidden = self._private and (self._exclusion_ok or self._mac_partial)
-                req["answer"] = live_docs_ui.ask_cloud(self, self.app, managed=bool(req.get("managed", True)),
-                                                       private=hidden)
+                req["answer"] = live_docs_ui.ask_cloud(self, self.app, managed=managed, private=hidden,
+                                                       route=req.get("route"))
         except Exception:
             logger.warning("Live Assistant: the documents question failed", exc_info=True)
             req["answer"] = None
@@ -3326,11 +3327,12 @@ class LiveAssistOverlay(QWidget):
             if ev is not None:
                 ev.set()
 
-    def _ask_documents(self, gen, managed):
+    def _ask_documents(self, gen, managed, route=None):
         """Worker thread: have the question put on the GUI thread and wait for the person's
-        answer. True / False, or None when it wasn't answered (a newer question took over, or
-        too long)."""
-        req = {"gen": gen, "managed": managed, "event": threading.Event(), "answer": None}
+        answer (a yes is for ``route``, live_docs.route_id). True / False, or None when it
+        wasn't answered (a newer question took over, or too long)."""
+        req = {"gen": gen, "managed": managed, "route": route, "event": threading.Event(),
+               "answer": None}
         self.sig_doc_ask.emit(req)
         waited = 0.0
         while not req["event"].wait(0.25):
@@ -3340,36 +3342,39 @@ class LiveAssistOverlay(QWidget):
         return req["answer"]
 
     @staticmethod
-    def _without_document_answers(ctx_args, history_docs, kind, cfg):
+    def _without_document_answers(ctx_args, history_docs, kind, cfg, route=None):
         """rolling_context's arguments without the earlier answers that were written from the
         user's documents - or None when those may go along. A follow-up carries the last
         answers, and an answer that quotes a document is the document: it goes only where the
-        documents themselves may go (live_docs.doc_use: this computer, or a cloud route the
-        person agreed to; never in Privacy mode). Switching "Answers written by" from this
-        computer to the cloud, or turning Privacy mode off, must not carry them over."""
-        if kind not in ("cloud", "managed") or live_docs.doc_use(cfg, kind, 1).send:
+        documents themselves may go (live_docs.doc_use: this computer, or a cloud route - the
+        ``route`` service - the person agreed to; never in Privacy mode). Switching "Answers
+        written by" from this computer to the cloud, or turning Privacy mode off, must not
+        carry them over."""
+        if kind not in ("cloud", "managed") or live_docs.doc_use(cfg, kind, 1, route).send:
             return None
         history = list(ctx_args.get("history") or ())
         flags = list(history_docs)[-len(history):] if history else []
         flags = [False] * (len(history) - len(flags)) + flags          # (the last answers line up)
         return dict(ctx_args, history=[h for h, from_docs in zip(history, flags) if not from_docs])
 
-    def _documents_for_answer(self, context, doc_args, kind, cfg, gen, auto):
+    def _documents_for_answer(self, context, doc_args, kind, cfg, gen, auto, route=None):
         """Worker thread. The documents for THIS answer: (context, pictures, footer words).
         ``doc_args`` are rolling_context's arguments; the context is built again with the
         reference block once the engine (so its window) is known. live_docs.doc_use is the one
-        decision: Privacy mode is absolute, a cloud route needs the person's one-time yes
-        (asked here for a question they typed, never in the middle of an automatic answer)."""
+        decision: Privacy mode is absolute, a cloud route needs the person's one-time yes for
+        that route (``route``, live_docs.route_id: one own-key service, or Gusan Cloud) -
+        asked here for a question they typed, never in the middle of an automatic answer."""
         store = live_docs.get_store()
         n = store.active_count()
-        use = live_docs.doc_use(cfg, kind, n)
+        route = route or live_docs.route_id(kind)
+        use = live_docs.doc_use(cfg, kind, n, route)
         if use.ask:
             if auto:
                 return context, [], FOOT_DOCS_ASK
-            answer = self._ask_documents(gen, kind == "managed")
+            answer = self._ask_documents(gen, kind == "managed", route)
             if answer is None:
                 return context, [], FOOT_DOCS_ASK
-            use = live_docs.doc_use(live_docs.with_choice(cfg, answer, kind), kind, n)
+            use = live_docs.doc_use(live_docs.with_choice(cfg, answer, route), kind, n, route)
         if not use.send:
             return context, [], (FOOT_DOCS_KEPT if use.why in ("declined", "private") else "")
         question = doc_args.get("question") or last_question(doc_args.get("live_text", ""))
@@ -3399,8 +3404,9 @@ class LiveAssistOverlay(QWidget):
         if not n:
             return
         kind = actions.ACTION_MODELS.get(engine, {}).get("kind")
-        if live_docs.doc_use(cfg, kind, n).ask:
-            self.sig_doc_ask.emit({"gen": 0, "managed": kind == "managed",
+        route = live_docs.route_id(kind, engine, cfg)
+        if live_docs.doc_use(cfg, kind, n, route).ask:
+            self.sig_doc_ask.emit({"gen": 0, "managed": kind == "managed", "route": route,
                                    "event": threading.Event(), "answer": None})
         store.warm()
 
@@ -3964,10 +3970,11 @@ class LiveAssistOverlay(QWidget):
             self._answer_engine = (gen, engine)    # named in this answer's footer
             kind = actions.ACTION_MODELS.get(engine, {}).get("kind")
             cfg = dict(cfg or {})
+            route = live_docs.route_id(kind, engine, cfg)   # a yes for the documents is for this service
             doc_images = []                        # pictures from the user's documents
             if ctx_args is not None and any(history_docs):
                 try:
-                    clean = self._without_document_answers(ctx_args, history_docs, kind, cfg)
+                    clean = self._without_document_answers(ctx_args, history_docs, kind, cfg, route)
                     if clean is not None:          # the documents may not go to this route
                         context = rolling_context(**clean)
                         ctx_args = clean
@@ -3981,7 +3988,7 @@ class LiveAssistOverlay(QWidget):
             if doc_args is not None:
                 try:
                     context, doc_images, words = self._documents_for_answer(
-                        context, doc_args, kind, cfg, gen, auto)
+                        context, doc_args, kind, cfg, gen, auto, route)
                 except _Superseded:
                     raise
                 except Exception:

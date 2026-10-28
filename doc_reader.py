@@ -94,6 +94,9 @@ MESSAGES = {
     "scanned": "Gusan can't read the words in this one on your computer.",
 }
 REASONS = tuple(MESSAGES)
+# A PDF locked with a cipher this copy of pypdf has nothing to run with (its DependencyError:
+# AES needs pycryptodome, see requirements.txt). It is not a scan and not damaged: say so.
+PDF_CIPHER_MESSAGE = "This PDF is protected in a way Gusan can't read here."
 
 # fmt -> (type class, what its sections are called)
 FORMATS = {
@@ -106,6 +109,10 @@ FORMATS = {
 }
 _PIL_FORMATS = {"PNG": "png", "JPEG": "jpeg", "GIF": "gif", "BMP": "bmp", "WEBP": "webp",
                 "TIFF": "tiff"}
+# What Pillow calls a file it opened with one of the formats above. A phone or camera photo
+# with a multi-picture segment (a preview, a depth or gain map) is opened by the JPEG reader
+# as "MPO": still a JPEG, and its first frame is the photo. (Not a format to open with.)
+_PIL_NAMES = dict(_PIL_FORMATS, MPO="jpeg")
 # Extensions that should be one of the formats above: with another content the file is
 # "damaged" rather than "a kind we can't read".
 _KNOWN_EXT = {".pdf", ".docx", ".docm", ".pptx", ".pptm", ".xlsx", ".xlsm", ".odt", ".odp",
@@ -819,6 +826,11 @@ _BLOCK_TAGS = frozenset(
     "p div br li ul ol tr table section article header footer h1 h2 h3 h4 h5 h6 blockquote "
     "pre hr dt dd figcaption nav aside form".split())
 _TAG_NAME = re.compile(r"(/?)([A-Za-z][A-Za-z0-9:-]*)")
+# Where a script or a style ends, in any case, searched in the text itself: a lower-cased copy
+# is not the same length (Turkish "İ" lower-cases to two characters), so its positions would
+# drift and the text after the block would be lost. (ASCII case only, as in a browser.)
+_BLOCK_END = {"script": re.compile(r"</script", re.I | re.A),
+              "style": re.compile(r"</style", re.I | re.A)}
 
 
 def html_to_text(src):
@@ -827,7 +839,6 @@ def html_to_text(src):
     moves forward and a tag with no ">" ends the scan."""
     out = []
     i, n = 0, len(src)
-    low = src.lower()
     while i < n:
         j = src.find("<", i)
         if j < 0:
@@ -849,11 +860,11 @@ def html_to_text(src):
         if k < 0:
             break
         name = m.group(2).lower()
-        if name in ("script", "style") and not m.group(1):
-            close = low.find("</" + name, k)
-            if close < 0:
+        if name in _BLOCK_END and not m.group(1):
+            close = _BLOCK_END[name].search(src, k)
+            if close is None:
                 break
-            k2 = src.find(">", close)
+            k2 = src.find(">", close.start())
             i = n if k2 < 0 else k2 + 1
             continue
         if name in _BLOCK_TAGS:
@@ -1037,8 +1048,10 @@ def _decode_text(data):
 def _read_image(data, b):
     from PIL import Image, ImageOps            # plain import: PyInstaller bundles Pillow
     # Pillow chatters about damaged files (truncated data, bad EXIF) through warnings:
-    # a damaged picture is simply read as far as it goes. A "decompression bomb" warning
-    # is promoted to an error (the pixel cap below is lower, so it never fires).
+    # a damaged picture is simply read as far as it goes. Its own "decompression bomb"
+    # check runs inside Image.open, BEFORE the pixel cap below: the warning (over ~89 M
+    # pixels) is promoted to an error, and it and Pillow's error (over ~179 M) both mean
+    # "too big".
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         warnings.simplefilter("error", Image.DecompressionBombWarning)
@@ -1049,10 +1062,10 @@ def _decode_picture(Image, ImageOps, data, b):
     b.check()
     try:
         im = Image.open(io.BytesIO(data), formats=list(_PIL_FORMATS))
-    except Image.DecompressionBombError:
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning):
         raise _Stop("too_big", "This picture is too big to read here.")
     with im:
-        fmt = _PIL_FORMATS.get(im.format or "", "")
+        fmt = _PIL_NAMES.get(im.format or "", "")
         if not fmt:
             raise _Stop("unsupported")
         w, h = im.size
@@ -1158,8 +1171,15 @@ def _pdf_limits(pypdf):
 
 def _read_pdf(data, b):
     import pypdf                                # plain import: PyInstaller bundles pypdf
+    # (pypdf imports its AES provider, pycryptodome, with plain statements of its own:
+    # PyInstaller follows them and its Crypto hook brings the cipher libraries along)
     with _pdf_limits(pypdf):
         return _read_pdf_pages(pypdf, data, b)
+
+
+def _no_cipher(e):
+    """True for pypdf's DependencyError: the PDF needs a cipher (AES) it can't run here."""
+    return type(e).__name__ == "DependencyError"
 
 
 def _read_pdf_pages(pypdf, data, b):
@@ -1167,8 +1187,9 @@ def _read_pdf_pages(pypdf, data, b):
         reader = pypdf.PdfReader(io.BytesIO(data), strict=False)
     except RecursionError:
         raise _Stop("unsafe")
-    except Exception:
-        raise _Stop("damaged")
+    except Exception as e:
+        # (an AES-256 file already needs the cipher to try the empty password while it opens)
+        raise _Stop("unsupported", PDF_CIPHER_MESSAGE) if _no_cipher(e) else _Stop("damaged")
     b.check()
     if getattr(reader, "is_encrypted", False):
         # Only the open-without-a-password check every viewer makes. A password is
@@ -1180,11 +1201,11 @@ def _read_pdf_pages(pypdf, data, b):
         except _Stop:
             raise
         except Exception as e:
-            raise _Stop("protected" if type(e).__name__ == "DependencyError" else "password")
+            raise _Stop("unsupported", PDF_CIPHER_MESSAGE) if _no_cipher(e) else _Stop("password")
     try:
         total = len(reader.pages)
-    except Exception:
-        raise _Stop("damaged")
+    except Exception as e:
+        raise _Stop("unsupported", PDF_CIPHER_MESSAGE) if _no_cipher(e) else _Stop("damaged")
     if total <= 0:
         raise _Stop("damaged")
     sections, failures, visible = [], 0, 0
@@ -1195,7 +1216,11 @@ def _read_pdf_pages(pypdf, data, b):
             text = reader.pages[i].extract_text() or ""
         except _Stop:
             raise
-        except Exception:
+        except Exception as e:
+            if _no_cipher(e):
+                # An AES-128 file opens (its password check is RC4), but every page needs the
+                # cipher: without this it would be taken for a scan.
+                raise _Stop("unsupported", PDF_CIPHER_MESSAGE)
             failures += 1
             if failures > 25:
                 break

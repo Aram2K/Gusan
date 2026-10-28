@@ -400,6 +400,24 @@ class TestMeetingTranscript(unittest.TestCase):
         self.assertEqual(w._final_transcript, "Speaker 1: all of it")
         self.assertEqual(w._transcript_notices, [])
 
+    def test_a_recording_that_ends_before_the_transcript_marks_the_meeting(self):
+        # ...so Identify speakers never rebuilds the transcript from it later (it would
+        # replace the whole meeting with the part the recording has).
+        full = " ".join(f"minute {m}." for m in range(150))
+
+        def run(name, truncated, saved, result=(full, "en"), prior=""):
+            d = self.dir / name
+            d.mkdir()
+            w = _session(_App(_Rec(result, truncated)), d, prior=prior)
+            w._save_recording_segment = lambda: (d / "audio_part1.wav") if saved else None
+            w._process_meeting_notes()
+            self.assertEqual(len(w.summarized), 1, name)               # the notes are written all the same
+            return ms.load_meta(d).get(ms.META_RECORDING_CUT_SHORT)
+        self.assertIs(run("capped", True, True), True)                  # past the ~2-hour cap
+        self.assertIs(run("unsaved", False, False), True)               # this part's sound could not be saved
+        self.assertIsNone(run("whole", False, True))                    # the recorder kept all of it
+        self.assertIsNone(run("nothing new", False, False, ("", "en"), prior="Earlier talk."))
+
     def test_done_page_shows_the_notices_above_the_notes(self):
         s = _session(_App(), self.dir)
         s._final_transcript = "t"
@@ -684,6 +702,57 @@ class TestTrackFiles(unittest.TestCase):
             with self.assertRaises(OSError):
                 ax.write_wav_int16(p, np.zeros(100, np.int16))
         self.assertEqual(len(ax.read_wav_int16(p)[0]), 10)         # the earlier file is intact
+
+
+def _wav_of(path, seconds):
+    """A WAV whose header says it is ``seconds`` long - one frame a second, so a
+    two-hour recording is a few kilobytes here."""
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(1)
+        w.writeframes(b"\0\0" * int(seconds))
+    return path
+
+
+class TestRecordingCutShort(unittest.TestCase):
+    """A meeting whose saved recording ends before its transcript does (past the
+    recorder's ~2-hour cap): rebuilding the transcript from it would lose the rest."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+
+    def test_part_seconds_reads_only_the_headers(self):
+        a = _wav_of(self.dir / "audio_part1.wav", 7200)
+        b = self.dir / "audio_part2.wav"
+        b.write_bytes(b"RIFF" + b"\0" * 100)                       # unreadable: unknown, not 0
+        self.assertEqual(ms.part_seconds([a, b, self.dir / "gone.wav"]), [7200.0, None, None])
+        self.assertEqual(ms.part_seconds([]), [])
+
+    def test_meta_or_a_2_0_notice_says_so(self):
+        self.assertTrue(ms.recording_cut_short({ms.META_RECORDING_CUT_SHORT: True}))
+        notice = ("The saved recording ends at about 2 h 00 min - the most one session keeps. "
+                  "The transcript and notes still cover the whole meeting (without speaker labels).")
+        self.assertTrue(ms.recording_cut_short({"notices": ["Something else.", notice]}))
+        self.assertTrue(notice.startswith(ms.CAP_NOTICE_START))
+        for meta in ({}, None, "x", {"notices": "not a list"}, {ms.META_RECORDING_CUT_SHORT: False},
+                     {"notices": ["Gusan was closed during this meeting."]}):
+            self.assertFalse(ms.recording_cut_short(meta), meta)
+
+    def test_an_older_meeting_is_told_by_a_part_that_reached_the_cap(self):
+        cap = ms.RECORDING_CAP_SEC
+        self.assertTrue(ms.recording_cut_short({"duration_sec": 3 * 3600}, [cap + 0.04]))
+        self.assertTrue(ms.recording_cut_short({"duration_sec": 3 * 3600}, [cap, 600.0]))     # continued later
+        self.assertTrue(ms.recording_cut_short({"duration_sec": 3 * 3600}, [cap, None]))      # one unreadable
+        # stopped right at the cap: the clock and the sound differ by seconds, not by a margin
+        self.assertFalse(ms.recording_cut_short({"duration_sec": cap + 20}, [cap]))
+        # shorter than the meeting but nowhere near the cap: a system-sound-only meeting keeps
+        # nothing while the computer is silent - that recording still covers every word
+        self.assertFalse(ms.recording_cut_short({"duration_sec": 3600}, [1800.0]))
+        self.assertFalse(ms.recording_cut_short({"duration_sec": 3 * 3600}, [None]))
+        self.assertFalse(ms.recording_cut_short({"duration_sec": "bad"}, [cap]))
 
 
 class TestMeetingListNeverBreaksOnOldFolders(unittest.TestCase):

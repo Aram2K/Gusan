@@ -145,7 +145,10 @@ Who said what (Gusan 2.0.1)
     text kept as transcript.before_speakers.txt until it is). It ends through
     ``finished(folder, its notes, "")`` and ``last_run_speakers`` (so the app says
     nothing about notes); a run that could not label also emits
-    ``error("speakers", why)``.
+    ``error("speakers", why)``. A recording that ends before the transcript does
+    (past the ~2-hour cap, or a part's sound not saved - meta
+    ``recording_cut_short``, written at Stop) is refused: the new transcript would
+    stop where the recording does.
   * An interrupted meeting (recording saved, no transcript.txt - only live pieces)
     is finished by retry_notes(folder=...) / write_pending_notes: the recording is
     read again, labelled and saved as transcript.txt, then the notes are written
@@ -234,8 +237,10 @@ ERR_DEVICE = "device"
 # Processing failures (error signal only; finished carries the message too).
 ERR_NOTES = "notes"
 ERR_EMPTY = "empty"
-# identify_speakers(): refused (no recording to read) / ended without labels.
+# identify_speakers(): refused (no recording to read; a recording that ends before
+# the transcript does) / ended without labels.
 ERR_NO_AUDIO = "no_audio"
+ERR_CUT_SHORT = "recording_cut_short"
 ERR_SPEAKERS = "speakers"
 
 RECAP_INTERVAL = 20.0      # seconds between "So far" updates...
@@ -1545,9 +1550,18 @@ class MeetingCore:
         cap = getattr(self.app.recorder, "_full_audio_max", None) if self.app else None
         secs = (cap / diarization.SAMPLE_RATE
                 if isinstance(cap, (int, float)) and cap > 0 else 2 * 3600)
-        return (f"The saved recording ends at about {meeting_store.format_duration(secs)} "
+        # (meeting_store.recording_cut_short knows a 2.0 meeting past the cap by this start)
+        return (f"{meeting_store.CAP_NOTICE_START} {meeting_store.format_duration(secs)} "
                 "- the most one session keeps. The transcript and notes still cover the "
                 "whole meeting (without speaker labels).")
+
+    def _recording_ends_early(self, part_path, has_text):
+        """Does this segment's saved recording end before its transcript does? The
+        recorder stopped keeping sound at its ~2-hour cap, or the sound could not be
+        saved at all (``part_path`` None) while there is text."""
+        rec = getattr(self.app, "recorder", None) if self.app else None
+        return bool(getattr(rec, "_full_audio_truncated", False) is True
+                    or (part_path is None and has_text))
 
     def _process_meeting_notes(self):
         try:
@@ -1628,6 +1642,13 @@ class MeetingCore:
                            "meeting again.")
                 self.proc_signals.finished.emit("", msg)
                 return
+
+            # A recording that ends before this transcript does (the ~2-hour cap, or
+            # this part's sound was not saved) is marked in meta before the transcript
+            # is written: Identify speakers must never rebuild the transcript from it
+            # (it would replace the whole meeting with the part the recording has).
+            if self._recording_ends_early(part_path, bool(text)):
+                self._write_meta(**{meeting_store.META_RECORDING_CUT_SHORT: True})
 
             # The plain transcript is safe on disk BEFORE the speaker pass: that
             # pass is the longest step (minutes to half an hour for a long
@@ -2467,7 +2488,9 @@ class MeetingCore:
         two tracks when it kept them - the microphone is "You" - else the mix),
         who spoke is worked out and transcript.txt is replaced. The old text is
         kept as transcript.before_speakers.txt while this runs. Works for any
-        meeting with a recording, also one without a transcript yet. Progress
+        meeting with a recording, also one without a transcript yet - but never
+        for one whose recording ends before its transcript does (a meeting past
+        the ~2-hour cap: ERR_CUT_SHORT, the transcript would lose the rest). Progress
         comes through ``status``; cancel_identify() stops it. Returns
         (ok, code, message); a refusal also emits error(code, message)."""
         app = self.app
@@ -2483,6 +2506,9 @@ class MeetingCore:
         folder = Path(folder)
         if not folder.is_dir() or not meeting_store.audio_parts(folder):
             return self._refuse(ERR_NO_AUDIO, "This meeting has no recording to read.")
+        cut = self._cut_short_message(folder)
+        if cut:
+            return self._refuse(ERR_CUT_SHORT, cut)
         if not self._load_for_rewrite(folder):         # no transcript is fine: audio is here
             return self._refuse(ERR_NO_AUDIO, "This meeting has no recording to read.")
         meta = meeting_store.load_meta(folder)
@@ -2505,6 +2531,26 @@ class MeetingCore:
         self._spawn(self._run_identify)
         return True, "", ""
 
+    @staticmethod
+    def _cut_short_message(folder):
+        """Why ``folder``'s recording can't give it speaker labels: the recording ends
+        before the meeting's transcript (or its live pieces) does, so a transcript
+        built from it would lose the rest (meeting_store.recording_cut_short). ""
+        when it covers it - or when there is no text yet: then the recording is all
+        there is to read."""
+        if not meeting_store.load_transcript(folder).strip():
+            return ""
+        seconds = meeting_store.part_seconds(meeting_store.audio_parts(folder))
+        if not meeting_store.recording_cut_short(meeting_store.load_meta(folder), seconds):
+            return ""
+        if len(seconds) == 1 and seconds[0]:
+            where = (f"The saved recording ends at about {meeting_store.format_duration(seconds[0])}, "
+                     "before the meeting did")
+        else:
+            where = "The saved recording doesn't cover the whole meeting"
+        return (f"{where}, so adding speaker labels from it would cut the transcript short. "
+                "The transcript stays as it is.")
+
     def cancel_identify(self):
         """Stop an Identify speakers run (the saved transcript stays as it was).
         True when one was running."""
@@ -2526,6 +2572,16 @@ class MeetingCore:
         # backup file and could write the transcript. Start only once it is really gone.
         if not self._followup.wait_idle(folder, 30.0):
             logger.warning("The background speaker pass of %s did not stop in time", Path(folder).name)
+        # identify_speakers refused a recording that ends before the transcript does;
+        # once more right before anything is touched: the transcript (and its old
+        # copy) must never be replaced by one that stops where the recording does.
+        cut = self._cut_short_message(folder)
+        if cut:
+            logger.warning("Identify speakers stopped: the recording of %s ends before its transcript",
+                           Path(folder).name)
+            self._identify_error = cut
+            self.proc_signals.finished.emit(self._final_notes or "", "")
+            return
         try:
             if meeting_store.load_meta(folder).get("transcribed_with") == TRANSCRIBED_CLOUD:
                 self._identify_cloud_words(folder)
@@ -2728,8 +2784,11 @@ class MeetingCore:
         extra = {}
         with self._chunks_lock:
             langs = [c.get("language") for c in self._chunks if c.get("language")]
+            has_text = any((c.get("text") or "").strip() for c in self._chunks)
         if langs:
             extra["language"] = max(set(langs), key=langs.count)
+        if self._recording_ends_early(part_path, has_text):
+            extra[meeting_store.META_RECORDING_CUT_SHORT] = True      # as at Stop
         self._write_meta(seen=False, notices=notices, notes_error=None,
                          **extra, **{META_NOTES_PENDING: True})
         # Last, so a slow disk never costs the recording or the transcript: the

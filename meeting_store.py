@@ -18,7 +18,8 @@ meta.json keys (all optional - older builds wrote only the first four):
   caveats to show above the notes), notes_notice (the one of them about the
   notes engine), notes_error, seen (False until the user opened the finished
   notes), calendar_event_id, attendees_list, source ("page", "live_assist",
-  "calendar", "classic").
+  "calendar", "classic"), recording_cut_short (True: the saved recording ends
+  before the transcript does - see recording_cut_short).
 Meta is only ever changed through ``update_meta`` (read, merge, atomic
 write), so keys written by one step survive every other step.
 """
@@ -296,6 +297,53 @@ def drop_before_speakers(folder):
         (Path(folder) / BEFORE_SPEAKERS).unlink()
     except OSError:
         pass
+
+
+# A recording that ends before the transcript does. The recorder keeps at most
+# ~2 hours of one session's sound (main.py AudioRecorder._full_audio_max), while
+# the live transcript goes on to the end; a part whose sound could not be saved
+# has text and no recording at all. Reading such a recording again (Identify
+# speakers) would REPLACE the whole transcript with a shorter one, so it is never
+# done. Stop marks the meeting in meta.json since 2.0.1; a 2.0 meeting past the
+# cap only carries the notice shown above its notes (it starts with
+# CAP_NOTICE_START); anything older is told by its recording's length.
+META_RECORDING_CUT_SHORT = "recording_cut_short"
+CAP_NOTICE_START = "The saved recording ends at about"
+RECORDING_CAP_SEC = 2 * 3600
+CUT_SHORT_MARGIN_SEC = 60        # the meeting's clock and its sound may differ by a few seconds
+
+
+def part_seconds(parts):
+    """Each recording part's length in seconds, in order (None for a part whose
+    WAV can't be read). Only the headers are read."""
+    out = []
+    for p in parts:
+        try:
+            with wave.open(str(p), "rb") as w:
+                out.append(w.getnframes() / float(w.getframerate() or 1))
+        except Exception:
+            out.append(None)
+    return out
+
+
+def recording_cut_short(meta, seconds=None):
+    """True when the meeting's saved recording ends before its transcript does,
+    so building the transcript again from it would lose the rest: meta says so
+    (META_RECORDING_CUT_SHORT), a 2.0 build's notice says the recording ends at
+    the cap, or - ``seconds``: each part's length (part_seconds) - a part reached
+    the cap and the meeting went on past what was saved. A recording that is just
+    shorter than the meeting is not enough on its own: a meeting recorded from the
+    system sound only keeps no sound while the computer is silent."""
+    meta = meta if isinstance(meta, dict) else {}
+    if meta.get(META_RECORDING_CUT_SHORT):
+        return True
+    notices = meta.get("notices")
+    if isinstance(notices, list) and any(str(n).startswith(CAP_NOTICE_START) for n in notices):
+        return True
+    known = [float(s) for s in (seconds or ()) if s]
+    if not any(s >= RECORDING_CAP_SEC - CUT_SHORT_MARGIN_SEC for s in known):
+        return False
+    return _int(meta.get("duration_sec")) > sum(known) + CUT_SHORT_MARGIN_SEC
 
 
 # segments.json: what the re-read of a recording found, kept so that "Them" can become

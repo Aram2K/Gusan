@@ -530,6 +530,7 @@ class DocumentsSection(QWidget):
         self._queue.added.connect(self._on_added)
         self._queue.batch_done.connect(self._on_finished)
         self._route = ""                # "cloud" | "own_key" | "local" | "none" | "" (the page tells)
+        self._engine = ""               # the own-key engine id (a yes covers that one service)
         self._announcing = False
         self._last_dir = os.path.expanduser("~")
 
@@ -604,9 +605,11 @@ class DocumentsSection(QWidget):
         return item
 
     # ── what the page tells it ──
-    def set_route(self, kind):
-        """Who writes the answers now: "cloud" (Gusan Cloud), "own_key", "local", "none"."""
+    def set_route(self, kind, engine=""):
+        """Who writes the answers now: "cloud" (Gusan Cloud), "own_key" (``engine`` is its
+        actions engine id), "local", "none"."""
         self._route = str(kind or "")
+        self._engine = str(engine or "")
         self.refresh_privacy()
 
     def focus_add(self):
@@ -918,6 +921,11 @@ class DocumentsSection(QWidget):
         self._overlay.setGeometry(self.rect())
 
     # ── where the words go ──
+    def _route_id(self, cfg):
+        """live_docs.route_id of who writes the answers now ("" when not a cloud route)."""
+        kind = {"cloud": "managed", "own_key": "cloud"}.get(self._route, "")
+        return live_docs.route_id(kind, self._engine, cfg)
+
     def privacy_line(self):
         """(text, link text) for the footer; ("", "") when there is nothing to say."""
         if not any(d.active for d in self._docs):       # none, or all switched off: nothing goes anywhere
@@ -928,9 +936,9 @@ class DocumentsSection(QWidget):
             return LINE_LOCAL, ""
         choice = cfg.get(live_docs.CLOUD_CHOICE_KEY)
         agreed = str(cfg.get(live_docs.CLOUD_ROUTE_KEY) or "")
-        here = {"cloud": "managed", "own_key": "cloud"}.get(self._route, "")
-        if choice is True and agreed and here and agreed != here:
-            choice = None               # the yes was for the other kind of cloud route: asked again
+        here = self._route_id(cfg)
+        if choice is True and agreed and here and (agreed != here or agreed == "cloud"):
+            choice = None               # the yes was for another route (or named none): asked again
         if choice is True:
             where = "Gusan Cloud" if self._route == "cloud" else "your AI service"
             return LINE_YES % where, LINK_NO
@@ -951,7 +959,9 @@ class DocumentsSection(QWidget):
         if self.privacy_link.text() == LINK_NO:
             live_docs_ui.set_choice(self.app, False)
         else:
-            live_docs_ui.ask_cloud(self, self.app, managed=(self._route == "cloud"))
+            cfg = getattr(self.app, "cfg", None)
+            live_docs_ui.ask_cloud(self, self.app, managed=(self._route == "cloud"),
+                                   route=self._route_id(cfg if isinstance(cfg, dict) else {}))
         self.refresh_privacy()
         self._emit_changed()
 

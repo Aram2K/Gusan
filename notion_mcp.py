@@ -1537,20 +1537,38 @@ def _append(client, page_id, units):
 
 _TRASHED = re.compile(r"(?:in_trash|archived|trashed)[\"']?\s*[:=]\s*[\"']?true|"
                       r"\b(?:in the trash|moved to (?:the )?trash|is in trash)\b", re.I)
+_TRASH_FIELDS = ("in_trash", "archived", "is_archived", "trashed")
+_CONTENT_START = re.compile(r"<content\b", re.I)
+
+
+def _trashed(result):
+    """Does a "notion-fetch" answer say the page ITSELF is in the trash? A yes/no field in
+    the answer's data decides when there is one. Else only the page's head is read (its
+    tag and properties) - never its <content>: that lists the pages under it by title, and
+    a meeting called "Sorting what is in the trash" must not make the hub look trashed."""
+    data = result.data if isinstance(result.data, dict) else {}
+    flags = [data[k] for k in _TRASH_FIELDS if isinstance(data.get(k), bool)]
+    if flags:
+        return any(flags)
+    text = result.text or ""
+    body = _CONTENT_START.search(text)
+    return bool(_TRASHED.search(text[:body.start()] if body else text))
 
 
 def hub_alive(client, page_id):
     """Is the page still there (and not in the trash)? True / False, or None when that
-    could not be found out (token refused, offline, busy). One call (the tool
-    "notion-fetch"); any other failure counts as "not there", since the page cannot be
-    used either way."""
+    could not be found out. One call (the tool "notion-fetch"). Only Notion saying so
+    makes it False - the page is not found (or not ours to reach), or the answer shows
+    it in the trash; any other failure (a 5xx, an error we cannot read, token refused,
+    offline, busy) is None: a passing outage must never make a second "Gusan meetings"
+    page that every later meeting then goes to."""
     try:
         result = client.call_tool("notion-fetch", {"id": page_id})
     except McpNotFound:
         return False
-    except NotionError as e:
-        return None if e.code in ("auth", "offline", "rate") else False
-    return not _TRASHED.search(result.text or "")
+    except NotionError:
+        return None
+    return not _trashed(result)
 
 
 def ensure_hub(client, saved="", persist=None, gone=False):
@@ -1640,7 +1658,8 @@ def send_meeting_mcp(creds, title, notes_md, transcript="", meta_line="", *,
             hub_id = dest = ensure_hub(client, dest, persist, gone=True)["id"]
         except McpError as e:
             # An answer that does not say "gone" in words we know: ask Notion whether the hub is
-            # still there before giving up, so a trashed hub cannot make every send fail.
+            # still there before giving up, so a trashed hub cannot make every send fail. Only a
+            # clear "not there" makes a new one; a check that fails too (an outage) reports the error.
             if recreated or e.reason or e.code != "other" or not hub_id or dest != hub_id \
                     or hub_alive(client, dest) is not False:
                 raise
@@ -1751,13 +1770,15 @@ def connection_settings(res):
 
 def _reusable_hub(cfg, workspace, client):
     """Connecting again keeps the "Gusan meetings" page the notes were going to - but only
-    for the same workspace (the consent page lets the user pick another one) and only when
-    it is still there (a trashed page would make every send fail)."""
+    for the same workspace (the consent page lets the user pick another one) and not when
+    Notion says it is gone or in the trash (a trashed page would make every send fail). A
+    page that could not be checked just now is kept: a hiccup must not make a second one,
+    and a send that finds it gone makes it again (send_meeting_mcp)."""
     saved = notion_export.extract_page_id(cfg.get("notion_hub_page"))
     old = (cfg.get("notion_workspace_name") or "").strip()
     if not (saved and old and old == workspace):
         return ""
-    return saved if hub_alive(client, saved) is True else ""
+    return saved if hub_alive(client, saved) is not False else ""
 
 
 def connect(cfg=None, open_browser=None, timeout=LOGIN_TIMEOUT, cancel=None, on_url=None, on_code=None,

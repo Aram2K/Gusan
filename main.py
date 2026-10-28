@@ -6686,7 +6686,12 @@ class AppController(QObject):
         self._session_ending = True
         logger.info("Session ending: saving work")
         try:
-            getattr(getattr(self, "meeting_session", None), "shutdown_speaker_followup", lambda: None)()
+            # The names after a meeting's notes stop (the queue is dropped; a running
+            # pass ends at its next look, its child process with it) - but not for good:
+            # the user can still cancel the log-off, and the app then goes on as it was.
+            # So neither shutdown_speaker_followup nor diarization_proc.cancel_all here:
+            # both refuse every later pass until the app restarts (quit_app only).
+            getattr(getattr(self, "meeting_session", None), "cancel_speaker_followup", lambda: None)()
         except Exception:
             logger.debug("Ending the speaker pass at log-off failed", exc_info=True)
         try:
@@ -6827,9 +6832,8 @@ class AppController(QObject):
             self.notify_history_changed()            # the meeting's meta changed
             if getattr(self, "_quitting", False):
                 return
-            if not ok and code == "auth" and mode in notion_export.GRANT_MODES \
-                    and not self.cfg.get("notion_reconnect"):
-                self.set_setting("notion_reconnect", True)     # the rail says "Reconnect"
+            # (A refused token's "Reconnect" flag is notion_sync's to set, through persist: it knows
+            # whether the connection the send used is still the one in use - see "stale".)
             if not ok and code == "privacy":
                 return
             if ok and (not self.cfg.get("notify_when_ready", True)
@@ -6839,12 +6843,14 @@ class AppController(QObject):
             if ok:
                 self.show_tray_hint("Sent to Notion", title, on_click=open_it)
             else:
-                # Say what to do when that is known; else which meeting it was.
-                why = {"auth": ("Reconnect it in Meeting settings" if mode in notion_export.GRANT_MODES
+                # Say what to do when that is known; else which meeting it was. A refused token of a
+                # connection the user gave up while the send ran ("stale") is no news: which meeting.
+                why = {"auth": (None if res.get("stale")
+                                else "Reconnect it in Meeting settings" if mode in notion_export.GRANT_MODES
                                 else "Notion rejected the secret"),
                        "offline": "Check your internet",
                        "full": notion_export.FULL_HINT,
-                       "no_access": ("Reconnect it in Meeting settings" if mode == "mcp"
+                       "no_access": ("Disconnect and connect it in Meeting settings" if mode == "mcp"
                                      else "Pick another page in Meeting settings")}.get(code)
                 self.show_tray_hint("Couldn't send to Notion", f"{why or title} · Open", on_click=open_it)
         except Exception:

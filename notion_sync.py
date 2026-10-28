@@ -25,7 +25,10 @@ meta.json (``notion_url``, ``notion_page_id``, ``notion_sent_at``,
   "Gusan meetings" page (made when it is missing or gone), the token is renewed
   inside the client - and every new pair, and a new hub, is handed to ``persist``
   before the next request. A connection Notion refuses for good ends in code
-  "auth" with ``notion_reconnect`` set, same as "oauth".
+  "auth" with ``notion_reconnect`` set, same as "oauth" - unless the user
+  disconnected (or connected again) while the send ran: then nothing is set and
+  the result carries ``"stale": True`` (an "auth" result always has ``stale``).
+  ``persist`` is the only way the flag is set: callers never set it themselves.
 
 ``persist(dict)`` is called on the worker thread with cfg keys to save; the
 caller hops to the GUI thread (main: ``self._run_on_gui(self.set_settings, d)``).
@@ -69,6 +72,10 @@ SENTENCES = {
 }
 AUTH_OAUTH_TEXT = OTHER_TEXT + " Reconnect it in Meeting settings."
 AUTH_OWN_TEXT = OTHER_TEXT + " Notion rejected the secret."
+# Mode "mcp", a page Notion won't let us use: there is no page to pick, and the token is fine, so
+# Settings shows no "Reconnect" button - only Manage and Disconnect. Say the steps that are there.
+# (Two lines in the notes toolbar at most, like the others: a longer one makes the toolbar taller.)
+NO_ACCESS_MCP_TEXT = OTHER_TEXT + " Disconnect and connect it in Meeting settings."
 
 _INFLIGHT = set()               # normalised folders being sent right now (auto, a click, a retry)
 _GUARD = threading.Lock()
@@ -116,7 +123,7 @@ def friendly(exc, mode):
     if code == "auth":
         return code, AUTH_OAUTH_TEXT if mode in notion_export.GRANT_MODES else AUTH_OWN_TEXT
     if code == "no_access" and mode == "mcp":
-        return code, AUTH_OAUTH_TEXT                # there is no page to pick: connecting again is the way out
+        return code, NO_ACCESS_MCP_TEXT             # there is no page to pick: connecting again is the way out
     return code, SENTENCES[code]
 
 
@@ -232,14 +239,18 @@ def _send(folder, cfg, auto, persist, publish, refresh, create_hub, update_meta,
             logger.warning("Sending a meeting to Notion failed (%s)", type(e).__name__, exc_info=True)
         # The Settings row then says "Reconnect" - unless the user disconnected (or connected again)
         # while this send was running: then a refused token is no news, and nothing is flagged.
-        if code == "auth" and mode in notion_export.GRANT_MODES and all(c.current() for c in held):
+        stale = not all(c.current() for c in held)
+        if code == "auth" and mode in notion_export.GRANT_MODES and not stale:
             _save(persist, {"notion_reconnect": True})
         fields = {"notion_error": code}
         partial = str(getattr(e, "url", "") or "")
         if partial:
             fields["notion_url"] = partial              # the page exists, only its tail failed: keep the link
         _write(update_meta, folder, **fields)
-        return _result(False, partial, code, sentence)
+        out = _result(False, partial, code, sentence)
+        if code == "auth":
+            out["stale"] = stale                        # so the caller doesn't ask to reconnect a connection that is gone
+        return out
 
     _write(update_meta, folder, notion_url=url, notion_page_id=notion_export.extract_page_id(url) or "",
            notion_sent_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),

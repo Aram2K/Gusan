@@ -1330,6 +1330,7 @@ def test_a_failed_send_shows_its_sentence_for_five_seconds(shell, meetings_root,
 @pytest.mark.parametrize("sentence", [
     "Couldn't send to Notion. Reconnect it in Meeting settings.",
     "Couldn't send to Notion. Pick another page in Meeting settings.",
+    "Couldn't send to Notion. Disconnect and connect it in Meeting settings.",      # mode "mcp", no_access
     "Couldn't send to Notion. Notion rejected the secret.",
     "That Notion workspace is full. Free up space or upgrade it."])
 def test_a_long_failure_sentence_is_read_in_full_and_pushes_nothing_out_of_the_window(

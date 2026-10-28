@@ -113,6 +113,49 @@ def test_a_three_second_recording_is_not_worth_a_line(shell, meetings_root):
     assert "Identify speakers" not in _hint(page)
 
 
+def _wav_of(path, seconds):
+    """A WAV whose header says it is ``seconds`` long (one frame a second: tiny)."""
+    import wave
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(1)
+        w.writeframes(b"\0\0" * int(seconds))
+
+
+def test_a_recording_that_ends_before_the_transcript_gets_no_line(shell, meetings_root):
+    # A meeting past the ~2-hour cap: labels from its recording would cut the transcript,
+    # so the Transcript tab never invites it (the ⋯ entry stays and says why when used).
+    import meeting_store
+    page, session, folder = _open_notes(shell, meetings_root, duration_sec=3 * 3600,
+                                        **{meeting_store.META_RECORDING_CUT_SHORT: True})
+    assert "Identify speakers" not in _hint(page)
+    assert "Hello team, we ship Friday." in _hint(page)
+    page.notes_view.more_menu.aboutToShow.emit()
+    assert page.notes_view.act_identify.isEnabled()
+
+
+def test_a_2_0_meeting_past_the_cap_gets_no_line_either(shell, meetings_root):
+    notice = ("The saved recording ends at about 2 h 00 min - the most one session keeps. "
+              "The transcript and notes still cover the whole meeting (without speaker labels).")
+    page, _s, _f = _open_notes(shell, meetings_root, notices=[notice])
+    assert "Identify speakers" not in _hint(page)
+
+
+def test_an_older_meeting_is_known_by_its_recordings_length(shell, meetings_root):
+    import meeting_store
+    page, _s, folder = _open_notes(shell, meetings_root, duration_sec=3 * 3600, audio=False)
+    _wav_of(folder / "audio_part1.wav", 2 * 3600)                # the recorder's cap, a 3-hour meeting
+    page.open_notes(str(folder))
+    assert page.notes_view.data["recording_cut_short"] is True
+    assert "Identify speakers" not in _hint(page)
+    # a meeting the recording covers (stopped right at the cap) still gets the line
+    meeting_store.update_meta(folder, duration_sec=2 * 3600 + 20)
+    page.open_notes(str(folder))
+    assert page.notes_view.data["recording_cut_short"] is False
+    assert _hint(page).startswith("Speaker labels aren't in this transcript. Identify speakers")
+
+
 def test_the_link_starts_it_for_this_meeting(shell, meetings_root):
     page, session, folder = _open_notes(shell, meetings_root)
     nv = page.notes_view
@@ -222,6 +265,36 @@ def test_a_real_run_replaces_the_transcript_and_the_page_shows_it(shell, meeting
     assert "Re-reading the recording… 50%" in status
     assert page.current_view() == "notes"
     assert s.last_run_speakers is True
+    s.deleteLater()
+
+
+def test_a_real_session_refuses_a_meeting_past_the_cap_and_changes_nothing(shell, meetings_root, monkeypatch):
+    import meeting_session
+    import meeting_store
+    monkeypatch.setattr(meeting_session.telemetry, "track", lambda *a, **k: None)
+    built = []
+    monkeypatch.setattr(meeting_session.meeting_speakers, "build_transcript", lambda *a, **k: built.append(1))
+    full = "Hour one, the plan. Hour two, the budget. Hour three, the decisions."
+    folder = _meeting(meetings_root, "20261021_103134", "Long meeting", transcript=full,
+                      duration_sec=3 * 3600, **{meeting_store.META_RECORDING_CUT_SHORT: True})
+    _with_audio(folder)
+    win, app = shell("pro")
+    app.recorder = object()
+    app.live_assist = None
+    app.release_models_after_session = lambda: None
+    page = _open(win)
+    s = meeting_session.get_session(app)
+    app.meeting_session = s
+    page.session()                                               # binds the page to it
+    page.open_notes(str(folder))
+    nv = page.notes_view
+    assert "Identify speakers" not in _hint(page)                # not invited...
+    nv.act_identify.trigger()                                    # ...and from the ⋯ menu it says why
+    assert "would cut the transcript short" in nv.flash_label.text()
+    assert not s.is_busy and built == []
+    assert (folder / "transcript.txt").read_text(encoding="utf-8") == full
+    assert not (folder / "transcript.before_speakers.txt").exists()
+    assert page.current_view() == "notes"
     s.deleteLater()
 
 

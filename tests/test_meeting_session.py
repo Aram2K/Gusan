@@ -1646,6 +1646,74 @@ class TestSpeakerLabelsAtStop(_SpeakerBase):
         self.assertEqual(s._transcript_notices, ["Something else."])
 
 
+@unittest.skipUnless(_real_numpy(), "real numpy not importable (stubbed)")
+class TestARecordingThatEndsBeforeTheTranscript(_SpeakerBase):
+    """A meeting longer than the recorder keeps (~2 hours): Stop keeps the whole live
+    transcript and marks the meeting, so Identify speakers never cuts it later."""
+    FULL = "Hour one, the plan. Hour two, the budget. Hour three, the decisions."
+
+    def _identify(self, folder):
+        calls = []
+
+        def build(recorder, parts, **kw):
+            calls.append(parts)
+            return _outcome(("Speaker 1: Hour one, the plan.",))
+        s = self.session(_App(_SpeakerRec()))
+        with patch.object(msess.meeting_speakers, "build_transcript", side_effect=build):
+            return s.identify_speakers(folder), calls
+
+    def test_stop_past_the_cap_marks_the_meeting_and_identify_speakers_then_refuses_it(self):
+        rec = _SpeakerRec(result=(self.FULL, "en"))
+        rec._full_audio_truncated = True                             # the recorder stopped keeping sound at 2 h
+        s = self._stopped(rec)
+        folder = s.meeting_dir
+        self.assertEqual(s._build_calls, [])                         # no labels at Stop (as before)
+        self.assertEqual((folder / "transcript.txt").read_text(encoding="utf-8"), self.FULL)
+        self.assertIs(ms.load_meta(folder)[ms.META_RECORDING_CUT_SHORT], True)
+        # Later, "Identify speakers" on that meeting
+        (ok, code, _msg), calls = self._identify(folder)
+        self.assertEqual((ok, code), (False, msess.ERR_CUT_SHORT))
+        self.assertEqual(calls, [])
+        self.assertEqual((folder / "transcript.txt").read_text(encoding="utf-8"), self.FULL)
+        self.assertFalse((folder / ms.BEFORE_SPEAKERS).exists())
+
+    def test_a_part_whose_sound_was_not_saved_marks_the_meeting_too(self):
+        with patch("audio_export.write_wav", side_effect=OSError("disk full")):
+            s = self._stopped(_SpeakerRec(result=(self.FULL, "en")))
+        self.assertIs(ms.load_meta(s.meeting_dir)[ms.META_RECORDING_CUT_SHORT], True)
+
+    def test_a_meeting_the_recorder_kept_whole_is_not_marked(self):
+        s = self._stopped(build=_outcome(("You: hi",)))
+        self.assertNotIn(ms.META_RECORDING_CUT_SHORT, ms.load_meta(s.meeting_dir))
+        (ok, _code, _msg), calls = self._identify(s.meeting_dir)
+        self.assertTrue(ok)
+        self.assertEqual(len(calls), 1)
+
+    def test_a_quit_past_the_cap_marks_the_meeting_too(self):
+        rec = _SpeakerRec()
+        rec._full_audio_truncated = True
+        rec.request_abort = MagicMock()
+        app = _App(rec, meeting_audio_mode="smart_meeting")
+        app.live_assist = MagicMock()
+        s = self.session(app)
+        s.start("Long call", "", language="en", audio_mode="smart_meeting")
+        s._on_chunk_transcribed(0, "Hour three, the decisions.", "en")
+        folder = Path(s.save_for_quit())
+        meta = ms.load_meta(folder)
+        self.assertIs(meta[ms.META_RECORDING_CUT_SHORT], True)
+        self.assertTrue(meta[msess.META_NOTES_PENDING])
+        self.assertEqual(self._identify(folder)[0][1], msess.ERR_CUT_SHORT)
+        # ...and a quit within the cap is not marked
+        rec2 = _SpeakerRec()
+        rec2.request_abort = MagicMock()
+        app2 = _App(rec2, meeting_audio_mode="smart_meeting")
+        app2.live_assist = MagicMock()
+        s2 = self.session(app2)
+        s2.start("Short call", "", language="en", audio_mode="smart_meeting")
+        s2._on_chunk_transcribed(0, "All of it.", "en")
+        self.assertNotIn(ms.META_RECORDING_CUT_SHORT, ms.load_meta(s2.save_for_quit()))
+
+
 class TestWatchSound(_Base):
     def test_one_tray_hint_per_quiet_stretch(self):
         rec = _Rec()
@@ -2050,6 +2118,98 @@ class TestIdentifySpeakers(_SavedMeeting):
         status = _Recorder(s.status)
         s.identify_speakers(d)
         self.assertIn(("Re-reading the recording… 40%",), status.calls)
+
+    # ── a recording that ends before the transcript does (a meeting past the ~2-hour cap) ──
+    FULL = "Hour one, the plan. Hour two, the budget. Hour three, the decisions."
+
+    @staticmethod
+    def _wav(path, seconds):
+        """A WAV whose header says it is ``seconds`` long (one frame a second: tiny)."""
+        import wave
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(1)
+            w.writeframes(b"\0\0" * int(seconds))
+
+    def test_a_recording_that_ends_before_the_transcript_is_never_read_into_it(self):
+        # A three-hour meeting: the live transcript has all of it, the recording the
+        # first two hours. Labels from it would replace the transcript - hour three gone.
+        d = self._folder(transcript=self.FULL, duration_sec=3 * 3600,
+                         **{ms.META_RECORDING_CUT_SHORT: True})
+        self._wav(d / "audio_part1.wav", 2 * 3600)
+        s, calls = self._start(d, _outcome(("Speaker 1: Hour one, the plan. Hour two, the budget.",)),
+                               inline=True)
+        errors = _Recorder(s.error)
+        ok, code, msg = s.identify_speakers(d)
+        self.assertEqual((ok, code), (False, msess.ERR_CUT_SHORT))
+        self.assertIn("The saved recording ends at about 2 h 00 min", msg)
+        self.assertIn("would cut the transcript short", msg)
+        self.assertEqual(errors.calls, [(msess.ERR_CUT_SHORT, msg)])
+        self.assertEqual(calls, [])                                  # the recording was not read
+        self.assertEqual((d / "transcript.txt").read_text(encoding="utf-8"), self.FULL)
+        self.assertFalse((d / ms.BEFORE_SPEAKERS).exists())
+        self.assertEqual(s.state, "idle")
+        self.assertIsNone(s.meeting_dir)                             # nor was the session pointed at it
+
+    def test_how_a_recording_that_ends_early_is_known(self):
+        cap_notice = self.session(_App())._recording_cap_notice()   # what 2.0 wrote, without a mark
+        refused = {
+            "20261021_100000": dict(notices=[cap_notice]),
+            "20261021_100100": dict(duration_sec=3 * 3600, wav=(2 * 3600,)),          # an older meeting
+            "20261021_100200": dict(duration_sec=3 * 3600 + 600, wav=(2 * 3600, 600)),  # ...continued later
+        }
+        allowed = {
+            "20261021_110000": dict(duration_sec=2 * 3600 + 20, wav=(2 * 3600,)),      # stopped at the cap
+            "20261021_110100": dict(duration_sec=3600, wav=(1800,)),   # system sound only, silent stretches
+            "20261021_110200": dict(),                                 # an ordinary meeting
+        }
+        for name, case in list(refused.items()) + list(allowed.items()):
+            wav = case.pop("wav", ())
+            d = self._folder(name, transcript=self.FULL, **case)
+            for i, secs in enumerate(wav, 1):
+                self._wav(d / f"audio_part{i}.wav", secs)
+            s, calls = self._start(d, _outcome(("You: labelled",)), inline=True)
+            ok, code, msg = s.identify_speakers(d)
+            if name in refused:
+                self.assertEqual((ok, code), (False, msess.ERR_CUT_SHORT), name)
+                self.assertEqual((d / "transcript.txt").read_text(encoding="utf-8"), self.FULL, name)
+                self.assertEqual(calls, [], name)
+            else:
+                self.assertTrue(ok, name)
+                self.assertEqual((d / "transcript.txt").read_text(encoding="utf-8"), "You: labelled", name)
+        # more than one part: the message can't name one end
+        self.assertIn("doesn't cover the whole meeting",
+                      self.session(_App())._cut_short_message(self.root / "20261021_100200"))
+
+    def test_with_nothing_written_yet_the_recording_is_all_there_is(self):
+        # (no transcript, no live pieces: reading the recording loses nothing)
+        d = self._folder(chunks=(), **{ms.META_RECORDING_CUT_SHORT: True})
+        s, _ = self._start(d, _outcome(("You: first words",)), inline=True)
+        self.assertTrue(s.identify_speakers(d)[0])
+        self.assertEqual((d / "transcript.txt").read_text(encoding="utf-8"), "You: first words")
+        # ...but live pieces are text the recording may not cover
+        d2 = self._folder("20261021_120000", **{ms.META_RECORDING_CUT_SHORT: True})
+        s2, calls = self._start(d2, _outcome(("You: x",)), inline=True)
+        self.assertEqual(s2.identify_speakers(d2)[1], msess.ERR_CUT_SHORT)
+        self.assertFalse((d2 / "transcript.txt").exists())
+
+    def test_the_run_checks_again_before_it_touches_anything(self):
+        d = self._folder(transcript=self.FULL)
+        s, calls = self._start(d, _outcome(("Speaker 1: Hour one.",)))
+        errors = _Recorder(s.error)
+        self.assertTrue(s.identify_speakers(d)[0])
+        ms.update_meta(d, **{ms.META_RECORDING_CUT_SHORT: True})      # (known by the time the run starts)
+        target, args = s.spawned[0]
+        target(*args)
+        self.assertEqual(calls, [])
+        self.assertEqual((d / "transcript.txt").read_text(encoding="utf-8"), self.FULL)
+        self.assertFalse((d / ms.BEFORE_SPEAKERS).exists())
+        self.assertEqual(errors.calls[0][0], "speakers")
+        self.assertIn("would cut the transcript short", errors.calls[0][1])
+        self.assertNotIn("speakers_at", ms.load_meta(d))
+        self.assertEqual(s.phase, "done")
+        self.assertFalse(s.is_busy)
 
 
 # ── Notes first, speaker names after ─────────────────────────────────────────

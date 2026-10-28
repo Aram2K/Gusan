@@ -161,9 +161,9 @@ class TestModelNames(unittest.TestCase):
 
     def test_local_ai_table(self):
         want = {"qwen_tiny": ("Small", "Qwen 1.5B", "1.12 GB", 8),
-                "qwen_3b": ("Medium", "Qwen 3B", "2.3 GB", 12),
-                "qwen_7b": ("Large", "Qwen 7B", "4.7 GB", 16),
-                "gemma_2b": ("Alternative", "Gemma 2 2B", "1.6 GB", 8)}
+                "qwen_3b": ("Medium", "Qwen 3B", "2.1 GB", 12),
+                "qwen_7b": ("Large", "Qwen 7B", "4.68 GB", 16),
+                "gemma_2b": ("Alternative", "Gemma 2 2B", "1.71 GB", 8)}
         for mid, (plain, real, size, mem) in want.items():
             i = hardware.LOCAL_AI_INFO[mid]
             self.assertEqual((i.plain, i.real, i.size, i.memory_gb, i.kind), (plain, real, size, mem, "writer"))

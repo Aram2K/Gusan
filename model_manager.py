@@ -215,6 +215,8 @@ def failure_message(exc):
     analytics, message one plain sentence for the card."""
     if isinstance(exc, speech_hy.SpeechHyError):          # the Armenian model's own plain sentence
         return exc.reason, exc.user_message
+    if type(exc).__name__ == "DownloadIncomplete":      # local_llm: cut off, never installed
+        return "incomplete", MSG_INCOMPLETE
     text = str(exc or "").lower()
     if isinstance(exc, OSError) and (
             getattr(exc, "errno", None) == errno.ENOSPC

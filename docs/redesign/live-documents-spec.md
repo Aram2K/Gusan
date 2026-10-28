@@ -47,10 +47,10 @@ in Privacy mode):
   XXE), depth cap 200, budget checked every 64 KB. Hidden spreadsheet tabs are skipped.
 * PDF: pypdf non-strict; at most 500 pages, 50 000 characters a page, 1.5 M overall; its
   own limits are tightened for the read (streams 25 MB, page tree 20 000 entries / depth
-  40, forms 500 per page, the external jbig2dec program never started). Encrypted: only the
-  open-without-a-password check every viewer makes; otherwise "This PDF is protected with a
-  password, so Gusan can't read it." No password is tried. Metadata, attachments, forms and
-  links are not read. Fewer than 3 visible characters = a scan.
+  40, forms 500 per page, the external jbig2dec program never started). Encrypted (RC4; AES via
+  pycryptodome): only the open-without-a-password check; otherwise "This PDF is protected with a
+  password, so Gusan can't read it." No password is tried; a cipher pypdf can't run says so.
+  Metadata, attachments, forms and links are not read. Fewer than 3 visible characters = a scan.
 * Pictures: Pillow limited to the six formats (no EPS/Ghostscript), pixel count checked from
   the header before decoding (40 MP; JPEG 85 MP reduced), shrunk before flattened (730 -> 390
   MB), warnings silenced. pypdf's log is silenced (it quotes names out of the document).
@@ -74,8 +74,8 @@ Reading and storing happen on the PC. Text reaches a model only as chunks chosen
 current question, only from ACTIVE documents, never when Privacy mode forbids the route.
 Before the first cloud use the person is asked once, in plain words (`mini_prompt.ask`,
 text in `live_docs.cloud_prompt`); the answer is config `live_docs_cloud_ok` (None / True /
-False), a yes with `live_docs_cloud_route` (the kind it was asked for: Gusan Cloud or an own
-key; the other kind asks again). `live_docs.doc_use(cfg, kind, n)` is the single decision.
+False), a yes with `live_docs_cloud_route` (`live_docs.route_id`: Gusan Cloud, or ONE own-key
+service, engine and host; another asks again). `live_docs.doc_use(cfg, kind, n, route)` decides.
 Declined: the answer is written without the documents and says so. Follow-ups carry earlier
 answers written from documents only where the documents may go. A picture goes whole: the
 question says so; an automatic answer takes only pictures its talk is about. A drag naming
@@ -106,9 +106,9 @@ documents the text is byte-for-byte what it was (checked against HEAD on 10 000 
 `live_docs.get_store()` -> `DocStore`: `list()`, `add_file(path, cancel=None)`,
 `add_files(paths, cancel=None, on_each=None)` (blocking: worker thread) -> `AddResult`,
 `set_active(id, on)`, `remove(id)`, `clear()`, `warm()`, `active_docs()`,
-`active_pictures(question)`, `active_count()`. Helpers: `doc_use(cfg, kind, n)`,
-`doc_chars_for(kind)`, `chip_text(n)`, `describe(info)`, `icon_for(info)`,
-`cloud_prompt(managed)`, `event_for(result)`. `live_context.rolling_context(...,
+`active_pictures(question)`, `active_count()`. Helpers: `doc_use(cfg, kind, n, route)`,
+`route_id(kind, engine, cfg)`, `doc_chars_for(kind)`, `chip_text(n)`, `describe(info)`,
+`icon_for(info)`, `cloud_prompt(managed)`, `event_for(result)`. `live_context.rolling_context(...,
 documents=, doc_chars=, pictures=)` and `safe_answer_markdown(text)`. Build the context
 in the worker thread, after the engine is known (its kind sets the budget).
 

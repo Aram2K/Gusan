@@ -1548,13 +1548,19 @@ class TestConnect(NetCase):
             self.assertNotEqual(res["dest"]["id"], ne.extract_page_id(old), marker)
             self.assertEqual(self.fake.calls("notion-create-pages")[-1]["creation_mode"], "draft")
 
-    def test_a_saved_page_that_cannot_be_checked_is_not_trusted_either(self):
+    def test_a_saved_page_that_cannot_be_checked_just_now_is_kept(self):
+        # A hiccup while connecting again (busy, a 5xx, words we cannot read) must not make a second
+        # "Gusan meetings" page; a send that finds the page really gone makes it again then.
         old = self.make_page("Gusan meetings")
         cfg = {"notion_hub_page": old, "notion_workspace_name": "Aram's workspace", "notion_mcp_client_id": "cid1", "notion_mcp_redirects": "2"}
         self.fake.registered["cid1"] = {}
-        self.fake.tools["notion-fetch"] = lambda args: (_ for _ in ()).throw(ToolFail("rate_limited"))
-        res = self.browse_connect(cfg=cfg)
-        self.assertNotEqual(res["dest"]["id"], ne.extract_page_id(old))
+        for text in ("rate_limited", "Internal server error"):
+            self.fake.tools["notion-fetch"] = lambda args, _t=text: (_ for _ in ()).throw(ToolFail(_t))
+            res = self.browse_connect(cfg=cfg)
+            self.assertEqual(res["dest"]["id"], ne.extract_page_id(old), text)
+            self.assertEqual(res["settings"]["notion_hub_page"], ne.extract_page_id(old), text)
+        self.assertEqual(self.fake.calls("notion-create-pages"), [])           # no second "Gusan meetings"
+        self.assertEqual(len(self.fake.calls("notion-fetch")), 2)               # it did ask
 
     def test_another_workspace_gets_its_own_page(self):
         cfg = {"notion_hub_page": hex_id(0x55), "notion_workspace_name": "Somebody else's", "notion_mcp_client_id": "cid1", "notion_mcp_redirects": "2"}
@@ -2561,17 +2567,40 @@ class TestHub(NetCase):
 
     def test_hub_alive_does_not_guess_when_it_could_not_ask(self):
         client = self.client()
-        for text in ("unauthorized", "rate_limited: retry_after_seconds: 1"):
+        for text in ("unauthorized", "rate_limited: retry_after_seconds: 1", "something odd", "Internal server error"):
             self.fake.tools["notion-fetch"] = lambda args, _t=text: (_ for _ in ()).throw(ToolFail(_t))
             self.assertIsNone(nm.hub_alive(client, hex_id(1)), text)
-        self.fake.tools["notion-fetch"] = lambda args: (_ for _ in ()).throw(ToolFail("something odd"))
-        self.assertIs(nm.hub_alive(client, hex_id(1)), False)                      # unusable either way
+        self.fake.tools["notion-fetch"] = lambda args: (_ for _ in ()).throw(ToolFail("Forbidden: no access"))
+        self.assertIs(nm.hub_alive(client, hex_id(1)), False)                      # not ours to reach: unusable
+        for status in (500, 502, 503):                                              # Notion having a bad minute
+            self.fake.mcp_fail.append((status, {}))
+            self.assertIsNone(nm.hub_alive(client, hex_id(1)), status)
 
         def down(*a, **k):
             raise nm.NetworkError("offline")
 
         with patch.object(nm, "_request", down):
             self.assertIsNone(nm.hub_alive(nm.McpClient(self.creds(), None), hex_id(1)))
+
+    def test_only_the_pages_own_head_says_it_is_in_the_trash(self):
+        # notion-fetch lists the pages under the hub by title in its <content>: a meeting called
+        # "Sorting what is in the trash" is not the hub being in the trash.
+        client = self.client()
+        page = self.make_page("Gusan meetings")
+        head = '<page url="https://www.notion.so/%s"%s>\n<properties>\n{"title":"Gusan meetings"}\n</properties>\n'
+        child = ('<content>\nNotes from your meetings.\n<page url="https://www.notion.so/%s">Sorting what is in the trash'
+                 '</page>\n<page url="https://www.notion.so/%s">Old notes in_trash: true</page>\n</content>\n</page>'
+                 % (hex_id(0x77), hex_id(0x78)))
+        self.fake.tools["notion-fetch"] = lambda args: tool_result(text=head % (page, "") + child)
+        self.assertIs(nm.hub_alive(client, page), True)
+        self.fake.tools["notion-fetch"] = lambda args: tool_result(text=head % (page, ' in_trash="true"') + child)
+        self.assertIs(nm.hub_alive(client, page), False)                           # the page's own tag still counts
+        # a yes/no field in the answer's data decides when there is one
+        self.fake.tools["notion-fetch"] = lambda args: tool_result(
+            {"in_trash": False, "text": head % (page, "") + child}, structured=True)
+        self.assertIs(nm.hub_alive(client, page), True)
+        self.fake.tools["notion-fetch"] = lambda args: tool_result({"archived": True, "title": "Gusan meetings"})
+        self.assertIs(nm.hub_alive(client, page), False)
 
     def test_forgetting_the_tokens_forgets_the_memo(self):
         client = self.client()
@@ -2650,17 +2679,50 @@ class TestSend(NetCase):
         self.assertEqual(self.persist.keys()["notion_parent_page"], new_hub)
 
     def test_a_gone_hub_is_found_out_even_when_notion_words_it_differently(self):
-        for marker in (False, True):
-            self.fake.trash_marker = marker
-            self.fake.gone_text = "request failed (code 7)"                      # nothing our classifier knows
-            hub = self.make_page("Gusan meetings")
-            self.fake.trashed.add(hub)
-            del self.fake.mcp_calls[:]
-            out = self.send(hub=hub, parent=hub)
-            creates = self.fake.calls("notion-create-pages")
-            self.assertEqual([c.get("creation_mode") for c in creates], [None, "draft", None], marker)
-            self.assertEqual(len(self.fake.calls("notion-fetch")), 1, marker)
-            self.assertNotEqual(out["hub_id"], ne.extract_page_id(hub))
+        self.fake.trash_marker = True                                           # the fetch shows it in the trash
+        self.fake.gone_text = "request failed (code 7)"                          # nothing our classifier knows
+        hub = self.make_page("Gusan meetings")
+        self.fake.trashed.add(hub)
+        out = self.send(hub=hub, parent=hub)
+        creates = self.fake.calls("notion-create-pages")
+        self.assertEqual([c.get("creation_mode") for c in creates], [None, "draft", None])
+        self.assertEqual(len(self.fake.calls("notion-fetch")), 1)
+        self.assertNotEqual(out["hub_id"], ne.extract_page_id(hub))
+
+    def test_a_hub_nobody_can_say_is_gone_is_never_swapped(self):
+        # The create and the check both answer something we cannot read: that may be an outage,
+        # so the meeting fails with the error and the user's hub stays the one notes go to.
+        self.fake.gone_text = "request failed (code 7)"
+        hub = self.make_page("Gusan meetings")
+        self.fake.trashed.add(hub)
+        with self.assertRaises(NotionError) as cm:
+            self.send(hub=hub, parent=hub)
+        self.assertEqual(cm.exception.code, "other")
+        self.assertEqual(len(self.fake.calls("notion-create-pages")), 1)
+        self.assertEqual(len(self.fake.calls("notion-fetch")), 1)
+        self.assertEqual(self.persist.calls, [])
+
+    def test_a_passing_outage_never_makes_a_second_hub(self):
+        # Notion answers 5xx to the create and to the check: before, the check's failure read as
+        # "the page is gone", so a second "Gusan meetings" page was made and every later meeting went there.
+        hub = self.make_page("Gusan meetings")
+        creds = self.creds()
+        client = nm.McpClient(creds, self.persist)
+        self.assertIs(nm.hub_alive(client, hub), True)                     # the session is up and the hub is fine
+        del self.fake.mcp_calls[:]
+        self.fake.mcp_fail.extend([(503, {}), (503, {})])
+        with self.assertRaises(NotionError) as cm:
+            self.send(creds, hub=hub, parent=hub, client=client)
+        self.assertEqual(cm.exception.code, "other")
+        self.assertIn("Notion had a problem", str(cm.exception))
+        self.assertEqual(self.fake.log.count("mcp:503"), 2)                 # the create, then the check
+        self.assertEqual(self.fake.calls("notion-create-pages"), [])        # nothing after them: no second hub
+        self.assertEqual(self.persist.calls, [])                            # ...and none saved
+        self.assertEqual(len(self.fake.pages), 1)
+        # Notion is back: the next send goes under the same hub
+        out = self.send(creds, hub=hub, parent=hub, client=client)
+        self.assertEqual(out["hub_id"], ne.extract_page_id(hub))
+        self.assertEqual(self.fake.pages[out["page_id"].replace("-", "")]["parent"], ne.extract_page_id(hub))
 
     def test_an_unknown_failure_with_a_hub_that_is_fine_is_reported_not_swapped(self):
         hub = self.make_page("Gusan meetings")
@@ -2965,14 +3027,37 @@ class TestSyncRouting(NetCase):
         res = notion_sync.send_meeting(self.folder, cfg, persist=self.persist, mcp_send=mcp_send)
         self.assertEqual((res["ok"], res["code"]), (False, "auth"))
         self.assertNotIn("notion_reconnect", self.persist.keys())
+        self.assertIs(res["stale"], True)                           # so main's tray hint does not ask for a reconnect
         self.assertEqual(self.meta()["notion_error"], "auth")       # the meeting still says what happened to it
+
+    def test_a_send_that_was_running_when_the_user_connected_again_does_not_flag_the_new_connection(self):
+        # Disconnect + Connect while an automatic send is in flight: the old token is refused, and the
+        # fresh connection must not read "Reconnect" (that would stop every automatic send after it).
+        cfg = self.cfg()
+
+        def mcp_send(creds, *args, **kw):
+            nc.forget_tokens()                                      # Disconnect...
+            nm._adopt_chain({"access_token": "at-new", "refresh_token": "rt-new", "expires_at": time.time() + 9999})
+            raise NotionAuthError(ne.AUTH_AGAIN_TEXT)               # ...Connect, and the old token is refused
+
+        res = notion_sync.send_meeting(self.folder, cfg, auto=True, persist=self.persist, mcp_send=mcp_send)
+        self.assertEqual((res["ok"], res["code"], res["stale"]), (False, "auth", True))
+        self.assertEqual(self.persist.calls, [])
 
     def test_a_refused_token_flags_a_reconnect_when_nobody_disconnected(self):
         def mcp_send(creds, *args, **kw):
             raise NotionAuthError(ne.AUTH_AGAIN_TEXT)
 
-        notion_sync.send_meeting(self.folder, self.cfg(), persist=self.persist, mcp_send=mcp_send)
+        res = notion_sync.send_meeting(self.folder, self.cfg(), persist=self.persist, mcp_send=mcp_send)
         self.assertTrue(self.persist.keys()["notion_reconnect"])
+        self.assertIs(res["stale"], False)
+
+    def test_only_a_refused_token_says_whether_its_connection_is_stale(self):
+        def raiser(*a, **k):
+            raise NotionError("x", code="rate")
+
+        res = notion_sync.send_meeting(self.folder, self.cfg(), persist=self.persist, mcp_send=raiser)
+        self.assertEqual(set(res), {"ok", "url", "code", "sentence"})
 
     def test_the_other_failures_read_the_same_as_before(self):
         cases = ((NotionNotFoundError(ne.AUTH_AGAIN_TEXT), "no_access"), (NotionError("x", code="rate"), "rate"),
@@ -2983,8 +3068,8 @@ class TestSyncRouting(NetCase):
             res = notion_sync.send_meeting(self.folder, self.cfg(), persist=self.persist, mcp_send=raiser)
             self.assertEqual((res["ok"], res["code"]), (False, code), exc)
             # (a page Notion won't let us use: "Pick another page" would send the user looking for
-            # a picker this mode doesn't have, so it says to reconnect)
-            self.assertEqual(res["sentence"], notion_sync.AUTH_OAUTH_TEXT if code == "no_access"
+            # a picker this mode doesn't have, so it says to disconnect and connect again)
+            self.assertEqual(res["sentence"], notion_sync.NO_ACCESS_MCP_TEXT if code == "no_access"
                              else notion_sync.SENTENCES[code])
             self.assertEqual(self.meta()["notion_error"], code)
 
@@ -3066,10 +3151,14 @@ class TestSyncRouting(NetCase):
             self.assertEqual(calls[-1], ("tok", oauth))
         boom.assert_not_called()
 
-    def test_a_page_notion_will_not_let_us_use_says_to_reconnect_in_mcp_mode(self):
-        # nothing to pick in this mode: the old "Pick another page" would send the user looking for a picker
+    def test_a_page_notion_will_not_let_us_use_says_to_connect_again_in_mcp_mode(self):
+        # nothing to pick in this mode: the old "Pick another page" would send the user looking for a picker;
+        # and the token is fine, so Settings has no "Reconnect" button to point at - only Disconnect, then Connect
         exc = NotionNotFoundError("x")
-        self.assertEqual(notion_sync.friendly(exc, "mcp"), ("no_access", notion_sync.AUTH_OAUTH_TEXT))
+        self.assertEqual(notion_sync.friendly(exc, "mcp"), ("no_access", notion_sync.NO_ACCESS_MCP_TEXT))
+        self.assertEqual(notion_sync.NO_ACCESS_MCP_TEXT,
+                         "Couldn't send to Notion. Disconnect and connect it in Meeting settings.")
+        self.assertNotIn("Reconnect", notion_sync.NO_ACCESS_MCP_TEXT)
         self.assertEqual(notion_sync.friendly(exc, "oauth"), ("no_access", notion_sync.SENTENCES["no_access"]))
         self.assertEqual(notion_sync.friendly(exc, "own"), ("no_access", notion_sync.SENTENCES["no_access"]))
         self.assertIn("Pick another page", notion_sync.SENTENCES["no_access"])
@@ -3717,20 +3806,32 @@ class TestMainWiring(unittest.TestCase):
 
     def test_a_refused_mcp_connection_asks_for_a_reconnect_with_the_same_words_as_oauth(self):
         a = self._app()
-        a._notion_auto_done("/m", "Weekly sync", {"ok": False, "url": "", "code": "auth", "sentence": ""})
-        self.assertEqual(a.applied, [("notion_reconnect", True)])
+        a._notion_auto_done("/m", "Weekly sync", {"ok": False, "url": "", "code": "auth", "sentence": "", "stale": False})
         self.assertEqual(a.hints, [("Couldn't send to Notion", "Reconnect it in Meeting settings · Open")])
         self.assertEqual(a.tracked[0][1]["mode"], "mcp")
         self.assertEqual(a.tracked[0][1]["reason"], "auth")
-        again = self._app(notion_reconnect=True)
-        again._notion_auto_done("/m", "Weekly sync", {"ok": False, "url": "", "code": "auth", "sentence": ""})
-        self.assertEqual(again.applied, [])                                   # asked once
+        # The flag itself is notion_sync's to set, through persist (TestSyncRouting
+        # .test_a_refused_token_flags_a_reconnect_when_nobody_disconnected): main never sets it.
+        self.assertEqual(a.applied, [])
+
+    def test_a_refused_token_of_a_connection_given_up_meanwhile_flags_nothing_and_asks_nothing(self):
+        # Disconnect + Connect while an automatic send ran: notion_sync answers "auth" with "stale" and
+        # persists nothing. Before, main set notion_reconnect itself - on the fresh, valid connection.
+        for cfg in ({"notion_auth_mode": "mcp"},                                  # connected again
+                    {"notion_api_key": "", "notion_auth_mode": ""}):               # just disconnected
+            a = self._app(**cfg)
+            a._notion_auto_done("/m", "Weekly sync", {"ok": False, "url": "", "code": "auth", "sentence": "",
+                                                      "stale": True})
+            self.assertEqual(a.applied, [], cfg)
+            self.assertEqual(a.hints, [("Couldn't send to Notion", "Weekly sync · Open")], cfg)
+            self.assertEqual(a.tracked[0][1]["reason"], "auth", cfg)
 
     def test_the_hint_for_a_page_notion_will_not_take_is_mode_aware(self):
         a = self._app()
         a._notion_auto_done("/m", "Weekly sync", {"ok": False, "url": "", "code": "no_access", "sentence": ""})
-        self.assertEqual(a.hints, [("Couldn't send to Notion", "Reconnect it in Meeting settings · Open")])
-        self.assertEqual(a.applied, [])                                        # only a refused token sets the flag
+        # no "Reconnect it": with a token that works, Settings shows Manage and Disconnect, no Reconnect button
+        self.assertEqual(a.hints, [("Couldn't send to Notion", "Disconnect and connect it in Meeting settings · Open")])
+        self.assertEqual(a.applied, [])                                        # nothing here sets the flag
         a = self._app(notion_auth_mode="oauth")
         a._notion_auto_done("/m", "Weekly sync", {"ok": False, "url": "", "code": "no_access", "sentence": ""})
         self.assertEqual(a.hints, [("Couldn't send to Notion", "Pick another page in Meeting settings · Open")])
