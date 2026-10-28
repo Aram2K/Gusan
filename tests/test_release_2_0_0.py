@@ -281,7 +281,7 @@ class TestKeptIdentifiers(unittest.TestCase):
     def test_updater_asset_and_repo(self):
         import updater
         self.assertEqual(updater.INSTALLER_NAME, INSTALLER_ASSET)
-        self.assertEqual(updater.RELEASES_API, "https://api.github.com/repos/Aram2K/transcribe-app/releases/latest")
+        self.assertEqual(updater.RELEASES_API, "https://api.github.com/repos/Aram2K/Gusan/releases/latest")
         self.assertIn(INSTALLER_ASSET, _read(MAIN_PY))
 
     def test_single_instance_port_and_handshake(self):
@@ -524,7 +524,13 @@ class TestBuild(unittest.TestCase):
         win = self.jobs["build-windows"]
         step = _step(win, "Qt window tests (offscreen)")
         self.assertIn("QT_QPA_PLATFORM: offscreen", step)
-        self.assertIn("pytest -q tests_qt", step)
+        self.assertRegex(step, r"pytest -q\b[^\n]*\btests_qt\b")
+        self.assertIn("pytest-xdist", step)                  # the suite is too long for one process
+        self.assertIn("--dist loadfile", step)               # a test file stays in one process
+        self.assertIn("--maxprocesses 3", step)              # one core stays free for the timing tests
+        # The window-freeze timing tests run alone, after the rest (and never twice).
+        self.assertIn("--ignore=tests_qt/test_gui_stall_budget.py", step)
+        self.assertRegex(step, r"pytest -q tests_qt/test_gui_stall_budget\.py")
         self.assertRegex(step, r"(?m)^\s+timeout-minutes:\s*\d+\s*$")    # a hung test can't hold the job
         steps = [n for n, _ in _steps(win)]
         self.assertLess(steps.index("Install dependencies"), steps.index("Qt window tests (offscreen)"))

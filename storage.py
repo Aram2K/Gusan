@@ -301,11 +301,27 @@ def _mac_write_secret(name, value):
                 timeout=5,
             )
             return True
+        # The secret must not be in the process arguments (``ps -ww`` shows them
+        # to every user of a shared Mac): `security -i` takes the command on stdin.
+        command = "add-generic-password -U -s {} -a {} -w {}\n".format(
+            _security_quote(SECRET_SERVICE), _security_quote(name), _security_quote(value))
         result = subprocess.run(
-            ["security", "add-generic-password", "-U", "-s", SECRET_SERVICE, "-a", name, "-w", value],
+            ["security", "-i"],
+            input=command,
+            text=True,
             capture_output=True,
             timeout=5,
         )
-        return result.returncode == 0
+        # `security -i` may answer 0 for a command that failed: read it back.
+        return result.returncode == 0 and _mac_read_secret(name) == value.strip()
     except Exception:
         return False
+
+
+def _security_quote(text):
+    """``text`` as one double-quoted word of `security -i`'s command line.
+    ValueError for a line break or NUL (they would end or split the command)."""
+    text = str(text)
+    if any(c in text for c in "\r\n\0"):
+        raise ValueError("secret can't be passed on one command line")
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'

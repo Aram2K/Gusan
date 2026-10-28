@@ -6,7 +6,10 @@ Used right after Stop, when an interrupted meeting is finished, and by
 
   1. the speaker tool must be here (the speaker model is downloaded once; never
      in Privacy mode);
-  2. each recording part is read again with timestamps (Whisper, one pass);
+  2. each recording part is read again with timestamps (Whisper, one pass) - except a
+     session whose words came from a cloud engine (Live Assistant, Gusan 2.0.1): it hands
+     build_transcript(reader=...) its live pieces as the segments, so the cloud's words
+     stay (a local Whisper re-read would replace them) and only the labels are worked out;
   3. a mic + system sound meeting (both tracks kept): every segment is labelled
      by SOURCE first - the microphone is "You" - and only what the system sound
      carries is diarized (on the system track alone), into "Speaker 1..N"
@@ -245,7 +248,8 @@ def _render(d, labeled_parts, names, out):
 
 
 def build_transcript(rec, parts, *, language=None, privacy=False, status=None,
-                     should_cancel=None, names=None, diarizer=None, diarize=True):
+                     should_cancel=None, names=None, diarizer=None, diarize=True,
+                     reader=None, model=None):
     """Label ``parts`` (a list of Part) and return an Outcome whose ``texts`` are
     the speaker transcripts, one per part.
 
@@ -254,6 +258,13 @@ def build_transcript(rec, parts, *, language=None, privacy=False, status=None,
     the status line (also first-use download progress); ``should_cancel()``;
     ``names``: {diarization speaker id: name} for a later step that knows who is
     who (names read off a shared screen).
+
+    ``reader(audio, language=, should_cancel=, on_progress=)`` replaces the re-read of each
+    part's audio with its own timestamped segments ([{"start", "end", "text"}], or None to
+    cancel): a session whose words came from a cloud engine passes its live pieces here
+    (AudioRecorder.piece_segments), so labels and names are worked out on those words instead
+    of on a local Whisper text that would replace them. ``model``: the Whisper model the
+    re-read uses (a Live Assistant session's own pick); None = the recorder's (Dictation's).
 
     ``diarize=False`` is the fast half, used at Stop: the re-read and the labels by
     SOURCE only - the transcript says "You" (the microphone) and "Them" (everyone on
@@ -304,12 +315,18 @@ def build_transcript(rec, parts, *, language=None, privacy=False, status=None,
             offset += seconds
             if seconds < MIN_SEC:
                 continue
-            label = "Re-reading the recording…" if len(parts) == 1 else \
-                "Re-reading recording %d of %d…" % (i + 1, len(parts))
-            say(label)
-            segments = rec.transcribe_segments(
-                audio, language=language, should_cancel=should_cancel,
-                on_progress=_percent_reporter(say, label))
+            if reader is not None:
+                # The words are already there (their own timestamps): nothing is read again.
+                segments = reader(audio, language=language, should_cancel=should_cancel,
+                                  on_progress=None)
+            else:
+                label = "Re-reading the recording…" if len(parts) == 1 else \
+                    "Re-reading recording %d of %d…" % (i + 1, len(parts))
+                say(label)
+                extra = {"model_name": model} if model else {}
+                segments = rec.transcribe_segments(
+                    audio, language=language, should_cancel=should_cancel,
+                    on_progress=_percent_reporter(say, label), **extra)
             if segments is None:
                 return _fail(out, R_CANCELLED)
             row["segments"] = [dict(s) for s in segments]

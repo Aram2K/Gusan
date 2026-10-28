@@ -58,20 +58,19 @@ starts app.meeting_session itself (not the page's record=True route).
   ``app._pro_upsell("Meeting recording" | "Live Assistance")`` for Free users,
   hides while the Pro window is up and comes back afterwards if the meeting is
   still in its reminder window). It has already hidden itself, so
-  ``record_from_calendar`` only has to start the recording - the Meetings
-  page does it, Pro gate and consent included (ui/pages/meetings.py notes)::
-
-      self.show_main("meetings", record=True, title=m["title"],
-                     attendees=m.get("others") or m.get("attendees"),
-                     calendar_event_id=m["id"])
-
-  and with_assist=True also opens the Live Assistant card (the same path as
-  the Meetings live view: ``show_live_assist()``, else
-  ``live_assist.open_card()``, else ``toggle_live_assist()``).
-* ``join`` is informational (e.g. telemetry): the toast opens the https link
+  ``AppController._on_reminder_record`` counts the tap (calendar_reminder_action
+  record | record_assist) and ``record_from_calendar(m, with_assist)`` starts
+  app.meeting_session with the title, the people on the invite and the event id
+  (consent and fast chunks included). With_assist=True also builds the Live
+  Assistant card first, sends the invite's agenda (the card's INVITE chip shows it,
+  so the user can read and edit it) and opens the card; a plain Record sends the
+  title and names only. Starting from here, the start card or the Live card marks
+  the meeting asked (``note_calendar_start``).
+* ``join`` is informational (telemetry: join): the toast opens the https link
   itself with QDesktopServices and stays up, so the user can still tap Record.
-* ``dismissed`` needs no handling: calendar_service marks the meeting asked
-  before ``remind`` fires (note 6), so "Not this one" only closes the toast.
+* ``dismissed`` needs no handling beyond a count (dismiss): calendar_service marks
+  the meeting asked before ``remind`` fires (note 6), so "Not this one" only closes
+  the toast. ``closed(m, "expired")`` is counted too (nobody answered).
 * Methods the toast calls on main_app (all optional, looked up by name):
   ``is_pro()``, ``_pro_upsell(feature)``, ``cfg`` (dict, read only).
 * Keyboard: the toast never takes focus by itself (it must not steal the
@@ -290,10 +289,14 @@ def join_link(meeting):
 
 # ── pieces ───────────────────────────────────────────────────────────────────
 class _ElidedLabel(QLabel):
-    """One line that ends in "…" when it doesn't fit; the full text is the tooltip."""
+    """One line that ends in "…" when it doesn't fit; the full text is the tooltip.
+    Always plain text: the title and names come from a calendar invite, which
+    anyone can send, and a QLabel would read "<img src=...>" in them as markup and
+    load that image (from the disk, or from a network share) with no click."""
 
     def __init__(self, text="", parent=None):
         super().__init__(parent)
+        self.setTextFormat(Qt.PlainText)            # before the first text
         self._full = ""
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.setMinimumWidth(10)
@@ -315,7 +318,7 @@ class _ElidedLabel(QLabel):
         w = self.width() if self.width() > 20 else 10_000
         shown = QFontMetrics(self.font()).elidedText(self._full, Qt.ElideRight, w)
         QLabel.setText(self, shown)
-        self.setToolTip(self._full if shown != self._full else "")
+        self.setToolTip(theme.plain_tip(self._full) if shown != self._full else "")
 
     def sizeHint(self):
         fm = QFontMetrics(self.font())
@@ -558,7 +561,7 @@ class MeetingReminder(QWidget):
                 host = urlsplit(link).hostname or ""
             except ValueError:
                 host = ""
-        self.join_button.setToolTip(host)
+        self.join_button.setToolTip(theme.plain_tip(host))
         self.refresh_account()
         self._update_when()
         self.setAccessibleDescription("%s. %s" % (title, self.when_text()))

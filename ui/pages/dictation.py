@@ -63,7 +63,7 @@ Integration notes for Wave 4
 import logging
 import os
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFontMetricsF, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QCheckBox, QComboBox, QFileDialog,
                                QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout, QLabel, QMenu, QPlainTextEdit,
@@ -71,7 +71,7 @@ from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QCheckBox, QComboB
 
 from ui import privacy_prompt, theme
 from ui.components import (Button, Card, Divider, IconButton, Keycaps, PageHeader, SettingRow, SettingsRail,
-                           Toggle, icons, label)
+                           Toggle, icons, label, mini_prompt, row_actions)
 from ui.components.controls import keycap_labels
 from ui.components.hotkey_capture import HotkeyCaptureButton
 from ui.pages import home as H
@@ -430,7 +430,10 @@ class LangTag(QWidget):
 
 
 class DictationRow(H._Hairline):
-    """time · one line · EN · Copy (46 px, plain on the window)."""
+    """time · one line · EN · Copy · a trash icon while the pointer is on the row (46 px, plain on
+    the window). The icon asks first (the page does) and the Delete key does the same from Copy."""
+
+    delete_requested = Signal(object)            # the entry
 
     def __init__(self, entry, now, parent, first=False):
         super().__init__(parent, first=False, token="line2" if first else "line")
@@ -455,6 +458,14 @@ class DictationRow(H._Hairline):
         self.copy_button.setAccessibleName("Copy “%s”" % text[:40])
         self.copy_button.clicked.connect(self._copy)
         lay.addWidget(self.copy_button, 0, Qt.AlignVCenter)
+        self.trash = row_actions.attach_trash(self, lay, text[:40], lambda: self.delete_requested.emit(self.entry))
+        self.copy_button.installEventFilter(self)
+
+    def eventFilter(self, obj, ev):
+        if obj is self.copy_button and ev.type() == QEvent.KeyPress and ev.key() == Qt.Key_Delete:
+            self.delete_requested.emit(self.entry)       # the keyboard's way: Delete on the row's Copy button
+            return True
+        return False
 
     def timestamp(self):
         return str(self.entry.get("timestamp") or "")
@@ -658,7 +669,18 @@ class DictationPage(QWidget):
                   self.runs_sep3, self.runs_extra, self.runs_sep4, self.runs_change):
             row.addWidget(w, 0, Qt.AlignVCenter)
         row.addStretch(1)
-        return row
+        # Under it, in plain words: Whisper on this computer isn't reliable for the language set (Armenian)
+        # - the same hint the Live Assistant has (engine_choice.dictation_note), naming the Armenian model
+        # when it can be had. Nothing for any other language or engine.
+        self.runs_hint = label("", "hint", self, wrap=True)
+        self.runs_hint.setContentsMargins(2, 0, 2, 0)
+        self.runs_hint.hide()
+        col = QVBoxLayout()
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(3)
+        col.addLayout(row)
+        col.addWidget(self.runs_hint)
+        return col
 
     def _build_list(self):
         col = QVBoxLayout()
@@ -755,9 +777,9 @@ class DictationPage(QWidget):
 
         try:
             import engine_choice
-            cloud_model = engine_choice.CLOUD_SPEECH_MODELS.get("gemini", "Gemini 2.5 Flash")
+            cloud_model = engine_choice.CLOUD_SPEECH_MODELS.get("gemini", "Fast")     # the profile: Gusan chooses the model
         except Exception:
-            cloud_model = "Gemini 2.5 Flash"
+            cloud_model = "Fast"
         self.cloud = Toggle("Gusan Cloud speech", False)
         self.cloud.toggled.connect(self._on_cloud)
         self.row_cloud = rail.add_row(SettingRow("Gusan Cloud speech", self.cloud, pro=True, model=cloud_model))
@@ -867,6 +889,15 @@ class DictationPage(QWidget):
         self.runs_sep3.setVisible(bool(extra))
         line = " · ".join(x for x in (plain, model if show_model else "", where if show_where else "", extra) if x)
         self.runs_plain.setAccessibleName("Runs on " + line)
+        try:
+            import engine_choice
+            note = engine_choice.dictation_note(H.cfg_of(self.app), H.is_pro(self.app),
+                                                getattr(getattr(self.app, "auth", None), "is_authenticated", None))
+        except Exception:
+            logger.debug("dictation_note failed", exc_info=True)
+            note = ""
+        self.runs_hint.setText(note)
+        self.runs_hint.setVisible(bool(note))
 
     def runs_on_text(self):
         """"Runs on Balanced · Whisper Small · on this computer" as shown."""
@@ -1127,7 +1158,9 @@ class DictationPage(QWidget):
                 self.list_lay.addWidget(lb)
                 first_group = False
                 first = True
-            self.list_lay.addWidget(DictationRow(e, now, self.list_box, first=first))
+            row = DictationRow(e, now, self.list_box, first=first)
+            row.delete_requested.connect(self._ask_delete)
+            self.list_lay.addWidget(row)
             first = False
         self.more_button.setVisible(len(found) > len(shown))
         self._fix_tab_order()
@@ -1176,6 +1209,44 @@ class DictationPage(QWidget):
     def _unflash_rows(self):
         for r in self.shown_rows():
             r.set_flash(False)
+
+    # ── delete ──
+    def _ask_delete(self, entry):
+        """The trash icon (or the Delete key) on a row: ask in the app's own card, then delete."""
+        snippet = H.one_line(entry.get("text"))
+        if len(snippet) > 90:
+            snippet = snippet[:89].rstrip() + "…"
+        if not mini_prompt.confirm(self, "Delete this dictation?", snippet, "Delete", "Cancel", danger=True,
+                                   detail="It is removed from this computer.", icon="trash"):
+            return False
+        self.delete_entries([entry])
+        return True
+
+    def delete_entries(self, entries):
+        """Remove these dictations from the saved history (a quick file rewrite, off the window's thread)
+        and from the list. Nothing else is touched."""
+        entries = list(entries)
+
+        def work():
+            import history
+            return history.delete_entries(entries)
+
+        def done(n, gone=entries):
+            try:
+                remaining = list(self._entries)
+                for g in gone:                       # the first equal one for each, as history.delete_entries does:
+                    for i, e in enumerate(remaining):    # two dictations of the same words go one at a time
+                        if e == g:
+                            del remaining[i]
+                            break
+                self._entries = remaining
+                self._render_list()
+                H.call(self.app, "track", "history_cleared", {"count": int(n or 0), "meetings": 0, "from": "dictation"})
+            except RuntimeError:
+                pass
+
+        H.run_later(work, done, error=lambda e: logger.warning("Deleting a dictation failed: %s", e),
+                    sync=self.sync_io)
 
     # ── export ──
     def _export_menu(self):

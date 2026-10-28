@@ -10,11 +10,17 @@ Gusan 2.0 retired; only these helpers were still in use.
 import logging
 import os
 
-from PySide6.QtWidgets import QFileDialog, QMessageBox
+from PySide6.QtWidgets import QFileDialog
 
 logger = logging.getLogger("transcribe")
 
 CONSENT_KEY = "meeting_consent_ack"
+CONSENT_TITLE = "Before you record"
+CONSENT_TEXT = "You're about to record a meeting - including other people's voices."
+CONSENT_DETAIL = ("Depending on your country or state, recording a conversation may require the "
+                  "consent of all participants. By continuing you confirm you have any consent "
+                  "required where you are.\n\nThis notice is shown only once.")
+CONSENT_YES = "I understand - continue"
 
 
 def _remember_consent(app):
@@ -44,20 +50,11 @@ def ensure_recording_consent(parent, app):
     cfg = getattr(app, "cfg", None)
     if cfg is None or cfg.get(CONSENT_KEY):
         return True
-    box = QMessageBox(parent)
-    box.setWindowTitle("Before you record")
-    box.setIcon(QMessageBox.Information)
-    box.setText("You're about to record a meeting - including other people's voices.")
-    box.setInformativeText(
-        "Depending on your country or state, recording a conversation may "
-        "require the consent of all participants. By continuing you confirm "
-        "you have any consent required where you are.\n\n"
-        "This notice is shown only once."
-    )
-    ok = box.addButton("I understand - continue", QMessageBox.AcceptRole)
-    box.addButton("Cancel", QMessageBox.RejectRole)
-    box.exec()
-    if box.clickedButton() is ok:
+    # (imported here: the components pull in Qt's SVG module, which the tests' stand-ins of Qt
+    # do not have - a test that only patches this module's functions must still import it)
+    from ui.components import mini_prompt
+    if mini_prompt.confirm(parent, CONSENT_TITLE, CONSENT_TEXT, CONSENT_YES, "Cancel", danger=False,
+                           detail=CONSENT_DETAIL, icon="people"):
         _remember_consent(app)
         return True
     return False

@@ -555,7 +555,9 @@ def test_copy_notice(shell, meetings_root):
 
 
 # ── Google Calendar ──────────────────────────────────────────────────────────
-def test_calendar_not_connected(shell, meetings_root):
+def test_calendar_not_connected(shell, meetings_root, monkeypatch):
+    from ui.components import mini_prompt
+    monkeypatch.setattr(mini_prompt, "ask", lambda *a, **k: True)   # the disclosure card: "Connect"
     cal = FakeCalendar(connected=False)
     win, app = shell("free", calendar=cal)
     page = _open(win)
@@ -934,6 +936,62 @@ def test_open_live_assistant_never_hides_the_card(shell, meetings_root):
     page = _open(win)
     page.live_view.assist_btn.click()
     assert ("show_live_assist",) in app.calls and ("toggle_live_assist",) not in app.calls
+
+
+def test_tell_everyone_line_only_for_calendar_with_others(shell, meetings_root, monkeypatch):
+    """The start card's "Let everyone know you're recording." is also on the live view for a
+    calendar meeting with somebody else on it - the reminder's Record never shows the card."""
+    from PySide6.QtGui import QGuiApplication
+    from ui.pages import meeting_views
+
+    class Snap(FakeSession):
+        def __init__(self, **snap):
+            super().__init__("recording")
+            self._snap = snap
+
+        def snapshot(self):
+            return {"phase": self.phase, "language": "en", "audio_mode": "smart_meeting", **self._snap}
+
+    def shown(cfg=None, **snap):
+        session = Snap(**snap)
+        win, app = shell("pro", meeting_session=session)      # the stub user is Aram Adamyan
+        app.cfg.update(cfg or {})
+        page = _open(win)
+        page.show_live()
+        QApplication.processEvents()
+        return page.live_view
+
+    toast = dict(source="calendar", calendar_event_id="ev1",
+                 attendees_list=["Aram Adamyan", "Anna Smith"])          # the reminder puts you in the names
+    live = shown(**toast)
+    assert live.consent_row.isVisibleTo(live)
+    assert live.copy_notice_btn.text() == "Copy notice"
+    live.copy_notice_btn.click()
+    assert QGuiApplication.clipboard().text() == meeting_views.NOTICE_TEXT
+    assert live.copy_notice_btn.text() == "Copied"
+    # From the start card with a meeting (the people there are the others), and from the
+    # Live Assistant card with an invite.
+    assert _consent_visible(shown, source="calendar", calendar_event_id="ev1", attendees_list=["Anna"])
+    assert _consent_visible(shown, source="live_assist", calendar_event_id="ev1",
+                            attendees_list=["Aram Adamyan", "Anna Smith"])
+    # Not for a recording that isn't a calendar meeting ...
+    assert not _consent_visible(shown, source="page", attendees_list=["Anna", "David"])
+    assert not _consent_visible(shown, source="live_assist", calendar_event_id="", attendees_list=["Anna"])
+    assert not _consent_visible(shown, attendees_list=["Anna"])                       # no source at all
+    # ... nor when you are the only one on the invite, or nobody is named.
+    assert not _consent_visible(shown, source="calendar", calendar_event_id="ev1", attendees_list=["Aram Adamyan"])
+    assert not _consent_visible(shown, source="calendar", calendar_event_id="ev1", attendees_list=[])
+    # ... nor with the setting off (the same one that controls the start card's line).
+    assert not _consent_visible(shown, cfg={"meeting_consent_reminder": False}, **toast)
+    # ... and not once the recording is over.
+    live = shown(**toast)
+    live.set_phase("processing")
+    assert not live.consent_row.isVisibleTo(live)
+
+
+def _consent_visible(shown, cfg=None, **snap):
+    live = shown(cfg=cfg, **snap)
+    return live.consent_row.isVisibleTo(live)
 
 
 # ── Notion: the rail, the sheet's entry point, Send to Notion ────────────────

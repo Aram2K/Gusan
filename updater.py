@@ -1,10 +1,12 @@
 """Updates (Gusan 2.0): one copy of the check and the install, shared by the
 controller and Settings › Updates & about.
 
-Kept exactly, because every 1.9.x install updates through them: the GitHub
-repo Aram2K/transcribe-app, RELEASES_API (latest release), tags "vX.Y.Z", and
-the asset TranscribeApp-Windows-Setup.exe (+ its .sha256, which build.yml
-publishes next to it).
+Kept exactly, because every 1.9.x install updates through them: RELEASES_API
+(latest release), tags "vX.Y.Z", and the asset TranscribeApp-Windows-Setup.exe
+(+ its .sha256, which build.yml publishes next to it). The GitHub repo was
+renamed from Aram2K/transcribe-app to Aram2K/Gusan: older installs still ask the
+old address, which GitHub redirects, so a repo named transcribe-app must never
+be created again.
 
 Integration notes for Wave 4
 ----------------------------
@@ -71,10 +73,10 @@ from app_info import APP_NAME, APP_VERSION
 
 logger = logging.getLogger("transcribe")
 
-PROJECT_GITHUB_URL = "https://github.com/Aram2K/transcribe-app"
-RELEASES_URL = "https://github.com/Aram2K/transcribe-app/releases/latest"
-RELEASES_API = "https://api.github.com/repos/Aram2K/transcribe-app/releases/latest"
-RELEASES_MANIFEST_URL = "https://github.com/Aram2K/transcribe-app/releases/latest/download/update-manifest.json"
+PROJECT_GITHUB_URL = "https://github.com/Aram2K/Gusan"
+RELEASES_URL = "https://github.com/Aram2K/Gusan/releases/latest"
+RELEASES_API = "https://api.github.com/repos/Aram2K/Gusan/releases/latest"
+RELEASES_MANIFEST_URL = "https://github.com/Aram2K/Gusan/releases/latest/download/update-manifest.json"
 INSTALLER_NAME = "TranscribeApp-Windows-Setup.exe"      # never rename: 1.9.x downloads this
 
 AVAILABLE, LATEST, ERROR, DISMISSED = "available", "latest", "error", "dismissed"

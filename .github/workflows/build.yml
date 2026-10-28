@@ -135,20 +135,26 @@ jobs:
       # The Gusan window, pages, welcome and floating surfaces, built for real
       # (offscreen) on the build's Python - the test job runs tests/ with
       # stand-ins for Qt. compileall catches syntax this Python can't read in
-      # modules the tests don't import. The suite takes ~3-5 min locally; the
-      # cap stops a hung test from holding the job for GitHub's 6-hour default.
+      # modules the tests don't import. Every test builds real pages, so the suite
+      # is ~25 min in ONE process on a laptop: pytest-xdist runs it on up to 3
+      # cores (one test FILE stays in one process, one core stays free). The
+      # window-freeze timing tests run alone afterwards: they measure how long
+      # the window stops, so they must not compete with other tests for the CPU.
+      # The cap stops a hung test from holding the job for GitHub's 6-hour default.
       - name: Qt window tests (offscreen)
         shell: pwsh
-        timeout-minutes: 25
+        timeout-minutes: 40
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
-          pip install pytest --quiet
+          pip install pytest pytest-xdist --quiet
           python -m compileall -q -l .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m compileall -q ui
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pytest -q tests_qt
+          python -m pytest -q -n auto --maxprocesses 3 --dist loadfile tests_qt --ignore=tests_qt/test_gui_stall_budget.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pytest -q tests_qt/test_gui_stall_budget.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Generate app icon

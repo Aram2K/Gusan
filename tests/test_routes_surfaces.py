@@ -233,6 +233,21 @@ class TestOnboardingAndSignIn(unittest.TestCase):
         app.show_auth_gate()
         self.assertEqual(app.opened, [("account", {})])        # signed in: Account & plan
 
+    def test_a_super_admin_previewing_guest_gets_the_sign_in_sheet(self):
+        # Signed in underneath, a guest on screen: "Sign in / Sign up" must open the sheet a guest
+        # would get, not bounce to Account & plan (whose own button would bounce back).
+        app = bind(opener(), "show_auth_gate")
+        app.auth = SimpleNamespace(is_authenticated=True, is_pro=False, user_name="Aram", user_email="a@b.c")
+        app.is_pro = lambda: False
+        app.current_tier = lambda: "guest"
+        app._show_auth_sheet = mock.MagicMock(return_value="sheet")
+        self.assertEqual(app.show_auth_gate(), "sheet")
+        app._show_auth_sheet.assert_called_once_with("signin")
+        self.assertEqual(app.opened, [])
+        app.current_tier = lambda: "free"                      # previewing Free (or really Free): Account
+        app.show_auth_gate()
+        self.assertEqual(app.opened, [("account", {})])
+
     def test_the_sheet_is_wired_once_and_opens_the_app_when_signed_in(self):
         sheet = SimpleNamespace(signed_in=Sig(), finished=Sig())
         calls = []
@@ -294,6 +309,34 @@ class TestProWindow(unittest.TestCase):
             self.assertEqual((made[0][0], props), (name, {"feature": name}))
         made, props = self._run(None)                          # the plain Upgrade
         self.assertEqual((made[0][0], props), (None, {"feature": ""}))
+
+    def _fallback(self, guest):
+        """The plain prompt shown when the Pro window cannot be built: what it offers."""
+        class BrokenProDialog:
+            def __init__(self, *a, **k):
+                raise RuntimeError("no window")
+        prompts = []
+        prompt = fake_module("ui.components.mini_prompt",
+                             choose=lambda parent, title, text, buttons, **kw: prompts.append(
+                                 (text, [b[0] for b in buttons], [b[1] for b in buttons])) or None)
+        components = fake_module("ui.components", mini_prompt=prompt)
+        app = bind(SimpleNamespace(cfg={}, main_win=None, auth=SimpleNamespace(is_authenticated=not guest),
+                                   is_pro=lambda: False, current_tier=lambda: "guest" if guest else "free"),
+                   "_pro_upsell", "_dialog_parent")
+        mods = {"ui.pro_dialog": fake_module("ui.pro_dialog", ProDialog=BrokenProDialog),
+                "ui.components": components, "ui.components.mini_prompt": prompt}
+        with mock.patch.dict(sys.modules, mods), mock.patch.object(main.telemetry, "track"):
+            app._pro_upsell("Meeting recording")
+        return prompts[0]
+
+    def test_the_plain_prompt_leads_a_guest_through_sign_in_first(self):
+        text, keys, labels = self._fallback(guest=True)
+        self.assertEqual((keys, labels), (["signin", "cancel"], ["Sign in / Sign up", "Maybe later"]))
+        self.assertIn("Sign in first", text)
+        self.assertNotIn("Upgrade", text)                      # no price buttons, no upgrade wording
+        text, keys, labels = self._fallback(guest=False)
+        self.assertEqual(keys, ["monthly", "annual", "cancel"])
+        self.assertIn("Upgrade to unlock", text)
 
     def test_it_opens_over_the_window_while_the_window_is_up(self):
         win = SimpleNamespace(isVisible=lambda: True, isMinimized=lambda: False)
@@ -394,8 +437,11 @@ MEETING = {"id": "ev1", "title": "Weekly product sync", "attendees": ["Aram", "A
 
 def calendar_app(pro=True):
     app = bind(opener(), "_on_calendar_remind", "_ensure_reminder", "_on_reminder_dismissed",
-               "_on_session_state_for_reminder", "record_from_calendar")
+               "_on_reminder_record", "_on_reminder_join", "_on_reminder_closed",
+               "_on_session_state_for_reminder", "record_from_calendar", "calendar_start_context",
+               "note_calendar_start")
     app._reminder = None
+    app.live_assist = None
     app.hints = []
     app.show_tray_hint = lambda t, m, on_click=None: app.hints.append((t, m))
     app.tray_icon = SimpleNamespace(geometry=lambda: "tray-rect")
@@ -512,8 +558,50 @@ class TestCalendarReminder(unittest.TestCase):
         app.start_result = (False, "device", "Can't open the microphone.")
         self.assertFalse(app.record_from_calendar(MEETING))
         self.assertEqual(app.opened, [("meetings", {"title": "Weekly product sync", "attendees": ["Anna", "David"],
-                                                    "calendar_event_id": "ev1"})])
+                                                    "calendar_event_id": "ev1", "agenda": ""})])
         self.assertEqual(app.hints, [("Couldn't start the recording", "Can't open the microphone.")])
+
+
+    def test_the_agenda_goes_only_with_live_assistant(self):
+        meeting = dict(MEETING, agenda="Budget\nHiring", private=False)
+        app = calendar_app()
+        app._on_calendar_remind(meeting)
+        app._reminder.record.emit(meeting, False)               # a plain Record: title and names only
+        self.assertNotIn("agenda", app.started[0])
+        self.assertEqual(app.tracked[-1], "calendar_meeting_started")
+        app = calendar_app()
+        app._on_calendar_remind(meeting)
+        app._reminder.record.emit(meeting, True)                # Record + Live Assistant: the user sees it
+        self.assertEqual(app.started[0]["agenda"], "Budget\nHiring")
+        self.assertEqual(app.started[0]["attendees"], "Aram, Anna, David")
+        app.calendar.mark_prompted.assert_called_with("ev1")    # asked: never again
+        # A private event never has one, whichever button.
+        app = calendar_app()
+        app.record_from_calendar(dict(meeting, private=True), with_assist=True)
+        self.assertNotIn("agenda", app.started[0])
+
+    def test_a_refused_start_fills_the_start_card_with_the_agenda_the_user_can_read(self):
+        meeting = dict(MEETING, agenda="Budget\nHiring")
+        app = calendar_app()
+        app.start_result = (False, "busy", "A meeting is already being recorded or saved.")
+        self.assertFalse(app.record_from_calendar(meeting))     # plain: nothing was sent...
+        self.assertNotIn("agenda", app.started[0])
+        self.assertEqual(app.opened[0][1]["agenda"], "Budget\nHiring")   # ...but the card shows it
+        app.calendar.mark_prompted.assert_not_called()
+
+    def test_the_toast_signals_are_counted_without_any_text(self):
+        app = calendar_app()
+        app._on_calendar_remind(MEETING)
+        toast = app._reminder
+        names = []
+        app.track = lambda event, props=None: names.append((event, props))
+        toast.join.emit(MEETING)
+        toast.dismissed.emit(MEETING)
+        toast.closed.emit(MEETING, "expired")
+        toast.closed.emit(MEETING, "hidden")
+        self.assertEqual(names, [("calendar_reminder_action", {"action": "join"}),
+                                 ("calendar_reminder_action", {"action": "dismiss"}),
+                                 ("calendar_reminder_action", {"action": "expired"})])
 
 
 # ── copy ──────────────────────────────────────────────────────────────────────

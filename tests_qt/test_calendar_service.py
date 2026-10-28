@@ -13,11 +13,13 @@ import calendar_sync
 T = datetime(2026, 10, 7, 14, 30, tzinfo=timezone.utc)
 
 
-def meeting(mid, start_min=0, length_min=60, link="https://meet.google.com/abc-defg-hij", title="Sync"):
+def meeting(mid, start_min=0, length_min=60, link="https://meet.google.com/abc-defg-hij", title="Sync",
+            others=("Anna", "David")):
     st = T + timedelta(minutes=start_min)
     return {"id": mid, "title": title, "start": st, "end": st + timedelta(minutes=length_min),
-            "attendees": ["Aram", "Anna", "David"], "others": ["Anna", "David"], "link": link,
-            "call_type": "Google Meet" if link else "", "recurring_id": ""}
+            "attendees": ["Aram"] + list(others), "others": list(others), "link": link,
+            "call_type": "Google Meet" if link else "", "recurring_id": "",
+            "agenda": "", "has_others": bool(others), "private": False}
 
 
 class FakeApi:
@@ -29,6 +31,7 @@ class FakeApi:
         self.fetches = []                # (thread, now) per upcoming() call
         self.revoked = []
         self.connect_mode = "ok"         # "ok" | "error" | "block"
+        self.connect_code = None         # the code of the CalendarError connect() raises
 
     def configured(self, cfg=None):
         return self._configured
@@ -44,7 +47,7 @@ class FakeApi:
 
     def connect(self, cfg=None, cancel=None, open_browser=None):
         if self.connect_mode == "error":
-            raise calendar_sync.CalendarError("Google sign-in was cancelled.")
+            raise calendar_sync.CalendarError("Google sign-in was cancelled.", self.connect_code)
         if self.connect_mode == "block":
             cancel.wait(5)
             raise calendar_sync.CalendarCancelled("Sign-in cancelled.")
@@ -113,9 +116,12 @@ def make(qapp, tmp_path):
         svc = calendar_service.CalendarService(
             cfg if cfg is not None else {}, is_busy=busy, api=api, clock=clock,
             state_path=tmp_path / "calendar_state.json", run_async=run_async, **kw)
-        log = {name: [] for name in ("changed", "connected", "disconnected", "error", "remind", "connecting")}
+        log = {name: [] for name in ("changed", "connected", "disconnected", "error", "remind", "connecting",
+                                     "status", "connect_result")}
         for name, bucket in log.items():
-            getattr(svc, name).connect(bucket.append)
+            if name != "connect_result":
+                getattr(svc, name).connect(bucket.append)
+        svc.connect_result.connect(lambda ok, reason: log["connect_result"].append((ok, reason)))
         made.append(svc)
         return svc, api, clock, log
 
@@ -139,7 +145,7 @@ def wait_for(pred, timeout=5.0):
 
 
 def test_start_runs_both_timers_and_fetches(make):
-    svc, api, _, log = make()
+    svc, api, _, log = make(rand=lambda: 0.5)         # no jitter: exactly the fast interval
     assert not svc._remind_timer.isActive()
     svc.start()
     assert svc._fetch_timer.isActive() and svc._fetch_timer.interval() == 5 * 60 * 1000
@@ -208,7 +214,8 @@ def test_ask_to_record_off_means_no_reminders(make):
     assert log["remind"] == []
 
 
-def test_a_row_that_ends_is_re_emitted_once(make):
+def test_a_row_that_ends_is_re_emitted_once(make, monkeypatch):
+    monkeypatch.setattr(calendar_service, "FETCH_STALE_S", 10 ** 6)     # a 61 min jump isn't a stale cache here
     svc, _, clock, log = make()
     svc.start()
     n = len(log["changed"])
@@ -221,9 +228,9 @@ def test_a_row_that_ends_is_re_emitted_once(make):
     assert len(log["changed"]) == n + 1
 
 
-def test_link_filter_setting_re_emits(make):
+def test_other_people_setting_re_emits(make):
     cfg = {}
-    api = FakeApi([meeting("call", 10), meeting("lunch", 20, link="")])
+    api = FakeApi([meeting("call", 10), meeting("lunch", 20, others=())])
     svc, _, _, log = make(api=api, cfg=cfg)
     svc.start()
     assert [m["id"] for m in log["changed"][-1]] == ["call"]
@@ -387,3 +394,447 @@ def test_current_meeting_for_the_start_card(make):
     assert svc.current_meeting()["id"] == "a"
     clock.now = T + timedelta(hours=3)
     assert svc.current_meeting() is None
+
+
+# ── polling: single-shot timer, backoff, pre-meeting read, stale cache, status ──
+def _fast(**kw):
+    return dict(rand=lambda: 0.5, **kw)               # jitter factor exactly 1
+
+
+def test_fetch_timer_single_shot_rescheduled(make):
+    svc, api, _, _ = make(**_fast())
+    assert svc._fetch_timer.isSingleShot()
+    svc.start()
+    assert svc._fetch_timer.isActive() and svc._fetch_timer.interval() == 300_000
+    svc._fetch_timer.stop()                           # as after a real timeout of a single-shot timer
+    assert not svc._fetch_timer.isActive()
+    svc._fetch_timer.timeout.emit()
+    assert len(api.fetches) == 2
+    assert svc._fetch_timer.isActive() and svc._fetch_timer.interval() == 300_000    # re-armed by the result
+
+
+def test_fetch_interval_follows_the_day(make):
+    api = FakeApi([meeting("far", 400)])                # nothing within 2 h: a quiet day
+    svc, api, clock, _ = make(api=api, **_fast())
+    svc.start()
+    assert svc._fetch_timer.interval() == 900_000
+    api.meetings = [meeting("far", 400), meeting("soon", 60)]
+    svc._fetch_timer.timeout.emit()
+    assert svc._fetch_timer.interval() == 300_000
+    api.meetings = []                                   # nothing at all counts as busy
+    svc._fetch_timer.timeout.emit()
+    assert svc._fetch_timer.interval() == 300_000
+
+
+def test_fetch_interval_has_jitter(make):
+    seen = set()
+    for luck in (0.0, 1.0):
+        svc, _, _, _ = make(rand=lambda luck=luck: luck)
+        svc.start()
+        seen.add(svc._fetch_timer.interval())
+    assert seen == {225_000, 375_000}
+    svc, _, _, _ = make()                               # the real random source
+    svc.start()
+    assert 225_000 <= svc._fetch_timer.interval() <= 375_000
+
+
+def test_backoff_after_errors_resets_on_success(make):
+    svc, api, clock, log = make(**_fast())
+    svc.start()
+    api.fail = calendar_sync.CalendarError("Google Calendar isn't answering. Trying again soon.")
+    steps = []
+    for _ in range(5):
+        svc._fetch_timer.timeout.emit()
+        steps.append(svc._fetch_timer.interval())
+    assert steps == [600_000, 1_200_000, 1_800_000, 1_800_000, 1_800_000]       # doubled, then the cap
+    assert log["error"] == ["Google Calendar isn't answering. Trying again soon."]   # said once per streak
+    assert [m["id"] for m in svc.meetings()] == ["a", "b"]                      # the list is kept
+    api.fail = None
+    svc._fetch_timer.timeout.emit()
+    assert svc._fetch_timer.interval() == 300_000                               # a success resets it
+    assert svc.last_error == ""
+    api.fail = calendar_sync.CalendarError("x")
+    svc._fetch_timer.timeout.emit()
+    assert svc._fetch_timer.interval() == 600_000                               # counting from zero again
+
+
+def test_failing_reads_are_not_hammered_by_the_stale_check(make):
+    svc, api, clock, _ = make(**_fast())
+    svc.start()
+    api.fail = calendar_sync.CalendarError("offline")
+    svc._fetch_timer.timeout.emit()
+    n = len(api.fetches)
+    for _ in range(5):
+        clock.now += timedelta(minutes=30)              # long past the stale limit
+        tick(svc)
+    assert len(api.fetches) == n                        # the backoff decides, not the 20 s tick
+
+
+def test_a_failed_read_still_rate_limits_the_page_refresh(make):
+    svc, api, clock, _ = make(**_fast())
+    svc.start()
+    api.fail = calendar_sync.CalendarError("offline")
+    svc._fetch_timer.timeout.emit()
+    n = len(api.fetches)
+    clock.now += timedelta(seconds=30)
+    assert svc.refresh() is False and len(api.fetches) == n        # the page shown again within a minute
+    clock.now += timedelta(seconds=40)
+    assert svc.refresh() is True and len(api.fetches) == n + 1
+
+
+def test_pre_meeting_refresh_is_scheduled(make):
+    api = FakeApi([meeting("m", 10)])
+    svc, api, clock, log = make(api=api, now=T + timedelta(minutes=3), **_fast())
+    svc.start()
+    # Starts in 7 min: read again 150 s before the start (in 270 s), not at the 300 s tick.
+    assert svc._fetch_timer.interval() == 270_000
+    # The meeting is cancelled meanwhile; the read just before it catches that.
+    api.meetings = []
+    clock.now = T + timedelta(minutes=7, seconds=30)
+    svc._fetch_timer.timeout.emit()
+    assert svc.meetings() == [] and log["changed"][-1] == []
+    assert svc._fetch_timer.interval() == 300_000       # nothing left to catch: the normal tick
+    clock.now = T + timedelta(minutes=10)
+    tick(svc)
+    assert log["remind"] == []                          # no toast for a meeting that isn't there
+
+
+def test_a_moved_meeting_is_asked_at_its_new_time(make):
+    api = FakeApi([meeting("m", 10)])
+    svc, api, clock, log = make(api=api, now=T + timedelta(minutes=3), **_fast())
+    svc.start()
+    api.meetings = [meeting("m", 40)]                   # moved 30 min later
+    clock.now = T + timedelta(minutes=7, seconds=30)
+    svc._fetch_timer.timeout.emit()
+    clock.now = T + timedelta(minutes=10)
+    tick(svc)
+    assert log["remind"] == []
+    clock.now = T + timedelta(minutes=39)
+    tick(svc)
+    assert [m["id"] for m in log["remind"]] == ["m"]
+
+
+def test_stale_cache_refreshes_on_tick(make):
+    svc, api, clock, log = make(**_fast())
+    svc.start()
+    assert len(api.fetches) == 1
+    clock.now += timedelta(minutes=10)
+    tick(svc)
+    assert len(api.fetches) == 1                        # fresh enough
+    clock.now += timedelta(minutes=11)                  # 21 min without a good read (sleep)
+    tick(svc)
+    assert len(api.fetches) == 2
+    tick(svc)
+    assert len(api.fetches) == 2                        # one read, not one per tick
+    assert svc._fetch_timer.isActive()
+
+
+def test_stale_cache_waits_while_paused_or_disconnected(make):
+    allowed = {"on": True}
+    svc, api, clock, _ = make(network_ok=lambda: allowed["on"], **_fast())
+    svc.start()
+    allowed["on"] = False
+    clock.now += timedelta(hours=3)
+    tick(svc)
+    assert len(api.fetches) == 1                        # Privacy mode: no request
+    allowed["on"] = True
+    off, off_api, off_clock, _ = make(api=FakeApi(connected=False), **_fast())
+    off.start()
+    off_clock.now += timedelta(hours=3)
+    tick(off)
+    assert off_api.fetches == []
+
+
+def test_status_signal_privacy_and_error(make):
+    allowed = {"on": True}
+    svc, api, _, log = make(network_ok=lambda: allowed["on"], **_fast())
+    svc.start()
+    assert svc.status_text() == "" and log["status"] == []
+    allowed["on"] = False
+    svc.on_setting_changed("privacy_mode")
+    assert svc.status_text() == "Paused in Privacy mode."
+    assert log["status"] == ["Paused in Privacy mode."]
+    svc.on_setting_changed("privacy_mode")
+    assert log["status"] == ["Paused in Privacy mode."]            # emitted when it changes only
+    allowed["on"] = True
+    api.fail = calendar_sync.CalendarError("Google is busy. Trying again soon.")
+    svc.on_setting_changed("privacy_mode")                          # back on: reads again, and it fails
+    assert svc.status_text() == "Couldn't read Google Calendar. Trying again."
+    assert log["status"][-1] == "Couldn't read Google Calendar. Trying again."
+    api.fail = None
+    svc._fetch_timer.timeout.emit()
+    assert svc.status_text() == "" and log["status"][-1] == ""      # cleared by the next good read
+    assert svc.meetings()
+    svc.disconnect_calendar()
+    assert svc.status_text() == ""
+
+
+def test_status_is_empty_when_nothing_is_connected(make):
+    svc, _, _, log = make(api=FakeApi(connected=False), network_ok=lambda: False)
+    svc.start()
+    assert svc.status_text() == "" and log["status"] == []
+
+
+def test_disconnect_clears_the_error_status(make):
+    svc, api, _, log = make(**_fast())
+    svc.start()
+    api.fail = calendar_sync.CalendarError("offline")
+    svc._fetch_timer.timeout.emit()
+    assert log["status"][-1] == "Couldn't read Google Calendar. Trying again."
+    svc.disconnect_calendar()
+    assert log["status"][-1] == ""
+    assert svc._failures == 0
+
+
+def test_paused_ticks_keep_the_timer_alive(make):
+    allowed = {"on": False}
+    svc, api, _, _ = make(network_ok=lambda: allowed["on"], **_fast())
+    svc.start()
+    assert svc._fetch_timer.isActive()
+    svc._fetch_timer.stop()                              # the single-shot timer fired ...
+    svc._fetch_timer.timeout.emit()                      # ... and paused reads did nothing
+    assert api.fetches == [] and svc._fetch_timer.isActive()    # still ticking, so Privacy mode off resumes
+
+
+def test_now_or_next_on_the_service(make):
+    svc, _, clock, _ = make(**_fast())
+    svc.start()
+    assert svc.now_or_next()[0] == "next" and svc.now_or_next()[1]["id"] == "a"
+    clock.now = T + timedelta(minutes=1)
+    kind, m = svc.now_or_next()
+    assert (kind, m["id"]) == ("now", "a")
+
+
+def test_the_page_open_refresh_is_still_once_a_minute(make):
+    svc, api, clock, _ = make(**_fast())
+    svc.start()
+    assert svc.refresh() is False
+    clock.now += timedelta(seconds=61)
+    assert svc.refresh() is True
+
+
+# ── connect_result: the reason a Connect ended ──────────────────────────────────
+def test_connect_result_ok_and_reasons(make):
+    svc, api, _, log = make(api=FakeApi(connected=False))
+    assert svc.connect_calendar() is True
+    assert log["connect_result"] == [(True, "")] and svc.last_connect_reason == ""
+    api2 = FakeApi(connected=False)
+    api2.connect_mode = "error"
+    for code, want in (("admin", "admin"), ("denied", "denied"), ("timeout", "timeout"), ("keyring", "keyring"),
+                       ("offline", "offline"), ("scope", "scope"), ("port_busy", "port_busy"),
+                       ("client", "client"), ("something_new", "other"), (None, "other")):
+        api2.connect_code = code
+        svc2, _, _, log2 = make(api=api2)
+        svc2.connect_calendar()
+        assert log2["connect_result"] == [(False, want)], code
+        assert svc2.last_connect_reason == want
+        assert log2["error"] == ["Google sign-in was cancelled."]
+
+
+def test_connect_result_for_cancel_and_early_failures(make):
+    api = FakeApi(connected=False)
+    api.connect_mode = "block"
+    threads = Threads()
+    svc, _, _, log = make(api=api, run_async=threads)
+    svc.connect_calendar()
+    svc.cancel_connect()
+    assert log["connect_result"] == [(False, "cancelled")]
+    assert threads.join()
+    wait_for(lambda: False, 0.1)
+    assert log["connect_result"] == [(False, "cancelled")]             # the stale answer adds nothing
+    off, _, _, off_log = make(api=FakeApi(configured=False))
+    off.connect_calendar()
+    assert off_log["connect_result"] == [(False, "client")]
+    paused, _, _, paused_log = make(api=FakeApi(connected=False), network_ok=lambda: False)
+    paused.connect_calendar()
+    assert paused_log["connect_result"] == [(False, "other")]
+
+
+def test_quitting_or_disconnecting_reports_no_connect_result(make):
+    api = FakeApi(connected=False)
+    api.connect_mode = "block"
+    threads = Threads()
+    svc, _, _, log = make(api=api, run_async=threads)
+    svc.connect_calendar()
+    svc.stop()
+    assert threads.join()
+    assert log["connect_result"] == []
+    svc2, _, _, log2 = make(api=api, run_async=threads)
+    svc2.connect_calendar()
+    svc2.disconnect_calendar()
+    assert log2["connect_result"] == [] and log2["disconnected"] == ["user"]
+    assert threads.join()
+
+
+def test_a_connect_resets_the_failure_streak(make):
+    svc, api, _, log = make(api=FakeApi([meeting("a")]), **_fast())
+    svc.start()
+    api.fail = calendar_sync.CalendarError("offline")
+    svc._fetch_timer.timeout.emit()
+    assert svc._failures == 1
+    svc.disconnect_calendar()
+    api._connected = False
+    api.fail = None
+    svc.connect_calendar()
+    assert svc._failures == 0 and svc.status_text() == ""
+
+
+# ── after a long sleep: no reminder from a stale list ───────────────────────────
+def _asleep(make, **kw):
+    """A service whose only meeting starts at T, last read 80 min before it,
+    with the reads held (Deferred) so a test decides when the answer lands."""
+    d = Deferred()
+    svc, api, clock, log = make(api=FakeApi([meeting("m", 0)]), now=T - timedelta(minutes=80),
+                                run_async=d, **_fast(**kw))
+    svc.start()
+    d.run()                                              # the first good read: "m" at T
+    assert log["remind"] == [] and [m["id"] for m in svc.meetings()] == ["m"]
+    clock.now = T - timedelta(minutes=1)                 # the lid opens: a stale list, "m" due in 1 min
+    return svc, api, clock, log, d
+
+
+def test_a_cancelled_meeting_is_not_reminded_from_a_stale_list(make):
+    svc, api, clock, log, d = _asleep(make)
+    api.meetings = []                                    # cancelled while the computer slept
+    tick(svc)
+    assert log["remind"] == [] and len(d.jobs) == 1      # held, and a read is on its way
+    assert "m" not in svc.core.state.prompted            # and not marked asked
+    d.run()
+    assert log["remind"] == [] and svc.meetings() == []
+    tick(svc)
+    assert log["remind"] == []
+
+
+def test_a_moved_meeting_is_still_asked_at_its_new_time_after_sleep(make):
+    svc, api, clock, log, d = _asleep(make)
+    api.meetings = [meeting("m", 30)]                    # moved to 16:00 meanwhile
+    tick(svc)
+    assert log["remind"] == [] and "m" not in svc.core.state.prompted
+    d.run()
+    assert log["remind"] == []                           # the fresh list says: not yet
+    clock.now = T + timedelta(minutes=25)
+    svc._fetch_timer.timeout.emit()                      # the normal read before the new start
+    d.run()
+    clock.now = T + timedelta(minutes=29)
+    tick(svc)
+    assert [m["id"] for m in log["remind"]] == ["m"]     # the reminder at the new time comes
+
+
+def test_the_fresh_list_decides_the_reminder_when_the_meeting_is_still_on(make):
+    svc, api, clock, log, d = _asleep(make)
+    tick(svc)
+    assert log["remind"] == []                           # held until the read is back...
+    d.run()
+    assert [m["id"] for m in log["remind"]] == ["m"]     # ...then asked, from _on_fetched
+
+
+def test_a_failed_read_falls_back_to_the_stale_list(make):
+    svc, api, clock, log, d = _asleep(make)
+    api.fail = calendar_sync.CalendarError("offline")
+    tick(svc)
+    assert log["remind"] == []
+    d.run()                                              # the read failed: nothing fresh
+    assert log["remind"] == []
+    tick(svc)                                            # the next tick uses the cache: nothing is lost
+    assert [m["id"] for m in log["remind"]] == ["m"]
+
+
+def test_a_fresh_list_reminds_at_once(make):
+    d = Deferred()
+    svc, api, clock, log = make(api=FakeApi([meeting("m", 0)]), now=T - timedelta(minutes=5),
+                                run_async=d, **_fast())
+    svc.start()
+    d.run()
+    clock.now = T - timedelta(minutes=1)                 # 4 min since the read: nothing to wait for
+    tick(svc)
+    assert [m["id"] for m in log["remind"]] == ["m"] and d.jobs == []
+
+
+# ── "No meetings coming up" only after a read ───────────────────────────────────
+def test_has_read_follows_the_first_good_read(make):
+    allowed = {"on": False}
+    svc, api, _, log = make(network_ok=lambda: allowed["on"], **_fast())
+    assert svc.has_read is False
+    svc.start()                                          # Privacy mode: connected, but nothing read
+    assert api.fetches == [] and svc.has_read is False
+    allowed["on"] = True
+    svc.on_setting_changed("privacy_mode")
+    assert svc.has_read is True
+    api.fail = calendar_sync.CalendarError("offline")
+    svc._fetch_timer.timeout.emit()
+    assert svc.has_read is True                          # an earlier good read still stands
+    svc.disconnect_calendar()
+    assert svc.has_read is False                         # a reconnect starts unread again
+
+
+def test_a_failed_first_read_is_not_a_read(make):
+    api = FakeApi([meeting("a")])
+    api.fail = calendar_sync.CalendarError("offline")
+    svc, api, _, _ = make(api=api, **_fast())
+    svc.start()
+    assert svc.has_read is False
+
+
+# ── a Disconnect that Google never heard is finished later ──────────────────────
+class RevokeApi(FakeApi):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.revoke_ok = False           # revoke(): False = Google couldn't be reached
+        self.retry_ok = True
+        self.retries = 0
+
+    def revoke(self, token):
+        self.revoked.append(token)
+        return self.revoke_ok
+
+    def retry_pending_revoke(self):
+        self.retries += 1
+        return self.retry_ok
+
+
+def test_an_unconfirmed_revoke_is_retried_after_the_next_good_read(make):
+    svc, api, _, _ = make(api=RevokeApi([meeting("a")]), **_fast())
+    svc.start()
+    assert api.retries == 1                              # the start-up check (nothing pending: free)
+    svc._fetch_timer.timeout.emit()
+    assert api.retries == 1                              # nothing failed since: no more checks
+    svc.disconnect_calendar()
+    assert api.revoked == ["rt"]                         # Google was offline: revoke said False
+    svc.connect_calendar()                               # back online: connected, first read
+    assert api.retries == 2                              # told to Google now
+    svc._fetch_timer.timeout.emit()
+    assert api.retries == 2                              # confirmed: left alone
+
+
+def test_a_retry_that_fails_waits_for_the_next_read(make):
+    api = RevokeApi([meeting("a")])
+    api.retry_ok = False
+    svc, api, _, _ = make(api=api, **_fast())
+    svc.start()
+    n = api.retries
+    assert n >= 1                                        # tried at start, and failed
+    svc._fetch_timer.timeout.emit()
+    assert api.retries == n + 1                          # still pending: tried again after the read
+    api.retry_ok = True
+    svc._fetch_timer.timeout.emit()
+    assert api.retries == n + 2
+    svc._fetch_timer.timeout.emit()
+    assert api.retries == n + 2                          # done: left alone
+
+
+def test_the_revoke_retry_waits_for_privacy_mode_to_end(make):
+    allowed = {"on": False}
+    svc, api, _, _ = make(api=RevokeApi([meeting("a")]), network_ok=lambda: allowed["on"], **_fast())
+    svc.start()
+    assert api.retries == 0                              # reads are paused: no request
+    allowed["on"] = True
+    svc.on_setting_changed("privacy_mode")
+    assert api.retries == 1
+
+
+def test_a_calendar_api_without_a_retry_is_left_alone(make):
+    svc, api, _, _ = make(**_fast())                     # FakeApi: nothing to retry with
+    svc.start()
+    svc._fetch_timer.timeout.emit()
+    svc.disconnect_calendar()
+    assert api.revoked == ["rt"]                         # no error, no job left behind

@@ -301,7 +301,15 @@ def test_the_pro_pill_is_the_real_pro_tag(qapp, host):
     tag.hide()
     tag.ensurePolished()
     tag.resize(tag.sizeHint())
-    assert pm.toImage() == tag.grab().toImage()           # same pixels as the PRO tag everywhere else
+    grabbed = tag.grab()
+    from ui.components import model_combo
+    # same pixels as the PRO tag everywhere else (a widget's grab() fills its whole rectangle; on screen the
+    # style clips the pill to its rounded corners, so the pill's corners are cut the same way here)
+    assert pm.toImage() == model_combo._RowDelegate._rounded(grabbed).toImage()
+    inside = grabbed.toImage()
+    assert pm.toImage().pixel(inside.width() // 2, inside.height() // 2) == inside.pixel(inside.width() // 2,
+                                                                                         inside.height() // 2)
+    assert pm.toImage().pixelColor(0, 0).alpha() < 40     # the corner is the page's, not purple
     tag.deleteLater()
 
 

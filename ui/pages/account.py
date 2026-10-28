@@ -9,11 +9,13 @@ every time the page opens (the tries counter moves).
 
 Integration notes for Wave 4
 ----------------------------
-* Buttons call the controller as it is: Upgrade -> app._pro_upsell() (the
-  current Pro window; a guest's offers sign-up first), Manage subscription ->
-  app.open_billing(), Sign out -> app.sign_out(), Sign in ->
-  app.show_auth_gate() (Wave 4 / owner 7: point it at the new auth sheet),
-  Preview as (super admins only) -> app.set_admin_tier_override(value).
+* Buttons call the controller as it is: Upgrade to Pro (Free only) ->
+  app._pro_upsell(), Manage subscription -> app.open_billing(), Sign out ->
+  app.sign_out(), Sign in / Sign up (a guest's one action, blue) ->
+  app.show_auth_gate(), Preview as (super admins only) ->
+  app.set_admin_tier_override(value). A guest - a super admin previewing Guest
+  too - sees "User" with a person icon (never a profile name or a letter) and
+  no upgrade wording anywhere; the labels are account_actions' constants.
 * Delete account: typed confirmation (account_actions.DELETE_WORD), then
   account_actions.delete_account on a worker; on success the page calls
   app.sign_out() and shows the server's message. The controller's
@@ -162,10 +164,10 @@ class AccountPage(QWidget):
             view = account_actions.account_view(getattr(self.app, "auth", None), S.cfg_of(self.app))
         except Exception:
             logger.warning("account_view failed", exc_info=True)
-            view = {"signed_in": S.is_signed_in(self.app), "name": "Guest", "email": "", "tier": "guest",
-                    "pro": False, "plan_line": "", "smart_text": "", "smart_tries_left": None,
+            view = {"signed_in": False, "guest": True, "name": account_actions.GUEST_NAME, "email": "",
+                    "tier": "guest", "pro": False, "plan_line": "", "smart_text": "", "smart_tries_left": None,
                     "smart_tries_total": 5, "is_admin": False, "admin_tier": "auto",
-                    "buttons": {"sign_in": True, "sign_out": False, "upgrade": True, "manage": False,
+                    "buttons": {"sign_in": True, "sign_out": False, "upgrade": False, "manage": False,
                                 "delete": False, "admin": False}}
         # The controller's own Pro check is the one every gate uses.
         if S.is_pro(self.app) and not view.get("pro"):
@@ -180,6 +182,7 @@ class AccountPage(QWidget):
         S.clear_layout(self.plan_holder)
         S.clear_layout(self.side_lay)
         self.buttons = {}
+        self.guest_note = None              # a guest's line under "Pro adds" (see _plan_card)
         self.plan_card = self._plan_card(self.view)
         self.plan_holder.addWidget(self.plan_card)
         self.account_card = self._account_card(self.view)
@@ -238,7 +241,10 @@ class AccountPage(QWidget):
             feats.addWidget(r)
         card.add(feats)
         buttons = v.get("buttons") or {}
-        has_foot = (not pro and buttons.get("upgrade", True)) or (pro and buttons.get("manage"))
+        # A guest has nothing to upgrade yet: no violet button and no price here,
+        # one plain line that points at the account card's blue Sign in / Sign up.
+        guest_line = not pro and bool(v.get("guest"))
+        has_foot = guest_line or (not pro and buttons.get("upgrade", True)) or (pro and buttons.get("manage"))
         if not has_foot:                        # e.g. a Pro trial: no portal yet, so no empty footer
             card.layout().addStretch(1)
             return card
@@ -246,8 +252,11 @@ class AccountPage(QWidget):
         card.layout().addSpacing(4)
         foot = QHBoxLayout()
         foot.setSpacing(16)
-        if not pro and buttons.get("upgrade", True):
-            b = Button("Upgrade to Pro", "pro", "l", parent=card)
+        if guest_line:
+            self.guest_note = S.text_label(account_actions.SIGN_IN_FIRST, 13, role="muted", parent=card, wrap=True)
+            foot.addWidget(self.guest_note, 1, Qt.AlignVCenter)
+        elif not pro and buttons.get("upgrade", True):
+            b = Button(account_actions.UPGRADE, "pro", "l", parent=card)
             b.setFixedHeight(40)
             b.clicked.connect(lambda _=False: S.call(self.app, "_pro_upsell"))
             self.buttons["upgrade"] = b
@@ -269,11 +278,11 @@ class AccountPage(QWidget):
         signed = bool(v.get("signed_in"))
         tier = "pro" if v.get("pro") else (v.get("tier") or "guest")
         card = Card(pad=(20, 18), gap=14)
-        name = v.get("name") or ("Guest" if not signed else "Your account")
+        name = (v.get("name") if signed else "") or (account_actions.GUEST_NAME if not signed else "Your account")
         card.setAccessibleName("Account: %s" % name)
         top = QHBoxLayout()
         top.setSpacing(12)
-        self.avatar = Avatar(name, 44, card)
+        self.avatar = Avatar(name, 44, card, guest=not signed)      # a guest: the person icon, never a letter
         top.addWidget(self.avatar, 0, Qt.AlignVCenter)
         col = QVBoxLayout()
         col.setSpacing(0)
@@ -299,7 +308,8 @@ class AccountPage(QWidget):
             b.clicked.connect(lambda _=False: S.call(self.app, "sign_out"))
             self.buttons["sign_out"] = b
         else:
-            b = Button("Sign in", "primary", "s", parent=card)
+            b = Button(account_actions.SIGN_IN_UP, "primary", "s", parent=card)
+            b.setAccessibleName(account_actions.SIGN_IN_UP_A11Y)
             b.clicked.connect(lambda _=False: S.call(self.app, "show_auth_gate"))
             self.buttons["sign_in"] = b
         row.addWidget(b, 0, Qt.AlignVCenter)

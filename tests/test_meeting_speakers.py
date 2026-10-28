@@ -582,6 +582,73 @@ class TestFastHalf(unittest.TestCase):
         self.assertEqual(out.parts[0][1]["source"], "them")
 
 
+@unittest.skipUnless(_real_numpy(), "real numpy not importable (stubbed)")
+class TestWordsThatAreAlreadyThere(unittest.TestCase):
+    """build_transcript(reader=...): a cloud session's live pieces are the segments - the
+    recording is NOT read again, so the cloud's words stay and only the labels are worked out."""
+
+    def setUp(self):
+        import numpy as np
+        self.np = np
+        self.part, _m, _s = _both_tracks_part(np, 40, [(2, 6), (12, 15)], [(7, 11), (16, 36)])
+        # (Armenian, as a cloud model writes it)
+        self.pieces = [seg(2, 6, "Բարև ձեզ"), seg(7, 11, "Ինչպե՞ս եք"), seg(12, 15, "Շնորհակալություն"),
+                       seg(16, 36, "Եկեք սկսենք")]
+
+    def test_the_pieces_are_labelled_by_source_and_no_whisper_runs(self):
+        rec = FakeRec([seg(0, 1, "local whisper text that must never appear")])
+        status = []
+        asked = []
+
+        def reader(audio, language=None, should_cancel=None, on_progress=None):
+            asked.append((len(audio) / 16000.0, language))
+            return [dict(s) for s in self.pieces]
+        d = FakeDiarizer(installed=False, downloaded=False)
+        out = msp.build_transcript(rec, [self.part], language="hy", status=status.append, diarizer=d,
+                                   diarize=False, reader=reader)
+        self.assertTrue(out.ok, (out.reason, out.notice))
+        self.assertEqual(rec.calls, [])                              # transcribe_segments was never called
+        self.assertEqual(asked, [(40.0, "hy")])
+        self.assertEqual(out.text.split("\n"),
+                         ["You: Բարև ձեզ", "Them: Ինչպե՞ս եք", "You: Շնորհակալություն", "Them: Եկեք սկսենք"])
+        self.assertNotIn("local whisper", out.text)
+        self.assertFalse(any("Re-reading" in s for s in status))     # nothing is read again
+        self.assertEqual([(x["source"], x["start"], x["end"]) for x in out.parts[0]],
+                         [("you", 2.0, 6.0), ("them", 7.0, 11.0), ("you", 12.0, 15.0), ("them", 16.0, 36.0)])
+
+    def test_the_whole_pass_names_the_voices_on_those_words_too(self):
+        out = msp.build_transcript(FakeRec([]), [self.part], diarizer=FakeDiarizer(),
+                                   reader=lambda audio, **kw: [dict(s) for s in self.pieces])
+        self.assertTrue(out.ok, (out.reason, out.notice))
+        self.assertEqual(out.text.split("\n"),
+                         ["You: Բարև ձեզ", "Speaker 1: Ինչպե՞ս եք", "You: Շնորհակալություն",
+                          "Speaker 1: Եկեք սկսենք"])
+
+    def test_a_reader_with_nothing_is_the_same_end_as_a_whisper_that_found_nothing(self):
+        out = msp.build_transcript(FakeRec([]), [self.part], diarizer=FakeDiarizer(), diarize=False,
+                                   reader=lambda audio, **kw: [])
+        self.assertEqual((out.texts, out.reason), ([], msp.R_NO_SEGMENTS))
+
+    def test_the_model_of_the_reread_is_passed_on_only_when_there_is_one(self):
+        seen = []
+
+        class Rec(FakeRec):
+            def transcribe_segments(self, audio, language=None, model_name=None, on_progress=None,
+                                    should_cancel=None):
+                seen.append(model_name)
+                return [seg(2, 6, "a")]
+        for model, want in ((None, None), ("small", "small")):
+            seen.clear()
+            msp.build_transcript(Rec([]), [self.part], diarizer=FakeDiarizer(), diarize=False, model=model)
+            self.assertEqual(seen, [want])
+
+        class OldRec(FakeRec):                      # a recorder whose method has no model_name
+            def transcribe_segments(self, audio, language=None, on_progress=None, should_cancel=None):
+                return [seg(2, 6, "a")]
+        out = msp.build_transcript(OldRec([]), [self.part], diarizer=FakeDiarizer(), diarize=False)
+        self.assertTrue(out.ok)                     # Dictation's own re-read: the call is unchanged
+
+
 def _call_part(np, seconds, you, them, segments, **kw):
     """(CallPart for name_the_call, the system track it reads)."""
     _mic, system = call_tracks(np, seconds, you, them, **kw)

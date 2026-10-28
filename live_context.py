@@ -4,11 +4,14 @@ companion should answer on its own, and whether the card is hidden on screen
 share (hide_status: one truthful answer for the card's chip, the Live
 Assistant page and Settings › Privacy). Kept out of ui/live_assist.py so it is
 testable without a display (and without PySide6)."""
+import inspect
 import re
 import sys
 from collections import namedtuple
 
-TAIL_CHARS = 2600                # ~3-4 minutes of speech fed to the model
+import invite_context
+
+TAIL_CHARS = 2600               # ~3-4 minutes of speech fed to the model
 HISTORY_TURNS = 2                # earlier answers kept for follow-up questions
 # The session context the user writes: room for a brief and a job or product
 # description, and still well inside a local model's 8k-token window next to
@@ -30,16 +33,70 @@ _LANG_NAMES = {"en": "English", "de": "German", "fr": "French", "es": "Spanish",
                "ar": "Arabic"}
 
 
+# What the user writes as "Context" is a STANDING INSTRUCTION: the first block of every
+# prompt, on every route (Gusan Cloud, Gemini, the Claude / Mistral routes, a local model),
+# worded the same everywhere. The system prompt (action_api.LIVE_ASSIST_SYSTEM) and the local
+# one (local_llm) explain it. It is the user's own text, so it is trusted for instructions;
+# the conversation, documents and invite are data (their own delimiters stay as they are).
+STANDING_HEADER = ("Standing instructions from the user - follow them in every answer; they "
+                   "override your defaults on language, format and length:")
+
+
+def standing_block(text):
+    """The user's context as the first block of a prompt ("" when there is none)."""
+    ctx = clip_context(text)
+    return STANDING_HEADER + "\n" + ctx if ctx else ""
+
+
+_FORGED_HEADER = re.compile(r"standing\s+instructions\s+from\s+(?:the\s+)?user", re.I)
+
+
+# The labels of the prompt's own sections: speech that says one of them ("User's question: ...")
+# must not read as the start of that section.
+_FORGED_LABEL = re.compile(
+    r"(user['’]s\s+question|conversation\s*\(latest\s+part\)|latest\s+piece\s+of\s+the\s+conversation"
+    r"|earlier\s+in\s+the\s+conversation|reference\s+material\s+the\s+user\s+added)\s*:", re.I)
+
+
+def defuse(text):
+    """Untrusted talk (what other people said on the call) that cannot pass for the user's
+    own heading: a speaker, or a pasted line, saying "Standing instructions from the user ..."
+    becomes "standing instructions from the speaker", and one saying "User's question: ..." or
+    another section's label loses the colon that would make it one. Everything else is left as
+    it is."""
+    return _FORGED_LABEL.sub(lambda m: m.group(1) + " -", defuse_header(text))
+
+
+def defuse_header(text):
+    """Only the heading: text someone else wrote (a meeting title, an invite's agenda) that says
+    "Standing instructions from the user ..." is a quote of it, not the heading. (Its rows are
+    bullets and framed as data already - see invite_context - so its other words stay.)"""
+    return _FORGED_HEADER.sub("standing instructions from the speaker", text or "")
+
+
+def respond_line(output_lang, standing=False):
+    """The "(Respond in ...)" line for the "Answer in" setting ("" for the call's own
+    language). With standing instructions in the prompt it gives way to them: "translate
+    everything to French" must still win over an "Answer in English" set long ago."""
+    if not output_lang or output_lang == "auto":
+        return ""
+    name = _LANG_NAMES.get(output_lang, output_lang)
+    if standing:
+        return f"(Respond in {name}, unless the standing instructions above say otherwise.)"
+    return f"(Respond in {name}.)"
+
+
 def clip_context(text, limit=CONTEXT_CHARS):
     """The session context as the model gets it: trimmed, at most ``limit``
-    characters."""
+    characters. (Whatever the user wrote there is a standing instruction: see
+    STANDING_HEADER and live_rules.)"""
     text = (text or "").strip()
     return text if len(text) <= limit else text[:limit].rstrip() + "…"
 
 
 def rolling_context(live_text, question="", title="", attendees="",
                     tail_chars=TAIL_CHARS, screen=False, output_lang="en", history=(),
-                    session_context="", documents=None, doc_chars=None, pictures=()):
+                    session_context="", documents=None, doc_chars=None, pictures=(), invite=""):
     """The text handed to the model: recent conversation + optional question,
     plus the last answers of this session (``history``: (asked, answer) pairs)
     so a follow-up like "and the second part?" has something to refer to.
@@ -53,35 +110,45 @@ def rolling_context(live_text, question="", title="", attendees="",
     instructions - after the session context and before the conversation, never
     longer than ``doc_chars`` (LOCAL_DOC_CHARS for a local model, CLOUD_DOC_CHARS
     otherwise; default cloud). ``pictures``: the names of picture documents attached
-    to this answer, named in that block. Without either, nothing changes."""
-    tail = (live_text or "").strip()
+    to this answer, named in that block. Without either, nothing changes.
+
+    ``invite``: the agenda of the calendar invite this session started from (what
+    the user can see and edit on the card's invite chip). It is written by whoever
+    made the invite, so it goes in its own section, plain and capped, framed as
+    data (invite_context.invite_block) - after the meeting line, before the
+    documents. Empty adds nothing; it is never merged into ``session_context``
+    (the user's own "About my calls" text)."""
+    tail = defuse((live_text or "").strip())
     if len(tail) > tail_chars:
         tail = tail[-tail_chars:]
         cut = re.search(r"[.!?]\s+", tail)
         if cut and cut.end() < len(tail) // 2:
             tail = tail[cut.end():]
     parts = []
-    ctx = clip_context(session_context)
-    if ctx:
+    standing = standing_block(session_context)
+    if standing:
         # First, and the same on every call of the session: the rest is read
-        # in its light, and the endpoint can cache it along with the brief.
-        parts.append("About this session (written by the user; it holds for every "
-                     "answer):\n" + ctx)
-    if title or attendees:
-        meta = []
-        if title:
-            meta.append(f"Meeting: {title}")
-        if attendees:
-            meta.append(f"Attendees: {attendees}")
-        parts.append("\n".join(meta))
+        # in its light, and the endpoint can cache it along with the brief. It is
+        # the user's standing instruction - what to do with what is said, how to
+        # answer - not just a note (see STANDING_HEADER).
+        parts.append(standing)
+    # The meeting line (title, at most MAX_PEOPLE names; a placeholder title like
+    # "Live session 14:30" says nothing and is left out), then the calendar
+    # invite's agenda as its own section - framed as data, never instructions.
+    meeting = defuse_header(invite_context.live_lines(title, attendees))
+    if meeting:
+        parts.append(meeting)
+    block = defuse_header(invite_context.invite_block(invite))
+    if block:
+        parts.append(block)
     if documents or pictures:
         import live_docs
         block = live_docs.documents_context(
             documents, question, tail[-live_docs.QUERY_CONVERSATION_CHARS:],
             CLOUD_DOC_CHARS if doc_chars is None else doc_chars, pictures)
         if block:
-            parts.append(block)
-    earlier = [(q, a) for q, a in list(history)[-HISTORY_TURNS:] if (a or "").strip()]
+            parts.append(block)              # (its lines are quoted "> ..." inside its own delimiters)
+    earlier =[(q, a) for q, a in list(history)[-HISTORY_TURNS:] if (a or "").strip()]
     if earlier:
         lines = ["Your earlier answers in this conversation (for follow-ups only):"]
         for q, a in earlier:
@@ -102,8 +169,9 @@ def rolling_context(live_text, question="", title="", attendees="",
         parts.append("(A screenshot of the user's screen is attached. Use it as "
                      "context; solve what it shows only when that is what is being "
                      "asked or nothing was asked.)")
-    if output_lang and output_lang != "auto":
-        parts.append(f"(Respond in {_LANG_NAMES.get(output_lang, output_lang)}.)")
+    line = respond_line(output_lang, bool(standing))
+    if line:
+        parts.append(line)
     if (question or "").strip():
         parts.append("User's question: " + question.strip())
     return "\n\n".join(parts)
@@ -115,6 +183,48 @@ def should_attach_screen(screen_on, force=False):
     ("how do I solve this?"), so with Screen on every answer sees the screen.
     ``force`` is an explicit request (the Solve screen button)."""
     return bool(screen_on or force)
+
+
+# ── the calendar invite: starting a session with it ──
+def takes_kwarg(fn, name):
+    """True when ``fn(name=...)`` is accepted: a parameter of that name, or **kwargs."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+
+
+def start_session(session, agenda="", **kw):
+    """``session.start(**kw)`` with the invite's agenda (what the user sees on the
+    start card or the Live card). It goes in as ``agenda=`` when start() takes it;
+    otherwise (a recorder built before agendas) it is set with ``set_agenda`` after a
+    good start. Returns start()'s own result: (ok, code, message)."""
+    agenda = invite_context.clip_agenda(agenda)
+    inline = bool(agenda) and takes_kwarg(session.start, "agenda")
+    if inline:
+        kw["agenda"] = agenda
+    result = session.start(**kw)
+    ok = bool(result[0]) if isinstance(result, (tuple, list)) and result else bool(result)
+    setter = getattr(session, "set_agenda", None)
+    if agenda and ok and not inline and callable(setter):
+        try:
+            setter(agenda)
+        except Exception:
+            pass                                 # the card still has it; the notes lose only the header
+    return result
+
+
+def others_of(attendees, me=""):
+    """The people on a call without you: ``attendees`` (a list or the comma string a
+    meeting keeps) minus ``me`` (your full name or first name). Best effort: when
+    nobody matches, everybody stays."""
+    names = invite_context.cap_names(attendees)
+    full = " ".join(str(me or "").split()).lower()
+    if not full:
+        return names
+    first = full.split()[0]
+    return [n for n in names if n.lower() not in (full, first)]
 
 
 # ── the reply path ──

@@ -32,6 +32,12 @@ The version lives in one place: `APP_VERSION` in `app_info.py` (with `APP_NAME =
 - The release notes come from `docs/release-notes/v<APP_VERSION>.md` when it exists.
 - `tests/test_release_2_0_0.py` checks the name, the version, the release notes file and every kept name above.
 
+## Build Notes
+
+- `sherpa-onnx` must be **1.13.5 or newer** (`requirements.txt` says so). It runs speaker detection and, from 2.0.1, the local Armenian speech model; versions 1.12.26 to 1.13.4 return an empty text for about one clip in eight with that model. The app checks the version before it offers the model.
+- `speech_hy.py` and `gpu_precision.py` are plain imports of `main.py`, so PyInstaller bundles them with no extra flag; `sherpa_onnx` is already bundled (`--collect-all`).
+- The Armenian model (NVIDIA FastConformer, CC BY 4.0, converted to int8: a 105 MB archive) is not inside the app. It stays hidden until it has somewhere to be downloaded from. To switch it on without an app update, host the archive on `gusan.aibuben.xyz`, the GitHub releases or Hugging Face and publish `https://gusan.aibuben.xyz/models/manifest.json` as `{"models": {"hy-fastconformer-int8": {"url": "https://...", "sha256": "<ARMENIAN_MODEL_SHA256>", "size": <ARMENIAN_MODEL_SIZE>, "version": "1"}}}` (the values are in `speech_hy.py`; the app only installs the exact archive its code pins, whatever the manifest says). Or set `ARMENIAN_MODEL_URL` in `speech_hy.py` for the next release.
+
 ## Release Steps
 
 1. Set `APP_VERSION` in `app_info.py` to the tag version without the `v` prefix, and write `docs/release-notes/v<version>.md`.

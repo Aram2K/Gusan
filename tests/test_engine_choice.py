@@ -40,10 +40,13 @@ class TestSpeech(unittest.TestCase):
     def test_gusan_cloud_needs_pro(self):
         cfg = {"backend": "managed", "managed_provider": "gemini", "whisper_model": "small"}
         r = ec.runs_on(cfg, "dictation", pro=True)
-        self.assertEqual(r["label"], "Gusan Cloud · Gemini 2.5 Flash")
+        # Gusan Cloud chooses the engine itself: the row names the PROFILE it asks for ("Fast"), and
+        # whatever really answered is named from the server's answer (see test_live_speech)
+        self.assertEqual(r["label"], "Gusan Cloud · Fast")
+        self.assertEqual(r["model_id"], "fast")
         self.assertTrue(r["pro"])
         self.assertEqual(ec.runs_on(dict(cfg, managed_provider="mistral"), "dictation", pro=True)["model_name"],
-                         "Voxtral Mini")
+                         "Fast")                     # (a 1.9 "mistral" provider is the same profile now)
         # Not Pro (lapsed): the proxy refuses and dictation runs on this computer.
         self.assertEqual(ec.runs_on(cfg, "dictation", pro=False)["kind"], "local")
 
@@ -217,7 +220,7 @@ class TestAudioToTextModels(unittest.TestCase):
                         self.assertEqual(ec.file_session(base, pro), ("local", None))     # never picked
                         self.assertEqual(s("huge-v9"), ("local", None))
                         self.assertEqual(s("small"), ("local", "small"))
-                        cloud = ("managed", "gemini") if (pro and not privacy) else ("local", None)
+                        cloud = ("managed", "best") if (pro and not privacy) else ("local", None)
                         self.assertEqual(s("cloud"), cloud)
                         g = ("google", "gemini-2.5-flash") if (str(keys.get("google_api_key", "")).strip()
                                                               and not privacy) else ("local", None)
@@ -230,10 +233,11 @@ class TestAudioToTextModels(unittest.TestCase):
             self.assertEqual(ec.file_session(files(mid, privacy_mode=True), False), ("local", mid))
 
     def test_session_provider_and_models(self):
-        self.assertEqual(ec.file_session(files("cloud", managed_provider="mistral"), True), ("managed", "mistral"))
+        # Audio to text asks Gusan Cloud for its BEST profile, whatever the old provider setting says
+        self.assertEqual(ec.file_session(files("cloud", managed_provider="mistral"), True), ("managed", "best"))
         self.assertEqual(ec.file_session(files("cloud", managed_provider=" Mistral "), True),
-                         ("managed", "mistral"))
-        self.assertEqual(ec.file_session(files("cloud", managed_provider="aws"), True), ("managed", "gemini"))
+                         ("managed", "best"))
+        self.assertEqual(ec.file_session(files("cloud", managed_provider="aws"), True), ("managed", "best"))
         cfg = files("own:google", google_stt_model="gemini-2.5-pro", **GKEY)
         self.assertEqual(ec.file_session(cfg, False), ("google", "gemini-2.5-pro"))
         cfg = files("own:mistral", mistral_stt_model="voxtral-mini-2602", **MKEY)
@@ -242,11 +246,12 @@ class TestAudioToTextModels(unittest.TestCase):
         self.assertEqual(ec.file_session(cfg, False), ("mistral", "voxtral-mini-latest"))    # healed like main
 
     def test_model_id(self):
-        self.assertEqual(ec.file_model_id({}, "cloud"), "gemini-2.5-flash")
-        self.assertEqual(ec.file_model_id({"managed_provider": "mistral"}, "cloud"), "voxtral-mini-latest")
-        # Gusan Cloud runs the proxy's model, whatever the own-key models say.
+        # Gusan Cloud: the profile a file asks for (cloud_files then reports the model that really ran)
+        self.assertEqual(ec.file_model_id({}, "cloud"), "best")
+        self.assertEqual(ec.file_model_id({"managed_provider": "mistral"}, "cloud"), "best")
+        # ...whatever the own-key models say.
         self.assertEqual(ec.file_model_id({"managed_provider": "mistral", "mistral_stt_model": "voxtral-mini-2507"},
-                                          "cloud"), "voxtral-mini-latest")
+                                          "cloud"), "best")
         self.assertEqual(ec.file_model_id({}, "own:google"), "gemini-2.5-flash")
         self.assertEqual(ec.file_model_id({"google_stt_model": " gemini-2.5-pro "}, "own:google"), "gemini-2.5-pro")
         self.assertEqual(ec.file_model_id({"google_stt_model": "gemini-demo"}, "own:google"), "gemini-demo")
@@ -257,7 +262,7 @@ class TestAudioToTextModels(unittest.TestCase):
         self.assertEqual(ec.file_model_id({}, "small"), "small")
         self.assertEqual(ec.file_model_id({}, "auto"), "")
         self.assertEqual(ec.file_model_id({}, "huge-v9"), "")
-        self.assertEqual(ec.file_model_id(files("cloud", managed_provider="mistral")), "voxtral-mini-latest")
+        self.assertEqual(ec.file_model_id(files("cloud", managed_provider="mistral")), "best")
         self.assertEqual(ec.file_model_id(None), "")
         # The ids don't depend on Pro, Privacy mode or keys (file_session decides those).
         self.assertEqual(ec.file_model_id({"privacy_mode": True}, "own:google"), "gemini-2.5-flash")
@@ -270,6 +275,10 @@ class TestAudioToTextModels(unittest.TestCase):
                 self.assertIn(mid, ec.MODEL_NAMES)
         for provider, name in ec.CLOUD_SPEECH_MODELS.items():
             self.assertEqual(ec.MODEL_NAMES[ec.CLOUD_SPEECH_IDS[provider]], name)
+        # every model the server can answer with has a real name (X-Gusan-Model is shown as it says)
+        for mid in ("scribe_v2", "voxtral-mini-latest", "gpt-transcribe", "gpt-4o-transcribe",
+                    "gpt-4o-mini-transcribe", "whisper-1"):
+            self.assertIn(mid, ec.MODEL_NAMES)
         self.assertEqual(set(ec.CLOUD_SPEECH_IDS), set(ec.CLOUD_SPEECH_MODELS))
         for value in ec.FILE_CLOUD_VALUES:
             for cfg in ({}, {"managed_provider": "mistral"}):
@@ -282,50 +291,121 @@ class TestAudioToTextModels(unittest.TestCase):
             self.skipTest("no transcribe-proxy source here")
         with open(path, encoding="utf-8") as f:
             source = f.read()
-        for mid in ec.CLOUD_SPEECH_IDS.values():
-            self.assertIn(mid, source)
+        # a client asks for a PROFILE: the proxy knows both words, and no Gemini id is ever sent
+        for word in ec.CLOUD_PROFILES:
+            self.assertIn('"%s"' % word, source)
+        for mid in ("scribe_v2", "voxtral-mini-latest", "gpt-transcribe", "gpt-4o-transcribe"):
+            self.assertIn('"%s"' % mid, source)             # the models it answers with are all named here
+            self.assertIn(mid, ec.MODEL_NAMES)
+
+    def test_live_assistant_speech_is_one_more_feature_with_the_same_keys_everywhere(self):
+        self.assertIn("live_assistant_speech", ec.FEATURES)
+        self.assertIn("live_assistant", ec.FEATURES)          # the answer writer stays
+        self.assertEqual(ec.LIVE_SPEECH_KEY, "live_assist_speech_model")
+        import settings_apply
+        self.assertEqual(settings_apply.LIVE_SPEECH, ec.LIVE_SPEECH_KEY)
+        self.assertEqual((ec.LIVE_SPEECH_AUTO, ec.LIVE_SPEECH_CLOUD, ec.LIVE_SPEECH_BEST),
+                         ("", "cloud", "cloud:best"))
+        self.assertEqual(ec.runs_on({}, "live_speech", pro=False)["feature"], "live_assistant_speech")
 
     def test_choices(self):
         choices = ec.file_choices()
-        self.assertEqual(choices[0], ("auto", "Automatic", "Automatic", False))
+        self.assertEqual(choices[0], ("auto", "Automatic", "Automatic · Local", False))
         self.assertEqual([c[0] for c in choices[1:-1]], list(ec.SPEECH_MODELS))
-        self.assertIn(("small", "Balanced", "Balanced · Whisper Small", False), choices)
+        # a REAL model name and where it runs - never a plain word, never "Gusan Cloud" as a model
+        self.assertIn(("small", "Whisper Small", "Whisper Small · Local", False), choices)
         self.assertTrue(all(not c[3] for c in choices[:-1]))
-        self.assertEqual(choices[-1], ("cloud", "Gusan Cloud", "Gusan Cloud · Gemini 2.5 Flash", True))
+        # Gusan Cloud is a heading and a PROFILE: its server chooses the model
+        self.assertEqual(choices[-1], ("cloud", "Best accuracy", "Best accuracy · Cloud · Pro", True))
         self.assertEqual([c[1] for c in choices],
-                         ["Automatic", "Lightest", "Fast", "Balanced", "Accurate", "Most accurate", "Maximum",
-                          "Gusan Cloud"])
-        self.assertEqual(ec.file_choices({"managed_provider": "mistral"})[-1][2], "Gusan Cloud · Voxtral Mini")
+                         ["Automatic", "Whisper Tiny", "Whisper Base", "Whisper Small", "Whisper Medium",
+                          "Whisper Large v3 Turbo", "Whisper Large v3", "Best accuracy"])
+        self.assertEqual(ec.file_choices({"managed_provider": "mistral"})[-1][2],
+                         "Best accuracy · Cloud · Pro")
+
+    def test_rows_group_the_models_and_wear_tags(self):
+        rows = ec.file_rows(BOTH)
+        self.assertEqual([r["group"] for r in rows],
+                         [""] + [ec.GROUP_THIS_COMPUTER] * len(ec.SPEECH_MODELS)
+                         + [ec.GROUP_GUSAN_CLOUD, ec.GROUP_OWN_KEY, ec.GROUP_OWN_KEY])
+        by = {r["value"]: r for r in rows}
+        self.assertEqual(by["small"]["tags"], ("local",))
+        self.assertEqual(by["small"]["note"], "Balanced")
+        self.assertEqual(by["cloud"]["tags"], ("cloud", "pro"))
+        self.assertTrue(by["cloud"]["pro"])
+        self.assertEqual(by["own:google"]["tags"], ("cloud",))
+        self.assertEqual(by["own:google"]["title"], "Gemini 2.5 Flash · your Google key")
+        self.assertEqual(by["own:mistral"]["title"], "Voxtral Mini · your Mistral key")
+        self.assertEqual(by["auto"]["tags"], ("local",))
+        self.assertEqual(by["auto"]["kind"], "auto")
+
+    def test_automatic_never_says_local_for_a_file_that_goes_to_the_cloud(self):
+        # An Armenian file under Automatic goes to Gusan Cloud for a signed-in Pro person (file_session's
+        # order): the row says CLOUD and PRO and names the profile. Every other case stays LOCAL.
+        def auto(cfg, pro, language, signed_in=None):
+            return ec.file_rows(cfg, pro, language, signed_in)[0]
+        with patch.object(ec, "hy_usable", return_value=False):
+            hy = auto({}, True, "hy")
+            self.assertEqual((hy["value"], hy["kind"], hy["tags"], hy["title"], hy["note"]),
+                             ("auto", "auto", ("cloud", "pro"), "Automatic · Best accuracy", "for Armenian"))
+            self.assertEqual(auto({}, True, "hye")["title"], "Automatic · Best accuracy")      # any spelling
+            self.assertEqual(auto({"mix_languages": ["en", "hy"]}, True, "multi")["note"], "for Armenian")
+            for cfg, pro, language, signed_in in (
+                    ({}, True, "fr", None),                                  # Whisper reads French well
+                    ({}, True, "auto", None),                                # nothing known to be poor
+                    ({}, True, None, None),                                  # no language asked
+                    ({}, False, "hy", None),                                 # no Pro plan
+                    ({}, True, "hy", False),                                 # signed out
+                    ({"privacy_mode": True}, True, "hy", None)):             # Privacy mode: nothing leaves
+                row = auto(cfg, pro, language, signed_in)
+                self.assertEqual((row["tags"], row["title"], row["note"]),
+                                 (("local",), "Automatic", "Picked for this computer"), (cfg, pro, language))
+        self.assertEqual(ec.file_choices({})[0], ("auto", "Automatic", "Automatic · Local", False))
+
+    def test_the_pro_chip_is_one_switch(self):
+        # Rows that need a Pro plan wear PRO for everyone (it says why the row is there); the flag
+        # is the one place to make that "only for people without the plan".
+        for user_pro in (False, True):
+            rows = {r["value"]: r for r in ec.file_rows({}, user_pro)}
+            self.assertEqual(rows["cloud"]["tags"], ("cloud", "pro"))
+        with patch.object(ec, "SHOW_PRO_TO_PRO", False):
+            self.assertEqual({r["value"]: r for r in ec.file_rows({}, True)}["cloud"]["tags"], ("cloud",))
+            self.assertEqual({r["value"]: r for r in ec.file_rows({}, False)}["cloud"]["tags"], ("cloud", "pro"))
+            self.assertTrue({r["value"]: r for r in ec.file_rows({}, True)}["cloud"]["pro"])      # still a Pro row
 
     def test_own_key_choices_only_with_the_key(self):
         def own(cfg):
             return [c for c in ec.file_choices(cfg) if c[0].startswith("own:")]
         self.assertEqual(own({}), [])
         self.assertEqual(own({"google_api_key": "  ", "mistral_api_key": ""}), [])
-        google = ("own:google", "Google Gemini", "Google Gemini · Gemini 2.5 Flash · your own key", False)
-        mistral = ("own:mistral", "Mistral", "Mistral · Voxtral Mini · your own key", False)
+        google = ("own:google", "Gemini 2.5 Flash · your Google key",
+                  "Gemini 2.5 Flash · your Google key · Cloud", False)
+        mistral = ("own:mistral", "Voxtral Mini · your Mistral key",
+                   "Voxtral Mini · your Mistral key · Cloud", False)
         self.assertEqual(own(GKEY), [google])
         self.assertEqual(own(MKEY), [mistral])
         self.assertEqual(own(BOTH), [google, mistral])
         self.assertEqual(ec.file_choices(BOTH)[-3][0], "cloud")             # Gusan Cloud, then own keys
-        # The line names the model that will really run (same words as Dictation's).
+        # The row names the model that will really run (same names as Dictation's).
         cfg = dict(BOTH, google_stt_model="gemini-2.5-pro", mistral_stt_model="voxtral-mini-2602")
-        self.assertEqual([c[2] for c in own(cfg)], ["Google Gemini · Gemini 2.5 Pro · your own key",
-                                                    "Mistral · Voxtral Mini 2602 · your own key"])
-        self.assertEqual(own(dict(GKEY, backend="google"))[0][2],
-                         ec.runs_on(dict(GKEY, backend="google"), "dictation")["label"])
-        # Privacy mode keeps them listed (the page greys them out), with the real line.
+        self.assertEqual([c[2] for c in own(cfg)],
+                         ["Gemini 2.5 Pro · your Google key · Cloud",
+                          "Voxtral Mini 2602 · your Mistral key · Cloud"])
+        self.assertEqual(ec.runs_on(dict(GKEY, backend="google"), "dictation")["tagged"],
+                         "Gemini 2.5 Flash · your Google key · Cloud")
+        # Privacy mode keeps them listed (the page greys them out), with the real names.
         self.assertEqual(own(dict(BOTH, privacy_mode=True)), [google, mistral])
-        self.assertEqual(ec.file_choices(dict(BOTH, privacy_mode=True))[-3][2], "Gusan Cloud · Gemini 2.5 Flash")
+        self.assertEqual(ec.file_choices(dict(BOTH, privacy_mode=True))[-3][2],
+                         "Best accuracy · Cloud · Pro")
 
     def test_engine_gusan_cloud(self):
         cfg = files("cloud", backend="local", whisper_model="small")
         r = ec.file_engine(cfg, pro=True)
         self.assertEqual((r["feature"], r["kind"], r["label"], r["model_name"], r["model_id"], r["pro"]),
-                         ("audio_to_text", "cloud", "Gusan Cloud · Gemini 2.5 Flash", "Gemini 2.5 Flash",
-                          "gemini-2.5-flash", True))
+                         ("audio_to_text", "cloud", "Gusan Cloud · Best accuracy", "Best accuracy",
+                          "best", True))
         r = ec.file_engine(dict(cfg, managed_provider="mistral"), pro=True)
-        self.assertEqual((r["model_name"], r["model_id"]), ("Voxtral Mini", "voxtral-mini-latest"))
+        self.assertEqual((r["model_name"], r["model_id"]), ("Best accuracy", "best"))
         # Free (or Pro ended), or Privacy mode: Automatic on this computer.
         self.assertEqual(ec.file_engine(cfg, pro=False)["label"], "Auto · on this computer")
         r = ec.file_engine(dict(cfg, privacy_mode=True), pro=True)
@@ -382,7 +462,7 @@ class TestAudioToTextModels(unittest.TestCase):
     def test_runs_on(self):
         app = SimpleNamespace(cfg=files("cloud", managed_provider="mistral"), is_pro=lambda: True,
                               auth=SimpleNamespace(is_authenticated=True))
-        self.assertEqual(ec.runs_on(app, "audio_to_text")["model_name"], "Voxtral Mini")
+        self.assertEqual(ec.runs_on(app, "audio_to_text")["model_name"], "Best accuracy")
         app.is_pro = lambda: False
         self.assertEqual(ec.runs_on(app, "files")["label"], "Auto · on this computer")
         self.assertEqual(ec.runs_on(files("cloud"), "audio_to_text", pro=True)["kind"], "cloud")
@@ -575,7 +655,7 @@ class TestSmartActionsSpeech(unittest.TestCase):
         cfg = {"backend": "local", "whisper_model": "small", ec.SMART_SPEECH_KEY: "cloud",
                "managed_provider": "mistral"}
         r = ec.runs_on(cfg, "smart_actions_speech", pro=True)
-        self.assertEqual((r["kind"], r["model_name"], r["pro"]), ("cloud", "Voxtral Mini", True))
+        self.assertEqual((r["kind"], r["model_name"], r["pro"]), ("cloud", "Fast", True))
         # Not Pro, or Privacy mode: it transcribes like Dictation.
         self.assertEqual(ec.runs_on(cfg, "smart_actions_speech", pro=False)["model_id"], "small")
         r = ec.runs_on(dict(cfg, privacy_mode=True), "smart_actions_speech", pro=True)
@@ -583,14 +663,24 @@ class TestSmartActionsSpeech(unittest.TestCase):
 
     def test_choices(self):
         choices = ec.smart_speech_choices()
-        self.assertEqual(choices[0], ("", "Same as Dictation", "Same as Dictation", False))
-        self.assertEqual(choices[-1], ("cloud", "Gusan Cloud", "Gusan Cloud · Gemini 2.5 Flash", True))
+        # "Same as Dictation" names what Dictation runs now (here: no cfg = Whisper Base on this computer)
+        self.assertEqual(choices[0], ("", "Same as Dictation · Whisper Base",
+                                      "Same as Dictation · Whisper Base · Local", False))
+        self.assertEqual(choices[-1], ("cloud", "Fast", "Fast · Cloud · Pro", True))
         middle = choices[1:-1]
         self.assertEqual([c[0] for c in middle], list(ec.SPEECH_MODELS))
-        self.assertIn(("small", "Balanced", "Balanced · Whisper Small", False), middle)
+        self.assertIn(("small", "Whisper Small", "Whisper Small · Local", False), middle)
         self.assertTrue(all(not c[3] for c in middle))
         self.assertEqual(ec.smart_speech_choices({"managed_provider": "mistral"})[-1][2],
-                         "Gusan Cloud · Voxtral Mini")
+                         "Fast · Cloud · Pro")
+
+    def test_same_as_dictation_wears_the_tags_of_what_dictation_runs(self):
+        rows = ec.smart_speech_rows({"backend": "managed", "managed_provider": "gemini"}, True)
+        self.assertEqual(rows[0]["title"], "Same as Dictation · Fast")
+        self.assertEqual(rows[0]["tags"], ("cloud", "pro"))
+        self.assertFalse(rows[0]["pro"])                       # picking it never needs a plan
+        rows = ec.smart_speech_rows({"backend": "managed", "privacy_mode": True}, True)
+        self.assertEqual(rows[0]["tags"], ("local",))          # Privacy mode: Dictation is local
 
     def test_set_smart_speech(self):
         key = ec.SMART_SPEECH_KEY
@@ -643,6 +733,59 @@ class TestParityWithMain(unittest.TestCase):
                         got, token = ec.resolve_action_engine(cfg, pro, True)
                         self.assertEqual(got, want)
                         self.assertEqual(token, "_managed_token" in config)
+
+
+class TestArmenianModelHints(unittest.TestCase):
+    """The Armenian model reads Armenian only: a place that has it picked while the language is not
+    Armenian says so (the recorder reads such speech with Whisper) - and says nothing when it reads."""
+
+    HY = "hy-fastconformer"
+
+    def listed(self, value=True, ready=True):
+        import speech_hy
+        for name, v in (("listed", value), ("ready", ready), ("runtime_ok", True)):
+            p = patch.object(speech_hy, name, lambda *a, _v=v, **k: _v)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_dictation_with_the_model_picked_says_what_reads_what(self):
+        self.listed()
+        cfg = {"backend": "local", "whisper_model": self.HY}
+        self.assertEqual(ec.dictation_note(dict(cfg, language="hy"), False), "")             # it reads this
+        self.assertEqual(ec.dictation_note(dict(cfg, language="auto"), False), ec.HY_NOTE_AUTO)
+        self.assertEqual(ec.dictation_note(dict(cfg, language="en"), False),
+                         "This model reads Armenian only. English is read by Whisper instead.")
+        self.assertEqual(ec.dictation_note(dict(cfg, language="multi", mix_languages=["hy", "en"]), False),
+                         ec.HY_NOTE_MIX)
+        self.assertEqual(ec.dictation_note(dict(cfg, language="multi", mix_languages=["hy"]), False),
+                         ec.HY_NOTE_MIX)            # (fewer than two picked: "any language" - not Armenian only)
+        # a Whisper pick: nothing about the Armenian model
+        self.assertEqual(ec.dictation_note(dict(cfg, whisper_model="small", language="en"), False), "")
+
+    def test_a_pick_that_cannot_be_used_says_so(self):
+        self.listed(value=False, ready=False)
+        cfg = {"backend": "local", "whisper_model": self.HY, "language": "hy"}
+        self.assertEqual(ec.dictation_note(cfg, False), ec.HY_NOTE_UNAVAILABLE)
+
+    def test_the_cloud_and_own_keys_say_nothing_about_it(self):
+        self.listed()
+        cfg = {"backend": "managed", "whisper_model": self.HY, "language": "en"}
+        self.assertEqual(ec.dictation_note(cfg, True, True), "")
+
+    def test_audio_to_text_and_the_live_assistant_say_it_too(self):
+        self.listed()
+        self.assertEqual(ec.file_note({"file_model": self.HY, "file_language": "auto"}, False),
+                         ec.HY_NOTE_AUTO)
+        self.assertEqual(ec.file_note({"file_model": self.HY, "file_language": "fr"}, False),
+                         "This model reads Armenian only. French is read by Whisper instead.")
+        self.assertEqual(ec.file_note({"file_model": self.HY, "file_language": "hy"}, False), "")
+        live = {"live_assist_speech_model": self.HY}
+        self.assertEqual(ec.live_speech_note(dict(live, live_assist_language="de"), False, None, False),
+                         "This model reads Armenian only. German is read by Whisper instead.")
+        self.assertEqual(ec.live_speech_note(dict(live, live_assist_language="hy"), False, None, False), "")
+        # Automatic and a Whisper pick keep their own words
+        self.assertEqual(ec.live_speech_note({"live_assist_speech_model": "small", "live_assist_language": "de"},
+                                             False, None, False), "")
 
 
 if __name__ == "__main__":

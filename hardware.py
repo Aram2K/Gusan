@@ -97,17 +97,34 @@ LOCAL_AI_MODEL_IDS = tuple(LOCAL_AI_INFO)
 LEGACY_LOCAL_AI_IDS = {"aibuben_tiny": "qwen_tiny", "aibuben_balanced": "qwen_3b", "aibuben_gpu": "qwen_7b"}
 
 # Gusan Cloud (Pro). Names only - the routing lives in main / engine_choice.
-CLOUD_SPEECH_MODEL = "Gemini 2.5 Flash"     # cloud speech (transcribe-proxy default)
+CLOUD_SPEECH_MODEL = "Fast"                  # cloud speech: Gusan Cloud's fast profile (transcribe-proxy chooses the model)
 CLOUD_WRITER_MODEL = "Mistral Small"        # meeting notes (smart-action tries Claude Sonnet 5.5 first once its key is scoped to a workspace)
 CLOUD_LIVE_MODEL = "DeepSeek V4.1 Flash"    # Live Assistant answers
 CLOUD_SMART_MODEL = CLOUD_LIVE_MODEL        # Smart Actions (smart-action SMART_MODES)
 
 DEFAULT_SPEECH_MODEL = "base"               # main.DEFAULT["whisper_model"]
 
+# The Armenian speech model that runs on this computer (speech_hy.py): NVIDIA's FastConformer,
+# converted for sherpa-onnx. NOT in MODEL_INFO on purpose: every card and picker that walks
+# MODEL_INFO lists Whisper models only, and this one is listed by speech_hy.listed() once it is
+# on disk or has somewhere to be downloaded from. info() and the label helpers know its names.
+HY_MODEL_ID = "hy-fastconformer"
+HY_INFO = ModelInfo(HY_MODEL_ID, SPEECH, "Armenian", "NVIDIA FastConformer Armenian", "105 MB", 105, 2,
+                    speed=4, accuracy=5, speed_rank=3)
+
+
+def is_speech_id(model_id) -> bool:
+    """Is this a speech model that runs on this computer: a Whisper id (MODEL_INFO) or the
+    Armenian model (HY_MODEL_ID)? What a config value (whisper_model, file_model, the Smart
+    Actions and Live Assistant picks) may name."""
+    return model_id in MODEL_INFO or model_id == HY_MODEL_ID
+
 
 def info(model_id) -> Optional[ModelInfo]:
     """The ModelInfo for a speech or local AI id (legacy ids too), else None."""
     mid = LEGACY_LOCAL_AI_IDS.get(model_id, model_id)
+    if mid == HY_MODEL_ID:
+        return HY_INFO
     return MODEL_INFO.get(mid) or LOCAL_AI_INFO.get(mid)
 
 

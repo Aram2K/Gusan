@@ -95,7 +95,7 @@ from PySide6.QtWidgets import (QButtonGroup, QFrame, QGraphicsOpacityEffect, QGr
                                QWidget)
 
 import rich_text
-from ui import privacy_prompt, theme
+from ui import hy_model, privacy_prompt, theme
 from ui.components import (Button, Card, IconButton, Keycaps, PageHeader, ProTag, SettingRow,
                            SettingsRail, icons, label)
 from ui.components import clipboard, mini_prompt
@@ -1129,6 +1129,12 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
         self.speech_line = label("", "model", sp)
         self.speech_line.setContentsMargins(13, 0, 0, 0)
         sv.addWidget(self.speech_line)
+        # While the Armenian model downloads: a way to stop it.
+        self.speech_cancel = Button(hy_model.CANCEL + " download", "link", "s", parent=sp)
+        self.speech_cancel.setAccessibleName("Cancel the Armenian model download")
+        self.speech_cancel.clicked.connect(self._cancel_speech_download)
+        self.speech_cancel.hide()
+        sv.addWidget(self.speech_cancel, 0, Qt.AlignLeft)
         sp.setAccessibleName("Transcribes with")
         self.speech_row = rail.add_row(SettingRow("Transcribes with", sp, stacked=True))
         self._speech_note = ""            # e.g. a download that didn't start
@@ -1242,17 +1248,22 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
         box = self.speech_combo
         try:
             import hardware
-            info = hardware.MODEL_INFO
+            info = hardware.info
+            is_model = hardware.is_speech_id         # a Whisper model or the Armenian one
         except Exception:
-            info = {}
+            def info(_v):
+                return None
+
+            def is_model(_v):
+                return False
         for i in range(box.count()):
             if box.is_heading(i):
                 continue
             value = str(box.itemData(i) or "")
             mark, note = "", ""
-            if value and value != SPEECH_CLOUD and self._speech_state(value) in ("missing", "failed"):
+            if value and value != SPEECH_CLOUD and is_model(value) and self._speech_state(value) in ("missing", "failed"):
                 mark = MARK_DOWNLOAD
-                note = getattr(info.get(value), "size", "") or ""
+                note = getattr(info(value), "size", "") or ""
             box.set_choice_mark(i, mark, note)
 
     def _speech_downloaded(self):
@@ -1323,6 +1334,8 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
         if ro.get("problem") == "needs_download":
             size = ro.get("size") or ""
             return ("%s · %s download" % (name, size)) if size else "%s · not downloaded" % name
+        if hy_model.is_hy(mid):
+            return (ro.get("tagged") or name) + " · Armenian only"      # (any other language: Whisper reads it)
         return ro.get("tagged") or name
 
     def _refresh_speech(self):
@@ -1338,6 +1351,7 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
         line = self._speech_line()
         self.speech_line.setText(line)
         self.speech_line.setVisible(bool(line))
+        self.speech_cancel.setVisible(hy_model.can_cancel(self.app))
         box.setAccessibleDescription(line)
         self.speech_row.set_hint(self._speech_note)
 
@@ -1373,6 +1387,10 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
     def _pick_missing_model(self, mid):
         """A Whisper model that is not on this computer: a small popup asks;
         Download starts it and picks it, Not now leaves everything as it is."""
+        if hy_model.is_hy(mid):
+            if hy_model.confirm_download(self, "Smart Actions"):
+                self._apply_speech(mid)
+            return
         try:
             import hardware
             info = hardware.MODEL_INFO.get(mid)
@@ -1383,6 +1401,16 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
         size = getattr(info, "size", "")
         if mini_prompt.confirm_download(self, plain, real, size):
             self._apply_speech(mid)
+
+    def _cancel_speech_download(self):
+        """Stop the Armenian model's download. A pick of it that is not on this computer would only
+        start the download again at the next Smart Action, so "Same as Dictation" is put back."""
+        if not hy_model.cancel(self.app):
+            return
+        if self.speech_value() == hy_model.HY_ID:
+            _set_many(self.app, {SPEECH_KEY: ""})
+        self._speech_note = "The download was stopped. Same as Dictation is back."
+        self._refresh_speech()
 
     def _apply_speech(self, value, turn_off_privacy=False):
         """Save the pick through the controller (and start its download when
@@ -1643,6 +1671,9 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
             scanned = getattr(dl, "scanned", None)
             if scanned is not None:
                 scanned.connect(self._on_dl_scanned)
+            catalog = getattr(dl, "catalog_changed", None)
+            if catalog is not None:
+                catalog.connect(self._on_dl_scanned)        # the Armenian model became available (or went)
             self._dl_connected = dl
         except Exception:
             logger.debug("downloads signals unavailable", exc_info=True)
@@ -1723,6 +1754,7 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
 
     # ── shell hooks ──
     def on_open(self, **opts):
+        hy_model.refresh_catalog(self.app)          # a worker: once a day at most, never in Privacy mode
         self.refresh()
         self.reload_recent()
         if opts.get("focus") in ("shortcut", "hotkey"):

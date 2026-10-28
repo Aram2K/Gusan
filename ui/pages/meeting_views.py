@@ -21,8 +21,8 @@ from PySide6.QtCore import QByteArray, QEvent, QObject, QRectF, QSize, Qt, QTime
 from PySide6.QtGui import (QColor, QDesktopServices, QGuiApplication, QIcon, QLinearGradient, QPainter,
                            QPen, QPixmap)
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import (QCheckBox, QFileDialog, QFrame, QHBoxLayout, QInputDialog,
-                               QLabel, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QScrollArea,
+from PySide6.QtWidgets import (QCheckBox, QFileDialog, QFrame, QHBoxLayout,
+                               QLabel, QMenu, QPlainTextEdit, QProgressBar, QScrollArea,
                                QSizePolicy, QStackedWidget, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
 import rich_text
@@ -54,6 +54,7 @@ AUDIO_MODES = {
     "system_only": ("Only the call's sound", ("volume",)),
 }
 NOTICE_TEXT = "Heads up: I'm using %s to take notes on this call." % APP_NAME
+CONSENT_KEY = "meeting_consent_reminder"       # the setting that turns the "let everyone know" lines on
 UPSELL_RECORD = "Meeting recording"
 
 
@@ -330,7 +331,7 @@ class ElidedLabel(QLabel):
         fm = self.fontMetrics()
         shown = fm.elidedText(self._full, Qt.ElideRight, max(0, self.width()))
         QLabel.setText(self, shown)
-        self.setToolTip(self._full if shown != self._full else "")
+        self.setToolTip(theme.plain_tip(self._full) if shown != self._full else "")
 
 
 # Markdown helpers live in rich_text (one renderer for display, copy, paste
@@ -948,6 +949,8 @@ class LiveView(QWidget):
         body.setSpacing(16)
         self.hero = self._build_hero()
         body.addWidget(self.hero)
+        self.consent_row = self._build_consent_row()
+        body.addWidget(self.consent_row)
 
         bottom = QHBoxLayout()
         bottom.setSpacing(16)
@@ -1066,6 +1069,51 @@ class LiveView(QWidget):
         lay.addWidget(acts, 0, Qt.AlignVCenter)
         return hero
 
+    def _build_consent_row(self):
+        """The start card's "Let everyone know you're recording." line, for a calendar
+        meeting recorded from the reminder (which goes straight to this view and never
+        shows the card). One calm row; hidden unless consent_wanted()."""
+        row = QWidget(self)
+        h = QHBoxLayout(row)
+        h.setContentsMargins(4, 0, 0, 0)
+        h.setSpacing(10)
+        h.addWidget(icon_label("bubble", 16, "muted", parent=row), 0, Qt.AlignVCenter)
+        h.addWidget(tlabel("Let everyone know you’re recording.", 13.5, 400, "text2", parent=row))
+        h.addStretch(1)
+        self.copy_notice_btn = Button("Copy notice", "secondary", "s", icon="copy", parent=row)
+        self.copy_notice_btn.setToolTip(NOTICE_TEXT)
+        self.copy_notice_btn.clicked.connect(self._copy_notice)
+        h.addWidget(self.copy_notice_btn)
+        self._copied = QTimer(self)
+        self._copied.setSingleShot(True)
+        self._copied.setInterval(1600)
+        self._copied.timeout.connect(lambda: self.copy_notice_btn.setText("Copy notice"))
+        self._consent_wanted = False
+        row.hide()
+        return row
+
+    def _copy_notice(self):
+        QGuiApplication.clipboard().setText(NOTICE_TEXT)
+        self.copy_notice_btn.setText("Copied")
+        self._copied.start()
+
+    def consent_wanted(self, snap):
+        """True for a calendar meeting with somebody else on it, while the setting
+        "Let everyone know" is on: the session came from the calendar (the reminder,
+        or the start card with a meeting) or from Live Assistant with an invite. The
+        names include you when the reminder started it, so you are taken out first."""
+        cfg = getattr(self.app, "cfg", None) or {}
+        if not cfg.get(CONSENT_KEY, True):
+            return False
+        snap = snap if isinstance(snap, dict) else {}
+        source = snap.get("source") or ""
+        if not (source == "calendar" or (source == "live_assist" and snap.get("calendar_event_id"))):
+            return False
+        me = self.page.me().lower()
+        names = [n for n in (snap.get("attendees_list") or []) if str(n).strip()]
+        others = [n for n in names if str(n).split()[0].lower() != me]
+        return bool(others)
+
     def _build_assist_rows(self, parent):
         self.assist_box = QWidget(parent)
         parent = self.assist_box
@@ -1143,6 +1191,7 @@ class LiveView(QWidget):
         lang = lang_name(snap.get("language") or getattr(s, "_session_language", "") or "")
         sub = " · ".join(p for p in (", ".join(people), lang) if p)
         self.header.set_sub(sub)
+        self._consent_wanted = self.consent_wanted(snap)
         mode = snap.get("audio_mode") or getattr(s, "_session_audio_mode", "") or ""
         self.transcript.set_speaker_labels(mode == "smart_meeting")
         self.sync_model()
@@ -1173,6 +1222,7 @@ class LiveView(QWidget):
         self.back_btn.setVisible(not recording)
         self.my_notes.setReadOnly(not recording)
         self.assist_box.setVisible(recording)
+        self.consent_row.setVisible(recording and self._consent_wanted)
         if phase == "recording":
             self._state("Recording", "red", "red")
             self.pause_btn.setText("Pause")
@@ -1600,6 +1650,7 @@ class NotesView(QWidget):
         self.back_link.clicked.connect(lambda: self.page.show_list())
         lay.addWidget(self.back_link, 0, Qt.AlignLeft)
         self.title_label = label("", "title", w)
+        self.title_label.setTextFormat(Qt.PlainText)    # a calendar invite's title is text, never markup
         self.title_label.setFixedHeight(34)
         lay.addWidget(self.title_label)
         self._meta = QHBoxLayout()
@@ -1795,7 +1846,9 @@ class NotesView(QWidget):
             h.setContentsMargins(0, 0, 0, 0)
             h.setSpacing(8)
             h.addWidget(Faces(people, 22, me=self.page.me()), 0, Qt.AlignVCenter)
-            h.addWidget(label(", ".join(people), "muted"))
+            names = label(", ".join(people), "muted")
+            names.setTextFormat(Qt.PlainText)           # guest names come from an invite
+            h.addWidget(names)
             parts.append(w)
         lang = lang_name(meta.get("language"))
         if lang:
@@ -1884,7 +1937,9 @@ class NotesView(QWidget):
             r = QHBoxLayout()
             r.setSpacing(10)
             r.addWidget(Faces([name], 28, me=me), 0, Qt.AlignVCenter)
-            r.addWidget(tlabel(name, 13.5, 600, "text"), 1, Qt.AlignVCenter)
+            who = tlabel(name, 13.5, 600, "text")
+            who.setTextFormat(Qt.PlainText)             # a guest's name from an invite
+            r.addWidget(who, 1, Qt.AlignVCenter)
             if me and name.split()[0].lower() == me.lower():
                 r.addWidget(label("You", "muted"), 0, Qt.AlignVCenter)
             self._people.addLayout(r)
@@ -2131,8 +2186,8 @@ class NotesView(QWidget):
         if not self.folder:
             return
         current = (self.data or {}).get("title") or ""
-        text, ok = QInputDialog.getText(self, "Rename meeting", "Name", text=current)
-        if not ok:
+        text = mini_prompt.ask_text(self, "Rename meeting", "Name", text=current, ok_label="Save")
+        if text is None:
             return
         self.apply_rename(text)
 
@@ -2159,25 +2214,27 @@ class NotesView(QWidget):
     def delete(self):
         if not self.folder or self.page.is_active_folder(self.folder):
             return
-        title = (self.data or {}).get("title") or "this meeting"
-        box = QMessageBox(self)
-        box.setWindowTitle("Delete meeting")
-        box.setText("Delete “%s”?" % title)
-        box.setInformativeText("Its notes, transcript and recording are removed from this computer.")
-        yes = box.addButton("Delete", QMessageBox.DestructiveRole)
-        box.addButton("Cancel", QMessageBox.RejectRole)
-        box.exec()
-        if box.clickedButton() is yes:
+        from ui.pages import meeting_delete
+        # The same question as in the list (the title may come from a calendar invite: shown as
+        # plain text). Red Delete, Cancel is what Enter presses.
+        if meeting_delete.confirm_delete(self, [dict(self.data or {}, dir=self.folder)]):
             self.apply_delete()
 
     def apply_delete(self):
+        """Delete the open meeting - the same way the list does: its folder moves to the trash and
+        "Deleted 1 meeting. Undo" floats over the page for ten seconds (meeting_delete.MeetingDeleter,
+        meeting_trash.py). ("Delete everything" in Settings, meeting_store.delete_all_meetings, is the
+        one that removes for good.)"""
         folder = self.folder
-        # A loaded recording holds its file open: Windows would refuse the delete.
+        if not folder:
+            return
+        meeting = dict(self.data or {}, dir=folder)
+        # A loaded recording holds its file open: Windows would refuse the move.
         self.audio_player.stop(release=True)
         s = self.page.session()
+        deleter = self.page.list_view.meetings.deleter
 
         def work():
-            import meeting_store
             # The names that come after the notes read the call's sound from this folder
             # (and would go on for minutes): they stop first, off the window's thread.
             stop = getattr(s, "stop_speaker_pass", None)
@@ -2186,18 +2243,35 @@ class NotesView(QWidget):
                     stop(folder)
                 except Exception:
                     logger.debug("stopping the speaker pass before a delete failed", exc_info=True)
-            return meeting_store.delete_meeting(folder)
+            return True
 
-        def done(ok, err):
-            if ok and err is None:
-                # No telemetry here: "meeting_deleted" isn't allow-listed yet
-                # (meetings.py Integration notes, Telemetry).
+        def done(_ok, _err):
+            # The move itself is the deleter's (a worker thread, the row dims "Deleting…" and leaves, the
+            # bar says Deleted - Undo, a failure is said in plain words, the count goes to telemetry).
+            if deleter.delete([meeting], "notes", names_stopped=True):
                 self.folder = None
                 self.audio_player.set_parts([])
                 self.page.show_list(refresh=True)
-            else:
-                self.flash("Couldn't delete this meeting.", "red")
         self._bg.run(work, done)
+
+    def _is_folder(self, folder):
+        try:
+            return bool(self.folder) and (os.path.normcase(os.path.abspath(str(self.folder)))
+                                          == os.path.normcase(os.path.abspath(str(folder))))
+        except Exception:
+            return False
+
+    def release_folder(self, folder):
+        """The list is about to move ``folder`` to the trash. When this view has its recording loaded,
+        let go of the file first (Windows will not move a folder that has a file open)."""
+        if self._is_folder(folder):
+            self.audio_player.stop(release=True)
+
+    def forget_folder(self, folder):
+        """``folder`` left the library (the list deleted it): this view no longer shows it."""
+        if self._is_folder(folder):
+            self.folder = None
+            self.audio_player.set_parts([])
 
     def play(self):
         """Play or pause the recording, right here."""

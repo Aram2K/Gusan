@@ -461,6 +461,31 @@ class TestCloudRun(unittest.TestCase):
                                  ["gemini-2.5-flash", "base"])
                 self.assertIn("Loading Whisper Base", [e[1] for e in events])
 
+    def test_a_language_whisper_is_poor_at_is_never_put_through_whisper_when_the_cloud_refuses(self):
+        # Armenian: the file is not converted on this computer instead - the person is told.
+        for kind in ("cap", "pro_required", "no_token"):
+            with self.subTest(kind):
+                def send(spec, wav, kind=kind):
+                    raise cloud_error(kind)
+                rec = FakeRecorder()
+                with self.assertRaises(fj.JobError) as cm:
+                    run({"model": "cloud", "language": "hy"}, audio=talk(90), recorder=rec,
+                        cloud=cloud_spec(language="hy", languages=("hy",)), cloud_send=send)
+                self.assertEqual(cm.exception.reason, "cloud")
+                self.assertEqual(cm.exception.message, fj.MSG_POOR_LOCAL.format(language="Armenian"))
+                self.assertEqual(rec.loaded, [])                    # Whisper was never loaded
+                self.assertNotIn("token", cm.exception.message.lower())
+        # a mix with Armenian in it is the same; a mix without it, and any other language, goes on here
+        def send(spec, wav):
+            raise cloud_error("cap")
+        with self.assertRaises(fj.JobError):
+            run({"model": "cloud", "language": "multi"}, audio=talk(90),
+                cloud=cloud_spec(language="multi", languages=("en", "hy")), cloud_send=send)
+        for lang, langs in (("fr", ("fr",)), ("multi", ("en", "fr")), ("auto", ())):
+            result, rec, _events, _ = run({"model": "cloud", "language": lang}, audio=talk(90), auto="base",
+                                          cloud=cloud_spec(language=lang, languages=langs), cloud_send=send)
+            self.assertEqual((result["engine"], rec.loaded), ("local", ["base"]), lang)
+
     def test_gusan_cloud_refused_later_fails_the_job(self):
         # Never a silent local fill under a cloud name.
         progress = Progress()
@@ -954,19 +979,20 @@ class TestQueue(unittest.TestCase):
         spec = run["cloud"]
         self.assertIsInstance(spec, cloud_speech.Spec)
         self.assertIn("cloud", run["kw"])
-        self.assertEqual((spec.engine, spec.model_id, spec.provider),
-                         ("gusan", "gemini-2.5-flash", "gemini"))
+        # Audio to text asks Gusan Cloud for its BEST profile; the server chooses the engine
+        self.assertEqual((spec.engine, spec.model_id, spec.provider, spec.request_model),
+                         ("gusan", "best", "gemini", "best"))
         self.assertIs(spec.token_fn, token)
         self.assertIs(spec.cfg, self.app.cfg)      # live: Privacy mode re-checked per piece
         self.assertEqual(run["busy"], (fj.BUSY_CLOUD, fj.BUSY_CLOUD))
         self.assertEqual((item["state"], item["model"], item["model_name"], item["engine"]),
-                         ("done", "gemini-2.5-flash", "Gemini 2.5 Flash", "gusan"))
-        self.assertEqual(self.store.saved[0]["model"], "gemini-2.5-flash")
+                         ("done", "best", "Best accuracy", "gusan"))
+        self.assertEqual(self.store.saved[0]["model"], "best")
         self.assertEqual(self.app.events("file_transcription_started"),
-                         [{"model": "gemini-2.5-flash", "engine": "gusan", "speakers": True,
+                         [{"model": "best", "engine": "gusan", "speakers": True,
                            "timestamps": True}])
         done = self.app.events("file_transcription_completed")[0]
-        self.assertEqual((done["model"], done["engine"]), ("gemini-2.5-flash", "gusan"))
+        self.assertEqual((done["model"], done["engine"]), ("best", "gusan"))
         self.assertEqual(self.app.waits, [])           # only jobs on this computer
         self.assertEqual(self.app.preloads, 0)         # dictation's model was never evicted
         self.assertFalse(self.app._file_job_running)
@@ -1023,8 +1049,8 @@ class TestQueue(unittest.TestCase):
         q = self.queue(sync=False, runner=self.cloud_runner)
         items, _ = q.enqueue(self.files[:2], {"model": "cloud"})
         self.assertEqual((items[0]["model"], items[0]["model_name"], items[0]["engine"]),
-                         ("voxtral-mini-latest", "Voxtral Mini", "gusan"))        # running
-        self.assertEqual(items[1]["model_name"], "Voxtral Mini")                  # queued
+                         ("best", "Best accuracy", "gusan"))                      # running
+        self.assertEqual(items[1]["model_name"], "Best accuracy")                 # queued
         self.assertEqual(fj.BUSY_FOR_MEETING, fj.BUSY_CLOUD)
         self.app.is_pro = lambda: False
         more, _ = q.enqueue([self.files[2]], {"model": "cloud"})
@@ -1033,7 +1059,7 @@ class TestQueue(unittest.TestCase):
             self.spawned.pop(0)()
         # Pro ended while it waited: Automatic on this computer.
         self.assertEqual([(i["model"], i["engine"]) for i in items + more],
-                         [("voxtral-mini-latest", "gusan"), ("base", "local"), ("base", "local")])
+                         [("best", "gusan"), ("base", "local"), ("base", "local")])
         self.assertNotEqual(fj.BUSY_FOR_MEETING, fj.BUSY_CLOUD)
 
     def test_cloud_job_that_went_local(self):

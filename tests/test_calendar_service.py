@@ -25,7 +25,8 @@ def meeting(mid, start_min=0, length_min=60, link="https://meet.google.com/abc-d
     st = T + timedelta(minutes=start_min)
     return {"id": mid, "title": title, "start": st, "end": st + timedelta(minutes=length_min),
             "attendees": ["Aram"] + list(others), "others": list(others), "link": link,
-            "call_type": "Google Meet" if link else "", "recurring_id": ""}
+            "call_type": "Google Meet" if link else "", "recurring_id": "",
+            "agenda": "", "has_others": bool(others), "private": False}
 
 
 class FakeApi:
@@ -89,6 +90,15 @@ class TestImport(unittest.TestCase):
         self.assertEqual(calendar_service.STATE_FILE, "calendar_state.json")
         self.assertEqual(calendar_service.FETCH_EVERY_MS, 300_000)
         self.assertLessEqual(calendar_service.REMIND_EVERY_MS, 20_000)
+
+    def test_fetch_cadence_constants(self):
+        cs = calendar_service
+        self.assertEqual((cs.FETCH_FAST_S, cs.FETCH_IDLE_S, cs.FETCH_PRE_MEETING_S,
+                          cs.FETCH_BACKOFF_CAP_S, cs.FETCH_STALE_S), (300, 900, 150, 1800, 1200))
+        self.assertEqual(cs.FETCH_EVERY_MS, cs.FETCH_FAST_S * 1000)
+        self.assertEqual((cs.STATUS_PAUSED_TEXT, cs.STATUS_RETRY_TEXT),
+                         ("Paused in Privacy mode.", "Couldn't read Google Calendar. Trying again."))
+        self.assertEqual(cs.LINK_ONLY_KEY, "calendar_only_with_link")      # the id keeps its old name
 
 
 class TestState(Base):
@@ -188,23 +198,68 @@ class TestCoreList(Base):
         self.assertEqual(rows[0]["people"], "Anna, David +2")
         self.assertNotIn("muted", c.cache[0])                # copies; the cache stays clean
 
-    def test_call_link_filter_applies_to_the_list(self):
+    def test_other_people_filter_applies_to_the_list(self):
         cfg = {}
         c = self.core(cfg)
-        c.apply_fetch([meeting("call", 10), meeting("lunch", 20, link="")])
-        self.assertEqual([m["id"] for m in c.meetings(T)], ["call"])     # default: only with a link
+        # A phone call with people (no link) counts; a solo Focus block with a Meet link does not.
+        c.apply_fetch([meeting("call", 10, link="", others=("Anna",)),
+                       meeting("lunch", 20, others=())])
+        self.assertEqual([m["id"] for m in c.meetings(T)], ["call"])     # default: only with other people
         cfg[calendar_service.LINK_ONLY_KEY] = False
         self.assertEqual([m["id"] for m in c.meetings(T)], ["call", "lunch"])
 
     def test_next_and_current_meeting(self):
         c = self.core({calendar_service.LINK_ONLY_KEY: True})
-        c.apply_fetch([meeting("running", -10, 30), meeting("next", 3, link=""), meeting("later", 60)])
-        self.assertEqual(c.next_meeting(T)["id"], "later")      # "next" has no link: filtered
-        self.assertEqual(c.current_meeting(T)["id"], "next")     # starts in 3 min, closest start
+        c.apply_fetch([meeting("running", -10, 30), meeting("next", 3, others=()), meeting("later", 60)])
+        self.assertEqual(c.next_meeting(T)["id"], "later")      # "next" is alone: filtered
+        self.assertEqual(c.current_meeting(T)["id"], "next")     # starts in 3 min, closest start; filter or not
         self.assertEqual(c.current_meeting(T - timedelta(minutes=6))["id"], "running")
         c.apply_fetch([])
         self.assertIsNone(c.next_meeting(T))
         self.assertIsNone(c.current_meeting(T))
+
+    def test_the_live_card_never_picks_a_solo_block(self):
+        # current_meeting() feeds the Live card, which sends the title to the AI.
+        c = self.core({calendar_service.LINK_ONLY_KEY: False})          # the setting doesn't matter here
+        c.apply_fetch([meeting("doctor", -20, 60, others=())])
+        self.assertEqual(c.current_meeting(T)["id"], "doctor")          # the start card: any event (spec A9)
+        self.assertIsNone(c.current_meeting(T, only_meetings=True))     # the Live card: nothing on
+        # A solo block that started closer to now doesn't hide a real meeting about to start.
+        c.apply_fetch([meeting("write-report", -2, 90, others=()), meeting("customer", 4)])
+        self.assertEqual(c.current_meeting(T)["id"], "write-report")
+        self.assertEqual(c.current_meeting(T, only_meetings=True)["id"], "customer")
+        self.assertEqual(c.current_meeting(T, only_meetings=True)["people"], "Anna, David +2")
+
+    def test_now_or_next(self):
+        c = self.core({calendar_service.LINK_ONLY_KEY: True})
+        self.assertEqual(c.now_or_next(T), ("", None))                      # nothing cached
+        c.apply_fetch([meeting("running", -10, 30), meeting("later", 60), meeting("solo", 20, others=())])
+        kind, m = c.now_or_next(T)
+        self.assertEqual((kind, m["id"]), ("now", "running"))               # a running meeting wins
+        self.assertEqual(m["people"], "Anna, David +2")                    # decorated like the list rows
+        kind, m = c.now_or_next(T + timedelta(minutes=25))                  # it ended; the solo one is filtered
+        self.assertEqual((kind, m["id"]), ("next", "later"))
+        kind, m = c.now_or_next(T + timedelta(minutes=61))                  # "later" is running now
+        self.assertEqual((kind, m["id"]), ("now", "later"))
+        self.assertEqual(c.now_or_next(T + timedelta(hours=3)), ("", None))
+        # Overlapping meetings: the one that started closest to now.
+        c.apply_fetch([meeting("long", -50, 120), meeting("recent", -5, 60)])
+        self.assertEqual(c.now_or_next(T)[1]["id"], "recent")
+        # The start of a meeting is "now", the minute before it is still "next".
+        c.apply_fetch([meeting("m", 5)])
+        self.assertEqual(c.now_or_next(T + timedelta(minutes=4, seconds=59))[0], "next")
+        self.assertEqual(c.now_or_next(T + timedelta(minutes=5))[0], "now")
+        c.cache = [meeting("m", 5)]
+        c.connected = False
+        self.assertEqual(c.now_or_next(T), ("", None))                      # not connected
+
+    def test_now_or_next_follows_the_filter_setting(self):
+        cfg = {}
+        c = self.core(cfg)
+        c.apply_fetch([meeting("solo", -5, 30, others=())])
+        self.assertEqual(c.now_or_next(T), ("", None))
+        cfg[calendar_service.LINK_ONLY_KEY] = False
+        self.assertEqual(c.now_or_next(T)[0], "now")
 
 
 class TestCoreReminders(Base):
@@ -235,13 +290,13 @@ class TestCoreReminders(Base):
         c.apply_fetch([meeting("a")])
         self.assertIsNone(c.take_reminder(T))
 
-    def test_muted_ask_off_and_link_filter(self):
+    def test_muted_ask_off_and_other_people_filter(self):
         cfg = {}
         c = self.core(cfg)
-        c.apply_fetch([meeting("a"), meeting("lunch", link="")])
+        c.apply_fetch([meeting("a"), meeting("lunch", others=())])
         self.assertTrue(c.set_muted("a", True))
         self.assertFalse(c.set_muted("a", True))
-        self.assertIsNone(c.take_reminder(T))                    # a muted, lunch has no link
+        self.assertIsNone(c.take_reminder(T))                    # a muted, lunch is alone
         cfg[calendar_service.LINK_ONLY_KEY] = False
         cfg[calendar_service.ASK_KEY] = False
         self.assertIsNone(c.take_reminder(T))                    # all reminders off
@@ -292,6 +347,45 @@ class TestCoreAccount(Base):
         c.set_muted("a", True)
         c.forget(calendar_service.REASON_EXPIRED)
         self.assertIn("a", self.saved()["muted"])
+
+    def _connected_with_ids(self):
+        api = FakeApi(connected=False)
+        c = self.core(api=api)
+        c.reconcile_owner("uid-123")
+        api._connected = True
+        c.on_connected("founder@example.com")
+        c.apply_fetch([meeting("evt-muted"), meeting("evt-asked", 90)])
+        c.set_muted("evt-muted", True)
+        c.mark_prompted("evt-asked")
+        c.state.save()                                   # once more, so a .bak holds the ids
+        self.bak = Path(f"{self.path}.bak")
+        self.assertTrue(self.bak.exists())
+        self.assertIn("founder@example.com", self.bak.read_text(encoding="utf-8"))
+        return c
+
+    def test_forgetting_the_calendar_leaves_no_email_or_ids_in_the_backup(self):
+        for reason in (calendar_service.REASON_USER, calendar_service.REASON_ACCOUNT):
+            c = self._connected_with_ids()
+            c.forget(reason)
+            self.assertFalse(self.bak.exists(), reason)
+            for leftover in (self.path, self.bak):
+                text = leftover.read_text(encoding="utf-8") if leftover.exists() else ""
+                for secret in ("founder@example.com", "uid-123", "evt-muted", "evt-asked"):
+                    self.assertNotIn(secret, text, (reason, secret))
+            fresh = CalendarState(self.path)             # nothing to fall back to
+            self.assertEqual((fresh.email, fresh.owner, fresh.prompted, fresh.muted), ("", "", {}, {}))
+
+    def test_an_expiry_keeps_the_asked_and_muted_ids(self):
+        c = self._connected_with_ids()
+        c.forget(calendar_service.REASON_EXPIRED)
+        saved = self.saved()
+        self.assertEqual((saved["email"], saved["owner"]), ("", ""))
+        self.assertIn("evt-muted", saved["muted"])
+        self.assertIn("evt-asked", saved["prompted"])
+        self.assertTrue(CalendarState(self.path).muted)
+
+    def test_drop_backup_without_a_backup_is_fine(self):
+        CalendarState(self.path).drop_backup()
 
     def test_owner_rules(self):
         c = self.core()

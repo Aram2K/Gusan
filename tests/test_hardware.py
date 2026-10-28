@@ -178,7 +178,8 @@ class TestModelNames(unittest.TestCase):
         self.assertEqual(hardware.LEGACY_LOCAL_AI_IDS, local_llm.LEGACY_MODEL_IDS)
 
     def test_cloud_names(self):
-        self.assertEqual(hardware.CLOUD_SPEECH_MODEL, "Gemini 2.5 Flash")
+        # Gusan Cloud chooses its speech engine: the name is its fast profile (engine_choice.CLOUD_PROFILE_NAMES)
+        self.assertEqual(hardware.CLOUD_SPEECH_MODEL, "Fast")
         self.assertEqual(hardware.CLOUD_WRITER_MODEL, "Mistral Small")
         self.assertEqual(hardware.CLOUD_LIVE_MODEL, "DeepSeek V4.1 Flash")
         self.assertEqual(hardware.CLOUD_SMART_MODEL, "DeepSeek V4.1 Flash")

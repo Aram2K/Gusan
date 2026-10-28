@@ -270,6 +270,70 @@ class TestSmartActionsSpeechModel(unittest.TestCase):
         self.assertEqual(res, {"privacy_mode": True, self.KEY: True})
 
 
+class TestLiveAssistantSpeechModel(unittest.TestCase):
+    KEY = "live_assist_speech_model"
+
+    def test_known_values_are_written_and_never_preload(self):
+        for value in ("small", "cloud", "cloud:best", "own:google:gemini-2.5-pro", "own:google", "",
+                      "large-v3-turbo"):
+            app = FakeApp(live_assist_speech_model="base")
+            self.assertTrue(settings_apply.apply(app, {self.KEY: value})[self.KEY], value)
+            self.assertEqual(app.cfg[self.KEY], value)
+            self.assertEqual(app.calls, [], value)            # the one model slot keeps Dictation's model
+            self.assertEqual(app.sig_setting_changed.emitted, [self.KEY])
+
+    def test_unknown_values_are_refused(self):
+        for value in ("whisper-9000", "managed", "local", "own:google:gemini-1.0", "own:mistral",
+                      "cloud:other"):
+            app = FakeApp(live_assist_speech_model="")
+            self.assertFalse(settings_apply.apply(app, {self.KEY: value})[self.KEY], value)
+            self.assertEqual(app.cfg[self.KEY], "")
+            self.assertEqual(app.saves, 0)
+
+    def test_the_cloud_and_your_own_key_are_refused_in_privacy_mode(self):
+        for value in ("cloud", "cloud:best", "own:google:gemini-2.5-flash"):
+            app = FakeApp(privacy_mode=True, live_assist_speech_model="")
+            self.assertFalse(settings_apply.apply(app, {self.KEY: value})[self.KEY], value)
+            self.assertEqual(app.cfg[self.KEY], "")
+        for value in ("small", ""):                           # on-device is fine
+            app = FakeApp(privacy_mode=True, live_assist_speech_model="base")
+            self.assertTrue(settings_apply.apply(app, {self.KEY: value})[self.KEY], value)
+        # Privacy going off in the same call allows it (privacy is applied first).
+        app = FakeApp(privacy_mode=True, live_assist_speech_model="")
+        res = settings_apply.apply(app, {self.KEY: "cloud:best", "privacy_mode": False})
+        self.assertEqual(res, {"privacy_mode": True, self.KEY: True})
+
+
+class TestSpokenLanguage(unittest.TestCase):
+    """"hye", "HY" and "hy-AM" are all Armenian: one spelling is saved, whichever setting it is."""
+
+    def test_every_spelling_is_saved_as_one_code(self):
+        for key in ("language", "live_assist_language", "meeting_language"):
+            for value, saved in (("hy", "hy"), ("hye", "hy"), ("HY", "hy"), ("hy-AM", "hy"), ("Armenian", "hy"),
+                                 ("en-US", "en"), ("fr_FR", "fr"), ("auto", "auto"), ("multi", "multi"),
+                                 ("Mixed languages", "multi"), ("uk", "uk")):
+                app = FakeApp(**{key: "en"})
+                self.assertTrue(settings_apply.apply(app, {key: value})[key], (key, value))
+                self.assertEqual(app.cfg[key], saved, (key, value))
+
+    def test_a_language_nothing_knows_is_refused_and_nothing_changes(self):
+        for key in ("language", "live_assist_language", "meeting_language"):
+            for value in ("klingon", "xx", "123", "armenian-ish"):
+                app = FakeApp(**{key: "fr"})
+                self.assertFalse(settings_apply.apply(app, {key: value})[key], (key, value))
+                self.assertEqual(app.cfg[key], "fr")
+                self.assertEqual(app.saves, 0)
+
+    def test_empty_means_the_default_of_each_setting(self):
+        app = FakeApp(language="fr")
+        self.assertTrue(settings_apply.apply(app, {"language": ""})["language"])
+        self.assertEqual(app.cfg["language"], "auto")                 # Dictation's own language: detect
+        for key in ("live_assist_language", "meeting_language"):
+            app = FakeApp(**{key: "hy"})
+            self.assertTrue(settings_apply.apply(app, {key: None})[key])
+            self.assertEqual(app.cfg[key], "")                        # "" = the same as Dictation
+
+
 class TestAudioToTextModel(unittest.TestCase):
     KEY = "file_model"
 

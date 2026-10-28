@@ -92,13 +92,35 @@ signal of the object (checked on PySide6 6.8.2).
    - rail: ``calendar.email`` + Disconnect -> ``calendar.disconnect_calendar()``;
      toggles write cfg keys ASK_KEY / LINK_ONLY_KEY via set_setting.
    - start card prefill: ``calendar.current_meeting()`` ("From your calendar · HH:MM").
-   - "Only meetings with a call link" filters BOTH the list and the reminders.
+   - "Only meetings with other people" (cfg key calendar_only_with_link, the
+     name is only an id) filters BOTH the list and the reminders; with it off
+     every event that isn't cancelled, all-day, declined, focus time ... counts.
 8. Home "Next:" chip and tray "Next:" row: ``calendar.next_meeting()`` on
    ``changed``; update one kept QAction instead of rebuilding the tray menu.
 
 Signals (all delivered on the GUI thread): changed(list), connected(str email),
 disconnected(str reason: "user" | "expired" | "account"), error(str),
-remind(dict meeting), connecting(bool).
+remind(dict meeting), connecting(bool), status(str: "" | "Paused in Privacy
+mode." | "Couldn't read Google Calendar. Trying again."; the muted line under
+"Coming up"), connect_result(bool ok, str reason: "" | cancelled | timeout |
+denied | offline | port_busy | scope | admin | client | keyring | api_off | other).
+
+``has_read`` is True once a read of this connection has succeeded: the cache is
+memory-only, so with Privacy mode on (or no network) at launch an empty list means
+"not read yet" and the page doesn't say "No meetings coming up." A reminder is never
+taken from a list older than FETCH_STALE_S while a fresh read is on its way (the
+computer slept: the meeting may be cancelled or moved); a failed read falls back to it.
+A Disconnect that Google never heard (offline, the app quit first) leaves its token in
+the keyring's "pending revoke" slot (calendar_sync.PENDING_REVOKE_SECRET); the service
+finishes it after the next good read, at start and when Privacy mode ends.
+
+Reading the calendar (google-calendar-spec.md decision 18): polling, not push.
+The fetch timer is single-shot and re-armed after every result with
+calendar_sync.next_fetch_delay (5 min while a meeting is on or near, 15 min
+when quiet, doubled per failure up to 30 min, +-25 % jitter, one extra read
+150 s before the next start); a cache with no good read for 20 min (sleep)
+refreshes on the next 20 s tick; the Meetings page refreshes at most once a
+minute. Privacy mode (network_ok False) and offline make no request.
 
 Layout
 ------
@@ -118,6 +140,7 @@ Three layers, so most of it tests without Qt:
   ``import calendar_service`` never imports PySide6.
 """
 import logging
+import random
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -129,13 +152,23 @@ logger = logging.getLogger("transcribe.calendar")
 
 STATE_FILE = "calendar_state.json"
 STATE_VERSION = 1
-FETCH_EVERY_MS = 5 * 60 * 1000        # background refresh of "Coming up"
+# Background reads of "Coming up" (calendar_sync.next_fetch_delay decides the
+# next one): fast while a meeting is on or near, idle when quiet, one just
+# before the next start, backed off after failures, stale after a long gap.
+FETCH_FAST_S = calendar_sync.FETCH_FAST_S
+FETCH_IDLE_S = calendar_sync.FETCH_IDLE_S
+FETCH_PRE_MEETING_S = calendar_sync.FETCH_PRE_MEETING_S
+FETCH_BACKOFF_CAP_S = calendar_sync.FETCH_BACKOFF_CAP_S
+FETCH_STALE_S = 20 * 60               # no good read for this long (sleep): read on the next tick
+FETCH_EVERY_MS = FETCH_FAST_S * 1000  # the fast interval
 REMIND_EVERY_MS = 20 * 1000           # reminder check (no network)
 MIN_REFRESH_S = 60                    # on-demand refresh (page shown) at most this often
 PRUNE_GRACE = timedelta(minutes=10)   # keep an id this long after its meeting ended
 UNKNOWN_END_KEEP = timedelta(days=2)  # muting an id that isn't in the cached list
 
 ASK_KEY = "calendar_ask_to_record"    # rail "Ask me to record" (all reminders)
+# Rail "Only meetings with other people" (calendar_sync.worth_asking). The key
+# keeps its old name ("only with a call link"): it is only an id.
 LINK_ONLY_KEY = "calendar_only_with_link"
 DEFAULTS = {ASK_KEY: True, LINK_ONLY_KEY: True}
 _CLIENT_KEYS = ("google_oauth_client_id", "google_oauth_client_secret")
@@ -143,11 +176,17 @@ _CLIENT_KEYS = ("google_oauth_client_id", "google_oauth_client_secret")
 REASON_USER = "user"
 REASON_EXPIRED = "expired"
 REASON_ACCOUNT = "account"
+# Why a Connect ended without a connection (the telemetry's `reason`; no text).
+_CONNECT_REASONS = frozenset({"cancelled", "timeout", "denied", "offline", "port_busy", "scope",
+                              "admin", "client", "keyring", "api_off", "other"})
 
 NOT_SET_UP_TEXT = "Calendar connection isn't set up in this version yet."
 PAUSED_TEXT = "Turn off Privacy Mode to use Google Calendar."
 CONNECT_FAILED_TEXT = "Couldn't connect Google Calendar - try again."
 FETCH_FAILED_TEXT = "Couldn't read Google Calendar."
+# The muted line under "Coming up" (CalendarService.status_text).
+STATUS_PAUSED_TEXT = "Paused in Privacy mode."
+STATUS_RETRY_TEXT = "Couldn't read Google Calendar. Trying again."
 
 
 def _utc_now():
@@ -224,6 +263,14 @@ class CalendarState:
         if not keep_prefs:
             self.prompted.clear()
             self.muted.clear()
+
+    def drop_backup(self):
+        """Delete calendar_state.json.bak, which atomic_write_json fills with the
+        previous file (the email and ids just cleared)."""
+        try:
+            Path(f"{self.path}.bak").unlink(missing_ok=True)
+        except OSError:
+            logger.debug("Couldn't remove the calendar state backup", exc_info=True)
 
 
 # ── decisions (no Qt) ────────────────────────────────────────────────────────
@@ -309,13 +356,13 @@ class CalendarCore:
         return d
 
     def meetings(self, now=None):
-        """The "Coming up" rows (ended meetings dropped, the call-link filter
-        applied), each a copy with ``muted`` and ``people``."""
+        """The "Coming up" rows (ended meetings dropped, the "only meetings with
+        other people" filter applied), each a copy with ``muted`` and ``people``."""
         if not self.connected:
             return []
         now = now or self.clock()
         rows = calendar_sync.visible_upcoming(self.cache, now,
-                                              only_with_link=self.setting(LINK_ONLY_KEY))
+                                              only_meetings=self.setting(LINK_ONLY_KEY))
         return [self._decorate(m) for m in rows]
 
     @staticmethod
@@ -331,13 +378,30 @@ class CalendarCore:
         now = now or self.clock()
         return next((m for m in self.meetings(now) if m["start"] > now), None)
 
-    def current_meeting(self, now=None):
-        """The meeting on now or starting within 5 min, for the start card
-        (any meeting, link or not), or None."""
+    def now_or_next(self, now=None):
+        """What the Home chip and the tray row show: ("now", meeting) while a
+        meeting is running (start <= now < end; the one that started closest to
+        now when several run), else ("next", the next one that hasn't started),
+        else ("", None). The same rows as the list (filter applied)."""
+        now = now or self.clock()
+        rows = self.meetings(now)
+        running = [m for m in rows if m["start"] <= now < m["end"]]
+        if running:
+            return "now", max(running, key=lambda m: (m["start"], m["end"]))
+        nxt = next((m for m in rows if m["start"] > now), None)
+        return ("next", nxt) if nxt else ("", None)
+
+    def current_meeting(self, now=None, only_meetings=False):
+        """The meeting on now or starting within 5 min, or None. The start card
+        takes any event (spec A9); the Live Assistant card, which sends the title
+        and people to the AI, passes ``only_meetings=True`` so a solo block
+        ("Doctor appointment", "Write report") is never picked for it - the filter
+        applies before the pick, so a real meeting about to start still wins."""
         if not self.connected:
             return None
         now = now or self.clock()
-        m = calendar_sync.current_meeting(calendar_sync.visible_upcoming(self.cache, now), now)
+        rows = calendar_sync.visible_upcoming(self.cache, now, only_meetings=only_meetings)
+        m = calendar_sync.current_meeting(rows, now)
         return self._decorate(m) if m else None
 
     def apply_fetch(self, meetings, now=None):
@@ -381,7 +445,7 @@ class CalendarCore:
             return None
         return calendar_sync.reminder_due(self.cache, now or self.clock(),
                                           muted=self.state.muted, prompted=self.state.prompted,
-                                          only_with_link=self.setting(LINK_ONLY_KEY))
+                                          only_meetings=self.setting(LINK_ONLY_KEY))
 
     def take_reminder(self, now=None):
         """The meeting to remind about now, marked asked (saved) so it's never
@@ -413,6 +477,10 @@ class CalendarCore:
         self.cache = []
         self.state.clear(keep_prefs=(reason == REASON_EXPIRED))
         self.state.save()
+        if reason != REASON_EXPIRED:
+            # The save kept the old file as .bak; a user who chose to forget the
+            # calendar doesn't leave the email and event ids behind.
+            self.state.drop_backup()
         return token
 
     def reconcile_owner(self, owner):
@@ -457,26 +525,40 @@ def _build_service_class():
         error = Signal(str)             # user-readable; a fetch error once per streak
         remind = Signal(object)         # the meeting dict to ask about
         connecting = Signal(bool)       # browser sign-in waiting (True) / over (False)
+        status = Signal(str)            # the muted line under "Coming up" changed ("" = none)
+        connect_result = Signal(bool, str)   # a Connect attempt ended: ok, reason ("" when ok)
         _fetched = Signal(int, object, str, str)       # gen, meetings, kind, message
-        _connect_done = Signal(int, str, str, str)     # gen, email, kind, message
+        _connect_done = Signal(int, str, str, str, str)    # gen, email, kind, message, code
 
         def __init__(self, cfg=None, is_busy=None, parent=None, *, api=None, clock=None,
-                     network_ok=None, state_path=None, run_async=None, open_browser=None):
+                     network_ok=None, state_path=None, run_async=None, open_browser=None,
+                     rand=None):
             super().__init__(parent)
             self.core = CalendarCore(cfg, api=api, state_path=state_path, clock=clock,
                                      is_busy=is_busy, network_ok=network_ok)
             self._run_async = run_async or _start_thread
             self._open_browser = open_browser
+            self._rand = rand or random.random      # the fetch jitter (tests pin it)
             self._started = False
             self._fetch_gen = 0
             self._fetching = None          # gen of the fetch in flight
             self._fetch_again = False
-            self._last_fetch_ok = None
+            self._last_fetch_ok = None     # when the last good read finished
+            self._last_attempt = None      # when the last read began (page refresh rate limit)
+            self._failures = 0             # reads that failed in a row (the backoff)
+            self._last_status = ""
             self.last_error = ""
+            self.last_connect_reason = ""  # why the last Connect failed ("" after a success)
             self._connect_gen = 0
             self._connect_cancel = None    # threading.Event while the browser sign-in waits
             self._last_key = None
+            # A Disconnect whose give-back Google never heard (offline, quit too
+            # soon) waits in the keyring (calendar_sync.PENDING_REVOKE_SECRET).
+            # True = "maybe": checked at start and after a good read, until clear.
+            self._revoke_pending = True
+            self._revoke_retrying = False
             self._fetch_timer = QTimer(self)
+            self._fetch_timer.setSingleShot(True)   # re-armed by _schedule_next after each read
             self._fetch_timer.setInterval(FETCH_EVERY_MS)
             self._fetch_timer.timeout.connect(self._on_fetch_timer)
             self._remind_timer = QTimer(self)
@@ -502,6 +584,13 @@ def _build_service_class():
             return self._connect_cancel is not None
 
         @property
+        def has_read(self):
+            """True once a read of this connection has succeeded. The cache is
+            memory-only, so until then (Privacy mode or offline at launch) an
+            empty list means "not read", not "nothing coming up"."""
+            return self._last_fetch_ok is not None
+
+        @property
         def email(self):
             return self.core.state.email if self.core.connected else ""
 
@@ -511,11 +600,32 @@ def _build_service_class():
         def next_meeting(self):
             return self.core.next_meeting(self.core.clock())
 
-        def current_meeting(self):
-            return self.core.current_meeting(self.core.clock())
+        def current_meeting(self, only_meetings=False):
+            return self.core.current_meeting(self.core.clock(), only_meetings=only_meetings)
+
+        def now_or_next(self):
+            """("now" | "next" | "", meeting | None) for the Home chip and the tray."""
+            return self.core.now_or_next(self.core.clock())
 
         def is_muted(self, event_id):
             return self.core.is_muted(event_id)
+
+        def status_text(self):
+            """The muted line under "Coming up": "" (nothing to say), "Paused in
+            Privacy mode." (reads are paused, the cached list still works) or
+            "Couldn't read Google Calendar. Trying again." (the last read
+            failed; cleared by the next good one)."""
+            if not self.core.connected:
+                return ""
+            if not self.core.network_allowed():
+                return STATUS_PAUSED_TEXT
+            return STATUS_RETRY_TEXT if self._failures else ""
+
+        def _emit_status(self):
+            text = self.status_text()
+            if text != self._last_status:
+                self._last_status = text
+                self.status.emit(text)
 
         # -- lifecycle
         def start(self):
@@ -524,11 +634,57 @@ def _build_service_class():
             if self.core.connected:
                 self._start_timers()
                 self.refresh(force=True)
+            self._emit_status()
+            self._retry_revoke()
+
+        def _give_back(self, token):
+            """Revoke ``token`` at Google on a worker thread. When Google can't
+            be reached, calendar_sync keeps the token pending; the retry is
+            _retry_revoke."""
+            api = self.core.api
+
+            def work():
+                ok = True
+                try:
+                    ok = api.revoke(token)
+                except Exception:
+                    logger.debug("Calendar revoke failed", exc_info=True)
+                    ok = False
+                if ok is False:
+                    self._revoke_pending = True
+
+            self._run_async(work)
+
+        def _retry_revoke(self):
+            """Finish a give-back that failed before (see _give_back): one
+            request on a worker thread, never while reads are paused. No-op with
+            nothing pending, so it can run after every good read."""
+            if not (self._revoke_pending and not self._revoke_retrying
+                    and self.core.available and self.core.network_allowed()):
+                return False
+            retry = getattr(self.core.api, "retry_pending_revoke", None)
+            if retry is None:
+                self._revoke_pending = False
+                return False
+            self._revoke_retrying = True
+
+            def work():
+                ok = False
+                try:
+                    ok = retry() is not False
+                except Exception:
+                    logger.debug("Calendar revoke retry failed", exc_info=True)
+                self._revoke_retrying = False
+                if ok:
+                    self._revoke_pending = False
+
+            self._run_async(work)
+            return True
 
         def stop(self):
             """App quit: stop timers, let a waiting sign-in go, ignore late results."""
             self._started = False
-            self.cancel_connect()
+            self.cancel_connect(user=False)
             self._stop_timers()
             self._fetch_gen += 1
             self._fetching = None
@@ -536,9 +692,20 @@ def _build_service_class():
 
         def _start_timers(self):
             if not self._fetch_timer.isActive():
-                self._fetch_timer.start()
+                self._schedule_next()
             if not self._remind_timer.isActive():
                 self._remind_timer.start()
+
+        def _schedule_next(self):
+            """Arm the single-shot fetch timer for the next read: when it falls
+            is calendar_sync.next_fetch_delay's call (the list we have, the
+            failures so far, jitter). Nothing is armed when not connected."""
+            if not (self.core.connected and self.core.available):
+                return
+            now = self.core.clock()
+            delay = calendar_sync.next_fetch_delay(now, self.core.meetings(now),
+                                                   self._failures, self._rand)
+            self._fetch_timer.start(max(1000, int(delay * 1000)))
 
         def _stop_timers(self):
             self._fetch_timer.stop()
@@ -553,14 +720,15 @@ def _build_service_class():
             if not self.core.network_allowed():
                 return False
             now = self.core.clock()
-            if (not force and self._last_fetch_ok is not None
-                    and (now - self._last_fetch_ok).total_seconds() < MIN_REFRESH_S):
+            if (not force and self._last_attempt is not None
+                    and (now - self._last_attempt).total_seconds() < MIN_REFRESH_S):
                 return False
             if self._fetching is not None:
                 self._fetch_again = True
                 return True
             gen = self._fetch_gen
             self._fetching = gen
+            self._last_attempt = now
             api, cfg = self.core.api, self.core.cfg
 
             def work():
@@ -581,7 +749,8 @@ def _build_service_class():
 
         @Slot()
         def _on_fetch_timer(self):
-            self.refresh(force=True)
+            if not self.refresh(force=True):
+                self._schedule_next()       # paused (Privacy mode) or offline: keep ticking
 
         @Slot(int, object, str, str)
         def _on_fetched(self, gen, items, kind, msg):
@@ -592,19 +761,26 @@ def _build_service_class():
             if kind == "ok":
                 self.core.apply_fetch(items, now)
                 self._last_fetch_ok = now
+                self._failures = 0
                 self.last_error = ""
                 self._emit_changed(now)
+                self._emit_status()
                 self.check_reminders()
+                self._retry_revoke()
             elif kind == "auth" and not self.core.token_still_kept():
                 self.disconnect_calendar(REASON_EXPIRED)
                 return
             else:
-                # Offline etc.: keep the cached list, say it once per streak.
+                # Offline, Google busy, ... : keep the cached list, back off,
+                # say it once per streak.
                 if kind == "auth":
                     msg = FETCH_FAILED_TEXT     # the token is there: a keyring hiccup
+                self._failures += 1
+                self._emit_status()
                 if msg != self.last_error:
                     self.last_error = msg
                     self.error.emit(msg)
+            self._schedule_next()
             if self._fetch_again:
                 self._fetch_again = False
                 self.refresh(force=True)
@@ -623,9 +799,30 @@ def _build_service_class():
             now = self.core.clock()
             if self.core.connected and self.core.list_key(now) != self._last_key:
                 self._emit_changed(now)
+            self._refresh_if_stale(now)
+            if self._cache_is_old_and_reading(now):
+                return          # wait for the fresh list; _on_fetched calls check_reminders again
             m = self.core.take_reminder(now)
             if m is not None:
                 self.remind.emit(m)
+
+        def _cache_is_old_and_reading(self, now):
+            """After a long sleep the cache can hold a meeting that was cancelled
+            or moved meanwhile: no reminder (and nothing marked asked) from a list
+            older than FETCH_STALE_S while a fresh read is on its way. A failed
+            read clears _fetching, so the next tick falls back to the cache."""
+            last = self._last_fetch_ok
+            return (self._fetching is not None and last is not None
+                    and (now - last).total_seconds() > FETCH_STALE_S)
+
+        def _refresh_if_stale(self, now):
+            """No good read for FETCH_STALE_S (the computer slept; the timer
+            drifted): read on this tick instead of waiting for the timer. Not
+            while reads are failing - the backoff decides then."""
+            last = self._last_fetch_ok
+            if (last is not None and self._failures == 0 and self._fetching is None
+                    and self.core.connected and (now - last).total_seconds() > FETCH_STALE_S):
+                self.refresh(force=True)
 
         def set_muted(self, event_id, muted):
             """The row's bell: muted=True means "don't ask me to record this one"."""
@@ -645,9 +842,13 @@ def _build_service_class():
                 return False
             if not self.core.available:
                 self.error.emit(NOT_SET_UP_TEXT)
+                self.last_connect_reason = "client"
+                self.connect_result.emit(False, "client")
                 return False
             if not self.core.network_allowed():
                 self.error.emit(PAUSED_TEXT)
+                self.last_connect_reason = "other"
+                self.connect_result.emit(False, "other")
                 return False
             cancel = threading.Event()
             self._connect_cancel = cancel
@@ -657,36 +858,41 @@ def _build_service_class():
             self.connecting.emit(True)
 
             def work():
-                email, kind, msg = "", "ok", ""
+                email, kind, msg, code = "", "ok", "", ""
                 try:
                     kw = {"cancel": cancel}
                     if open_browser is not None:
                         kw["open_browser"] = open_browser
                     email = api.connect(cfg, **kw) or ""
                 except calendar_sync.CalendarCancelled:
-                    kind = "cancelled"
+                    kind, code = "cancelled", "cancelled"
                 except calendar_sync.CalendarError as e:
-                    kind, msg = "error", str(e)
+                    kind, msg, code = "error", str(e), str(getattr(e, "code", "") or "other")
                 except Exception:
                     logger.exception("Calendar connect failed")
-                    kind, msg = "error", CONNECT_FAILED_TEXT
-                _emit(self, "_connect_done", gen, email, kind, msg)
+                    kind, msg, code = "error", CONNECT_FAILED_TEXT, "other"
+                _emit(self, "_connect_done", gen, email, kind, msg, code)
 
             self._run_async(work)
             return True
 
-        def cancel_connect(self):
-            """Stop waiting for the browser sign-in (its listener closes within ~1 s)."""
+        def cancel_connect(self, *, user=True):
+            """Stop waiting for the browser sign-in (its listener closes within
+            ~1 s). ``user`` False (quit, disconnect) reports no result; it is
+            keyword-only so a Qt ``clicked(bool)`` can't flip it."""
             if self._connect_cancel is None:
                 return False
             self._connect_cancel.set()
             self._connect_cancel = None
             self._connect_gen += 1
             self.connecting.emit(False)
+            if user:
+                self.last_connect_reason = "cancelled"
+                self.connect_result.emit(False, "cancelled")
             return True
 
-        @Slot(int, str, str, str)
-        def _on_connect_done(self, gen, email, kind, msg):
+        @Slot(int, str, str, str, str)
+        def _on_connect_done(self, gen, email, kind, msg, code=""):
             if gen != self._connect_gen:
                 # A cancelled attempt that still got through: keep nothing,
                 # unless a newer attempt or a live connection owns the token.
@@ -697,37 +903,47 @@ def _build_service_class():
                     except Exception:
                         token = ""
                     if token:
-                        self._run_async(lambda: api.revoke(token))
+                        self._give_back(token)
                 return
             self._connect_cancel = None
             if kind == "ok":
                 self.core.on_connected(email)
                 self.connecting.emit(False)
+                self._failures = 0
+                self._last_attempt = None
+                self.last_connect_reason = ""
                 self._last_key = None
                 self._start_timers()
                 self.connected.emit(email)
+                self.connect_result.emit(True, "")
                 self.refresh(force=True)
+                self._emit_status()
                 return
             self.connecting.emit(False)
+            reason = code if code in _CONNECT_REASONS else "other"
+            self.last_connect_reason = reason
             if kind == "error":
                 self.error.emit(msg)
+            self.connect_result.emit(False, reason)
 
         def disconnect_calendar(self, reason=REASON_USER):
             """Forget the calendar now (keyring, cache, account) and revoke the
             access at Google on a worker thread."""
-            self.cancel_connect()
+            self.cancel_connect(user=False)
             self._stop_timers()
             self._fetch_gen += 1
             self._fetching = None
             self._fetch_again = False
             self._last_fetch_ok = None
+            self._last_attempt = None
+            self._failures = 0
             self.last_error = ""
-            api = self.core.api
             token = self.core.forget(reason)
             if token:
-                self._run_async(lambda: api.revoke(token))
+                self._give_back(token)
             self._last_key = ()
             self.changed.emit([])
+            self._emit_status()
             self.disconnected.emit(reason)
 
         # -- the rest of the app
@@ -751,8 +967,11 @@ def _build_service_class():
                         self._stop_timers()
                         self._last_key = ()
                         self.changed.emit([])
+                    self._emit_status()
             elif key == "privacy_mode":
+                self._emit_status()                 # "Paused in Privacy mode." on / off
                 self.refresh(force=True)
+                self._retry_revoke()
 
     return CalendarService
 

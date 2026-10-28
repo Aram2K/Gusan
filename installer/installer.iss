@@ -18,7 +18,7 @@
 #define MyOldAppName "Transcribe"
 #define MyAppPublisher "Aram Adamyan"
 #define MyAppPublisherURL "https://aibuben.xyz"
-#define MyAppURL "https://github.com/Aram2K/transcribe-app"
+#define MyAppURL "https://github.com/Aram2K/Gusan"
 #define MyAppExeName "TranscribeApp.exe"
 
 #ifndef MyAppVersion

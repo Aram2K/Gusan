@@ -38,6 +38,35 @@ class ProTag(_Pill):
         self.setToolTip("Pro feature")
 
 
+class LocalTag(_Pill):
+    """LOCAL: this model runs on this computer (the speech pickers)."""
+    TONE = "local"
+
+    def __init__(self, size="s", text="LOCAL", parent=None):
+        super().__init__(text, size, parent)
+        self.setToolTip("Runs on this computer")
+
+
+class CloudTag(_Pill):
+    """CLOUD: this model runs in the cloud - Gusan Cloud or your own key (the speech pickers)."""
+    TONE = "cloud"
+
+    def __init__(self, size="s", text="CLOUD", parent=None):
+        super().__init__(text, size, parent)
+        self.setToolTip("Runs in the cloud")
+
+
+def tag_chip(tag, size="s", parent=None):
+    """The chip for a speech tag: "local" -> LOCAL, "cloud" -> CLOUD, "pro" -> the PRO pill."""
+    if tag == "local":
+        return LocalTag(size, parent=parent)
+    if tag == "cloud":
+        return CloudTag(size, parent=parent)
+    if tag == "pro":
+        return ProTag(size, parent=parent)
+    raise ValueError("not a speech tag: %r" % (tag,))
+
+
 class FreeBadge(_Pill):
     """The green FREE pill (also the Smart Actions counter: FreeBadge(text="4/5 FREE"))."""
     TONE = "free"

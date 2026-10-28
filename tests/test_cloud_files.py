@@ -656,6 +656,50 @@ class TestTranscribeChunks(unittest.TestCase):
         self.assertEqual(calls[0], cf.MAX_ATTEMPTS)
         self.assertEqual(calls[1], 0)
 
+    # -- another script: kept for a capable model after the retry, else the piece fails
+    @staticmethod
+    def off_err(model, why="script", text="We will review it on Monday."):
+        e = err("off_language")
+        e.why, e.model, e.answer = why, model, (text, "en", model)
+        return e
+
+    def test_a_capable_model_that_writes_another_script_twice_is_kept(self):
+        calls = collections.Counter()
+
+        def send(spec_, wav):
+            calls[piece_of(wav)] += 1
+            if piece_of(wav) == 0:
+                raise self.off_err("gpt-transcribe")
+            return "Words."
+        res, _ = self.run_chunks(2, send, ONE)
+        self.assertEqual(calls[0], 2)                         # the first answer, one retry, then kept
+        self.assertEqual([t for _, t, _ in res["pieces"]], ["We will review it on Monday.", "Words."])
+        self.assertEqual(res["stats"]["retries"], 1)
+
+    def test_another_script_once_then_a_good_answer_is_the_good_answer(self):
+        calls = collections.Counter()
+
+        def send(spec_, wav):
+            calls[piece_of(wav)] += 1
+            if calls[0] == 1:
+                raise self.off_err("scribe_v2")
+            return "Good words."
+        res, _ = self.run_chunks(1, send, ONE)
+        self.assertEqual(calls[0], 2)
+        self.assertEqual([t for _, t, _ in res["pieces"]], ["Good words."])
+
+    def test_an_engine_that_does_not_cover_the_language_still_fails_the_piece(self):
+        for model, why in (("voxtral-mini-latest", "engine"), ("voxtral-mini-latest", "script"), ("", "script")):
+            calls = collections.Counter()
+
+            def send(spec_, wav, model=model, why=why):
+                calls[piece_of(wav)] += 1
+                raise self.off_err(model, why)
+            with self.assertRaises(cf.CloudFileError) as ctx:
+                self.run_chunks(1, send, ONE)
+            self.assertEqual(ctx.exception.kind, "off_language", (model, why))
+            self.assertEqual(calls[0], cf.MAX_ATTEMPTS, (model, why))
+
     def test_a_rate_limit_leaves_one_worker(self):
         lock, active, seen, limited = threading.Lock(), set(), [], threading.Event()
 

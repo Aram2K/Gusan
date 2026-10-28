@@ -290,7 +290,7 @@ def test_model_step_uses_the_hardware_probe(wizard):
     assert m.cta.text() == "Download Balanced · 460 MB"
     labels = _texts(m)
     for txt in ("Pick your speech model", "Whisper Base · 140 MB", "Whisper Small · 460 MB",
-                "Whisper Large v3 Turbo · 1.6 GB", "Gemini 2.5 Flash", "Whisper Tiny · 75 MB",
+                "Whisper Large v3 Turbo · 1.6 GB", "Fast · Cloud", "Whisper Tiny · 75 MB",
                 "Whisper Medium · 1.4 GB", "Whisper Large v3 · 3 GB", "Fastest. Nothing to download.",
                 "More sizes", "Works offline", "Change it later in Settings"):
         assert txt in labels, txt

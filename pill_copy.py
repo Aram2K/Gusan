@@ -343,6 +343,8 @@ def warm():
 def _whisper_name(model_id):
     """'small' -> 'Whisper Small', 'large-v3-turbo' -> 'Whisper Large v3
     Turbo': hardware.MODEL_INFO's names, while engine_choice isn't loaded."""
+    if str(model_id or "").strip() == "hy-fastconformer":        # hardware.HY_MODEL_ID: the Armenian model
+        return "NVIDIA FastConformer Armenian"
     words = [w if re.fullmatch(r"v\d+", w) else w.capitalize()
              for w in str(model_id or "base").strip().split("-") if w]
     return " ".join(["Whisper"] + words)

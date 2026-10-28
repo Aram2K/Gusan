@@ -431,6 +431,62 @@ def test_home_next_meeting_chip_follows_the_calendar(home_page):
     assert page.next_chip.isHidden()
 
 
+def _meeting_at(start, title="Weekly product sync", minutes=30):
+    return {"id": "e1", "title": title, "start": start, "end": start + timedelta(minutes=minutes)}
+
+
+def test_home_chip_says_now_while_the_meeting_runs(home_page):
+    # G10: a running meeting shows "Now: <title>" (time word "Now"); before and after, "Next: ..." as built.
+    page, app, _ = home_page()
+    now = datetime.now().astimezone()
+    cal = FakeCalendar(connected=True)
+    state = {"v": ("now", _meeting_at(now - timedelta(minutes=5)))}
+    cal.now_or_next = lambda: state["v"]
+    app.calendar = cal
+    page._update_next()
+    chip = page.next_chip
+    assert not chip.isHidden()
+    assert chip.title() == "Weekly product sync" and chip.time() == "Now" and chip.prefix() == "Now:"
+    assert chip.accessibleName() == "Meeting now: Weekly product sync"
+    assert chip.toolTip() == "Opens Meetings"                # a started meeting is past its reminder
+    # The meeting ended and another is next: the chip reads as it always did.
+    state["v"] = ("next", _meeting_at(now.replace(hour=14, minute=30, second=0, microsecond=0)))
+    page._update_next()
+    assert chip.prefix() == "Next:" and chip.time() == "14:30"
+    assert chip.accessibleName() == "Next meeting: Weekly product sync at 14:30"
+    assert chip.toolTip() == "Gusan asks to record 1 min before"
+    # Nothing running, nothing next (or the calendar went): no chip.
+    state["v"] = ("", None)
+    page._update_next()
+    assert chip.isHidden()
+    state["v"] = ("now", _meeting_at(now - timedelta(minutes=5)))
+    page._update_next()
+    assert not chip.isHidden()
+    cal.is_connected = False
+    page._update_next()
+    assert chip.isHidden()
+
+
+def test_home_chip_keeps_working_with_a_service_that_has_no_now(home_page):
+    page, app, _ = home_page()
+    app.calendar = FakeCalendar(connected=True)             # next_meeting() only
+    page._update_next()
+    assert page.next_chip.prefix() == "Next:" and page.next_chip.time() == "14:30"
+
+
+def test_home_chip_width_follows_its_words(home_page):
+    page, app, _ = home_page()
+    now = datetime.now().astimezone()
+    cal = FakeCalendar(connected=True)
+    cal.now_or_next = lambda: ("now", _meeting_at(now - timedelta(minutes=1), title="Quarterly planning"))
+    app.calendar = cal
+    page._update_next()
+    running = page.next_chip.width()
+    cal.now_or_next = lambda: ("next", _meeting_at(now + timedelta(hours=1), title="Quarterly planning"))
+    page._update_next()
+    assert page.next_chip.width() > running                 # "Next: ... · 14:30" is longer than "Now: ..."
+
+
 def test_home_hero_follows_settings(home_page):
     page, app, _ = home_page("pro")
     app.cfg.update(hotkey="ctrl+shift+space", language="multi", backend="managed", managed_provider="gemini",
@@ -441,7 +497,7 @@ def test_home_hero_follows_settings(home_page):
     assert page.hero_keys.sizeHint().width() <= 380        # a long shortcut is drawn smaller
     assert page.hero_keys.key_height() < 92
     assert page.lang_chip.text() == "Mixed languages"
-    assert page.model_chip.accessibleName() == "Gusan Cloud · Gemini 2.5 Flash"
+    assert page.model_chip.accessibleName() == "Gusan Cloud · Fast"
     assert page.where_chip.isHidden()                      # the model chip already says Gusan Cloud
     assert page.tile_live.sub.text() == "Alt + E"
     assert page.tile_live.accessibleName().startswith("Live Assistant, Alt + E")
@@ -563,7 +619,7 @@ def test_dictation_builds_for_every_plan(dict_page, tier):
     assert [r.label.text() for r in page.rail.rows()][2] == "Languages you mix"
     assert page.row_mix.isHidden()
     assert page.row_cloud.pro_tag is not None
-    assert page.row_cloud.model_label.text() == "Gemini 2.5 Flash"
+    assert page.row_cloud.model_label.text() == "Fast"
     assert page.runs_on_text() == "Runs on Balanced · Whisper Small · on this computer"
     assert page.hero_keys.keys() == ["Alt", "R"]
     assert page.shortcut.hotkey() == "alt+r"
@@ -719,7 +775,7 @@ def test_gusan_cloud_speech(dict_page):
     papp.cfg.update(backend="managed", managed_provider="gemini")
     pro.on_setting_changed("backend")
     assert pro.cloud.isChecked()
-    assert pro.runs_on_text() == "Runs on Gusan Cloud · Gemini 2.5 Flash"
+    assert pro.runs_on_text() == "Runs on Gusan Cloud · Fast"
     pro.cloud.click()
     assert ("set_settings", {"backend": "local", "whisper_model": "small"}) in papp.calls
 
@@ -946,10 +1002,11 @@ def test_tab_order_never_reaches_into_a_combo_popup(dict_page):
     assert page._rail_focusables() and all(w.window() is win for w in page._rail_focusables())
 
 
-def test_rail_cloud_row_names_the_model_gusan_cloud_runs(dict_page):
+def test_rail_cloud_row_names_the_profile_gusan_cloud_is_asked_for(dict_page):
+    # (Gusan Cloud's server chooses the model: the row says "Fast", whatever 1.9's provider setting says)
     page, app, _ = dict_page("pro", backend="managed", managed_provider="mistral")
-    assert page.row_cloud.model_label.text() == "Voxtral Mini"
-    assert page.runs_on_text() == "Runs on Gusan Cloud · Voxtral Mini"
+    assert page.row_cloud.model_label.text() == "Fast"
+    assert page.runs_on_text() == "Runs on Gusan Cloud · Fast"
 
 
 def test_cloud_toggle_goes_back_without_a_controller(dict_page):

@@ -26,11 +26,19 @@ Side effects
     smart_actions_speech_model   what transcribes a Smart Action: "" (same as
                          Dictation), "cloud" (Gusan Cloud; refused in Privacy
                          mode - Pro is checked when a take starts) or a
-                         hardware.MODEL_INFO Whisper id; anything else is
+                         hardware.MODEL_INFO Whisper id (or the Armenian
+                         model, "hy-fastconformer"); anything else is
                          refused. Never a preload: the one model slot keeps
                          Dictation's model (a Smart take loads its own)
+    live_assist_speech_model   what transcribes a Live Assistant session: "" (Automatic),
+                         a hardware.MODEL_INFO Whisper id or "hy-fastconformer" (the Armenian
+                         model), "cloud" / "cloud:best" (Gusan Cloud)
+                         or "own:google[:<Gemini id>]" (your own key) - the last three refused in
+                         Privacy mode (Pro and the key are checked when a session starts);
+                         anything else is refused. Never a preload
     file_model           Audio to text's model: "auto", a hardware.MODEL_INFO
-                         Whisper id, or "cloud" (Gusan Cloud) / "own:google" /
+                         Whisper id or "hy-fastconformer" (the Armenian
+                         model), or "cloud" (Gusan Cloud) / "own:google" /
                          "own:mistral" (your own key) - those three refused in
                          Privacy mode; Pro and the key are checked when a job
                          starts. Anything else is refused
@@ -57,9 +65,13 @@ ASSIST_HOTKEY = "live_assist_hotkey"
 SMART_HOTKEY = "smart_actions_hotkey"   # ui/pages/smart_actions.py HOTKEY_KEY
 SMART_SPEECH = "smart_actions_speech_model"   # engine_choice.SMART_SPEECH_KEY
 SMART_SPEECH_CLOUD = "cloud"                   # engine_choice.SMART_SPEECH_CLOUD
+LIVE_SPEECH = "live_assist_speech_model"       # engine_choice.LIVE_SPEECH_KEY
 FILE_MODEL = "file_model"                      # engine_choice.FILE_KEY
 FILE_AUTO = "auto"                             # engine_choice.FILE_AUTO
 FILE_CLOUD_VALUES = ("cloud", "own:google", "own:mistral")   # engine_choice.FILE_CLOUD_VALUES
+# The spoken-language settings: "hye", "HY" and "hy-AM" are all Armenian - saved as "hy" (a value
+# no engine knows is refused). "" means "same as Dictation" for the other two.
+SPEECH_LANGUAGE_KEYS = ("language", "live_assist_language", "meeting_language")
 PRIVACY = "privacy_mode"
 LAUNCH_AT_LOGIN = "launch_at_login"     # autostart.CFG_KEY (never in DEFAULT)
 PRELOAD_KEYS = ("backend", "whisper_model")
@@ -81,13 +93,27 @@ def norm_hotkey(hk):
 
 def _smart_speech_ok(value, private):
     """A smart_actions_speech_model value a page may write: "" (same as
-    Dictation), "cloud" outside Privacy mode, or a known Whisper model id."""
+    Dictation), "cloud" outside Privacy mode, or a known local speech model id (a Whisper model
+    or the Armenian one)."""
     if value == "":
         return True
     if value == SMART_SPEECH_CLOUD:
         return not private
     import hardware
-    return value in hardware.MODEL_INFO
+    return hardware.is_speech_id(value)
+
+
+def _live_speech_ok(value, private, cfg):
+    """A live_assist_speech_model value a page may write: "" (Automatic), a known Whisper id,
+    or a cloud / own-key value outside Privacy mode (Pro and the key are checked when a session
+    starts). Unknown values are refused."""
+    import engine_choice
+    kind, _model = engine_choice.parse_live_speech(value, cfg)
+    if kind == engine_choice.LIVE_UNKNOWN:
+        return False
+    if kind in (engine_choice.LIVE_CLOUD, engine_choice.LIVE_BEST, engine_choice.LIVE_OWN):
+        return not private
+    return True
 
 
 def _file_model_ok(value, private):
@@ -99,7 +125,16 @@ def _file_model_ok(value, private):
     if value in FILE_CLOUD_VALUES:
         return not private
     import hardware
-    return value in hardware.MODEL_INFO
+    return hardware.is_speech_id(value)
+
+
+def _language_value(key, value):
+    """The canonical value of a spoken-language setting, or None for one nothing knows."""
+    import speech_langs
+    raw = str(value if value is not None else "").strip()
+    if not raw:
+        return "auto" if key == "language" else ""
+    return speech_langs.normalize(raw) or None
 
 
 def _try(label, fn, *args, **kwargs):
@@ -201,10 +236,22 @@ def apply(app, updates, autostart_mod=None):
                 results[key] = False            # unknown, or the cloud in Privacy mode
                 continue
 
+        if key == LIVE_SPEECH:
+            value = str(value or "").strip()
+            if not _live_speech_ok(value, bool(cfg.get(PRIVACY)), cfg):
+                results[key] = False            # unknown, or a cloud model in Privacy mode
+                continue
+
         if key == FILE_MODEL:
             value = str(value or "").strip()
             if not _file_model_ok(value, bool(cfg.get(PRIVACY))):
                 results[key] = False            # unknown, or a cloud model in Privacy mode
+                continue
+
+        if key in SPEECH_LANGUAGE_KEYS:
+            value = _language_value(key, value)
+            if value is None:
+                results[key] = False            # not a language any engine knows
                 continue
 
         if key == HOTKEY:

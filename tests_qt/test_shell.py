@@ -281,18 +281,22 @@ def test_free_pro_guest_sidebar(shell):
     assert free.sidebar.tier() == "free"
     assert free.sidebar.upgrade_button is not None
     assert free.sidebar.upgrade_button.text() == "Upgrade to Pro"
+    assert free.sidebar.sign_in_button is None
     assert isinstance(free.sidebar.account_row.badge, FreeBadge)
     assert free.sidebar.account_row.name_label.text() == "Aram"
 
     pro, _ = shell("pro")
     assert pro.sidebar.tier() == "pro"
     assert pro.sidebar.upgrade_button is None    # calm Pro: no upgrade anywhere
+    assert pro.sidebar.sign_in_button is None
     assert isinstance(pro.sidebar.account_row.badge, ProTag)
 
     guest, _ = shell("guest")
     assert guest.sidebar.tier() == "guest"
     assert isinstance(guest.sidebar.account_row.badge, GuestBadge)
-    assert guest.sidebar.account_row.name_label.text() == "Guest"
+    assert guest.sidebar.account_row.name_label.text() == "User"      # a guest is "User", never a name
+    assert guest.sidebar.upgrade_button is None                       # no upgrade wording for a guest
+    assert guest.sidebar.sign_in_button.text() == "Sign in / Sign up"
 
     # No PRO tags in the sidebar for anyone (a Free user who uses a Pro
     # feature gets the Pro window there).
@@ -324,6 +328,14 @@ def test_sidebar_signals(shell):
     assert ("_pro_upsell", None) in app.calls
     win.sidebar.account_row.click()
     assert win.current_route() == "account"
+
+
+def test_a_guests_sign_in_opens_the_sign_in_sheet(shell):
+    win, app = shell("guest")
+    win.show()
+    win.sidebar.sign_in_button.click()
+    assert ("show_auth_gate",) in app.calls
+    assert not [c for c in app.calls if c[0] == "_pro_upsell"]        # never the Pro window for a guest
 
 
 def test_pro_account_row_is_highlighted_on_account(shell):

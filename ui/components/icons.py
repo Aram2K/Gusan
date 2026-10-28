@@ -55,6 +55,9 @@ IC = {
     "copy": ('<rect x="8" y="8" width="12" height="12" rx="2"/>'
              '<path d="M16 8V5.5A1.5 1.5 0 0 0 14.5 4h-9A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H8"/>'),
     "more": '<circle cx="5.5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="18.5" cy="12" r="1.6"/>',
+    # The paper-clip in the corner of the Context box: "add documents" (Live Assistant).
+    "paperclip": ('<path d="M20.5 11.2 11.9 19.8a5.2 5.2 0 0 1-7.4-7.4l9-9a3.5 3.5 0 0 1 4.9 4.9l-9 9'
+                  'a1.8 1.8 0 0 1-2.5-2.5l8.3-8.3"/>'),
     "stop": '<rect x="6.5" y="6.5" width="11" height="11" rx="2"/>',
     "pause": '<path d="M9 6.5v11M15 6.5v11"/>',
     "play": '<path d="M8 5.5v13l10.5-6.5z"/>',

@@ -6,7 +6,11 @@ Integration notes for Wave 4
       view = account_actions.account_view(app.auth, app.cfg)
   (pure apart from reading usage.json for the Smart Action tries) and redraw
   on sig_auth_changed (main._on_auth_changed already calls
-  main_win.refresh_account()). Keys: signed_in, name, email, initial, tier
+  main_win.refresh_account()). A guest - not signed in, or a super admin
+  previewing Guest (still signed in underneath) - is never shown with a name,
+  an email or an initial from the session: name is GUEST_NAME, the rest empty,
+  and its one action is SIGN_IN_UP (no upgrade). Keys: signed_in (a person is
+  shown: False for every guest), guest, name, email, initial, tier
   ("guest" | "free" | "pro"), badge ("GUEST" | "FREE" | "PRO"), pro, plan,
   plan_label ("Monthly" | "Annual" | "Trial" | "Admin" | "Free" | ""),
   on_trial, trial_days_left, plan_line ("Annual · renews 4 Oct 2027",
@@ -48,6 +52,17 @@ FEEDBACK_MAX_IMAGES = 4
 FEEDBACK_MAX_IMAGE_BYTES = 6_000_000
 
 _PLAN_LABELS = {"monthly": "Monthly", "annual": "Annual", "trial": "Trial", "admin": "Admin"}
+
+# ── what a guest (and anyone else) is called and offered: ONE place ──────────
+# The sidebar card, the tray menu, Account & plan, the Settings link and the Pro
+# window all read these, so a label never differs between them.
+GUEST_NAME = "User"                      # a guest is never called by a name: no profile name, no initial
+GUEST_BADGE = "Guest"                    # the tray's account line; the pill itself reads GUEST
+SIGN_IN_UP = "Sign in / Sign up"         # the guest's one action (blue); opens the sign-in sheet
+SIGN_IN_UP_A11Y = "Sign in or sign up"   # what a screen reader says for it
+UPGRADE = "Upgrade to Pro"               # Free only (violet)
+SIGN_IN_FIRST = "Sign in first, then try Pro free for 3 days."   # the guest's line where Free sees the price
+SIGN_IN_TO_UPGRADE = "Sign in to upgrade"   # a guest's button in the Pro window: sign-in comes first, then checkout
 
 
 # ── view-model ───────────────────────────────────────────────────────────────
@@ -110,11 +125,15 @@ def account_view(auth, cfg=None, *, now=None, smart_remaining=None):
     """Everything Account & plan shows (see the module notes). ``pro`` is
     feature access (entitlements.has_pro_access: a super admin's tier preview
     wins), the same rule every Pro gate uses."""
-    signed_in = bool(auth is not None and getattr(auth, "is_authenticated", False))
     tier = entitlements.tier(auth, cfg)
     pro = entitlements.has_pro_access(auth, cfg)
     if pro:
         tier = entitlements.TIER_PRO
+    guest = tier == entitlements.TIER_GUEST
+    # A person is shown only when the plan says so: a super admin previewing
+    # Guest is still signed in underneath (their profile name is still in
+    # auth), and a guest must never wear it.
+    signed_in = bool(auth is not None and getattr(auth, "is_authenticated", False)) and not guest
     email = (getattr(auth, "user_email", None) or "") if signed_in else ""
     name = ""
     if signed_in:
@@ -127,7 +146,7 @@ def account_view(auth, cfg=None, *, now=None, smart_remaining=None):
     total = entitlements.FREE_SMART_ACTION_TRIES
     if pro:
         left, smart_text = None, "Unlimited"
-    elif not signed_in or tier == entitlements.TIER_GUEST:   # (an admin previewing Guest)
+    elif not signed_in or guest:
         left, smart_text = None, "Sign up to try them"
     else:
         if smart_remaining is None:
@@ -142,7 +161,8 @@ def account_view(auth, cfg=None, *, now=None, smart_remaining=None):
     real_plan = str(plan or "").lower()
     return {
         "signed_in": signed_in,
-        "name": name or "Guest",
+        "guest": guest,
+        "name": name or GUEST_NAME,
         "email": email,
         "initial": initial,
         "tier": tier,
@@ -161,13 +181,55 @@ def account_view(auth, cfg=None, *, now=None, smart_remaining=None):
         "buttons": {
             "sign_in": not signed_in,
             "sign_out": signed_in,
-            "upgrade": not pro,                 # a guest's Pro window offers sign-up first
+            "upgrade": not pro and not guest,   # Free only: a guest's one action is sign_in
             # Only a Stripe subscription has a portal (a trial is one too).
             "manage": signed_in and pro and real_plan in ("monthly", "annual"),
             "delete": signed_in,
             "admin": is_admin,
         },
     }
+
+
+def app_tier(app):
+    """'pro' | 'free' | 'guest' for the controller: the one rule the sidebar,
+    the tray, the Pro window and the greetings share. The controller's own
+    current_tier() carries a super admin's tier preview (so a signed-in admin
+    previewing Guest IS a guest here); without it the sign-in decides."""
+    try:
+        if app.is_pro():
+            return entitlements.TIER_PRO
+    except Exception:
+        pass
+    tier = None
+    fn = getattr(app, "current_tier", None)
+    if callable(fn):
+        try:
+            tier = fn()
+        except Exception:
+            tier = None
+    if tier not in (entitlements.TIER_PRO, entitlements.TIER_FREE, entitlements.TIER_GUEST):
+        signed_in = bool(getattr(getattr(app, "auth", None), "is_authenticated", False))
+        tier = entitlements.TIER_FREE if signed_in else entitlements.TIER_GUEST
+    return tier
+
+
+def is_guest(app):
+    return app_tier(app) == entitlements.TIER_GUEST
+
+
+def first_name(app):
+    """The signed-in person's first name (their profile name, else the front of
+    their email), "" for a guest: whatever a session still holds - a super
+    admin previewing Guest is signed in underneath - a guest is never called
+    by it."""
+    if is_guest(app):
+        return ""
+    auth = getattr(app, "auth", None)
+    name = str(getattr(auth, "user_name", None) or "").strip()
+    if not name:
+        email = str(getattr(auth, "user_email", None) or "").strip()
+        name = email.split("@")[0] if email else ""
+    return name.split()[0] if name else ""
 
 
 # ── delete account ───────────────────────────────────────────────────────────

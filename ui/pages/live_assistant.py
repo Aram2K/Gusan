@@ -15,13 +15,23 @@ only the shortcut row at the top and the status in one word):
   TRUTHFUL status (live_context.hide_status) as ONE word in a badge: Hidden,
   May be hidden or Visible; the explanation is its tooltip and accessible
   description, never a sentence on the page.
-- About my calls (live_assist_context), Documents (ui/pages/live_documents.py: the files
-  the assistant may read - added with a picker or by dropping them on the page, read on a
-  worker thread, each with a "Use in answers" switch; docs/redesign/live-documents-spec.md)
-  and Past sessions (meeting_store.list_live_sessions(), read on a worker thread).
+- Context - ONE card (ui/pages/live_documents.py ContextCard): the text box on top
+  (live_assist_context: who you are, what your calls are about, or a rule like "Translate
+  everything you hear into French" - a standing instruction every answer follows; a paper-clip
+  in its corner adds documents), under it the switch "Apply to everything I hear"
+  (live_assist_rules_everything: off, the rule shapes the answers to questions; on, it is run on
+  every sentence heard - live_rules.py; a calm Yes / No offer appears when the text reads like
+  such a rule, never switched silently), and under that the documents the assistant may read
+  (added with the paper-clip, Add documents, or by dropping files anywhere on the page / the
+  card - "Drop files to add" - read on a worker thread, each with a "Use in answers" switch;
+  docs/redesign/live-documents-spec.md), and Past sessions (meeting_store.list_live_sessions(),
+  read on a worker thread).
 - The rail "Live Assistant settings": Hide from screen share, Shortcut, Answer
-  questions by itself, Let it see my screen, Call language, Answer in, Answers
-  written by (Gusan Cloud · DeepSeek V4.1 Flash PRO / This computer · Qwen
+  questions by itself, Let it see my screen, Call language, Answer in,
+  Transcribes with (cfg live_assist_speech_model: Automatic / a model on this
+  computer / Gusan Cloud PRO / Best accuracy PRO / your own Google key, with the
+  plain hint when local Whisper would transcribe Armenian - ui/pages/live_speech.py),
+  Answers written by (Gusan Cloud · DeepSeek V4.1 Flash PRO / This computer · Qwen
   1.5B), Card look; "More options" opens Card see-through, Reset card position
   and Your own key.
 Every change goes through app.set_setting (applies at once, no Save button).
@@ -88,18 +98,20 @@ from PySide6.QtCore import (QEasingCurve, QEvent, QPointF, QRectF, QSize, Qt, QT
                             Signal)
 from PySide6.QtGui import (QColor, QFontMetricsF, QGuiApplication, QLinearGradient, QPainter, QPainterPath,
                            QPen)
-from PySide6.QtWidgets import (QBoxLayout, QButtonGroup, QComboBox, QFrame, QHBoxLayout, QLabel,
-                               QLayout, QPlainTextEdit, QRadioButton, QSizePolicy, QSlider,
+from PySide6.QtWidgets import (QBoxLayout, QButtonGroup, QComboBox, QFrame, QGraphicsOpacityEffect, QHBoxLayout,
+                               QLabel, QLayout, QPlainTextEdit, QRadioButton, QSizePolicy, QSlider,
                                QVBoxLayout, QWidget)
 
 import live_context
 from ui import live_docs_ui, theme
 from ui.components import (Button, Card, Chip, IconButton, PageHeader, ProTag, Segmented,
-                           SettingRow, SettingsRail, Toggle, icons, label)
+                           SettingRow, SettingsRail, Toggle, icons, label, row_actions)
 from ui.components.controls import keycap_labels
 from ui.components.hotkey_capture import HotkeyCaptureButton
-from ui.pages import live_demo
-from ui.pages.live_documents import DocumentsSection
+from ui.pages import live_demo, meeting_delete
+import live_rules
+from ui.pages.live_documents import ContextCard
+from ui.pages.live_speech import LiveSpeechRow
 
 logger = logging.getLogger("transcribe")
 
@@ -129,7 +141,7 @@ CLOUD_LIVE_MODEL = "DeepSeek V4.1 Flash"    # engine_choice.CLOUD_LIVE_MODEL (re
 LOCAL_DEFAULT_MODEL = "Qwen 1.5B"
 MAX_SESSIONS = 4
 CONTEXT_SAVE_MS = 700
-CONTEXT_MIN_H = 66                          # About my calls: two lines tall...
+CONTEXT_MIN_H = 66                          # Context: two lines tall...
 CONTEXT_MAX_LINES = 5                       # ...growing to five as the text needs
 
 _GENERIC_TITLE = re.compile(r"^Live session \d{1,2}:\d{2}$")
@@ -150,14 +162,13 @@ def _is_pro(app):
 
 
 def _first_name(app):
+    """The demo picture's owner: the signed-in person's first name - "" for a guest
+    (a super admin previewing Guest included)."""
+    import account_actions
     auth = getattr(app, "auth", None)
     if not bool(getattr(auth, "is_authenticated", False)):
         return ""
-    name = (getattr(auth, "user_name", None) or "").strip()
-    if not name:
-        email = (getattr(auth, "user_email", None) or "").strip()
-        name = email.split("@")[0] if email else ""
-    return name.split()[0] if name else ""
+    return account_actions.first_name(app)
 
 
 def _norm_hotkey(hk):
@@ -1436,13 +1447,14 @@ class ElidedLabel(QLabel):
 
     def __init__(self, text="", parent=None):
         super().__init__(parent)
+        self.setTextFormat(Qt.PlainText)        # a session's title can come from a calendar invite
         self._full = ""
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.set_full_text(text)
 
     def set_full_text(self, text):
         self._full = text or ""
-        self.setToolTip(self._full)
+        self.setToolTip(_rich_tip(self._full))
         self.setAccessibleName(self._full)
         self._elide()
 
@@ -1466,9 +1478,11 @@ class ElidedLabel(QLabel):
 
 class SessionRow(QFrame):
     """One past session: day + time, the first question (or the title), the
-    length and answers, and an Open button."""
+    length and answers, an Open button, and a trash icon while the pointer is on the row (or the
+    Delete key on Open): the same delete, with the same question and Undo, as on Meetings."""
 
     opened = Signal(str)
+    delete_requested = Signal(dict)
 
     def __init__(self, sess, parent=None):
         super().__init__(parent)
@@ -1503,7 +1517,15 @@ class SessionRow(QFrame):
         lay.addWidget(self.meta_label, 0, Qt.AlignVCenter)
         self.open_button = IconButton("chev_r", "Open session", size=32, icon_size=17, color="muted", parent=self)
         self.open_button.clicked.connect(self._open)
-        lay.addWidget(self.open_button, 0, Qt.AlignVCenter)
+        end = QHBoxLayout()                          # Open and, right after it, the trash icon's place
+        end.setContentsMargins(0, 0, 0, 0)
+        end.setSpacing(0)
+        end.addWidget(self.open_button, 0, Qt.AlignVCenter)
+        lay.addLayout(end)
+        self._deleting = False
+        self.trash = row_actions.attach_trash(self, end, self.sess.get("text") or "this session",
+                                              lambda: self.delete_requested.emit(self.sess))
+        self.open_button.installEventFilter(self)
         name = ", ".join(x for x in (day, time_, self.sess.get("text") or "", session_meta(self.sess)) if x)
         self.setAccessibleName(name)
         # The button is what Tab reaches: it reads the whole row, not just "Open session".
@@ -1511,7 +1533,34 @@ class SessionRow(QFrame):
         self.open_button.setToolTip("Open session")
 
     def _open(self):
-        self.opened.emit(self.sess.get("dir") or "")
+        if not self._deleting:
+            self.opened.emit(self.sess.get("dir") or "")
+
+    def eventFilter(self, obj, ev):
+        if obj is self.open_button and ev.type() == QEvent.KeyPress and ev.key() == Qt.Key_Delete:
+            self.delete_requested.emit(self.sess)        # the keyboard's way: Delete on the row's Open button
+            return True
+        return False
+
+    def set_blocked(self, reason):
+        self.trash.set_blocked(reason)
+        self.trash.reveal.refresh(animate=False)
+
+    def set_deleting(self, on):
+        """The folder is on its way to the trash: the row dims and can't be pressed."""
+        on = bool(on)
+        if on == self._deleting:
+            return
+        self._deleting = on
+        self.setEnabled(not on)
+        self.trash.reveal.enabled = not on
+        self.trash.reveal.refresh(animate=False)
+        if on:
+            fx = QGraphicsOpacityEffect(self)
+            fx.setOpacity(0.5)
+            self.setGraphicsEffect(fx)
+        else:
+            self.setGraphicsEffect(None)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -1525,7 +1574,7 @@ class SessionRow(QFrame):
             return
         self.meta_label.ensurePolished()            # the theme's font, not the default one
         meta_w = self.meta_label.fontMetrics().horizontalAdvance(meta) + 4
-        room = self.width() - 76 - 32 - 3 * 12 - meta_w
+        room = self.width() - 76 - 32 - 28 - 3 * 12 - meta_w
         self.meta_label.setVisible(room >= 150)
 
     def mouseReleaseEvent(self, e):
@@ -1584,8 +1633,7 @@ class LiveAssistantPage(QWidget):
         main.setSpacing(16)
         main.addWidget(self._build_hero())
         main.addSpacing(-12)        # the picture's own 18 px of shadow room is part of the gap below it
-        main.addWidget(self._build_about())
-        main.addWidget(self._build_documents())
+        main.addWidget(self._build_context())
         main.addWidget(self._build_sessions())
         main.addStretch(1)
         body.addLayout(main, 1)
@@ -1620,44 +1668,25 @@ class LiveAssistantPage(QWidget):
         v.addWidget(self.picture)
         return hero
 
-    def _build_about(self):
-        card = Card(self, gap=10)
-        card.layout().setContentsMargins(20, 16, 20, 16)
-        card.setAccessibleName("About my calls")
-        head = QHBoxLayout()
-        head.setSpacing(4)
-        head.addWidget(_h2("About my calls", card))
-        head.addStretch(1)
-        self.saved_icon = QLabel(card)
-        self.saved_icon.setPixmap(icons.pixmap("check", 14, "ok-tx", sw=2.2))
-        self.saved_label = label("Saved", "muted", card)
-        head.addWidget(self.saved_icon, 0, Qt.AlignVCenter)
-        head.addWidget(self.saved_label, 0, Qt.AlignVCenter)
-        card.add(head)
-        self.context_edit = QPlainTextEdit(card)
-        self.context_edit.setAccessibleName("About my calls")
-        self.context_edit.setPlaceholderText("Who you are and what your calls are about.")
-        self.context_edit.setFont(theme.font(13.5))
-        self.context_edit.setFixedHeight(CONTEXT_MIN_H)
-        self.context_edit.setTabChangesFocus(True)
-        self.context_edit.document().setDocumentMargin(3)
+    def _build_context(self):
+        """ONE Context card (ui/pages/live_documents.py): the text box, "Apply to everything I
+        hear", and the documents the assistant may read. The card - and the page around it -
+        takes files dropped on it (see dragEnterEvent); a file dropped on the text box would
+        only have pasted its path, so that box hands drops over too."""
+        card = ContextCard(self.app, self, cfg=self._cfg_dict, setter=self._set)
+        self.context_card = card
+        self.saved_icon, self.saved_label = card.saved_icon, card.saved_label
+        self.context_edit = card.context_edit
+        self.documents = card.documents
         self.context_edit.textChanged.connect(self._on_context_edited)
         self.context_edit.installEventFilter(self)
         # Re-wrapped (typing, a new value, a narrower window): fit the height,
         # after the layout pass that reported it.
         self.context_edit.document().documentLayout().documentSizeChanged.connect(
             lambda _s: QTimer.singleShot(0, self, self._fit_context))
-        card.add(self.context_edit)
-        return card
-
-    def _build_documents(self):
-        """The files the assistant may read (ui/pages/live_documents.py). The page takes
-        files dropped anywhere on it (see dragEnterEvent); a file dropped on the About box
-        would only have pasted its path, so that box hands drops over too."""
-        self.documents = DocumentsSection(self.app, self)
         self.setAcceptDrops(True)
         self.context_edit.setAcceptDrops(False)       # a file dropped here is a document, not a path
-        return self.documents
+        return card
 
     def _build_sessions(self):
         card = Card(self, gap=0)
@@ -1676,6 +1705,11 @@ class LiveAssistantPage(QWidget):
         self._sessions_head = QWidget(card)
         self._sessions_head.setLayout(head)
         card.add(self._sessions_head)
+        # Delete from the list: the trash icon on a row, the same question, Undo for ten seconds.
+        self.deleter = meeting_delete.MeetingDeleter(self.app, self, dock=self)     # its Undo toast floats over the page
+        self.deleter.removed.connect(self._session_removed)
+        self.deleter.busy.connect(self._session_busy)
+        self.deleter.restored.connect(lambda _n=0: self.reload_sessions())
         self.sessions_box = QWidget(card)
         self.sessions_lay = QVBoxLayout(self.sessions_box)
         self.sessions_lay.setContentsMargins(0, 0, 0, 0)
@@ -1735,6 +1769,11 @@ class LiveAssistantPage(QWidget):
         self.answer_lang = self._combo("Answer in", ANSWER_LANGS)
         self.answer_lang.activated.connect(lambda _i: self._apply_combo("live_assist_output_language", self.answer_lang))
         rail.add_row(SettingRow("Answer in", self.answer_lang))
+
+        # What transcribes the call (ui/pages/live_speech.py): Automatic, a model on this
+        # computer, Gusan Cloud, Best accuracy or your own Google key.
+        self.speech = LiveSpeechRow(self.app, open_settings=self._open_speech_settings)
+        self.speech_row = rail.add_row(self.speech.row)
 
         writers = QWidget()
         wl = QVBoxLayout(writers)
@@ -1841,6 +1880,7 @@ class LiveAssistantPage(QWidget):
     def refresh_account(self):
         self.picture.set_owner(_first_name(self.app))
         self._refresh_writer()
+        self.speech.refresh()                   # the PRO pills follow the plan
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -1855,12 +1895,12 @@ class LiveAssistantPage(QWidget):
         if self._context_dirty:
             self._save_context()
         self.shortcut.capture.cancel_capture()
-        self.documents.drag_leave()
+        self.context_card.drag_leave()
         super().hideEvent(e)
 
     # ── files dropped on the page become documents ──
     def dragEnterEvent(self, e):
-        if self.documents.drag_enter(e.mimeData()):
+        if self.context_card.drag_enter(e.mimeData()):
             e.acceptProposedAction()
         else:
             e.ignore()
@@ -1872,11 +1912,11 @@ class LiveAssistantPage(QWidget):
             e.ignore()
 
     def dragLeaveEvent(self, e):
-        self.documents.drag_leave()
+        self.context_card.drag_leave()
         super().dragLeaveEvent(e)
 
     def dropEvent(self, e):
-        if self.documents.drop(e.mimeData()):
+        if self.context_card.drop(e.mimeData()):
             e.acceptProposedAction()
         else:
             e.ignore()
@@ -1936,9 +1976,11 @@ class LiveAssistantPage(QWidget):
         self.picture.set_owner(_first_name(self.app))
         for key in ("live_assist_private", "live_assist_hotkey", "live_assist_auto_answer",
                     "live_assist_screen_auto", "live_assist_language", "live_assist_output_language",
-                    "live_assist_theme", "live_assist_opacity", "live_assist_context"):
+                    "live_assist_theme", "live_assist_opacity", "live_assist_context",
+                    live_rules.RULES_KEY, live_rules.DECLINED_KEY):
             self._sync_key(key, refresh_writer=False)
         self._refresh_writer()
+        self.speech.refresh()
 
     _MISSING = object()
 
@@ -1950,6 +1992,8 @@ class LiveAssistantPage(QWidget):
         def val(default):
             return cfg.get(key, default) if value is self._MISSING else value
 
+        if refresh_writer and self.speech.watches(key):
+            self.speech.refresh()               # what transcribes the call (and its language hint)
         if key == "live_assist_private":
             on = bool(val(True))
             self._wanted_private = on
@@ -1991,6 +2035,11 @@ class LiveAssistantPage(QWidget):
                     self.context_edit.setPlainText(text)
                     self.context_edit.blockSignals(False)
             self._show_saved()
+            self.context_card.refresh_rules()
+        elif key == live_rules.RULES_KEY:
+            self.context_card.refresh_rules(on=bool(val(False)))
+        elif key == live_rules.DECLINED_KEY:
+            self.context_card.refresh_rules(declined=str(val("") or ""))
         elif refresh_writer and not key.startswith("live_assist_") or key == "live_assist_writer":
             # privacy_mode, action_model, keys, plan...: who writes the answers may have changed.
             self._refresh_writer()
@@ -2185,12 +2234,14 @@ class LiveAssistantPage(QWidget):
         else:
             self._call("show_settings")
 
-    # ── About my calls ──
+    # ── Context ──
     def _on_context_edited(self):
         self._context_dirty = True
         self._show_saved()
         self._ctx_timer.start()
         self._fit_context()
+        self.context_card.clear_rules_note()          # (what the switch said about the last text is old news)
+        self.context_card.refresh_rules()            # the switch, its words and the offer follow the text
 
     def _fit_context(self, *_):
         """Two lines tall like the mockup; grows to five as the text needs
@@ -2215,9 +2266,22 @@ class LiveAssistantPage(QWidget):
     def _save_context(self):
         self._ctx_timer.stop()
         text = live_context.clip_context(self.context_edit.toPlainText())
+        old = live_context.clip_context(str(self._cfg_dict().get("live_assist_context") or ""))
         if self._set("live_assist_context", text):
             self._context_dirty = False
+            self._reconcile_rules(old, text)
         self._show_saved()
+
+    def _reconcile_rules(self, old, text):
+        """"Apply to everything I hear" must not outlive its rule (live_rules.reconcile): the context
+        was cleared, or no longer reads like a rule - the switch turns itself off and says so once,
+        calmly; a different rule that still reads like one stays on and says that, too."""
+        on = bool(self._cfg_dict().get(live_rules.RULES_KEY, False))
+        turn_off, said = live_rules.reconcile(on, text, old)
+        if turn_off:
+            self._set(live_rules.RULES_KEY, False)
+        if said:
+            self.context_card.say_rules(said)
 
     def _show_saved(self):
         shown = not self._context_dirty and bool(self.context_edit.toPlainText().strip())
@@ -2297,7 +2361,8 @@ class LiveAssistantPage(QWidget):
 
     def set_sessions(self, sessions):
         """Show these sessions (dicts from load_sessions), newest first."""
-        self._sessions = list(sessions or [])
+        # (a read that began before a delete and arrived after it must not bring the session back)
+        self._sessions = [s for s in (sessions or []) if not self.deleter.is_gone(s.get("dir"))]
         for row in self.session_rows:
             row.hide()
             row.deleteLater()
@@ -2306,8 +2371,12 @@ class LiveAssistantPage(QWidget):
         for sess in self._sessions[:MAX_SESSIONS]:
             row = SessionRow(sess, self.sessions_box)
             row.opened.connect(self._open_session)
+            row.delete_requested.connect(self._ask_delete_session)
             self.sessions_lay.addWidget(row)
             self.session_rows.append(row)
+            row.set_blocked(self.deleter.blocked(sess))
+            if self.deleter.is_deleting(sess.get("dir")):
+                row.set_deleting(True)
             # Rows are made after the rail: put them right after See all in
             # the Tab order (page order), not after the last rail control.
             QWidget.setTabOrder(prev, row.open_button)
@@ -2327,6 +2396,22 @@ class LiveAssistantPage(QWidget):
         self.see_all.setVisible(state == "list")
         self.sessions_box.setVisible(state == "list")
         self.empty_row.setVisible(state == "empty")
+
+    def _ask_delete_session(self, sess):
+        """The trash icon (or the Delete key) on a past session: ask, then move it to the trash."""
+        text = str(sess.get("text") or "").strip().strip("“”").strip()
+        return self.deleter.ask([{"dir": sess.get("dir"), "title": text or "Live session",
+                                  "duration_sec": sess.get("duration_sec") or 0,
+                                  "started": sess.get("started") or ""}], "live")
+
+    def _session_busy(self, folder, on):
+        row = next((r for r in self.session_rows if r.sess.get("dir") == folder), None)
+        if row is not None:
+            row.set_deleting(on)
+
+    def _session_removed(self, folder):
+        """A session went to the trash: the list shows the rest (and the next one that was hidden)."""
+        self.set_sessions([s for s in (self._sessions or []) if s.get("dir") != folder])
 
     def _open_session(self, folder):
         if callable(getattr(self.app, "show_main", None)):

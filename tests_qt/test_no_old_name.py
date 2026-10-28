@@ -29,28 +29,33 @@ from tests_qt.conftest import make_stub_app
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OLD = re.compile(r"\bTranscribe\b")
+# OpenAI's own model names (what Gusan Cloud's server answers with) end in the word: not our old name.
+_MODEL_NAMES = re.compile(r"\bGPT(?:-4o(?: mini)?)? Transcribe\b")
 _SENTENCE_START = (".", ":", "!", "?", "•", "\n", "(", "\"", "“", "'")
 
 
 def old_names(text):
     """The text when it still names the app "Transcribe" (else None). The verb
     starting an action or a sentence ("Transcribe a file") is fine."""
-    text = text or ""
+    shown = text or ""
+    text = _MODEL_NAMES.sub("GPT-model", shown)
     for m in OLD.finditer(text):
         before = text[:m.start()].rstrip()
         after = text[m.end():]
         verb = (not before or before.endswith(_SENTENCE_START)) and re.match(r"\s+[a-z]", after)
         if not verb:
-            return text
+            return shown
     return None
 
 
 def test_the_rule():
     for shown in ("Welcome to Transcribe", "Transcribe Pro", "Restart Transcribe and try again.",
-                  "Transcribe", "Quit Transcribe", "Transcribe Files", "Open Transcribe"):
+                  "Transcribe", "Quit Transcribe", "Transcribe Files", "Open Transcribe",
+                  "GPT Transcribe, Transcribe Pro"):
         assert old_names(shown) == shown, shown
     for fine in ("Transcribe a file", "Transcribe only", "Done. Transcribe another one?",
-                 "TranscribeApp-Windows-Setup.exe", "Transcribed on this computer", "Gusan", ""):
+                 "TranscribeApp-Windows-Setup.exe", "Transcribed on this computer", "Gusan", "",
+                 "GPT Transcribe", "GPT-4o Transcribe", "GPT-4o mini Transcribe", "Fast · GPT Transcribe · Cloud"):
         assert old_names(fine) is None, fine
 
 

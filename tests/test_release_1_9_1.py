@@ -20,12 +20,11 @@ class TestUpdateFlag(unittest.TestCase):
         import main
         me = SimpleNamespace(_update_prompt_open=False, is_rec=False,
                              cfg={"pending_update_version": "v1.9.1"},
-                             save_config=MagicMock(), track=MagicMock(),
+                             save_config=MagicMock(), track=MagicMock(), show_tray_hint=MagicMock(),
                              _is_newer=main.AppController._is_newer)
-        with patch.object(main, "APP_VERSION", "1.9.1"), \
-             patch.object(main.QMessageBox, "question") as ask:
+        with patch.object(main, "APP_VERSION", "1.9.1"):
             main.AppController._prompt_update(me, "v1.9.1")
-        ask.assert_not_called()
+        me.show_tray_hint.assert_not_called()                        # nothing to announce (and no UI import: Linux CI)
         self.assertEqual(me.cfg["pending_update_version"], "")
         me.save_config.assert_called_once()
 
@@ -87,7 +86,8 @@ class TestAutoAnswerNeverPreemptsTheUser(unittest.TestCase):
     def _overlay(self, **state):
         base = dict(app=SimpleNamespace(cfg={}), _suggesting=False, _suggest_auto=False,
                     _hold_until=0.0, _pending_auto=False,
-                    _no_answer_engine_for_free=lambda: False)     # Pro / has an engine: no early stop
+                    _no_answer_engine_for_free=lambda: False,     # Pro / has an engine: no early stop
+                    rules_active=lambda: False)                   # no standing rule for everything heard
         base.update(state)
         return SimpleNamespace(**base)
 

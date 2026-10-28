@@ -1,11 +1,20 @@
 """The main window's left navigation (232 px), as in the mockups.
 
 Logo + "Gusan", the six pages (no PRO tags: Pro features open the Pro
-window when a Free user uses them), then the account at the bottom - for Free and guests a small
-card with one quiet "Upgrade to Pro", for Pro just the name and the PRO pill -
-and Settings last.
+window when a Free user uses them), then the account at the bottom, and
+Settings last. The account area by plan:
 
-Signals: navigate(route), upgrade(), account().
+* Free: a small card - the first name, the FREE pill and one quiet violet
+  "Upgrade to Pro".
+* Guest (not signed in; also a super admin previewing Guest): the same card
+  with a neutral person icon, the name "User" (never a profile name or an
+  initial), the GUEST pill and ONE blue "Sign in / Sign up". No upgrade wording.
+* Pro (and a trial): just the name and the PRO pill.
+
+The labels live in account_actions (GUEST_NAME, SIGN_IN_UP, SIGN_IN_UP_A11Y,
+UPGRADE).
+
+Signals: navigate(route), upgrade() (Free), sign_in() (guest), account().
 """
 
 from PySide6.QtCore import QRectF, QSize, Qt, Signal
@@ -13,9 +22,11 @@ from PySide6.QtGui import QColor, QLinearGradient, QPainter
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
                                QVBoxLayout, QWidget)
 
+from account_actions import GUEST_NAME, SIGN_IN_UP, SIGN_IN_UP_A11Y, UPGRADE
 from ui import theme
 from ui.components import icons
 from ui.components.badges import FreeBadge, GuestBadge, ProTag
+from ui.components.buttons import Button
 
 # route, icon, label, Pro feature
 NAV = (
@@ -29,18 +40,29 @@ NAV = (
 
 
 class Avatar(QWidget):
-    """Round avatar: the name's first letter on the blue gradient."""
+    """Round avatar: the name's first letter on the blue gradient. A guest
+    (``guest=True``) gets a neutral person icon instead - never a letter."""
 
-    def __init__(self, name="", size=30, parent=None):
+    def __init__(self, name="", size=30, parent=None, guest=False):
         super().__init__(parent)
         self._size = int(size)
+        self._guest = bool(guest)
         self._letter = (name or "?").strip()[:1].upper() or "?"
         self.setFixedSize(self._size, self._size)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
-    def set_name(self, name):
+    def set_name(self, name, guest=None):
+        if guest is not None:
+            self._guest = bool(guest)
         self._letter = (name or "?").strip()[:1].upper() or "?"
         self.update()
+
+    def is_guest(self):
+        return self._guest
+
+    def letter(self):
+        """The letter it shows ("" for a guest's person icon)."""
+        return "" if self._guest else self._letter
 
     def sizeHint(self):
         return QSize(self._size, self._size)
@@ -49,6 +71,18 @@ class Avatar(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         r = QRectF(0, 0, self._size, self._size)
+        if self._guest:
+            g = QLinearGradient(r.topLeft(), r.bottomRight())
+            g.setColorAt(0, QColor("#e8eef6"))
+            g.setColorAt(1, QColor("#cbd5e1"))
+            p.setPen(Qt.NoPen)
+            p.setBrush(g)
+            p.drawEllipse(r)
+            isz = int(round(self._size * 0.58))
+            off = int(round((self._size - isz) / 2.0))
+            p.drawPixmap(off, off, icons.pixmap("user", isz, "#475569", sw=1.9))
+            p.end()
+            return
         g = QLinearGradient(r.topLeft(), r.bottomRight())     # 135deg
         g.setColorAt(0, QColor("#60a5fa"))
         g.setColorAt(1, QColor("#2563eb"))
@@ -132,7 +166,7 @@ class _AccountRow(QPushButton):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(8 if avatar_size >= 30 else 2, 0, 8 if avatar_size >= 30 else 2, 0)
         lay.setSpacing(10 if avatar_size >= 30 else 8)
-        self.avatar = Avatar(name, avatar_size, self)
+        self.avatar = Avatar(name, avatar_size, self, guest=(tier not in ("pro", "free")))
         lay.addWidget(self.avatar, 0, Qt.AlignVCenter)
         self.name_label = QLabel(name, self)
         self.name_label.setProperty("navText", True)
@@ -158,6 +192,7 @@ class _AccountRow(QPushButton):
 class Sidebar(QFrame):
     navigate = Signal(str)
     upgrade = Signal()
+    sign_in = Signal()
     account = Signal()
 
     WIDTH = 232
@@ -213,19 +248,22 @@ class Sidebar(QFrame):
         self.items["settings"] = self.settings_item
 
         self.account_row = None
-        self.upgrade_button = None
+        self.upgrade_button = None          # Free's violet "Upgrade to Pro" (None for guests and Pro)
+        self.sign_in_button = None          # a guest's blue "Sign in / Sign up" (None for Free and Pro)
         self._tier = None
         self._active_route = None
-        self.set_account("guest", "Guest")
+        self.set_account("guest", GUEST_NAME)
 
     # ── account ──
     def tier(self):
         return self._tier
 
     def set_account(self, tier, name):
-        """tier: 'pro' | 'free' | 'guest'. Rebuilds the account area."""
+        """tier: 'pro' | 'free' | 'guest'. Rebuilds the account area. A guest
+        is always "User": a name handed in for one (a profile the session still
+        holds) is ignored here too, so no caller can put a person on the card."""
         tier = tier if tier in ("pro", "free") else "guest"
-        name = (name or "").strip() or ("Guest" if tier == "guest" else "Account")
+        name = GUEST_NAME if tier == "guest" else ((name or "").strip() or "Account")
         if (tier, name) == (self._tier, getattr(self, "_name", None)):
             return
         self._tier, self._name = tier, name
@@ -235,6 +273,7 @@ class Sidebar(QFrame):
                 w.setParent(None)
                 w.deleteLater()
         self.upgrade_button = None
+        self.sign_in_button = None
         if tier == "pro":
             self.account_row = _AccountRow(name, tier, 30, 44, "m", self._acct_slot)
             self.account_row.clicked.connect(lambda _=False: self.account.emit())
@@ -251,20 +290,28 @@ class Sidebar(QFrame):
             self.account_row = _AccountRow(name, tier, 26, 26, "s", card)
             self.account_row.clicked.connect(lambda _=False: self.account.emit())
             cl.addWidget(self.account_row)
-            btn = QPushButton("Upgrade to Pro", card)
-            btn.setProperty("gusan", "upgradeQuiet")
-            btn.setFixedHeight(30)
-            btn.setFont(theme.font(12.5, 700))
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setFocusPolicy(Qt.TabFocus)
-            theme.focus_ring(btn)
-            btn.setAccessibleName("Upgrade to Pro")
-            btn.clicked.connect(lambda _=False: self.upgrade.emit())
+            if tier == "guest":
+                # The app's primary blue (the other blue buttons), not violet.
+                btn = Button(SIGN_IN_UP, "primary", "s", parent=card, full=True)
+                btn.setFont(theme.font(12.5, 700))
+                btn.setAccessibleName(SIGN_IN_UP_A11Y)
+                btn.clicked.connect(lambda _=False: self.sign_in.emit())
+                self.sign_in_button = btn
+            else:
+                btn = QPushButton(UPGRADE, card)
+                btn.setProperty("gusan", "upgradeQuiet")
+                btn.setFixedHeight(30)
+                btn.setFont(theme.font(12.5, 700))
+                btn.setCursor(Qt.PointingHandCursor)
+                btn.setFocusPolicy(Qt.TabFocus)
+                theme.focus_ring(btn)
+                btn.setAccessibleName(UPGRADE)
+                btn.clicked.connect(lambda _=False: self.upgrade.emit())
+                self.upgrade_button = btn
             bl = QHBoxLayout()
             bl.setContentsMargins(2, 0, 2, 0)
             bl.addWidget(btn)
             cl.addLayout(bl)
-            self.upgrade_button = btn
             self._acct_lay.addWidget(card)
         # Same rule as set_active: only the Pro row lights up on Account & plan.
         self.account_row.set_active(self._active_route == "account" and tier == "pro")

@@ -241,15 +241,14 @@ def test_the_update_answer_is_one_quiet_notice(ctl, monkeypatch):
 
 
 def test_quit_asks_before_it_ends_a_meeting(ctl, monkeypatch):
-    import main
-    from PySide6.QtWidgets import QMessageBox
+    from ui.components import mini_prompt
     asked = []
 
-    class Box(QMessageBox):
-        def exec(self):                                   # closed with Esc / Cancel
-            asked.append((self.windowTitle(), self.text()))
-            return 0
-    monkeypatch.setattr(main, "QMessageBox", Box)
+    def exec_(self):                                      # closed with Esc / Cancel
+        asked.append((self.windowTitle(), self.body_label.text()))
+        assert self.tone == "danger" and self.no_button.isDefault()      # red Quit; Enter = Cancel
+        return 0
+    monkeypatch.setattr(mini_prompt.MiniPrompt, "exec", exec_)
     session = ctl.meeting_session
     assert session.state == "idle"
     session.state = "recording"
@@ -279,9 +278,12 @@ def test_cmd_q_and_the_dock_quit_go_through_quit_app(ctl, monkeypatch):
 
 
 def test_a_log_off_mid_meeting_saves_without_a_question(ctl, monkeypatch):
-    import main
+    from ui.components import mini_prompt
     saved = []
-    monkeypatch.setattr(main, "QMessageBox", None)            # any dialog would fail here
+
+    def no_card(*_a, **_k):
+        raise AssertionError("a question was asked at a log-off")
+    monkeypatch.setattr(mini_prompt.MiniPrompt, "exec", no_card)       # any card would fail here
     monkeypatch.setattr(ctl.meeting_session, "save_for_quit", lambda: saved.append("saved") or "")
     session = ctl.meeting_session
     session.state = "recording"
@@ -512,3 +514,509 @@ def test_a_calendar_reminder_is_the_toast(ctl, monkeypatch):
         assert ctl._calendar_busy() is False
     finally:
         toast.hide_reminder()
+
+
+# ── Google Calendar wiring (G7, G11): the controller side of the reminder, the cards and telemetry ──
+CAL_AGENDA = "Q3 numbers\nHiring plan\nLaunch checklist"
+
+
+def _cal_meeting(**kw):
+    from datetime import datetime, timedelta, timezone
+    start = datetime.now(timezone.utc) + timedelta(seconds=40)
+    m = {"id": "ev1", "title": "Weekly product sync", "start": start, "end": start + timedelta(minutes=30),
+         "attendees": ["Aram Adamyan", "Anna Smith", "David Lee"], "others": ["Anna Smith", "David Lee"],
+         "people": "Anna, David", "agenda": CAL_AGENDA, "link": "https://meet.google.com/abc",
+         "call_type": "Google Meet", "private": False, "has_others": True}
+    m.update(kw)
+    return m
+
+
+class _FakeSession:
+    """Stands in for MeetingSession: records start(), takes an agenda like the real one does."""
+
+    def __init__(self, ok=True, with_agenda=True, log=None):
+        self.is_busy = False
+        self.ok = ok
+        self.calls = []
+        self.log = log if log is not None else []
+        self.with_agenda = with_agenda
+        self.agendas = []
+        if with_agenda:
+            self.start = self._start_with_agenda
+        else:
+            self.start = self._start_plain
+
+    def _start_with_agenda(self, title="", attendees="", agenda="", source=None, calendar_event_id=None):
+        self.log.append("session.start")
+        self.calls.append(dict(title=title, attendees=attendees, agenda=agenda, source=source,
+                               calendar_event_id=calendar_event_id))
+        return (True, "", "") if self.ok else (False, "busy", "A meeting is already being recorded.")
+
+    def _start_plain(self, title="", attendees="", source=None, calendar_event_id=None):
+        self.log.append("session.start")
+        self.calls.append(dict(title=title, attendees=attendees, source=source,
+                               calendar_event_id=calendar_event_id))
+        return (True, "", "") if self.ok else (False, "busy", "A meeting is already being recorded.")
+
+    def set_agenda(self, text):
+        self.agendas.append(text)
+
+
+class _FakeCard:
+    def __init__(self):
+        self.invites = []
+
+    def set_invite(self, agenda="", others=None):
+        self.invites.append((agenda, list(others) if others is not None else None))
+
+
+@pytest.fixture
+def cal_flow(ctl, monkeypatch):
+    """record_from_calendar with everything outside the controller faked, in one call log."""
+    log = []
+    events = {"log": log, "main": [], "tracked": [], "marked": [], "hints": ctl.hints}
+    monkeypatch.setattr(ctl, "is_pro", lambda: True)
+    monkeypatch.setattr(ctl, "show_main", lambda page=None, **kw: events["main"].append((page, kw)))
+    monkeypatch.setattr(ctl, "show_live_assist", lambda: log.append("show_live_assist"))
+    monkeypatch.setattr(ctl, "track", lambda event, props=None: events["tracked"].append((event, props)))
+    card = _FakeCard()
+
+    def ensure():
+        log.append("ensure_live_assist")
+        return card
+    monkeypatch.setattr(ctl, "_ensure_live_assist", ensure)
+    monkeypatch.setattr(ctl, "live_assist", card)
+    cal = type("Cal", (), {"mark_prompted": lambda self, i: events["marked"].append(i) or True})()
+    monkeypatch.setattr(ctl, "calendar", cal)
+    import ui.recording_prompts as rp
+    monkeypatch.setattr(rp, "ensure_recording_consent", lambda parent, app: True)
+    events["card"] = card
+    events["session"] = lambda **kw: _install_session(ctl, monkeypatch, log, **kw)
+    ctl.hints.clear()
+    return events
+
+
+def _install_session(ctl, monkeypatch, log, **kw):
+    s = _FakeSession(log=log, **kw)
+    monkeypatch.setattr(ctl, "meeting_session", s)
+    return s
+
+
+def test_calendar_start_context_helper(ctl, monkeypatch):
+    # No calendar (dormant) or not connected: nothing - for the default meeting.
+    monkeypatch.setattr(ctl, "calendar", None)
+    assert ctl.calendar_start_context() is None
+    m = _cal_meeting()
+
+    class Cal:
+        available, is_connected = True, True
+
+        def __init__(self, row):
+            self.row = row
+
+        def current_meeting(self, only_meetings=False):
+            return self.row
+    cal = Cal(m)
+    monkeypatch.setattr(ctl, "calendar", cal)
+    ctx = ctl.calendar_start_context()
+    assert ctx == {"title": "Weekly product sync", "attendees": ["Aram Adamyan", "Anna Smith", "David Lee"],
+                   "others": ["Anna Smith", "David Lee"], "agenda": CAL_AGENDA, "event_id": "ev1"}
+    assert ctl.calendar_start_context(with_agenda=False)["agenda"] == ""      # title and names only
+    cal.is_connected = False
+    assert ctl.calendar_start_context() is None
+    cal.is_connected = True
+    cal.row = None                                             # nothing on now
+    assert ctl.calendar_start_context() is None
+    cal.current_meeting = lambda only_meetings=False: 1 / 0    # a service that breaks is not the start's problem
+    assert ctl.calendar_start_context() is None
+    # A meeting handed in is used as it is (the reminder's), connected or not.
+    monkeypatch.setattr(ctl, "calendar", None)
+    assert ctl.calendar_start_context(m)["event_id"] == "ev1"
+    # Nothing that identifies anyone beyond their name goes in; a private event has no agenda.
+    ctx = ctl.calendar_start_context(_cal_meeting(private=True, attendees=["Aram <a@x.example>"],
+                                                  others=["Anna <anna@secret.example>"]))
+    assert ctx["agenda"] == "" and "@" not in repr(ctx) and "secret.example" not in repr(ctx)
+
+
+def test_the_live_card_start_never_takes_a_solo_block(ctl, monkeypatch, tmp_path):
+    """calendar_start_context() with no meeting is the Live card's Start: its title, people
+    and agenda go to the AI with every answer, so a solo block ("Doctor appointment") is
+    never picked - while the start card's pre-fill still takes any event (spec A9)."""
+    from datetime import datetime, timedelta, timezone
+    from calendar_service import CalendarCore
+
+    class Api:
+        def configured(self, cfg=None):
+            return True
+
+        def is_connected(self):
+            return True
+
+    now = datetime.now(timezone.utc)
+    solo = _cal_meeting(id="doc", title="Doctor appointment", start=now - timedelta(minutes=2),
+                        end=now + timedelta(minutes=58), attendees=["Aram Adamyan"], others=[],
+                        has_others=False, agenda="Bring the results")
+    real = _cal_meeting(id="cust", title="Customer call", start=now + timedelta(minutes=4),
+                        end=now + timedelta(minutes=34))
+
+    class Cal:
+        available, is_connected = True, True
+
+        def __init__(self):
+            self.core = CalendarCore({}, api=Api(), state_path=tmp_path / "cal.json")
+
+        def current_meeting(self, only_meetings=False):
+            return self.core.current_meeting(only_meetings=only_meetings)
+    cal = Cal()
+    monkeypatch.setattr(ctl, "calendar", cal)
+    cal.core.apply_fetch([solo])
+    assert cal.current_meeting()["id"] == "doc"                           # the start card: any event
+    assert ctl.calendar_start_context() is None                           # the Live card: nothing on
+    cal.core.apply_fetch([solo, real])
+    assert cal.current_meeting()["id"] == "doc"                           # it started closer to now...
+    ctx = ctl.calendar_start_context()
+    assert ctx["title"] == "Customer call" and ctx["event_id"] == "cust"  # ...but the real meeting wins here
+    assert "Doctor" not in repr(ctx) and "results" not in repr(ctx)
+
+
+def test_record_from_calendar_with_assist_orders_card_then_session_and_passes_agenda(ctl, cal_flow):
+    s = cal_flow["session"]()
+    assert ctl.record_from_calendar(_cal_meeting(), with_assist=True) is True
+    assert cal_flow["log"] == ["ensure_live_assist", "session.start", "show_live_assist"]
+    kw = s.calls[0]
+    assert kw == {"title": "Weekly product sync", "attendees": "Aram Adamyan, Anna Smith, David Lee",
+                  "agenda": CAL_AGENDA, "source": "calendar", "calendar_event_id": "ev1"}
+    assert ctl.recorder.fast_live_chunks is True              # short pieces keep its answers live
+    ctl.recorder.fast_live_chunks = False
+    assert cal_flow["main"] == [("meetings", {"view": "live"})]
+    assert cal_flow["marked"] == ["ev1"]                       # asked: never again
+    assert cal_flow["tracked"] == [("calendar_meeting_started",
+                                    {"source": "toast", "with_assist": True, "with_agenda": True})]
+    # The open card says whose meeting it is: who is on it, and the agenda that was sent.
+    assert cal_flow["card"].invites == [(CAL_AGENDA, ["Anna Smith", "David Lee"])]
+
+
+def test_record_from_calendar_plain_record_sends_no_agenda(ctl, cal_flow):
+    s = cal_flow["session"]()
+    assert ctl.record_from_calendar(_cal_meeting(), with_assist=False) is True
+    assert cal_flow["log"] == ["session.start"]                # no card is built for a plain record
+    assert s.calls[0]["agenda"] == "" and s.calls[0]["title"] == "Weekly product sync"
+    assert s.calls[0]["attendees"] == "Aram Adamyan, Anna Smith, David Lee"
+    assert cal_flow["tracked"] == [("calendar_meeting_started",
+                                    {"source": "toast", "with_assist": False, "with_agenda": False})]
+    assert cal_flow["card"].invites == [("", ["Anna Smith", "David Lee"])]    # an open card: people, no agenda
+    assert cal_flow["main"] == [("meetings", {"view": "live"})]
+    assert ctl.recorder.fast_live_chunks is False
+
+
+def test_record_from_calendar_works_with_a_recorder_that_has_no_agenda_yet(ctl, cal_flow):
+    s = cal_flow["session"](with_agenda=False)
+    assert ctl.record_from_calendar(_cal_meeting(), with_assist=True) is True
+    assert "agenda" not in s.calls[0] and s.agendas == [CAL_AGENDA]       # set after the start
+    ctl.recorder.fast_live_chunks = False
+
+
+def test_record_from_calendar_private_event_never_sends_its_agenda(ctl, cal_flow):
+    s = cal_flow["session"]()
+    assert ctl.record_from_calendar(_cal_meeting(private=True), with_assist=True) is True
+    assert s.calls[0]["agenda"] == ""
+    assert cal_flow["tracked"][0][1]["with_agenda"] is False
+    ctl.recorder.fast_live_chunks = False
+
+
+def test_record_from_calendar_failure_prefills_start_card(ctl, cal_flow):
+    s = cal_flow["session"](ok=False)
+    assert ctl.record_from_calendar(_cal_meeting(), with_assist=True) is False
+    assert ctl.recorder.fast_live_chunks is False              # not left on
+    assert cal_flow["main"] == [("meetings", {"title": "Weekly product sync",
+                                              "attendees": ["Anna Smith", "David Lee"],
+                                              "calendar_event_id": "ev1", "agenda": CAL_AGENDA})]
+    assert cal_flow["hints"][-1][:2] == ("Couldn't start the recording", "A meeting is already being recorded.")
+    assert cal_flow["tracked"] == [] and cal_flow["marked"] == [] and cal_flow["card"].invites == []
+    # A plain Record that fails fills the card too - with the agenda the user can read there.
+    cal_flow["main"].clear()
+    s.ok = False
+    assert ctl.record_from_calendar(_cal_meeting(), with_assist=False) is False
+    assert cal_flow["main"][0][1]["agenda"] == CAL_AGENDA and s.calls[-1]["agenda"] == ""
+
+
+def test_record_from_calendar_without_a_session_or_while_busy(ctl, cal_flow, monkeypatch):
+    monkeypatch.setattr(ctl, "meeting_session", None)
+    assert ctl.record_from_calendar(_cal_meeting()) is False
+    assert cal_flow["main"][-1][1]["calendar_event_id"] == "ev1"             # the card, filled in
+    cal_flow["main"].clear()
+    s = _install_session(ctl, monkeypatch, cal_flow["log"])
+    s.is_busy = True
+    assert ctl.record_from_calendar(_cal_meeting()) is False
+    assert cal_flow["main"] == [("meetings", {})] and s.calls == []         # one at a time: the live view
+
+
+def test_record_from_calendar_pro_gate_and_consent_come_first(ctl, cal_flow, monkeypatch):
+    s = cal_flow["session"]()
+    asked = []
+    monkeypatch.setattr(ctl, "is_pro", lambda: False)
+    monkeypatch.setattr(ctl, "_pro_upsell", lambda feature=None: asked.append(feature))
+    assert ctl.record_from_calendar(_cal_meeting(), with_assist=True) is False
+    assert asked == ["Meeting recording"] and s.calls == [] and cal_flow["tracked"] == []
+    monkeypatch.setattr(ctl, "is_pro", lambda: True)
+    import ui.recording_prompts as rp
+    monkeypatch.setattr(rp, "ensure_recording_consent", lambda parent, app: False)    # the notice was refused
+    assert ctl.record_from_calendar(_cal_meeting(), with_assist=True) is False
+    assert s.calls == [] and cal_flow["log"] == []
+
+
+def test_note_calendar_start_marks_asked_and_shows_the_invite(ctl, cal_flow):
+    card = cal_flow["card"]
+    ctl.note_calendar_start({"event_id": "ev7", "agenda": "A", "others": ["Anna"]}, "start_card", False)
+    assert cal_flow["marked"] == ["ev7"] and card.invites == [("A", ["Anna"])]
+    assert cal_flow["tracked"] == [("calendar_meeting_started",
+                                    {"source": "start_card", "with_assist": False, "with_agenda": True})]
+    # The Live card's own start: it already shows the invite; counted as "with assist".
+    card.invites.clear()
+    ctl.note_calendar_start({"event_id": "ev8", "agenda": ""}, "live_card")
+    assert card.invites == [] and cal_flow["marked"] == ["ev7", "ev8"]
+    assert cal_flow["tracked"][-1] == ("calendar_meeting_started",
+                                       {"source": "live_card", "with_assist": True, "with_agenda": False})
+    # A recording with no calendar meeting: nothing to mark, no chip.
+    ctl.note_calendar_start({}, "start_card", False)
+    assert cal_flow["marked"] == ["ev7", "ev8"] and card.invites == []
+
+
+def test_calendar_telemetry_has_no_text_ids_or_counts(ctl, monkeypatch):
+    tracked = []
+    monkeypatch.setattr(ctl, "track", lambda event, props=None: tracked.append((event, props)))
+    monkeypatch.setattr(ctl, "record_from_calendar", lambda m, with_assist=False: True)
+    m = _cal_meeting()
+    ctl._on_reminder_record(m, False)
+    ctl._on_reminder_record(m, True)
+    ctl._on_reminder_join(m)
+    ctl._on_reminder_dismissed(m)
+    ctl._on_reminder_closed(m, "expired")
+    ctl._on_reminder_closed(m, "hidden")                       # a recording began elsewhere: not counted
+    ctl._on_reminder_closed(m, "record")
+    ctl._on_calendar_connect_result(True, "")
+    ctl._on_calendar_connect_result(False, "admin")
+    ctl._on_calendar_disconnected("user")
+    ctl._on_calendar_disconnected("account")
+    assert tracked == [
+        ("calendar_reminder_action", {"action": "record"}),
+        ("calendar_reminder_action", {"action": "record_assist"}),
+        ("calendar_reminder_action", {"action": "join"}),
+        ("calendar_reminder_action", {"action": "dismiss"}),
+        ("calendar_reminder_action", {"action": "expired"}),
+        ("calendar_connect_result", {"ok": True, "reason": ""}),
+        ("calendar_connect_result", {"ok": False, "reason": "admin"}),
+        ("calendar_disconnected", {"reason": "user"}),
+        ("calendar_disconnected", {"reason": "account"}),
+    ]
+    import telemetry
+    for event, props in tracked:
+        assert event in telemetry.ALLOWED_EVENTS
+        assert "ev1" not in repr(props) and "Weekly" not in repr(props)
+    # An expiry still tells the user (and counts).
+    ctl.hints.clear()
+    ctl._on_calendar_disconnected("expired")
+    assert tracked[-1] == ("calendar_disconnected", {"reason": "expired"})
+    assert ctl.hints[-1][0] == "Google Calendar disconnected"
+
+
+def test_the_toast_buttons_reach_the_controller(ctl, monkeypatch):
+    # The toast's own signals are what the controller listens to (one toast, built once).
+    seen = []
+    monkeypatch.setattr(ctl, "track", lambda event, props=None: seen.append((event, props)))
+    monkeypatch.setattr(ctl, "record_from_calendar", lambda m, with_assist=False: seen.append(("rec", with_assist)))
+    import ui.floating.meeting_reminder as mr
+    monkeypatch.setattr(mr.QDesktopServices, "openUrl", staticmethod(lambda url: True))   # no real browser
+    toast = ctl._ensure_reminder()
+    m = _cal_meeting()
+    try:
+        toast.show_meeting(m)
+        toast._on_join()
+        toast.record.emit(m, True)
+        toast.dismissed.emit(m)
+        toast._finish("expired")
+    finally:
+        toast.hide_reminder()
+    assert ("calendar_reminder_action", {"action": "join"}) in seen
+    assert ("calendar_reminder_action", {"action": "record_assist"}) in seen and ("rec", True) in seen
+    assert ("calendar_reminder_action", {"action": "dismiss"}) in seen
+    assert ("calendar_reminder_action", {"action": "expired"}) in seen
+
+
+def test_on_calendar_remind_tray_fallback(ctl, monkeypatch):
+    # The toast can't be built: the reminder is not lost - a tray note that opens Meetings.
+    monkeypatch.setattr(ctl, "_ensure_reminder", lambda: 1 / 0)
+    opened = []
+    monkeypatch.setattr(ctl, "show_main", lambda page=None, **kw: opened.append(page))
+    ctl.hints.clear()
+    ctl._on_calendar_remind(_cal_meeting())
+    title, text, on_click = ctl.hints[-1]
+    assert title == "Record this meeting?" and text == "Weekly product sync is starting."
+    on_click()
+    assert opened == ["meetings"]
+
+
+def test_calendar_busy_blocks_toast_without_marking(ctl, monkeypatch, tmp_path):
+    # The service asks the controller whether it may; while a dictation / meeting runs it
+    # answers no, and the meeting is not marked asked (it is asked when the user is free).
+    from datetime import datetime, timezone
+    from calendar_service import CalendarCore
+    now = datetime.now(timezone.utc)
+    m = _cal_meeting()
+    api = type("Api", (), {"configured": staticmethod(lambda cfg=None: True),
+                           "is_connected": staticmethod(lambda: True),
+                           "people_label": staticmethod(lambda names: "Anna, David")})
+    core = CalendarCore({}, api=api, state_path=tmp_path / "calendar_state.json", clock=lambda: now,
+                        is_busy=ctl._calendar_busy)
+    core.connected = True
+    core.cache = [m]
+    monkeypatch.setattr(ctl, "is_rec", True)
+    assert core.take_reminder(now) is None and core.state.prompted == {}
+    monkeypatch.setattr(ctl, "is_rec", False)
+    got = core.take_reminder(now)
+    assert got is not None and got["id"] == "ev1" and "ev1" in core.state.prompted
+
+
+def test_setup_calendar_with_client_builds_service_and_tray_row(ctl, monkeypatch):
+    from calendar_service import CalendarService
+    saved = ctl.calendar
+    monkeypatch.setattr(ctl, "calendar", None)
+    monkeypatch.setitem(ctl.cfg, "google_oauth_client_id", "test-client.apps.googleusercontent.com")
+    attached, heard = [], []
+    monkeypatch.setattr(ctl.tray_menu, "attach_calendar", lambda cal: attached.append(cal))
+    monkeypatch.setattr(ctl, "_on_calendar_remind", lambda m: heard.append(("remind", m["id"])))
+    monkeypatch.setattr(ctl, "_on_calendar_disconnected", lambda reason: heard.append(("gone", reason)))
+    monkeypatch.setattr(CalendarService, "start", lambda self: None, raising=False)   # no timers, no reads
+    ctl._setup_calendar()
+    cal = ctl.calendar
+    try:
+        assert isinstance(cal, CalendarService) and cal.available and not cal.is_connected
+        assert attached == [cal]                                   # the tray's "Next" row follows it
+        cal.remind.emit(_cal_meeting())
+        cal.disconnected.emit("user")
+        assert heard == [("remind", "ev1"), ("gone", "user")]
+        # connect_result reaches the controller's telemetry.
+        tracked = []
+        monkeypatch.setattr(ctl, "track", lambda event, props=None: tracked.append((event, props)))
+        cal.connect_result.emit(False, "cancelled")
+        assert tracked == [("calendar_connect_result", {"ok": False, "reason": "cancelled"})]
+        # Privacy mode pauses its reads (nothing leaves the computer); it is the service's own gate.
+        monkeypatch.setitem(ctl.cfg, "privacy_mode", True)
+        assert cal.core.network_allowed() is False
+        monkeypatch.setitem(ctl.cfg, "privacy_mode", False)
+        assert cal.core.network_allowed() is True
+    finally:
+        cal.stop()
+        cal.deleteLater()
+        QApplication.processEvents()
+        monkeypatch.setattr(ctl, "calendar", saved)
+
+
+def test_dormant_without_client_id_keeps_every_calendar_call_safe(ctl, monkeypatch):
+    monkeypatch.setattr(ctl, "calendar", None)
+    assert ctl.calendar_start_context() is None
+    ctl.note_calendar_start({"event_id": "x", "agenda": ""}, "start_card", False)   # no service: no error
+    ctl._on_reminder_dismissed({"id": "x"})
+    assert ctl._calendar_busy() in (True, False)
+
+
+def test_a_card_opened_mid_meeting_catches_up_with_the_invite(ctl, monkeypatch):
+    from PySide6.QtCore import QObject, Signal
+
+    class Session(QObject):
+        sig_chunk = Signal(str)
+        sig_summary = Signal(str)
+        state = "recording"
+        STATE_RECORDING = "recording"
+        _meeting_title = "Weekly product sync"
+        _meeting_attendees = "Aram Adamyan, Anna Smith, David Lee"
+        _meeting_agenda = CAL_AGENDA
+        _calendar_event_id = "ev1"
+        _live_text = "We just started."
+        _live_summary_text = ""
+    from ui import live_assist as la_mod
+    s = Session()
+    monkeypatch.setattr(ctl, "meeting_session", s)
+    monkeypatch.setattr(ctl, "live_assist", None)
+    monkeypatch.setattr(la_mod.LiveAssistOverlay, "_me_name", lambda self: "Aram Adamyan")
+    try:
+        card = ctl._ensure_live_assist()
+        assert card.lbl_title.text() == "Weekly product sync"
+        assert card.has_invite() and card.invite_text() == CAL_AGENDA
+        assert card.inv_chip.text.text() == "Anna, David · Agenda"      # the others, not you
+    finally:
+        card = ctl.live_assist
+        ctl.live_assist = None
+        if card is not None:
+            card.hide()
+            card.deleteLater()
+            QApplication.processEvents()
+    # A meeting that is not a calendar's: no chip.
+    s._calendar_event_id, s._meeting_agenda = "", ""
+    try:
+        card = ctl._ensure_live_assist()
+        assert not card.has_invite() and card.lbl_title.text() == "Weekly product sync"
+    finally:
+        card = ctl.live_assist
+        ctl.live_assist = None
+        if card is not None:
+            card.hide()
+            card.deleteLater()
+            QApplication.processEvents()
+
+
+def test_a_real_session_started_with_an_invite_shows_its_agenda_on_a_card_opened_mid_call(
+        ctl, monkeypatch, tmp_path):
+    """The card opened with the hotkey in the middle of a call: no stand-in for the session -
+    the real MeetingSession is started with the invite and the card catches up from it."""
+    import meeting_session as msess
+    import live_context
+    from types import SimpleNamespace
+    from ui import live_assist as la_mod
+
+    monkeypatch.setattr(msess.storage, "path_for", lambda *a, **k: tmp_path / "meetings")
+
+    class Rec:
+        fast_live_chunks = False
+        on_chunk_complete = on_levels = on_partial = on_lang_detected = on_source_levels = None
+
+        def start_recording(self, **kw):
+            pass
+
+        def stop_recording(self):
+            pass
+
+        def request_abort(self):
+            pass
+
+    app = SimpleNamespace(cfg={"meeting_consent_ack": True, "meeting_audio_mode": "default_mic",
+                               "save_history": False}, recorder=Rec(), live_assist=None,
+                          track=lambda *a, **k: None)
+    s = msess.MeetingSession(app)
+    try:
+        ok, _code, msg = live_context.start_session(
+            s, agenda=CAL_AGENDA, title="Weekly product sync",
+            attendees="Aram Adamyan, Anna Smith, David Lee", source="calendar",
+            calendar_event_id="ev1")
+        assert ok, msg
+        assert s._meeting_agenda == CAL_AGENDA
+        monkeypatch.setattr(ctl, "meeting_session", s)
+        monkeypatch.setattr(ctl, "live_assist", None)
+        monkeypatch.setattr(la_mod.LiveAssistOverlay, "_me_name", lambda self: "Aram Adamyan")
+        card = ctl._ensure_live_assist()
+        try:
+            assert card.lbl_title.text() == "Weekly product sync"
+            assert card.has_invite() and card.invite_text() == CAL_AGENDA
+            assert card.inv_chip.text.text() == "Anna, David · Agenda"
+        finally:
+            ctl.live_assist = None
+            card.hide()
+            card.deleteLater()
+            QApplication.processEvents()
+        # An edit on the card is kept by the session (and so reaches the notes).
+        s.set_agenda("Only this")
+        assert s._meeting_agenda == "Only this"
+    finally:
+        s.abort()
+        s.deleteLater()
+        QApplication.processEvents()

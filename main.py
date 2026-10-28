@@ -46,7 +46,7 @@ from PIL import Image, ImageDraw
 
 from PySide6.QtCore import Qt, QTimer, QObject, Signal, QEvent
 from PySide6.QtGui import QIcon, QPixmap, QImage, QAction
-from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox
+from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
 
 import storage
 import history as hist
@@ -61,11 +61,14 @@ import text_cleanup
 import vocabulary
 import hotkeys
 import speech_langs
+import cloud_speech
 import autostart
 import gpu_accel
+import gpu_precision                 # Qt-free: float16 / int8_float16 / int8 on an NVIDIA card
 import diarization_proc
 import chunk_pipeline
 import recorder_tracks
+import speech_hy                 # Qt-free: the local Armenian speech model (sherpa-onnx is imported only when it loads)
 
 # ── Name and version ──────────────────────────────────────────────────────────
 # Defined in app_info.py (no Qt) so pages and services can read them without
@@ -77,6 +80,7 @@ import updater
 # Gusan 2.0 services' config defaults (both modules are Qt-free at import).
 from file_jobs import FILE_DEFAULTS
 from calendar_service import DEFAULTS as CALENDAR_DEFAULTS
+import live_context              # Qt-free: start_session() hands a calendar agenda to a session
 
 # ── Managed cloud transcription (Pro moat) ────────────────────────────────────
 MANAGED_PROXY_URL = "https://hftcelxzfoubheqeoool.supabase.co/functions/v1/transcribe-proxy"
@@ -98,10 +102,10 @@ STRIPE_PORTAL_URL = ""
 # shows today's name.
 PRO_FEATURE_EVENT = {"Live Assistant": "Live Assistance"}
 PRO_FEATURE_SHOWN = {"Live Assistance": "Live Assistant"}
-PROJECT_GITHUB_URL = "https://github.com/Aram2K/transcribe-app"
-RELEASES_URL = "https://github.com/Aram2K/transcribe-app/releases/latest"
-RELEASES_API = "https://api.github.com/repos/Aram2K/transcribe-app/releases/latest"
-RELEASES_MANIFEST_URL = "https://github.com/Aram2K/transcribe-app/releases/latest/download/update-manifest.json"
+PROJECT_GITHUB_URL = "https://github.com/Aram2K/Gusan"
+RELEASES_URL = "https://github.com/Aram2K/Gusan/releases/latest"
+RELEASES_API = "https://api.github.com/repos/Aram2K/Gusan/releases/latest"
+RELEASES_MANIFEST_URL = "https://github.com/Aram2K/Gusan/releases/latest/download/update-manifest.json"
 AIBUBEN_URL = "https://aibuben.xyz"
 
 SINGLE_INSTANCE_PORT = 47823   # localhost-only IPC for "open on second launch"
@@ -242,10 +246,20 @@ DEFAULT = {
     "live_assist_output_language": "",
     # Who writes the answers: "" automatic, "cloud" (Gusan Cloud), "local".
     "live_assist_writer": "",
+    # What transcribes a Live Assistant session (engine_choice.LIVE_SPEECH_KEY): "" =
+    # Automatic (like Dictation - but Gusan Cloud for a call in Armenian, where local Whisper
+    # is poor, when allowed) | a Whisper id | "cloud" | "cloud:best" | "own:google:<model>".
+    "live_assist_speech_model": "",
     "live_assist_screen_auto": True,      # attach a screenshot when the talk refers to the screen
     # What the user wrote about the call (the overlay's Context line): every
     # answer is shaped by it until they change or clear it.
     "live_assist_context": "",
+    # "Apply to everything I hear" (live_rules.py): run the context as a standing rule on
+    # EVERY new piece of the conversation, not only when a question is heard. Off until the
+    # user turns it on (the card and the page offer it when the text reads like such a rule).
+    "live_assist_rules_everything": False,
+    # A short mark of the context text the user said No to that offer for (not asked twice).
+    "live_assist_rules_declined": "",
     # The documents the user added to the Live Assistant (live_docs.py): may parts of
     # them go to a CLOUD model? None = not asked yet (asked once, in plain words, the
     # first time a cloud answer would use them), True = yes, False = keep them on
@@ -679,8 +693,7 @@ LANG_NAMES = {
 # including our "auto"/"multi" pseudo-codes - is omitted so we never send an
 # unsupported code, which Voxtral rejects with a 400 (this was the cause of cloud
 # transcription failing even when the API key tested fine).
-MISTRAL_LANGS = {"en", "es", "fr", "de", "it", "nl", "pt", "hi", "ar", "ru",
-                 "uk", "pl", "tr", "ja", "ko", "zh", "ro", "cs", "el"}
+MISTRAL_LANGS = speech_langs.MISTRAL_LANGS      # the one table (speech_langs.LANGUAGE_SUPPORT)
 
 
 def cloud_error_message(provider, status, body_text):
@@ -862,6 +875,8 @@ def _cached_model_bin(repo_id):
 
 
 def model_downloaded(name):
+    if speech_hy.is_hy_model(name):             # the Armenian model: a few file stats, no import
+        return speech_hy.ready()
     repo = _WHISPER_REPOS.get(name)
     if repo:
         on_disk = _cached_model_bin(repo)
@@ -876,6 +891,8 @@ def model_downloaded(name):
         return False
 
 def download_whisper_model(name, on_progress=None):
+    if speech_hy.is_hy_model(name):             # checked, unpacked and installed by speech_hy
+        return speech_hy.download(on_progress=on_progress, privacy=bool(cfg.get("privacy_mode")))
     if on_progress is None:
         from faster_whisper.utils import download_model
         return download_model(name)
@@ -978,6 +995,8 @@ def whisper_model_cache_dir(name):
         return None
 
 def remove_whisper_model(name):
+    if speech_hy.is_hy_model(name):
+        return speech_hy.remove()
     import os, stat, shutil
     cache_dir = whisper_model_cache_dir(name)
     if not cache_dir or not cache_dir.exists():
@@ -1092,6 +1111,21 @@ class AudioRecorder:
         # global cfg["backend"] / cfg["whisper_model"]. Every start resets them.
         self.backend_override = None
         self.model_override = None
+        # A Live Assistant take's cloud model (start_recording speech=, third value): None =
+        # none asked (the backend's own: Dictation / Smart Actions); "" = Gusan Cloud / your
+        # own key with Gemini and its default model; "gemini-2.5-pro" = that Gemini model.
+        self.cloud_model_override = None
+        # Where each live piece sits in the retained recording ((first, last) sample) and what
+        # the take's cloud engine answered - see piece_segments() and speech_report().
+        self._chunk_spans = {}
+        self._speech_ran = self._new_speech_ran()
+        # Pieces a cloud engine could not read in a language local Whisper is poor at (Armenian):
+        # never replaced by Whisper's text - a gap, its audio kept (int16 by piece) to be tried
+        # again (_mark_gap / _fill_gaps). on_chunk_gap(idx, kind) tells the live transcript.
+        self._gap = AudioRecorder._new_gap_state()
+        self._gap_audio = {}
+        self._ran_models = []
+        self.on_chunk_gap = None
         self._capture_mode = None     # smart_meeting/system_only/default_mic; None = dictation
         self.fast_live_chunks = False  # Live Assistance session: short pieces (see _record_loop)
         self._loopback_peak = 0.0     # loudest loopback sample this session (0 = no system audio)
@@ -1149,8 +1183,12 @@ class AudioRecorder:
 
     @staticmethod
     def _whisper_device():
-        """Prefer a CUDA GPU when one is usable (much faster); else CPU int8.
-        int8_float16 keeps GPU VRAM low so it fits on small cards too."""
+        """Prefer a CUDA GPU when one is usable (much faster); else CPU int8 (on the processor int8
+        costs at most a word in 167 and float32 is 1.3x slower in twice the memory). On the GPU the
+        best precision the card runs: float16 (nothing compressed) for compute capability 7.0 and
+        newer, int8_float16 where float16 isn't offered, int8 on the older 6.x cards
+        (gpu_precision). _build_model_locked steps down from there when a model doesn't fit in the
+        card's free memory."""
         try:
             import ctranslate2
             if ctranslate2.get_cuda_device_count() > 0:
@@ -1162,7 +1200,10 @@ class AudioRecorder:
                     return ("cpu", "int8")
                 if cfg.get(gpu_accel.CFG_FAILED):
                     return ("cpu", "int8")
-                return ("cuda", "int8_float16")
+                best = gpu_precision.best_cuda_type(ctranslate2)
+                if best is None:
+                    return ("cpu", "int8")           # a card that runs none of the GPU precisions
+                return ("cuda", best)
         except Exception:
             pass
         return ("cpu", "int8")
@@ -1203,10 +1244,66 @@ class AudioRecorder:
         except Exception:
             pass
 
-    def load_model(self, name=None):
-        name = name or cfg["whisper_model"]
+    def load_model(self, name=None, language=None):
+        """Make a speech model ready. ``name`` None = Dictation's. Either way it is the model that
+        really transcribes (engine_model): a Whisper id as given, and the Armenian model (speech_hy,
+        its own recognizer) only when the language is Armenian - ``language`` (the one the caller
+        is about to transcribe: Audio to text passes its own), else this take's."""
+        name = AudioRecorder.engine_model(self, name or cfg["whisper_model"], language)
+        if speech_hy.is_hy_model(name):
+            AudioRecorder._load_hy(self)
+            return
         with self._model_lock:
             self._load_locked(name)
+
+    def engine_model(self, name=None, language=None):
+        """The model id that really transcribes for ``name`` (None = the take's own pick, else
+        Dictation's) in ``language`` (None = this take's): the Armenian model (speech_hy) only when
+        the language is Armenian (speech_hy.covers - "auto", every other language and any real mix
+        go to Whisper) and the model is on this computer or can be downloaded (speech_hy.listed),
+        else a Whisper id - ``name`` itself, or for an Armenian pick the best Whisper model on this
+        computer."""
+        name = name or AudioRecorder._speech_model(self)
+        if not speech_hy.is_hy_model(name):
+            return name
+        if AudioRecorder._hy_covers(self, language) and speech_hy.listed():
+            return name
+        return AudioRecorder._whisper_fallback(self)
+
+    def _hy_covers(self, language=None):
+        """Does the Armenian model take this take's language (or ``language``)?"""
+        setting = language or AudioRecorder._lang_setting(self)
+        mix = speech_langs.mix_languages(cfg) if speech_langs.normalize(setting) == "multi" else []
+        return speech_hy.covers(setting, mix)
+
+    def _whisper_fallback(self):
+        """The Whisper model that reads what the Armenian model doesn't cover: the best one already
+        on this computer, else the app's default (it downloads like any Whisper model)."""
+        device = "cuda" if getattr(self, "_cuda_usable", None) is True else "cpu"
+        return speech_hy.fallback_whisper(model_downloaded, device)
+
+    def _load_hy(self):
+        """Ready the Armenian recognizer (3-8 s): a model that is not on disk comes through the app's
+        one download manager first (model_fetcher), like a Whisper model."""
+        self._last_model_use = time.monotonic()
+        if speech_hy.loaded():
+            return
+        self._building_model = True               # (transcribe() lets the pieces wait for it)
+        try:
+            if not speech_hy.ready():
+                fetch = getattr(self, "model_fetcher", None)
+                self._fetching_model = True
+                try:
+                    if fetch is not None:
+                        fetch(speech_hy.MODEL_ID)
+                    else:                         # no download manager (a script): fetch it here
+                        speech_hy.download(privacy=bool(cfg.get("privacy_mode")))
+                finally:
+                    self._fetching_model = False
+            speech_hy.load()
+        finally:
+            self._building_model = False
+        self._last_model_use = time.monotonic()
 
     def _users_guard(self):
         lock = getattr(self, "_users_lock", None)
@@ -1251,13 +1348,54 @@ class AudioRecorder:
             models = self._cuda_oom_models = set()
         return models
 
+    def _oom_types(self):
+        """{model: the GPU precisions it ran out of memory at} this session: the next load of that
+        model starts one level lighter (gpu_precision.plan); only when no lighter level is left
+        does the model go to the processor (_oom_models)."""
+        types = getattr(self, "_cuda_oom_types", None)
+        if types is None:
+            types = self._cuda_oom_types = {}
+        return types
+
+    def _cuda_plan(self, name, best):
+        """The GPU levels to try for model ``name``, best first (gpu_precision.plan): from ``best``
+        down, only those the card runs, none that ran out of memory before, and not float16 when the
+        card has less free memory than the model needs in it. [] = none fits (the processor).
+        Logged once per model with the reason."""
+        tried = AudioRecorder._oom_types(self).get(name, set())
+        free = gpu_precision.free_vram_mb() if (best == "float16" and "float16" not in tried) else None
+        chain, why = gpu_precision.plan(name, best, gpu_precision.supported_cuda_types(), free, tried)
+        seen = getattr(self, "_gpu_plan_logged", None)
+        if seen is None:
+            seen = self._gpu_plan_logged = set()
+        key = (name, tuple(chain), why)
+        if key not in seen:
+            seen.add(key)
+            logger.info("GPU precision for %s: %s%s", name, " > ".join(chain) or "none (processor)",
+                        " (%s)" % why if why else (" (out of memory before: %s)" % ", ".join(sorted(tried))
+                                                   if tried else ""))
+        return chain
+
     def _gpu_failed_mid_use(self, failed, name, err):
-        """A model on the GPU failed while transcribing: out of memory = this
-        model goes to the processor; anything else = the GPU is off for this
-        run (and the app remembers it). The failed model is dropped so the
-        retry builds a CPU one."""
+        """A model on the GPU failed while transcribing: out of memory = one precision lighter on
+        the GPU (float16 -> int8_float16 -> int8), and the processor for this model once none is
+        left; anything else = the GPU is off for this run (and the app remembers it). The failed
+        model is dropped so the retry builds a new one."""
+        oom = gpu_accel.is_oom(err)
+        ct = getattr(failed, "_gusan_compute", None) if oom else None
+        if oom and ct:
+            tried = AudioRecorder._oom_types(self).setdefault(name, set())
+            tried.add(ct)
+            lighter = gpu_precision.lower_types(ct, gpu_precision.supported_cuda_types(), tried)
+            if lighter:
+                logger.warning("GPU ran out of memory with %s at %s (%s); trying %s.", name, ct, err, lighter[0])
+                with self._model_lock:
+                    if self._model is failed:
+                        self._model = None
+                        self._model_name = None
+                return
         logger.warning("GPU transcription failed (%s); retrying on CPU.", err)
-        if gpu_accel.is_oom(err):
+        if oom:
             self._oom_models().add(name)
         else:
             self._cuda_usable = False
@@ -1298,19 +1436,32 @@ class AudioRecorder:
             dev = "cpu"                   # GPU unusable, or THIS model doesn't fit on it
         if dev == "cuda":
             self._add_cuda_dll_dirs()
-        attempts = []
+        # The ordered attempts (gpu_precision): on the card float16 - nothing compressed - first when
+        # the card runs it and has the memory for it, then int8_float16, then int8; each one twice
+        # (the offline cache, then online). A level that runs out of memory steps down to the next
+        # (remembered for this model: _oom_types); the processor (int8) is last. float16 -> int8 on
+        # the processor, where it is as good as float32 and 1.3x faster in half the memory.
+        chain = []
         if dev == "cuda":
-            attempts += [("cuda", ct, True), ("cuda", ct, False)]
+            chain = AudioRecorder._cuda_plan(self, name, ct)
+            if not chain:
+                AudioRecorder._oom_models(self).add(name)       # no level of it fits: the processor
+        attempts = []
+        for level in chain:
+            attempts += [("cuda", level, True), ("cuda", level, False)]
         attempts += [("cpu", "int8", True), ("cpu", "int8", False)]
         last_err = None
         repaired_cache = False
+        dead_levels = set()               # GPU levels this model ran out of memory at, now
+        cuda_over = False                 # the GPU stack failed for another reason: no more CUDA
         for d, c, local_only in attempts:
             # GPU already proven unusable earlier in THIS load (its warm-up
             # raised) - skip the remaining CUDA attempt. Building a second
             # CUDA model would skip the warm-up below and hand back a broken
             # GPU model that hangs on real inference - the "stuck on
             # Finalising" bug on machines where cuBLAS/cuDNN are missing.
-            if d == "cuda" and (getattr(self, "_cuda_usable", None) is False
+            if d == "cuda" and (cuda_over or c in dead_levels
+                                or getattr(self, "_cuda_usable", None) is False
                                 or name in AudioRecorder._oom_models(self)):
                 continue
             try:
@@ -1328,6 +1479,10 @@ class AudioRecorder:
                         seg, _ = m.transcribe(np.zeros(16000, dtype=np.float32), beam_size=1)
                         list(seg)
                     self._cuda_usable = True
+                try:
+                    m._gusan_compute = c        # what it runs at (_gpu_failed_mid_use steps down from it)
+                except Exception:
+                    pass
                 self._model = m
                 self._model_name = name
                 self._last_model_use = time.monotonic()
@@ -1339,15 +1494,35 @@ class AudioRecorder:
                 return
             except Exception as e:
                 last_err = e
+                # A failed attempt must not keep its model (and the video memory it holds) alive while
+                # the next level loads: the exception's traceback holds the frames of the failed first
+                # computation - and so the model - for as long as last_err lives. A card that was just
+                # short of memory for float16 needs that memory back to fit int8_float16.
+                m = None
+                try:
+                    import traceback
+                    traceback.clear_frames(e.__traceback__)
+                except Exception:
+                    pass
+                if d == "cuda":
+                    gc.collect()
                 # Only the GPU stack's own errors say anything about the GPU:
                 # a damaged cache or being offline must not switch it off.
                 if d == "cuda" and gpu_accel.is_cuda_error(e):
                     self._cuda_error = str(e)[:300]
                     if gpu_accel.is_oom(e):
-                        AudioRecorder._oom_models(self).add(name)      # smaller models still fit
+                        # Out of memory: this level does not fit - the next lighter one may. Only
+                        # when none is left does the model go to the processor (smaller ones
+                        # still use the GPU).
+                        dead_levels.add(c)
+                        AudioRecorder._oom_types(self).setdefault(name, set()).add(c)
+                        if not [level for level in chain if level not in dead_levels]:
+                            AudioRecorder._oom_models(self).add(name)
                     else:
                         self._cuda_usable = False  # remember: skip GPU next time
                         self._report_cuda_failure(self._cuda_error)
+                elif d == "cuda" and not local_only:
+                    cuda_over = True                # not the card's doing (online try too): a lighter level won't help
                 logger.warning("Whisper load failed on %s/%s (offline=%s): %s",
                                d, c, local_only, e)
                 if not repaired_cache and _looks_like_whisper_cache_error(e):
@@ -1369,6 +1544,10 @@ class AudioRecorder:
         caller always gets exactly the model it asked for - never None, never
         a model another thread switched to in between."""
         name = name or cfg["whisper_model"]
+        if speech_hy.is_hy_model(name):
+            # Not a Whisper id: the callers send Armenian to speech_hy themselves (_run_hy,
+            # transcribe_segments). One that gets here is for a language Whisper reads.
+            name = AudioRecorder._whisper_fallback(self)
         with self._model_lock:
             self._load_locked(name)
             model = self._model
@@ -1390,23 +1569,26 @@ class AudioRecorder:
         seconds, and then this tick simply skips. Never frees a model that is
         in use (use_model), during a recording, or while chunk threads run.
         Dropping the reference frees CTranslate2's memory at once (measured
-        ~0.8 GB for large-v3-turbo on CPU); a reload takes ~4-9 s."""
+        ~0.8 GB for large-v3-turbo on CPU); a reload takes ~4-9 s. The Armenian
+        model (speech_hy, 221 MB) is freed by the same rule. True when either
+        was freed."""
         if not idle_sec or idle_sec <= 0:
             return False
+        freed_hy = AudioRecorder._maybe_unload_idle_hy(self, idle_sec, now)
         if not self._model_lock.acquire(blocking=False):
-            return False
+            return freed_hy
         try:
             # Holding _model_lock: no new lease can start (use_model takes it);
             # a lease ending meanwhile only lowers the count.
             with self._users_guard():
                 users = getattr(self, "_model_users", 0)
             if self._model is None or users > 0 or getattr(self, "recording", False):
-                return False
+                return freed_hy
             if any(t.is_alive() for t in list(getattr(self, "_chunk_threads", []) or [])):
-                return False
+                return freed_hy
             t = time.monotonic() if now is None else now
             if t - getattr(self, "_last_model_use", 0.0) < idle_sec:
-                return False
+                return freed_hy
             name, self._model, self._model_name = self._model_name, None, None
         finally:
             self._model_lock.release()
@@ -1414,7 +1596,23 @@ class AudioRecorder:
         logger.info("Freed the idle speech model (%s)", name)
         return True
 
+    def _maybe_unload_idle_hy(self, idle_sec, now=None):
+        """The Armenian model's share of maybe_unload_idle: never during a recording or while chunk
+        threads run, and never one a transcription holds (speech_hy leases it)."""
+        try:
+            if not speech_hy.loaded() or getattr(self, "recording", False):
+                return False
+            if any(t.is_alive() for t in list(getattr(self, "_chunk_threads", []) or [])):
+                return False
+            return bool(speech_hy.maybe_unload_idle(idle_sec, now))
+        except Exception:
+            logger.debug("Armenian model idle sweep failed", exc_info=True)
+            return False
+
     def unload_model(self, name=None):
+        if speech_hy.is_hy_model(name):            # the Armenian model has its own recognizer
+            speech_hy.unload()
+            return
         with self._model_lock:
             if name is None or self._model_name == name:
                 self._model = None
@@ -1582,9 +1780,11 @@ class AudioRecorder:
         return stream.read(read_n, exception_on_overflow=False)
 
     def start_recording(self, capture_mode=None, language=None, speech=None):
-        """``speech``: (backend, model) THIS take transcribes with - a Smart
-        Action's own pick (engine_choice.smart_speech_session); None = the
-        global cfg backend / whisper_model."""
+        """``speech``: (backend, model[, cloud]) THIS take transcribes with - a Smart
+        Action's own pick (engine_choice.smart_speech_session) or a Live Assistant
+        session's (live_speech_session; ``cloud`` is its Gusan Cloud profile, "fast" or "best",
+        or - for your own Google key - its Gemini model); None = the global cfg backend /
+        whisper_model."""
         try:
             self._start_recording_impl(capture_mode, language, speech)
         except BaseException:
@@ -1602,9 +1802,14 @@ class AudioRecorder:
         # Per-take speech engine, the same way: set before any piece is cut
         # (pieces transcribe while recording) and reset by every other start
         # (Alt+R, a meeting, the Live Assistant).
-        backend, model = (tuple(speech) + (None, None))[:2] if speech else (None, None)
+        backend, model, cloud = (tuple(speech) + (None, None, None))[:3] if speech else (None,) * 3
         self.backend_override = backend or None
         self.model_override = model or None
+        self.cloud_model_override = cloud if isinstance(cloud, str) else None
+        self._speech_ran = AudioRecorder._new_speech_ran()
+        self._gap = AudioRecorder._new_gap_state()
+        self._gap_audio = {}
+        self._ran_models = []
         self._capture_mode = capture_mode
         self._loopback_peak = 0.0
         self.paused = False
@@ -1617,6 +1822,7 @@ class AudioRecorder:
             self._chunk_errors     = []
             self._chunk_silence_before = {}
             self._chunk_sources    = {}
+            self._chunk_spans      = {}
         self._session_lang  = None
         self._chunk_threads = []
         self._record_error  = ""
@@ -1753,6 +1959,12 @@ class AudioRecorder:
         """Waiting pieces were joined into piece ``first_idx``: it carries their
         mic / call energy too (the live You / Them hint)."""
         with self._chunk_lock:
+            spans = getattr(self, "_chunk_spans", None)
+            if spans:
+                # The joined piece covers all of theirs (they follow each other).
+                parts = [spans[i] for i in (first_idx, *other_idxs) if i in spans]
+                if parts:
+                    spans[first_idx] = (min(p[0] for p in parts), max(p[1] for p in parts))
             sources = getattr(self, "_chunk_sources", None)
             if not sources:
                 return
@@ -1967,6 +2179,13 @@ class AudioRecorder:
                 chunk_sources = getattr(self, "_chunk_sources", None)
                 if sources is not None and chunk_sources is not None:
                     chunk_sources[idx] = sources
+                # Where this piece sits in the retained recording (it ends at what was kept so
+                # far; a pause keeps nothing, so the timeline has no gap): the Live Assistant's
+                # cloud pieces become the session's timestamped segments (piece_segments).
+                spans = getattr(self, "_chunk_spans", None)
+                if spans is not None and not getattr(self, "_full_audio_truncated", False):
+                    end = int(getattr(self, "_full_audio_len", 0) or 0)
+                    spans[idx] = (max(0, end - len(chunk_audio)), end)
             # A meeting's pieces go through its bounded, supervised queue
             # (chunk_pipeline); dictation - and a queue that has closed - keeps
             # one thread per piece.
@@ -2225,6 +2444,13 @@ class AudioRecorder:
             else:
                 text, lang = self._run_local(audio)
 
+            if lang and lang.startswith(AudioRecorder.GAP_PREFIX):
+                # The cloud could not read this piece and Whisper on this computer is poor at
+                # its language: a gap (a meeting / live call), never Whisper's text.
+                AudioRecorder._mark_gap(self, idx, audio, lang[len(AudioRecorder.GAP_PREFIX):],
+                                        backend)
+                return
+
             if lang and lang.startswith("!"):
                 with self._chunk_lock:
                     self._chunk_errors.append(lang)
@@ -2251,6 +2477,12 @@ class AudioRecorder:
                     self.on_chunk_complete(idx, text, lang or "")
             except Exception as e:
                 logger.warning("on_chunk_complete failed: %s", e)
+            if text and getattr(self, "_gap_audio", None):
+                # The cloud answers again: one of the pieces it could not read goes now.
+                try:
+                    AudioRecorder._fill_gaps(self, limit=1)
+                except Exception as e:
+                    logger.warning("A gap piece could not be tried again: %s", e)
         except Exception as e:
             friendly = _friendly_transcription_error(e)
             with self._chunk_lock:
@@ -2346,6 +2578,13 @@ class AudioRecorder:
             return "", "!aborted:Cancelled."
         if self._record_error:
             return "", self._record_error
+        # Pieces the cloud could not read (Armenian): one more go now that the take is over.
+        if getattr(self, "_gap_audio", None):
+            try:
+                AudioRecorder._fill_gaps(
+                    self, limit=None, deadline=time.monotonic() + AudioRecorder.GAP_FINAL_SEC)
+            except Exception as e:
+                logger.warning("The kept pieces could not be tried again: %s", e)
         # A failed chunk still fails this pass (callers show the error), but
         # the tail is transcribed anyway and everything that DID transcribe is
         # kept in partial_text - a meeting can then keep its notes.
@@ -2354,6 +2593,7 @@ class AudioRecorder:
             chunk_error = self._chunk_errors[0] if self._chunk_errors else ""
 
         remaining = np.frombuffer(b"".join(self._chunk_frames), dtype=np.float32).copy()
+        tail_len = len(remaining)              # (before any padding: the tail's place in the recording)
         last_text, detected = "", ""
 
         backend = AudioRecorder._backend(self)       # this take's (a Smart Action's own pick)
@@ -2388,12 +2628,26 @@ class AudioRecorder:
                 last_text, detected = self._run_local(remaining)
 
         tail_error = ""
+        if detected and detected.startswith(AudioRecorder.GAP_PREFIX):
+            # The tail could not be read by the cloud and Whisper is poor at its language: a gap
+            # (a meeting keeps its audio and says so), or - dictation - the take's error.
+            kind, last_text, detected = detected[len(AudioRecorder.GAP_PREFIX):], "", ""
+            if getattr(self, "_capture_mode", None) is None:
+                import engine_choice
+                tail_error = f"!{backend}:" + engine_choice.gap_line(
+                    AudioRecorder._gap_state(self).get("language") or "this language", kind, final=True)
+            else:
+                AudioRecorder._mark_gap(self, self._chunk_idx, remaining, kind, backend)
         if detected and (detected.startswith("!google:") or detected.startswith("!mistral:") or detected.startswith("!managed:")):
             tail_error, last_text, detected = detected, "", ""
 
         with self._chunk_lock:
             if last_text:
                 self._chunk_results[self._chunk_idx] = last_text
+                spans = getattr(self, "_chunk_spans", None)
+                if spans is not None and not getattr(self, "_full_audio_truncated", False):
+                    end = int(getattr(self, "_full_audio_len", 0) or 0)
+                    spans[self._chunk_idx] = (max(0, end - tail_len), end)
             parts = [
                 self._chunk_results[i]
                 for i in range(self._chunk_idx + 1)
@@ -2407,7 +2661,7 @@ class AudioRecorder:
 
         if detected and self.on_lang_detected:
             self.on_lang_detected(detected, LANG_NAMES.get(detected, detected.upper()))
-        return full_text.strip(), detected or "en"
+        return full_text.strip(), detected or AudioRecorder._final_language(self)
 
     def get_full_audio(self):
         """The full retained wall-clock recording as 16 kHz mono float32 (empty
@@ -2424,13 +2678,118 @@ class AudioRecorder:
             return np.zeros(0, dtype=np.float32)
         return np.frombuffer(frames, dtype=np.float32).copy()
 
+    @staticmethod
+    def _new_speech_ran():
+        """What a take's engines answered so far (speech_report)."""
+        return {"cloud_pieces": 0, "local_pieces": 0, "ran_model": ""}
+
+    def _note_cloud_ran(self, answered, assumed=""):
+        """A piece came back from a cloud engine: count it and remember the model that
+        RAN (what the provider said, else ``assumed`` - an older transcribe-proxy says nothing
+        and runs Gemini 2.5 Flash)."""
+        ran = getattr(self, "_speech_ran", None)
+        if ran is None:
+            return
+        ran["cloud_pieces"] = ran.get("cloud_pieces", 0) + 1
+        ran["ran_model"] = answered or assumed or ran.get("ran_model", "")
+        model = answered or assumed
+        if model:
+            models = getattr(self, "_ran_models", None)
+            if models is None:
+                models = self._ran_models = []
+            if model not in models:
+                models.append(model)            # every model that has answered this take
+        gap = getattr(self, "_gap", None)
+        if gap is not None:
+            gap["open"] = False                 # the cloud answers again: the "retrying" line goes
+            gap["reason"] = ""
+
+    def _note_local_fallback(self):
+        """A piece meant for a cloud engine was transcribed on this computer."""
+        ran = getattr(self, "_speech_ran", None)
+        if ran is not None:
+            ran["local_pieces"] = ran.get("local_pieces", 0) + 1
+
+    def speech_report(self):
+        """What THIS take transcribes with and what has answered so far, for the Live
+        Assistant card (engine_choice.take_engine / live_speech_status): backend (after the
+        Privacy-mode rule), whisper_model, language (this take's), cloud_model (the take's
+        Gemini pick: None / "" / an id),
+        ran_model (what the cloud said ran, "" until a piece came back), cloud_pieces and
+        local_pieces (pieces meant for the cloud that went through this computer)."""
+        ran = dict(getattr(self, "_speech_ran", None) or {})
+        gap = dict(getattr(self, "_gap", None) or {})
+        return {"backend": AudioRecorder._backend(self),
+                # the local model that really transcribes this take (the Armenian pick reads
+                # Armenian only; any other language goes to a Whisper model)
+                "whisper_model": AudioRecorder.engine_model(self),
+                "language": AudioRecorder._lang_setting(self),
+                "cloud_model": getattr(self, "cloud_model_override", None),
+                "ran_model": ran.get("ran_model", ""),
+                "ran_models": list(getattr(self, "_ran_models", None) or []),
+                "cloud_pieces": ran.get("cloud_pieces", 0),
+                "local_pieces": ran.get("local_pieces", 0),
+                # Pieces the cloud could not read in a language Whisper here is poor at:
+                # gap_pieces still waiting, gap_total ever, gap_open = the latest try failed
+                # (gap_reason: its kind), gap_language its name, gap_retries tries repeated,
+                # gap_recovered read afterwards.
+                "gap_open": bool(gap.get("open")), "gap_reason": gap.get("reason", ""),
+                "gap_language": gap.get("language", ""), "gap_pieces": int(gap.get("pieces", 0)),
+                "gap_total": int(gap.get("total", 0)), "gap_retries": int(gap.get("retries", 0)),
+                "gap_recovered": int(gap.get("recovered", 0))}
+
+    def _final_language(self):
+        """The language of a take nothing detected: the one that was set, else "" (not known) -
+        never a made-up "en" (a French meeting would be read again as English)."""
+        try:
+            code = self._lang_setting()
+        except Exception:
+            return ""
+        return "" if code in ("", "auto") else code
+
+    def piece_segments(self):
+        """This take's transcribed live pieces as timestamped segments - [{"start", "end",
+        "text"}] in seconds on the retained recording's timeline (get_full_audio), in spoken
+        order - or None when a piece with words has no place in it (the recording passed
+        its memory cap, or nothing was kept). The Live Assistant's cloud sessions use them
+        instead of reading the recording again with local Whisper (which would replace the
+        cloud's words): who spoke is told from these spans, a piece being the finest grain
+        (no word times are asked of a cloud model)."""
+        sr = float(cfg["sample_rate"])
+        with self._chunk_lock:
+            results = dict(self._chunk_results)
+            spans = dict(getattr(self, "_chunk_spans", None) or {})
+            kept = int(getattr(self, "_full_audio_len", 0) or 0)
+        total = kept / sr
+        out = []
+        for idx in sorted(results):
+            text = str(results[idx] or "").strip()
+            if not text:
+                continue
+            span = spans.get(idx)
+            if span is None or total <= 0:
+                return None
+            start = span[0] / sr
+            end = min(span[1] / sr, total)
+            out.append({"start": round(start, 2), "end": round(max(end, start + 0.05), 2),
+                        "text": text})
+        return out
+
     def transcribe_segments(self, audio, language=None, model_name=None,
                             on_progress=None, should_cancel=None):
-        """Transcribe a full audio array into timestamped segments using the
-        LOCAL Whisper model: a list of {"start", "end", "text"} in seconds, for
+        """Transcribe a full audio array into timestamped segments using a
+        LOCAL speech model: a list of {"start", "end", "text"} in seconds, for
         the post-meeting speaker-attributed transcript and the file-transcription
         tab. Returns [] on failure or very short audio, and None when
         ``should_cancel`` asked to stop mid-way. Holds the shared inference lock.
+
+        ALWAYS a model on this computer, whatever the take's backend was - never a cloud engine.
+        So a session whose words came from a cloud engine must not be put through it afterwards,
+        or its words are replaced by Whisper's (for Armenian: by a much worse text): the Live
+        Assistant's cloud sessions use piece_segments() instead (meeting_session). The model is
+        Whisper, except that the Armenian one (speech_hy: ``model_name`` or Dictation's pick is
+        "hy-fastconformer") reads a recording in Armenian - its segments come out like Whisper's
+        (a sentence or a few seconds each).
 
         ``on_progress(done_seconds, total_seconds)`` fires as segments stream
         out of the decoder - faster-whisper's segments are a lazy generator, so
@@ -2443,16 +2802,22 @@ class AudioRecorder:
         sr = cfg["sample_rate"]
         if len(audio) < sr // 2:
             return []
+        # The Armenian model reads Armenian only; any other language (or Automatic) goes to Whisper.
+        model_name = AudioRecorder.engine_model(self, model_name or cfg["whisper_model"], language or None)
+        if speech_hy.is_hy_model(model_name):
+            return AudioRecorder._segments_hy(self, audio, on_progress, should_cancel)
         try:
-            # In use for the whole decode (a file job can take an hour).
-            for attempt in (1, 2):
+            # In use for the whole decode (a file job can take an hour). A GPU that runs out of
+            # memory steps down a precision (float16, int8_float16, int8) and tries again; the
+            # processor is the last attempt.
+            for attempt in (1, 2, 3, 4):
                 failed = None
                 with self.use_model(model_name) as model:
                     t0 = time.monotonic()
                     try:
                         return self._segments_with(model, audio, sr, language,
                                                    on_progress, should_cancel,
-                                                   gpu_errors=(attempt == 1))
+                                                   gpu_errors=(attempt < 4))
                     except _GpuDecodeError as g:
                         failed, err = model, g.message
                     finally:
@@ -2468,12 +2833,37 @@ class AudioRecorder:
             logger.warning("transcribe_segments: model load failed: %s", e)
             return []
 
+    def _segments_hy(self, audio, on_progress, should_cancel):
+        """transcribe_segments with the Armenian model: [{"start", "end", "text"}], [] for nothing
+        (or a model that can't be loaded: one log line - Audio to text loads it first, with its
+        own sentence), None when ``should_cancel`` stopped it."""
+        t0 = time.monotonic()
+        try:
+            AudioRecorder._load_hy(self)
+            self._last_segments_language = "hy"
+            segments = speech_hy.transcribe_segments(audio, on_progress=on_progress,
+                                                     should_cancel=should_cancel)
+        except Exception as e:
+            logger.warning("transcribe_segments (Armenian model): %s", e)
+            return []
+        finally:
+            self._last_segments_seconds = time.monotonic() - t0
+        if segments is None:
+            return None
+        terms = vocabulary.load_terms(cfg)
+        if terms:
+            for seg in segments:
+                seg["text"] = vocabulary.correct_spellings(seg["text"], terms)
+        self._last_model_use = time.monotonic()
+        return segments
+
     def _segments_with(self, model, audio, sr, language, on_progress, should_cancel,
                        gpu_errors=False):
         # An explicit language (a file job always passes its own, "auto"
         # included) wins; only None / "" falls back to this session's.
-        lang_setting = language or self._lang_setting()
-        lang_arg = None if lang_setting in ("auto", "multi", "", None) else lang_setting
+        lang_setting = (speech_langs.normalize(language, default="auto") if language
+                        else self._lang_setting())
+        lang_arg = speech_langs.whisper_language(lang_setting)
         # Mixed languages: faster-whisper re-detects the language per window
         # instead of locking onto the first one it heard.
         extra = {"multilingual": True} if lang_setting == "multi" else {}
@@ -2543,7 +2933,8 @@ class AudioRecorder:
     def _lang_setting(self):
         """The language for THIS recording session: an explicit per-session
         override (the meeting window's selector) wins over the global default."""
-        return self.language_override or cfg.get("language", "auto")
+        return speech_langs.normalize(self.language_override or cfg.get("language", "auto"),
+                                      default="auto")
 
     def _backend(self):
         """The speech backend of THIS take: a Smart Action's own pick
@@ -2568,11 +2959,19 @@ class AudioRecorder:
         sr = cfg["sample_rate"]
         if len(audio) < sr // 2:
             return "", "en"
+        try:
+            armenian = speech_hy.is_hy_model(AudioRecorder._local_name(self))
+        except Exception:                                 # a stand-in without the take's settings
+            armenian = False
         out = self._run_local_once(audio)
         if AudioRecorder._backend(self) != "local":
             # A cloud backend ran locally (no key, cap, offline) - and it
             # worked: the next dictation loads the model early too.
             self._local_fallback_at = time.monotonic()
+            if not armenian:
+                # (the Live Assistant card says so - but not for a piece the Armenian model read:
+                # that is not "Whisper's mistakes")
+                AudioRecorder._note_local_fallback(self)
         return out
 
     def _fallback_to_local_or_error(self, audio, backend, reason):
@@ -2586,24 +2985,46 @@ class AudioRecorder:
             )
             return "", f"!{backend}:{reason} Local fallback is unavailable: {friendly}"
 
+    def _local_name(self):
+        """The model that reads a piece on this computer for this take: the take's own pick as the
+        recorder runs it (engine_model), and the Armenian model for a cloud piece in Armenian that has
+        to be read here when it is on this computer (_hy_stands_in) - never Whisper there."""
+        name = AudioRecorder.engine_model(self, AudioRecorder._speech_model(self))
+        if not speech_hy.is_hy_model(name) and AudioRecorder._hy_stands_in(self):
+            name = speech_hy.MODEL_ID
+        return name
+
     def _run_local_once(self, audio):
-        name = AudioRecorder._speech_model(self)
-        with self.use_model(name) as model:
-            try:
-                return self._run_local_with(model, audio)
-            except Exception as e:
-                if _model_device(model) != "cuda" or not gpu_accel.is_cuda_error(e):
-                    raise
-                failed, err = model, str(e)   # the text only: no traceback cycle
-        # The GPU failed mid-dictation (out of memory, driver hiccup): THIS
-        # piece again on the processor. Decided by the model that failed, so
-        # every chunk that hit the broken GPU model is retried, not just the
-        # first one to notice.
-        model = None
-        self._gpu_failed_mid_use(failed, name, err)
-        del failed                            # gone before the CPU model is built
-        with self.use_model(name) as model:   # the same model, now on the processor
-            return self._run_local_with(model, audio)
+        name = AudioRecorder._local_name(self)
+        if speech_hy.is_hy_model(name):
+            return AudioRecorder._run_hy(self, audio)       # Armenian, on this computer
+        for attempt in (1, 2, 3, 4):
+            with self.use_model(name) as model:
+                try:
+                    return self._run_local_with(model, audio)
+                except Exception as e:
+                    if attempt == 4 or _model_device(model) != "cuda" or not gpu_accel.is_cuda_error(e):
+                        raise
+                    failed, err = model, str(e)   # the text only: no traceback cycle
+            # The GPU failed mid-dictation (out of memory, driver hiccup): THIS
+            # piece again - one precision lighter when it ran out of memory, else on the
+            # processor. Decided by the model that failed, so every chunk that hit the
+            # broken GPU model is retried, not just the first one to notice.
+            model = None
+            self._gpu_failed_mid_use(failed, name, err)
+            del failed                            # gone before the next model is built
+
+    def _run_hy(self, audio):
+        """One piece through the Armenian model (speech_hy) -> (text, "hy"). A model that is not on
+        this computer comes through the app's download manager first (_load_hy); what can't be
+        done is an exception with one plain sentence."""
+        AudioRecorder._load_hy(self)
+        text = speech_hy.transcribe(audio, "hy")
+        terms = vocabulary.load_terms(cfg)
+        if terms and text:
+            text = vocabulary.correct_spellings(text, terms)
+        self._last_model_use = time.monotonic()
+        return text, "hy"
 
     def _run_local_with(self, model, audio):
         sr = cfg["sample_rate"]
@@ -2624,8 +3045,8 @@ class AudioRecorder:
         # also span the generator consumption below - transcribe() is lazy and
         # does the real work while the segments are iterated.
         with self._infer_lock:
-            if lang_setting not in ("auto", "multi"):
-                lang_arg = lang_setting
+            if speech_langs.whisper_language(lang_setting):
+                lang_arg = speech_langs.whisper_language(lang_setting)
             elif lang_setting == "auto" and self._session_lang is not None:
                 lang_arg = self._session_lang
             else:
@@ -2695,10 +3116,244 @@ class AudioRecorder:
                     text = ""                 # only the primer, read back into silence
         return text, lang_arg
 
-    def _run_google(self, audio):
+    # ── a cloud piece: what happens when it fails (the language policy) ──
+    def _poor_language(self):
+        """The name ("Armenian") of the language local Whisper is poor at in THIS take, else
+        "". A cloud piece in such a language that fails is tried again and then becomes a gap
+        - never Whisper's text (engine_choice.gap_line); for any other language this
+        computer reads the piece, as always. Not "poor" while the Armenian model is on this
+        computer (_hy_stands_in): then a piece the cloud could not read is read here, by it."""
+        try:
+            poor = speech_langs.local_whisper_poor(self._lang_setting(), cfg)
+            return "" if poor and AudioRecorder._hy_stands_in(self) else poor
+        except Exception:
+            return ""
+
+    def _hy_stands_in(self):
+        """A cloud take in Armenian whose piece has to be read on this computer, and the Armenian
+        model is already here (never downloaded for this): it reads the piece - Whisper is poor at
+        Armenian - instead of leaving a gap. False for a take that runs here anyway (it uses the model
+        it picked) and for any other language."""
+        try:
+            return bool(AudioRecorder._backend(self) != "local" and speech_hy.ready() and speech_hy.runtime_ok()
+                        and AudioRecorder._hy_covers(self))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _cloud_error(engine, name, reason, *, status=None, body="", headers=None, exc=None):
+        """The CloudSpeechError of a failed request (kind, retry_after), carrying ``reason`` - the
+        engine's own short sentence the fallback has always used - and the HTTP status."""
+        err = cloud_speech.classify_failure(engine, name, status=status, body=body,
+                                            headers=headers, exc=exc)
+        err.reason = reason
+        err.status = status
+        return err
+
+    @staticmethod
+    def _off_language_error(name, language, why, text, ran=""):
+        """An answer that is not in the language that was asked for (a model that does not
+        cover it, or letters of another script): a failed piece. One log line, never the words.
+        ``ran``: the model that answered, when it said. A model that does cover the language but
+        wrote another script heard other speech (English or Russian in an Armenian call): asking
+        again returns the same words, so such a piece is tried ONCE more (``same_again``,
+        cloud_speech.retry_wait) - and when a capable model (GPT transcribe, Scribe, Gemini) writes
+        the other script again, _accepted_code_switch keeps its words as the speaker's own mix of
+        languages instead of making a gap."""
+        logger.warning("%s answered a %s piece that is not in that language (%s: %s, %d letters)",
+                       name, speech_langs.language_name(language), why,
+                       speech_langs.script_name(text) or "no letters", len(str(text or "")))
+        err = cloud_speech.CloudSpeechError("off_language", cloud_speech.error_message(
+            "off_language", name, speech_langs.language_name(language)))
+        err.reason = f"{name} didn't answer in {speech_langs.language_name(language)}."
+        err.status = 200
+        err.same_again = bool(ran) and why == "script"
+        return err
+
+    @staticmethod
+    def _answer_json(resp, name):
+        """The JSON of a 200 answer. One that is not JSON (an error page a proxy or a gateway sent
+        with a 200) is a failed piece of kind "bad_response" - tried again like any other - never
+        an exception that skips the retries."""
+        try:
+            return resp.json()
+        except Exception:
+            err = cloud_speech.CloudSpeechError(
+                "bad_response", cloud_speech.error_message("bad_response", name))
+            err.reason = f"{name} sent an answer that couldn't be read."
+            err.status = 200
+            raise err from None
+
+    @staticmethod
+    def _accepted_code_switch(why, ran, off_count, language, name):
+        """A capable cloud model (cloud_speech.accept_off_script: GPT transcribe, Scribe, Gemini) that
+        wrote another script for the same piece TWICE (the second time after the retry) is not a model
+        that missed the language: the speaker used other words (English names, a Russian phrase in an
+        Armenian call). Its words are kept - one log line, never the words. Voxtral and an engine that
+        did not say what it is keep the old rule: a failed piece, then a gap."""
+        if not cloud_speech.accept_off_script(why, ran, off_count):
+            return False
+        logger.info("%s answered a %s piece in another script twice: kept as the speaker's own mix of "
+                    "languages", name, speech_langs.language_name(language))
+        return True
+
+    def _cloud_attempt(self, once, retries=None, timeout=None, budget=None):
+        """Run one cloud request (``once()`` returns its answer or raises a CloudSpeechError):
+        (answer, None) or (None, the last error). In a language local Whisper is poor at a
+        failed piece is tried again (cloud_speech.LIVE_RETRIES time, a short wait, the
+        provider's Retry-After honoured); in any other language it is not - this computer
+        reads it at once. ``timeout``: the seconds one try may take (it is called ``once(timeout=...)``,
+        never more than what is left of ``budget``: all the trying one piece may take, the first try
+        included - a dead server never holds the call's one worker for long)."""
+        poor = AudioRecorder._poor_language(self)
+        n = cloud_speech.LIVE_RETRIES if retries is None else max(0, int(retries))
+        if not poor:
+            n = 0
+
+        def on_retry(attempt, err, wait):
+            gap = AudioRecorder._gap_state(self)
+            gap.update(open=True, reason=err.kind, language=poor)
+            gap["retries"] = gap.get("retries", 0) + 1
+            logger.info("Piece in %s will be tried again (%s), in %.1f s", poor, err.kind, wait)
+
+        kw = {}
+        if timeout is not None:
+            kw["timeout"] = timeout
+            kw["budget"] = budget if budget is not None else cloud_speech.live_budget(timeout)
+        return cloud_speech.attempt_with_retries(
+            once, retries=n, stop=lambda: bool(getattr(self, "_abort", False)),
+            on_retry=on_retry, **kw)
+
+    def _cloud_failed(self, audio, backend, err):
+        """A cloud piece failed. A language local Whisper is poor at: a gap (the audio is
+        kept, nothing is made up). Any other language: this computer reads the piece."""
+        poor = AudioRecorder._poor_language(self)
+        if poor:
+            return AudioRecorder._gap_failed(self, backend, err, poor)
+        if getattr(err, "kind", "") in ("cap", "busy"):
+            self._cloud_capped = True
+        return self._fallback_to_local_or_error(audio, backend,
+                                                getattr(err, "reason", "") or err.message)
+
+    # ── gaps: pieces the cloud could not read (a language local Whisper is poor at) ──
+    GAP_PREFIX = "!gap:"
+    GAP_KEEP_SEC = 20 * 60          # the audio of pieces waiting to be tried again, at most
+    GAP_FINAL_SEC = 60.0            # after Stop: how long to try the kept pieces once more
+
+    @staticmethod
+    def _new_gap_state():
+        return {"open": False, "reason": "", "language": "", "pieces": 0, "total": 0,
+                "retries": 0, "recovered": 0, "lost": 0}
+
+    def _gap_state(self):
+        gap = getattr(self, "_gap", None)
+        if gap is None:
+            gap = AudioRecorder._new_gap_state()
+            try:
+                self._gap = gap
+            except Exception:
+                pass
+        return gap
+
+    def _gap_failed(self, backend, err, poor):
+        """The answer of a piece that must not fall back to this computer: the gap marker
+        _transcribe_chunk (and the tail) turn into a kept piece / the take's error."""
+        gap = AudioRecorder._gap_state(self)
+        gap.update(open=True, reason=err.kind, language=poor)
+        logger.warning("%s piece not transcribed (%s): %s is left as a gap, not read by "
+                       "local Whisper", backend, err.kind, poor)
+        return "", AudioRecorder.GAP_PREFIX + err.kind
+
+    def _mark_gap(self, idx, audio, kind, backend="managed"):
+        """Piece ``idx`` could not be read: dictation fails with one plain sentence (never half
+        a text); a meeting or a live call keeps the piece's audio, says so once on the live
+        transcript (on_chunk_gap) and tries it again when the cloud answers."""
+        gap = AudioRecorder._gap_state(self)
+        language = gap.get("language") or "this language"
+        if getattr(self, "_capture_mode", None) is None:
+            import engine_choice
+            line = engine_choice.gap_line(language, kind, final=True)
+            with self._chunk_lock:
+                self._chunk_errors.append(f"!{backend}:{line}")
+            self._chunk_failures = getattr(self, "_chunk_failures", 0) + 1
+            return
+        try:
+            pcm = (np.clip(np.asarray(audio, dtype=np.float32), -1.0, 1.0) * 32767).astype(np.int16)
+        except Exception:
+            pcm = np.zeros(0, dtype=np.int16)
+        with self._chunk_lock:
+            store = getattr(self, "_gap_audio", None)
+            if store is None:
+                store = self._gap_audio = {}
+            store[idx] = pcm
+            cap = cfg["sample_rate"] * AudioRecorder.GAP_KEEP_SEC
+            while len(store) > 1 and sum(len(v) for v in store.values()) > cap:
+                store.pop(min(store))                    # the oldest: the recording still has it
+                gap["lost"] = gap.get("lost", 0) + 1
+            gap["pieces"] = len(store)
+            gap["total"] = gap.get("total", 0) + 1
+        self._chunk_failures = getattr(self, "_chunk_failures", 0) + 1
+        logger.warning("Piece %s was not transcribed (%s) - kept as a gap (%d waiting)", idx, kind,
+                       gap["pieces"])
+        callback = getattr(self, "on_chunk_gap", None)
+        if callable(callback):
+            try:
+                callback(idx, kind)
+            except Exception as e:
+                logger.warning("on_chunk_gap failed: %s", e)
+
+    def _fill_gaps(self, limit=1, deadline=None):
+        """Try the kept gap pieces again, oldest first - ``limit`` of them (None = all) before
+        ``deadline`` (time.monotonic). Called when the cloud has just answered, and once more
+        after Stop. A piece that is read now joins the transcript in its place; one that fails
+        again stays kept. Returns how many were filled."""
+        store = getattr(self, "_gap_audio", None)
+        if not store:
+            return 0
+        backend = AudioRecorder._backend(self)
+        run = {"managed": self._run_managed, "google": self._run_google,
+               "mistral": self._run_mistral}.get(backend)
+        if run is None or (backend == "google" and not cfg.get("google_api_key")) \
+                or (backend == "mistral" and not cfg.get("mistral_api_key")):
+            return 0
+        filled = 0
+        while limit is None or filled < limit:
+            if deadline is not None and time.monotonic() > deadline:
+                break
+            if getattr(self, "_abort", False):
+                break
+            with self._chunk_lock:
+                if not store:
+                    break
+                idx = min(store)
+                pcm = store.pop(idx)
+            try:
+                text, lang = run((pcm.astype(np.float32) / 32767.0), retries=0)
+            except Exception:
+                text, lang = "", "!gap:error"
+            if not isinstance(lang, str) or lang.startswith("!"):
+                with self._chunk_lock:
+                    store[idx] = pcm                      # still unread: kept for the next time
+                break
+            gap = AudioRecorder._gap_state(self)
+            with self._chunk_lock:
+                self._chunk_results[idx] = text
+                gap["pieces"] = len(store)
+                gap["recovered"] = gap.get("recovered", 0) + 1
+            filled += 1
+            logger.info("A gap piece (%s) was read after all (%d still waiting)", idx, len(store))
+            try:
+                if text and self.on_chunk_complete:
+                    self.on_chunk_complete(idx, text, lang or "")
+            except Exception as e:
+                logger.warning("on_chunk_complete failed: %s", e)
+        return filled
+
+    def _run_google(self, audio, retries=None):
         # Uses the Google AI Studio (Gemini) API, which accepts a plain API key.
         # (Google Cloud Speech-to-Text rejects API keys and needs OAuth/service
         # accounts, so the key people copy from AI Studio could never work there.)
+        key = ""
         try:
             import requests
             key = (cfg.get("google_api_key") or "").strip()
@@ -2709,11 +3364,12 @@ class AudioRecorder:
             b64_data = base64.b64encode(wav_bytes).decode("utf-8")
 
             lang_setting = self._lang_setting()
+            mix = speech_langs.mix_languages(cfg)
             # Native script for the spoken language(s) - and words from another
             # language kept as spoken, not translated: an Armenian sentence
             # with English words in it stays exactly that. With Mixed
             # languages it's told which ones it will hear, switching anywhere.
-            lang_hint = speech_langs.cloud_hint(lang_setting, speech_langs.mix_languages(cfg))
+            lang_hint = speech_langs.cloud_hint(lang_setting, mix)
 
             # The user's custom vocabulary used to be dropped on every cloud
             # backend - configure it, upgrade to cloud, and it silently stopped
@@ -2721,8 +3377,18 @@ class AudioRecorder:
             vocab_hint = vocabulary.cloud_transcription_hint(cfg)
 
             model_name = cfg.get("google_stt_model", "gemini-2.5-flash")
+            # A Live Assistant take on your own key picks its Gemini model itself.
+            live_model = getattr(self, "cloud_model_override", None) or ""
+            if live_model:
+                model_name = live_model
             url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
                    f"{model_name}:generateContent?key={key}")
+            gen_config = {"temperature": 0}
+            if live_model:
+                # Fast and valid thinking for that model (Flash off, Pro its smallest budget).
+                thinking = cloud_speech.thinking_config(model_name)
+                if thinking:
+                    gen_config["thinkingConfig"] = thinking
             payload = {
                 "contents": [{
                     "parts": [
@@ -2732,25 +3398,60 @@ class AudioRecorder:
                         {"inline_data": {"mime_type": "audio/wav", "data": b64_data}},
                     ]
                 }],
-                "generationConfig": {"temperature": 0},
+                "generationConfig": gen_config,
             }
-            resp = requests.post(url, json=payload, timeout=30)
-            if resp.status_code != 200:
-                reason = cloud_error_message("Google", resp.status_code, resp.text)
-                return self._fallback_to_local_or_error(audio, "google", reason)
 
-            data = resp.json()
-            cands = data.get("candidates", [])
-            if not cands:
-                return "", "en"
-            parts = cands[0].get("content", {}).get("parts", [])
-            text = "".join(p.get("text", "") for p in parts).strip()
-            return text, (lang_setting if lang_setting != "auto" else "en")
+            off = {"n": 0}                  # answers of this piece that were in another script
+
+            def once():
+                try:
+                    resp = requests.post(url, json=payload, timeout=30)
+                except Exception as e:
+                    # A requests error quotes the URL - and the key is in it (?key=...): never in
+                    # a log line or a message the person reads.
+                    detail = str(e).replace(key, "…") if key else str(e)
+                    raise AudioRecorder._cloud_error(
+                        "google", "Google", f"Google request failed: {detail}", exc=e) from None
+                if resp.status_code != 200:
+                    raise AudioRecorder._cloud_error(
+                        "google", "Google", cloud_error_message("Google", resp.status_code, resp.text),
+                        status=resp.status_code, body=getattr(resp, "text", ""),
+                        headers=getattr(resp, "headers", None))
+                data = AudioRecorder._answer_json(resp, "Google")
+                cands = data.get("candidates", [])
+                if not cands:
+                    return "", "", "", data
+                parts = cands[0].get("content", {}).get("parts", [])
+                text = "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
+                ran = cloud_speech.answered_model("google", data) or model_name
+                why = speech_langs.answer_problem(text, lang_setting, ran, mix)
+                if why:
+                    off["n"] += 1
+                    if not AudioRecorder._accepted_code_switch(why, ran, off["n"], lang_setting, "Google"):
+                        raise AudioRecorder._off_language_error("Google", lang_setting, why, text, ran)
+                return text, (lang_setting if lang_setting != "auto" else ""), ran, data
+
+            answer, err = AudioRecorder._cloud_attempt(self, once, retries)
+            if err is not None:
+                return AudioRecorder._cloud_failed(self, audio, "google", err)
+            text, lang_out, ran, data = answer
+            if data.get("candidates"):
+                try:
+                    AudioRecorder._note_cloud_ran(self, ran, assumed=model_name)
+                except Exception:
+                    pass
+            return text, lang_out
         except Exception as e:
-            return self._fallback_to_local_or_error(
-                audio, "google", f"Google request failed: {e}")
+            # A requests error quotes the URL - and the key is in it (?key=...): never in a log
+            # line or a message the person reads (your own key on the Live Assistant too).
+            detail = str(e)
+            secret = (cfg.get("google_api_key") or "").strip()
+            if secret:
+                detail = detail.replace(secret, "…")
+            return AudioRecorder._cloud_failed(self, audio, "google", AudioRecorder._cloud_error(
+                "google", "Google", f"Google request failed: {detail}", exc=e))
 
-    def _run_managed(self, audio):
+    def _run_managed(self, audio, retries=None):
         """Pro managed cloud transcription. Sends audio + the user's access token
         to our server proxy, which holds the real STT key. The key never touches
         the client, so this can't be used without a valid Pro/trial account."""
@@ -2765,19 +3466,33 @@ class AudioRecorder:
             if not token:
                 # Offline (the access token can't be refreshed) or signed out:
                 # the local model keeps the dictation instead of losing it.
-                return self._fallback_to_local_or_error(
-                    audio, "managed", "Pro cloud unavailable - sign in or check your connection.")
+                err = cloud_speech.CloudSpeechError(
+                    "no_token", cloud_speech.error_message("no_token", "Gusan Cloud"))
+                err.reason = "Pro cloud unavailable - sign in or check your connection."
+                return AudioRecorder._cloud_failed(self, audio, "managed", err)
 
-            wav_bytes = self._float_to_wav(audio)  # full WAV; the proxy sends it to Gemini
+            wav_bytes = self._float_to_wav(audio)  # full WAV; the proxy sends it to its engines
             b64_data = base64.b64encode(wav_bytes).decode("utf-8")
 
-            # Pro users pick which managed provider to use (server keys): Gemini
-            # (default) or Mistral. No BYO key is involved here.
+            # Gusan Cloud is asked for a PROFILE - "fast" (dictation, Smart Actions, the Live Assistant)
+            # or "best" (a Live Assistant take on Best accuracy) - and its server chooses the engine; the
+            # answer's model (and X-Gusan-Model) says which one RAN. The old Gemini ids are never sent.
+            # A 1.9 "mistral" provider still puts Voxtral first on the fast profile for Dictation; a
+            # Live Assistant take (it carries its own profile) never sends one. An older proxy ignores
+            # the "model" field.
+            import engine_choice
             provider = cfg.get("managed_provider", "gemini")
+            live_model = getattr(self, "cloud_model_override", None)
+            asked_model = engine_choice.cloud_profile(live_model)
+            if live_model is not None or provider not in ("gemini", "mistral"):
+                provider = "gemini"
+            if asked_model == engine_choice.CLOUD_BEST:
+                provider = "gemini"
             # Custom vocabulary for the proxy to fold into its prompt. Older
             # proxy deployments ignore unknown fields, so this is a no-op until
             # the server side ships - never an error.
             lang_setting = self._lang_setting()
+            mix = speech_langs.mix_languages(cfg)
             body = {
                 "audio": b64_data,
                 "sample_rate": cfg["sample_rate"],
@@ -2786,81 +3501,149 @@ class AudioRecorder:
                 # The languages to expect: the mix for Mixed languages, else the
                 # one set (empty for auto). Its presence also tells the proxy to
                 # keep foreign words as spoken; older proxies ignore it.
-                "languages": (speech_langs.mix_languages(cfg) if lang_setting == "multi"
+                "languages": (mix if lang_setting == "multi"
                               else [lang_setting] if lang_setting in speech_langs.NAMES
                               else []),
             }
             vocab_terms = vocabulary.cloud_terms(cfg)
             if vocab_terms:
                 body["vocabulary"] = vocab_terms
-            resp = requests.post(
-                MANAGED_PROXY_URL,
-                json=body,
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=30,
-            )
-            if resp.status_code == 429:
-                # The cloud declined (its quiet safety cap) - transparently fall
-                # back to the local model so the user keeps working. Flag it so
-                # the UI can say so once.
-                self._cloud_capped = True
-                return self._fallback_to_local_or_error(
-                    audio, "managed", "Cloud transcription wasn't available.")
-            if resp.status_code == 403:
-                # Not entitled to managed cloud - fall back to local.
-                return self._fallback_to_local_or_error(
-                    audio, "managed", "Managed cloud access was denied.")
-            if resp.status_code == 401:
-                return "", "!managed:Session expired - sign in again."
-            if resp.status_code != 200:
-                # Any cloud error: don't fail the dictation, use local instead.
-                reason = cloud_error_message("Managed cloud", resp.status_code, resp.text)
-                return self._fallback_to_local_or_error(audio, "managed", reason)
-            data = resp.json()
-            return data.get("text", ""), data.get("lang", "en")
+            body["model"] = asked_model
+            off = {"n": 0}                  # answers of this piece that were in another script
+            seconds = len(audio) / float(cfg["sample_rate"]) if cfg.get("sample_rate") else 0.0
+
+            def once(timeout=None):
+                # A live piece never waits long: cloud_speech.LIVE_ATTEMPT_TIMEOUT a try (a longer
+                # take a little more), two tries at most in 20 s (see _cloud_attempt).
+                limit = timeout if timeout is not None else cloud_speech.live_timeout(seconds)
+                try:
+                    resp = requests.post(
+                        MANAGED_PROXY_URL,
+                        json=body,
+                        headers={"Authorization": f"Bearer {token}"},
+                        timeout=(cloud_speech.LIVE_CONNECT_TIMEOUT, limit),
+                    )
+                except Exception as e:
+                    # Network/other failure.
+                    raise AudioRecorder._cloud_error(
+                        "gusan", "Gusan Cloud", f"Managed cloud request failed: {e}", exc=e) from None
+                code = resp.status_code
+                if code != 200:
+                    # 429: the cloud declined (its quiet safety cap). 403: not entitled. 401: the
+                    # session ended. Any other error: don't fail the dictation, use local instead.
+                    reason = {429: "Cloud transcription wasn't available.",
+                              403: "Managed cloud access was denied.",
+                              401: "Session expired - sign in again."}.get(code) or \
+                        cloud_error_message("Managed cloud", code, resp.text)
+                    raise AudioRecorder._cloud_error(
+                        "gusan", "Gusan Cloud", reason, status=code, body=getattr(resp, "text", ""),
+                        headers=getattr(resp, "headers", None))
+                data = AudioRecorder._answer_json(resp, "Gusan Cloud")
+                text = data.get("text", "")
+                # What RAN, as the server says it (never what was asked): its answer's model / the
+                # X-Gusan-Model header (an older server says nothing).
+                ran = cloud_speech.answered_model("gusan", data, getattr(resp, "headers", None))
+                # An answer from a model that does not cover the language (Voxtral for Armenian),
+                # or in another script, is not speech: the piece failed - unless a capable model wrote
+                # the other script twice (code-switching: its words are kept, _accepted_code_switch).
+                why = speech_langs.answer_problem(text, lang_setting, ran, mix)
+                if why:
+                    off["n"] += 1
+                    if not AudioRecorder._accepted_code_switch(why, ran, off["n"], lang_setting, "Gusan Cloud"):
+                        raise AudioRecorder._off_language_error("Gusan Cloud", lang_setting, why, text, ran)
+                # The proxy's "lang" only echoes the language sent ("en" for auto): that says
+                # nothing about what was spoken, so auto stays unknown.
+                lang_out = "" if lang_setting == "auto" else (data.get("lang") or lang_setting)
+                return text, lang_out, ran, data
+
+            answer, err = AudioRecorder._cloud_attempt(
+                self, once, retries, timeout=cloud_speech.live_timeout(seconds))
+            if err is not None:
+                if (err.kind == "signed_out" and live_model is None
+                        and not AudioRecorder._poor_language(self)):
+                    return "", "!managed:Session expired - sign in again."
+                # (A Live Assistant call keeps its transcript through an expired session: this
+                # computer reads the piece - or, for Armenian, it is a gap - and the card says so.)
+                return AudioRecorder._cloud_failed(self, audio, "managed", err)
+            text, lang_out, ran, _data = answer
+            try:
+                AudioRecorder._note_cloud_ran(self, ran)
+                if ran:
+                    # The Live Assistant's page then names the model that ran, not just the profile.
+                    engine_choice.note_cloud_model(asked_model, ran)
+            except Exception:
+                pass
+            return text, lang_out
         except Exception as e:
             # Network/other failure - fall back to local rather than erroring.
-            return self._fallback_to_local_or_error(
-                audio, "managed", f"Managed cloud request failed: {e}")
+            return AudioRecorder._cloud_failed(self, audio, "managed", AudioRecorder._cloud_error(
+                "gusan", "Gusan Cloud", f"Managed cloud request failed: {e}", exc=e))
 
-    def _run_mistral(self, audio):
+    def _run_mistral(self, audio, retries=None):
         try:
             import requests
             import io
-            
+
             api_key = cfg.get("mistral_api_key", "")
             if not api_key:
                 return "", "!mistral:Add your Mistral API key in Settings."
 
             model = normalize_mistral_model(cfg.get("mistral_stt_model", MISTRAL_STT_DEFAULT))
             lang_setting = self._lang_setting()
+            mix = speech_langs.mix_languages(cfg)
+            if not speech_langs.engine_covers(speech_langs.FAMILY_VOXTRAL, lang_setting, mix):
+                # Voxtral answers a language it doesn't cover (Armenian) with confident text in
+                # another script - so it is not asked. For a language this computer reads well
+                # the piece goes there; for one it doesn't, it is a gap (and the card says why).
+                name = speech_langs.language_name(lang_setting) if lang_setting != "multi" else "one of your languages"
+                err = cloud_speech.CloudSpeechError(
+                    "language", cloud_speech.error_message("language", "Mistral"))
+                err.reason = f"Mistral doesn't cover {name}."
+                return AudioRecorder._cloud_failed(self, audio, "mistral", err)
 
             wav_bytes = self._float_to_wav(audio)
-            wav_io = io.BytesIO(wav_bytes)
 
             url = "https://api.mistral.ai/v1/audio/transcriptions"
             headers = {"Authorization": f"Bearer {api_key}"}
-            files = {"file": ("audio.wav", wav_io, "audio/wav")}
             data = {"model": model}
-            # Only send a language Voxtral actually supports; "auto"/"multi" and
-            # unsupported codes (e.g. Armenian) are omitted so it auto-detects
-            # instead of 400-ing.
+            # Only send a language Voxtral actually supports; "auto"/"multi" are omitted so it
+            # auto-detects instead of 400-ing (a language it doesn't cover never gets here).
             if lang_setting in MISTRAL_LANGS:
                 data["language"] = lang_setting
 
-            resp = requests.post(url, headers=headers, files=files, data=data, timeout=20)
-            if resp.status_code != 200:
-                reason = cloud_error_message("Mistral", resp.status_code, resp.text)
-                return self._fallback_to_local_or_error(audio, "mistral", reason)
+            def once():
+                files = {"file": ("audio.wav", io.BytesIO(wav_bytes), "audio/wav")}
+                try:
+                    resp = requests.post(url, headers=headers, files=files, data=data, timeout=20)
+                except Exception as e:
+                    raise AudioRecorder._cloud_error(
+                        "mistral", "Mistral", f"Mistral request failed: {e}", exc=e) from None
+                if resp.status_code != 200:
+                    raise AudioRecorder._cloud_error(
+                        "mistral", "Mistral", cloud_error_message("Mistral", resp.status_code, resp.text),
+                        status=resp.status_code, body=getattr(resp, "text", ""),
+                        headers=getattr(resp, "headers", None))
+                resp_data = AudioRecorder._answer_json(resp, "Mistral")
+                text = resp_data.get("text", "").strip()
+                why = speech_langs.answer_problem(text, lang_setting, model, mix)
+                if why:
+                    raise AudioRecorder._off_language_error("Mistral", lang_setting, why, text, model)
+                detected_lang = resp_data.get("language") or (
+                    lang_setting if lang_setting in MISTRAL_LANGS else "")
+                return text, detected_lang, str(resp_data.get("model") or model), resp_data
 
-            resp_data = resp.json()
-            text = resp_data.get("text", "").strip()
-            detected_lang = resp_data.get("language", lang_setting if lang_setting in MISTRAL_LANGS else "en")
-
+            answer, err = AudioRecorder._cloud_attempt(self, once, retries)
+            if err is not None:
+                return AudioRecorder._cloud_failed(self, audio, "mistral", err)
+            text, detected_lang, ran, _data = answer
+            try:
+                AudioRecorder._note_cloud_ran(self, ran, assumed=model)
+            except Exception:
+                pass
             return text, detected_lang
         except Exception as e:
-            return self._fallback_to_local_or_error(
-                audio, "mistral", f"Mistral request failed: {e}")
+            return AudioRecorder._cloud_failed(self, audio, "mistral", AudioRecorder._cloud_error(
+                "mistral", "Mistral", f"Mistral request failed: {e}", exc=e))
 
     def _float_to_wav(self, audio_float):
         int_data = (audio_float * 32767).astype(np.int16)
@@ -3333,9 +4116,13 @@ class AppController(QObject):
         "translate_target", "meeting_audio_mode", "save_history",
         "cleanup_enabled", "restore_clipboard",
         "smart_actions_hotkey", "smart_actions_speech_model",
+        "live_assist_speech_model",
         "notion_auto_send",
     )
     _TRACKED_AS_SET = ("smart_actions_hotkey",)
+    # Reported as a class ("auto" | "local" | "cloud" | "cloud_best" | "own_key"), never as a
+    # model name (engine_choice.live_speech_class).
+    _TRACKED_AS_CLASS = ("live_assist_speech_model",)
 
     def track(self, event, props=None):
         """Record an anonymous usage event (a no-op when analytics is off)."""
@@ -3374,8 +4161,17 @@ class AppController(QObject):
         })
 
     def _settings_snapshot(self):
-        return {k: (bool(self.cfg.get(k)) if k in self._TRACKED_AS_SET else self.cfg.get(k))
-                for k in self._TRACKED_SETTINGS}
+        def value(k):
+            if k in self._TRACKED_AS_SET:
+                return bool(self.cfg.get(k))
+            if k in self._TRACKED_AS_CLASS:
+                try:
+                    import engine_choice
+                    return engine_choice.live_speech_class(self.cfg.get(k), self.cfg)
+                except Exception:
+                    return "unknown"
+            return self.cfg.get(k)
+        return {k: value(k) for k in self._TRACKED_SETTINGS}
 
     def _track_setting_changes(self):
         prev = getattr(self, "_tracked_settings", None)
@@ -3388,6 +4184,10 @@ class AppController(QObject):
             return
         if "backend" in changed:
             self.track("backend_selected", {"backend": now["backend"]})
+        if "live_assist_speech_model" in changed:
+            # The Live Assistant's own pick, by class only (no model names, no text).
+            self.track("backend_selected", {"feature": "live_assist",
+                                            "choice": now["live_assist_speech_model"]})
         props = {"changed": ",".join(changed)}
         props.update({k: now[k] for k in changed})
         self.track("settings_saved", props)
@@ -3535,6 +4335,11 @@ class AppController(QObject):
                 # Smart Actions transcribe like Dictation again.
                 self.cfg["smart_actions_speech_model"] = ""
                 _changed = True
+            if self.cfg.get("live_assist_speech_model") in ("cloud", "cloud:best"):
+                # The Live Assistant is back on Automatic (your own key and the models on
+                # this computer need no plan: they stay).
+                self.cfg["live_assist_speech_model"] = ""
+                _changed = True
             if _changed:
                 # An automatic fallback, not a user choice: keep it out of the
                 # backend_selected / settings_saved analytics.
@@ -3637,7 +4442,8 @@ class AppController(QObject):
         else:
             text = ("Couldn't open your subscription page right now. Check your connection "
                     f"and try again, or write to {SUPPORT_EMAIL}.")
-        QMessageBox.information(self._dialog_parent(), "Manage subscription", text)
+        from ui.components import mini_prompt
+        mini_prompt.notify(self._dialog_parent(), "Manage subscription", text)
 
     def set_privacy_mode(self, on, notify=True):
         """Apply Privacy Mode globally and immediately. Privacy forces everything
@@ -3706,26 +4512,31 @@ class AppController(QObject):
             logger.warning("Pro dialog failed, using fallback: %s", e)
 
         # Fallback: simple prompt if the rich dialog can't be shown.
-        box = QMessageBox(parent)
-        box.setWindowTitle(f"{APP_NAME} Pro")
-        feat = f"{shown} is a Pro feature.\n\n" if shown else ""
-        box.setText(feat + "Upgrade to unlock Meetings, Smart Actions, and fast cloud transcription.")
-        if not self.auth.is_authenticated:
-            signin_btn = box.addButton("Create account", QMessageBox.AcceptRole)
+        from ui.components import mini_prompt
+        feat = f"{shown} is a Pro feature. " if shown else ""
+        import account_actions
+        try:
+            guest = account_actions.is_guest(self)
+        except Exception:
+            guest = not self.auth.is_authenticated
+        if guest:
+            # A subscription belongs to an account: sign in (or sign up) first, then the plans.
+            clicked = mini_prompt.choose(
+                parent, f"{APP_NAME} Pro", feat + account_actions.SIGN_IN_FIRST,
+                [("signin", account_actions.SIGN_IN_UP, "primary"), ("cancel", "Maybe later", "ghost")],
+                default="signin", icon="crown")
         else:
-            signin_btn = None
-        monthly_btn = box.addButton("€7.99/mo", QMessageBox.ActionRole)
-        annual_btn = box.addButton("€59/yr", QMessageBox.ActionRole)
-        box.addButton("Maybe later", QMessageBox.RejectRole)
-        if hasattr(self, "style_content"):
-            box.setStyleSheet(self.style_content)
-        box.exec()
-        clicked = box.clickedButton()
-        if signin_btn is not None and clicked == signin_btn:
+            clicked = mini_prompt.choose(
+                parent, f"{APP_NAME} Pro",
+                feat + "Upgrade to unlock Meetings, Smart Actions, and fast cloud transcription.",
+                [("monthly", "€7.99/mo", "secondary"), ("annual", "€59/yr", "primary"),
+                 ("cancel", "Maybe later", "ghost")],
+                default="annual", icon="crown")
+        if clicked == "signin":
             self.show_auth_gate()
-        elif clicked == monthly_btn:
+        elif clicked == "monthly":
             webbrowser.open(self._checkout_url(PRO_MONTHLY_URL))
-        elif clicked == annual_btn:
+        elif clicked == "annual":
             webbrowser.open(self._checkout_url(PRO_ANNUAL_URL))
 
     def _checkout_url(self, base):
@@ -3915,8 +4726,8 @@ class AppController(QObject):
         rec = self.recorder
         rec._cuda_usable = None                       # let it try the GPU again
         rec._cuda_error = ""
-        name = self.cfg.get("whisper_model") or "base"
-        if not self._can_verify_gpu():
+        name = AppController._gpu_check_model(self)
+        if not self._can_verify_gpu() or name is None:
             return "pending", ""                      # tried at the next local transcription
         if getattr(self, "_file_job_running", False) is True:
             # A file job holds the speech model: reloading it now would stall
@@ -3944,7 +4755,15 @@ class AppController(QObject):
     def _can_verify_gpu(self):
         # File jobs run locally whatever the dictation backend, so the GPU is
         # worth testing whenever the local model is on disk.
-        return model_downloaded(self.cfg.get("whisper_model") or "base")
+        return AppController._gpu_check_model(self) is not None
+
+    def _gpu_check_model(self):
+        """The Whisper model the GPU check loads: Dictation's pick when it is on disk, and for the
+        Armenian pick (it runs on the processor) the best Whisper model that is - or None."""
+        name = self.cfg.get("whisper_model") or "base"
+        if speech_hy.is_hy_model(name):
+            name = speech_hy.fallback_whisper(model_downloaded, "cuda")
+        return name if model_downloaded(name) else None
 
     def _on_gpu_runtime_failed(self, message):
         """The GPU failed during a real transcription (worker -> here): remember
@@ -4008,6 +4827,8 @@ class AppController(QObject):
         try:
             if context != "file" and (backend or self.cfg.get("backend") or "local") != "local":
                 return
+            if speech_hy.is_hy_model(model or self.cfg.get("whisper_model")):
+                return                  # the Armenian model runs on the processor: a GPU download would not speed it up
             self.sig_gpu_wait.emit(context, str(model or self.cfg.get("whisper_model") or ""),
                                    float(seconds))
         except Exception:
@@ -4425,9 +5246,17 @@ class AppController(QObject):
     def show_auth_gate(self):
         """Sign in / create an account (ui/auth_sheet.py): one sheet, brought
         forward on repeated clicks. Used by the tray, the pages and the Pro
-        window. Already signed in: Account & plan instead."""
+        window. Already signed in: Account & plan instead - except a super admin
+        previewing Guest (signed in underneath): they are a guest on screen, so
+        "Sign in / Sign up" opens the sheet a guest would get."""
         if self.auth.is_authenticated:
-            return self.show_main("account")
+            try:
+                import account_actions
+                guest_preview = account_actions.is_guest(self)
+            except Exception:
+                guest_preview = False
+            if not guest_preview:
+                return self.show_main("account")
         return self._show_auth_sheet("signin")
 
     def show_account_gate(self):
@@ -4730,8 +5559,12 @@ class AppController(QObject):
                 s.sig_summary.connect(card.set_summary)
                 if getattr(s, "state", None) == getattr(s, "STATE_RECORDING", "recording"):
                     # Opened mid-meeting: catch up (no answers for old questions).
+                    agenda = getattr(s, "_meeting_agenda", "")
+                    agenda = agenda if isinstance(agenda, str) else ""
                     card.set_meeting_active(True, getattr(s, "_meeting_title", ""),
-                                            getattr(s, "_meeting_attendees", ""))
+                                            getattr(s, "_meeting_attendees", ""), agenda=agenda)
+                    if getattr(s, "_calendar_event_id", ""):
+                        card.set_invite(agenda)     # a calendar meeting: the INVITE chip
                     card.feed_transcript(getattr(s, "_live_text", ""), answer=False)
                     card.set_summary(getattr(s, "_live_summary_text", ""))
             self.live_assist = card
@@ -4992,11 +5825,35 @@ class AppController(QObject):
                 logger.debug("Freeing the session's AI model failed", exc_info=True)
         threading.Thread(target=_free, daemon=True).start()
 
-    def prewarm_speech_model(self):
+    def prewarm_speech_model(self, speech=None):
         """A recording just started (meeting / Live Assistance): load the local
         Whisper model now, so the load overlaps the speech instead of holding
-        up the first piece. No-op for cloud backends or a model not on disk."""
+        up the first piece. No-op for cloud backends or a model not on disk.
+        ``speech``: a Live Assistant session's own (backend, model[, cloud]) - its
+        Whisper model is loaded when it is on disk, a cloud route loads nothing (a
+        piece that has to fall back to this computer loads Dictation's model then)."""
+        if speech and speech[0]:
+            if speech[0] == "local" and speech[1]:
+                name = speech[1]
+
+                def _load():
+                    try:
+                        real = AppController._real_speech_model(self, name)
+                        if model_downloaded(real):
+                            self.recorder.load_model(real)
+                    except Exception as e:
+                        logger.debug("Speech model preload failed: %s", e)
+                threading.Thread(target=_load, daemon=True).start()
+            return
         self._preload_speech_model()
+
+    def _real_speech_model(self, name):
+        """The model that will really transcribe for the pick ``name`` in this take's language: a
+        Whisper id as it is, the Armenian model only for Armenian (AudioRecorder.engine_model)."""
+        try:
+            return self.recorder.engine_model(name)
+        except Exception:
+            return name
 
     def _preload_speech_model(self):
         """Background-load the local Whisper model when dictation uses it
@@ -5008,8 +5865,9 @@ class AppController(QObject):
 
         def _load():
             try:
-                if model_downloaded(name):
-                    self.recorder.load_model(name)
+                real = AppController._real_speech_model(self, name)
+                if model_downloaded(real):
+                    self.recorder.load_model(real)
             except Exception as e:
                 logger.debug("Speech model preload failed: %s", e)
         threading.Thread(target=_load, daemon=True).start()
@@ -5026,7 +5884,7 @@ class AppController(QObject):
         if dl is None or threading.current_thread() is threading.main_thread():
             return                      # never block the GUI: the build decides
         try:
-            if dl.kind(name) != "whisper" or model_downloaded(name):
+            if dl.kind(name) not in ("whisper", "speech_hy") or model_downloaded(name):
                 return                  # a custom model, or on disk (a stat): the usual case
         except Exception:
             return
@@ -5454,6 +6312,12 @@ class AppController(QObject):
         rec_model = getattr(self.recorder, "model_override", None)
         used_model = (rec_model if isinstance(rec_model, str) and rec_model
                       else self.cfg.get("whisper_model"))
+        try:
+            # What really transcribes: the Armenian model reads Armenian only, a Whisper model any other.
+            real_model = self.recorder.engine_model(used_model) if speech_hy.is_hy_model(used_model) else used_model
+            used_model = real_model if isinstance(real_model, str) and real_model else used_model
+        except Exception:
+            pass
         self.recorder.stop_recording()
         # Recording is finished now - flip is_rec immediately so Esc during the
         # transcription below is treated as "cancel processing", and a stale
@@ -5608,7 +6472,7 @@ class AppController(QObject):
                 output_text = actions.process(
                     text,
                     action_mode,
-                    source_lang=lang,
+                    source_lang=lang or "auto",
                     target_lang=self.cfg.get("translate_target", "en"),
                     model=action_model,
                     config=action_config,
@@ -5707,16 +6571,9 @@ class AppController(QObject):
         text = AppController._quit_question(self)
         if not text:
             return True
-        box = QMessageBox(self._dialog_parent())
-        box.setIcon(QMessageBox.Warning)
-        box.setWindowTitle(f"Quit {APP_NAME}?")
-        box.setText(text)
-        quit_btn = box.addButton("Quit", QMessageBox.DestructiveRole)
-        stay_btn = box.addButton("Cancel", QMessageBox.RejectRole)
-        box.setDefaultButton(stay_btn)
-        box.setEscapeButton(stay_btn)
-        box.exec()
-        return box.clickedButton() is quit_btn
+        from ui.components import mini_prompt
+        return bool(mini_prompt.confirm(self._dialog_parent(), f"Quit {APP_NAME}?", text, "Quit", "Cancel",
+                                        danger=True))
 
     def _stop_mic_monitor_for_quit(self):
         mm = getattr(self, "mic_monitor", None)
@@ -6080,6 +6937,7 @@ class AppController(QObject):
             return
         cal.remind.connect(self._on_calendar_remind)
         cal.disconnected.connect(self._on_calendar_disconnected)
+        cal.connect_result.connect(self._on_calendar_connect_result)
         self.sig_setting_changed.connect(cal.on_setting_changed)
         self.calendar = cal
         try:
@@ -6138,9 +6996,11 @@ class AppController(QObject):
         toast = MeetingReminder(main_app=self)
         # Record fires for Pro users only (the toast opens the Pro window for
         # Free users itself); the controller gates again anyway.
-        toast.record.connect(lambda m, assist: self.record_from_calendar(m, with_assist=assist))
+        toast.record.connect(self._on_reminder_record)
         toast.dismissed.connect(self._on_reminder_dismissed)
         # "Join call": the toast opens the https link itself and stays up.
+        toast.join.connect(self._on_reminder_join)
+        toast.closed.connect(self._on_reminder_closed)
         self.sig_auth_changed.connect(toast.refresh_account)
         self.sig_setting_changed.connect(toast.on_setting_changed)
         s = getattr(self, "meeting_session", None)
@@ -6161,6 +7021,7 @@ class AppController(QObject):
     def _on_reminder_dismissed(self, meeting):
         """"Not this one": that meeting is never asked about again (the service
         already marked it when it asked; this keeps it so)."""
+        self.track("calendar_reminder_action", {"action": "dismiss"})
         cal = getattr(self, "calendar", None)
         mid = (meeting or {}).get("id")
         if cal is not None and mid:
@@ -6168,6 +7029,82 @@ class AppController(QObject):
                 cal.mark_prompted(mid)
             except Exception:
                 logger.debug("calendar mark_prompted failed", exc_info=True)
+
+    def _on_reminder_record(self, meeting, with_assist=False):
+        """The toast's Record / Record + Live Assistant (Pro users only)."""
+        self.track("calendar_reminder_action",
+                   {"action": "record_assist" if with_assist else "record"})
+        self.record_from_calendar(meeting, with_assist=bool(with_assist))
+
+    def _on_reminder_join(self, _meeting=None):
+        """"Join call": the toast opened the link; only the tap is counted."""
+        self.track("calendar_reminder_action", {"action": "join"})
+
+    def _on_reminder_closed(self, _meeting=None, reason=""):
+        """The toast went away: counted when nobody answered (its window ran out)."""
+        if reason == "expired":
+            self.track("calendar_reminder_action", {"action": "expired"})
+
+    def calendar_start_context(self, meeting=None, with_agenda=True):
+        """What a recording or Live Assistant session starts with, from a calendar
+        meeting: {"title", "attendees" (people on the invite, you included), "others"
+        (without you), "agenda", "event_id"} - clean text, no emails or links
+        (calendar_sync.start_context) - or None. One source of truth for the
+        reminder's Record, the Meetings start card and the Live Assistant card.
+
+        ``meeting`` (a calendar_service row) is used as it is; without it, the meeting
+        on now or starting within 5 minutes - and only while a Google Calendar is
+        connected, so a dormant or disconnected calendar gives None. ``with_agenda``
+        False leaves the agenda out (a plain Record sends the title and names only)."""
+        m = meeting
+        if m is None:
+            cal = getattr(self, "calendar", None)
+            if cal is None:
+                return None
+            try:
+                if not (cal.available and cal.is_connected):
+                    return None
+                # Only meetings with other people: this goes to the AI with every
+                # answer, so a solo block ("Doctor appointment") is never picked
+                # for it (the start card pre-fill still takes any event).
+                m = cal.current_meeting(only_meetings=True)
+            except Exception:
+                logger.debug("calendar current_meeting failed", exc_info=True)
+                return None
+        if not isinstance(m, dict) or not m:
+            return None
+        try:
+            import calendar_sync
+            return calendar_sync.start_context(m, with_agenda=with_agenda)
+        except Exception:
+            logger.warning("Couldn't read the calendar meeting", exc_info=True)
+            return None
+
+    def note_calendar_start(self, ctx, source, with_assist=None):
+        """A recording or Live Assistant session began for a calendar meeting - from the
+        reminder's Record (source "toast"), the Meetings start card ("start_card") or the
+        Live Assistant card ("live_card"): that meeting counts as asked, so the reminder
+        never comes for it again, an open Live Assistant card says whose meeting it is
+        (the INVITE chip: who is on it and the agenda that was sent), and the start is
+        counted (the source and two yes/no facts - no titles, names or ids)."""
+        ctx = ctx or {}
+        event_id = str(ctx.get("event_id") or "")
+        cal = getattr(self, "calendar", None)
+        if cal is not None and event_id:
+            try:
+                cal.mark_prompted(event_id)
+            except Exception:
+                logger.debug("calendar mark_prompted failed", exc_info=True)
+        la = getattr(self, "live_assist", None)
+        if la is not None and event_id and source != "live_card":
+            try:
+                la.set_invite(ctx.get("agenda", ""), ctx.get("others"))
+            except Exception:
+                logger.debug("Live Assistant: invite not shown", exc_info=True)
+        if with_assist is None:
+            with_assist = source == "live_card"
+        self.track("calendar_meeting_started", {"source": source, "with_assist": bool(with_assist),
+                                                "with_agenda": bool(ctx.get("agenda"))})
 
     def record_from_calendar(self, meeting, with_assist=False):
         """Record a Google Calendar meeting (the reminder's Record / Record +
@@ -6186,20 +7123,23 @@ class AppController(QObject):
             self._pro_upsell("Meeting recording")
             if not self.is_pro():
                 return False
-        title = str(m.get("title") or "").strip()
-
-        def names(value):
-            if isinstance(value, str):
-                return [p.strip() for p in value.split(",") if p.strip()]
-            return [str(p).strip() for p in (value or []) if str(p).strip()]
-        # The session's attendees include you (the notes say who is who); the
-        # start card lists the others, as the Meetings page does.
-        people = names(m.get("attendees")) or names(m.get("others"))
-        others = names(m.get("others")) if "others" in m else people
-        event_id = str(m.get("id") or "")
+        # The one place the meeting's words are cleaned (calendar_start_context): the
+        # title, the people on the invite (you included - the notes say who is who)
+        # and the event id. ``card`` is what the start card may show; the agenda
+        # only goes along with Live Assistant (the card shows it, so the user can
+        # read and edit it) - a plain Record sends the title and names only.
+        card = self.calendar_start_context(m) or {}
+        title = card.get("title") or str(m.get("title") or "").strip()
+        people = card.get("attendees") or []
+        others = card.get("others") if "others" in card else people
+        event_id = card.get("event_id") or str(m.get("id") or "")
+        agenda = card.get("agenda", "") if with_assist else ""
+        sent = dict(card, agenda=agenda)
+        prefill = dict(title=title, attendees=others, calendar_event_id=event_id,
+                       agenda=card.get("agenda", ""))
         session = getattr(self, "meeting_session", None)
         if session is None:
-            self.show_main("meetings", title=title, attendees=others, calendar_event_id=event_id)
+            self.show_main("meetings", **prefill)
             return False
         if session.is_busy:
             self.show_main("meetings")              # one at a time: the live view
@@ -6216,8 +7156,9 @@ class AppController(QObject):
                 self._ensure_live_assist()
                 if rec is not None:
                     rec.fast_live_chunks = True
-            ok, _code, msg = session.start(title=title, attendees=", ".join(people),
-                                           source="calendar", calendar_event_id=event_id or None)
+            ok, _code, msg = live_context.start_session(
+                session, agenda=agenda, title=title, attendees=", ".join(people),
+                source="calendar", calendar_event_id=event_id or None)
         except Exception as e:
             logger.warning("Recording the calendar meeting failed", exc_info=True)
             ok, msg = False, str(e)
@@ -6225,19 +7166,26 @@ class AppController(QObject):
             rec.fast_live_chunks = False
         if not ok:
             # The start card, filled in: Record there says what is wrong.
-            self.show_main("meetings", title=title, attendees=others, calendar_event_id=event_id)
+            self.show_main("meetings", **prefill)
             self.show_tray_hint("Couldn't start the recording", msg or "Try again from the Meetings page.")
             return False
+        self.note_calendar_start(dict(sent, others=others), "toast", with_assist)
         self.show_main("meetings", view="live")
         if with_assist:
             self.show_live_assist()
         return True
 
     def _on_calendar_disconnected(self, reason):
+        if reason in ("user", "expired", "account"):
+            self.track("calendar_disconnected", {"reason": reason})
         if reason == "expired":
             self.show_tray_hint("Google Calendar disconnected",
                                 "Connect it again on the Meetings page.",
                                 on_click=lambda: self.show_main("meetings"))
+
+    def _on_calendar_connect_result(self, ok, reason=""):
+        """A Connect attempt ended: counted with a reason word (no text, no account)."""
+        self.track("calendar_connect_result", {"ok": bool(ok), "reason": str(reason or "")})
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _parse_version(v):
@@ -6372,6 +7320,14 @@ def main():
     # the data folder stays "Transcribe" - see storage.py.)
     qapp.setApplicationName(APP_NAME)
     qapp.setQuitOnLastWindowClosed(False) # Tray-resident background app constraint!
+    # One light look whatever the OS is set to: the Fusion style and an explicit light palette,
+    # before any window (a pop-up used to take its panel from a dark OS and its words from our
+    # stylesheet). The title bars stay the OS's. See ui/theme.py, "One light look".
+    try:
+        from ui.theme import install_light_scheme
+        install_light_scheme(qapp)
+    except Exception as e:
+        logging.warning("Could not set the light palette: %s", e)
     # Gusan 2.0 fonts: bundled assets/fonts if present, else the system faces.
     try:
         from ui.theme import load_fonts
@@ -6431,6 +7387,15 @@ def main():
                          name="gusan-sweep-temp", daemon=True).start()
     except Exception:
         logger.debug("temp folder sweep not started", exc_info=True)
+
+    # A meeting deleted from a list waits in the trash for its Undo (meeting_trash.py). A quit or
+    # a crash in those ten seconds leaves it there: whatever is older than a minute goes now.
+    try:
+        import meeting_trash
+        threading.Thread(target=meeting_trash.purge_older_than, name="gusan-sweep-trash",
+                         daemon=True).start()
+    except Exception:
+        logger.debug("trash sweep not started", exc_info=True)
 
     # A frozen window leaves one entry in transcribe.log (where the GUI thread is
     # stuck, what the other threads do, how long it lasted): stall_watchdog.py.

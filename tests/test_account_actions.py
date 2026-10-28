@@ -40,11 +40,18 @@ class _NoDevTier(unittest.TestCase):
 class TestAccountView(_NoDevTier):
     def test_guest(self):
         v = aa.account_view(auth("guest"), {}, now=NOW)
-        self.assertEqual((v["signed_in"], v["name"], v["email"], v["initial"], v["tier"], v["badge"]),
-                         (False, "Guest", "", "", "guest", "GUEST"))
+        self.assertEqual((v["signed_in"], v["guest"], v["name"], v["email"], v["initial"], v["tier"], v["badge"]),
+                         (False, True, "User", "", "", "guest", "GUEST"))
         self.assertEqual(v["smart_text"], "Sign up to try them")
-        self.assertEqual(v["buttons"], {"sign_in": True, "sign_out": False, "upgrade": True,
+        # A guest's one action is Sign in / Sign up: no upgrade.
+        self.assertEqual(v["buttons"], {"sign_in": True, "sign_out": False, "upgrade": False,
                                         "manage": False, "delete": False, "admin": False})
+
+    def test_labels_are_constants_in_one_place(self):
+        self.assertEqual((aa.GUEST_NAME, aa.SIGN_IN_UP, aa.SIGN_IN_UP_A11Y, aa.UPGRADE),
+                         ("User", "Sign in / Sign up", "Sign in or sign up", "Upgrade to Pro"))
+        for text in (aa.GUEST_NAME, aa.SIGN_IN_UP, aa.SIGN_IN_UP_A11Y, aa.SIGN_IN_FIRST):
+            self.assertNotIn("upgrade", text.lower())
 
     def test_free(self):
         v = aa.account_view(auth("free"), {}, now=NOW, smart_remaining=4)
@@ -93,11 +100,63 @@ class TestAccountView(_NoDevTier):
         v = aa.account_view(a, {"admin_tier_override": "guest"}, smart_remaining=3)
         self.assertEqual((v["badge"], v["smart_tries_left"], v["smart_text"]), ("GUEST", None, "Sign up to try them"))
 
+    def test_an_admin_previewing_guest_is_never_shown_by_name(self):
+        # The founder's screenshot: a GUEST chip with "Aram" and an "A". A super admin previewing Guest is
+        # still signed in underneath (profile name, email) - on screen they are a guest, nobody else.
+        a = auth("pro", plan="admin", admin=True, name="Aram Adamyan", email="aram@aibuben.xyz")
+        v = aa.account_view(a, {"admin_tier_override": "guest"}, smart_remaining=3)
+        self.assertEqual((v["signed_in"], v["guest"], v["name"], v["email"], v["initial"], v["badge"]),
+                         (False, True, "User", "", "", "GUEST"))
+        self.assertEqual((v["plan_line"], v["plan_label"]), ("", ""))     # no plan to state for a guest
+        self.assertNotIn("Aram", repr(v))
+        self.assertNotIn("aibuben", repr(v))
+        self.assertTrue(v["buttons"]["sign_in"] and not v["buttons"]["upgrade"] and not v["buttons"]["sign_out"])
+        self.assertTrue(v["buttons"]["admin"])              # the "Preview as" switch stays, to get back
+        # Previewing Free: that is a person, with the name, and the one Upgrade.
+        v = aa.account_view(a, {"admin_tier_override": "free"}, smart_remaining=3)
+        self.assertEqual((v["signed_in"], v["guest"], v["name"], v["initial"]), (True, False, "Aram Adamyan", "A"))
+        self.assertTrue(v["buttons"]["upgrade"])
+
     def test_dates_and_days(self):
         self.assertEqual(aa.format_date("2027-10-04"), "4 Oct 2027")
         self.assertEqual(aa.format_date("not a date"), "")
         self.assertEqual(aa.trial_days_left(SimpleNamespace(period_end=None), NOW), 0)
         self.assertEqual(aa.trial_days_left(SimpleNamespace(period_end="2026-10-01T00:00:00Z"), NOW), 0)
+
+
+def _app(tier, **kw):
+    """A controller stand-in: ``tier`` is what current_tier() says (a tier preview included)."""
+    a = auth("free" if tier == "free" else tier, **kw)
+    return SimpleNamespace(auth=a, is_pro=lambda: tier == "pro", current_tier=lambda: tier)
+
+
+class TestAppTier(unittest.TestCase):
+    def test_tier_and_guest(self):
+        self.assertEqual(aa.app_tier(_app("pro")), "pro")
+        self.assertEqual(aa.app_tier(_app("free")), "free")
+        self.assertEqual(aa.app_tier(_app("guest")), "guest")
+        self.assertTrue(aa.is_guest(_app("guest")))
+        self.assertFalse(aa.is_guest(_app("free")) or aa.is_guest(_app("pro")))
+
+    def test_without_current_tier_the_sign_in_decides(self):
+        signed = SimpleNamespace(auth=auth("free"))
+        self.assertEqual(aa.app_tier(signed), "free")
+        self.assertEqual(aa.app_tier(SimpleNamespace(auth=auth("guest"))), "guest")
+        self.assertEqual(aa.app_tier(SimpleNamespace()), "guest")
+
+    def test_a_broken_controller_is_a_guest_not_a_crash(self):
+        def boom():
+            raise RuntimeError("x")
+        self.assertEqual(aa.app_tier(SimpleNamespace(auth=auth("guest"), is_pro=boom, current_tier=boom)), "guest")
+
+    def test_first_name_is_empty_for_every_guest(self):
+        self.assertEqual(aa.first_name(_app("free", name="Aram Adamyan")), "Aram")
+        self.assertEqual(aa.first_name(_app("pro", name=None, email="mariam@example.com")), "mariam")
+        self.assertEqual(aa.first_name(_app("guest")), "")
+        # a super admin previewing Guest: the session still holds the profile, the person on screen is a guest
+        previewing = SimpleNamespace(auth=auth("free", name="Aram Adamyan"), is_pro=lambda: False,
+                                     current_tier=lambda: "guest")
+        self.assertEqual(aa.first_name(previewing), "")
 
 
 class TestDeleteAccount(unittest.TestCase):

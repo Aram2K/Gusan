@@ -130,6 +130,22 @@ state: while it runs the model stays "ready" and is_removing(name) is True.
 Names: speech ids ("tiny" ... "large-v3") and local AI ids ("qwen_tiny", "qwen_3b",
 "qwen_7b", "gemma_2b"; 1.9.x ids such as "aibuben_tiny" are normalised) share one
 namespace - they never collide. Telemetry "kind" stays "whisper" / "llm" as in 1.9.x.
+
+The Armenian speech model (Gusan 2.0.1, speech_hy.py) is a third kind, "speech_hy", with the one
+id "hy-fastconformer". It is NOT a Whisper id: ready("whisper") and the Whisper cards never see
+it. Its calls are the same (start / fetch / remove / state / progress / finished), plus
+    cancel(name) -> bool   stop a running Armenian download (it keeps what it has and resumes
+                           next time; the state goes back to "missing" with no message)
+    refresh_catalog(force=False) -> bool   WORKER THREADS ONLY (ModelDownloads.refresh_catalog()
+                           starts it on a worker): look for the model's manifest entry (at most
+                           once a day, never in Privacy mode, never at startup) and emit
+                           catalog_changed when speech_hy.listed() changed. Call it when a place
+                           that would list the model opens (Speech & AI, a speech picker,
+                           onboarding's model step), then read speech_hy.listed() again.
+Privacy mode does not stop the download itself (it sends nothing of the person's, like a Whisper
+download: speech_hy.DOWNLOAD_BLOCKED_IN_PRIVACY_MODE is the one switch) but it does stop the manifest
+lookup; the model is hidden everywhere while speech_hy.listed() is False (nothing to download from
+yet, or no runtime).
 """
 from __future__ import annotations
 
@@ -140,16 +156,19 @@ import threading
 import time
 
 import hardware
+import speech_hy
 
 logger = logging.getLogger("transcribe")
 
 MISSING, DOWNLOADING, READY, FAILED = "missing", "downloading", "ready", "failed"
 STATES = (MISSING, DOWNLOADING, READY, FAILED)
 WHISPER, LLM = "whisper", "llm"          # telemetry "kind" (1.9.x values)
+HY = speech_hy.KIND                      # "speech_hy": the Armenian model (Gusan 2.0.1)
 
 SPEECH_IDS = hardware.SPEECH_MODEL_IDS
+HY_IDS = (hardware.HY_MODEL_ID,)
 LLM_IDS = hardware.LOCAL_AI_MODEL_IDS
-ALL_IDS = SPEECH_IDS + LLM_IDS
+ALL_IDS = SPEECH_IDS + HY_IDS + LLM_IDS
 
 PROGRESS_MIN_S = 0.1     # at most ~10 progress updates a second per model
 PROGRESS_IDLE_S = 0.5    # ...but at least every half second while bytes move
@@ -194,6 +213,8 @@ def _http_status(exc):
 def failure_message(exc):
     """(reason, message) for a failed download: reason is a short code safe for
     analytics, message one plain sentence for the card."""
+    if isinstance(exc, speech_hy.SpeechHyError):          # the Armenian model's own plain sentence
+        return exc.reason, exc.user_message
     text = str(exc or "").lower()
     if isinstance(exc, OSError) and (
             getattr(exc, "errno", None) == errno.ENOSPC
@@ -237,10 +258,18 @@ def _main_module():
 
 
 class ModelOps:
-    """The real operations. Swap for a fake in tests."""
+    """The real operations. Swap for a fake in tests. ``privacy``: () -> bool, Privacy mode on
+    (the Armenian model's manifest and download are refused while it is)."""
 
-    def __init__(self, unload_whisper=None):
+    def __init__(self, unload_whisper=None, privacy=None):
         self._unload_whisper = unload_whisper
+        self._privacy = privacy
+
+    def privacy_on(self):
+        try:
+            return bool(self._privacy()) if self._privacy is not None else False
+        except Exception:
+            return False
 
     @staticmethod
     def normalize(name):
@@ -249,12 +278,17 @@ class ModelOps:
     def downloaded(self, kind, name):
         if kind == WHISPER:
             return bool(_main_module().model_downloaded(name))
+        if kind == HY:
+            return bool(speech_hy.ready())
         import local_llm
         return bool(local_llm.model_downloaded(name))
 
-    def download(self, kind, name, on_progress):
+    def download(self, kind, name, on_progress, should_cancel=None):
         if kind == WHISPER:
             return _main_module().download_whisper_model(name, on_progress=on_progress)
+        if kind == HY:
+            return speech_hy.download(on_progress=on_progress, should_cancel=should_cancel,
+                                      privacy=self.privacy_on())
         import local_llm
         return local_llm.download_model(name, on_progress=on_progress)
 
@@ -263,8 +297,14 @@ class ModelOps:
             if self._unload_whisper is not None:
                 self._unload_whisper(name)      # may wait for a load in progress: worker only
             return _main_module().remove_whisper_model(name)
+        if kind == HY:
+            return speech_hy.remove()           # unloads it first; raises InUse while it transcribes
         import local_llm
         return local_llm.remove_model(name)     # raises LocalLLMError while busy
+
+    def refresh_catalog(self, force=False):
+        """The Armenian model's manifest entry (speech_hy.refresh_catalog): True when it changed."""
+        return bool(speech_hy.refresh_catalog(force=force, privacy=self.privacy_on()))
 
 
 def _thread(fn, *args):
@@ -293,6 +333,7 @@ class DownloadManager:
         self._last_emit = {}       # name -> (time, pct)
         self._listeners = {}       # name -> [on_progress] of fetch() callers waiting on it
         self._gen = {}             # name -> bumped on every change a scan must not undo
+        self._cancels = set()      # names whose running download was asked to stop (cancel())
         self._scanned = False
 
     # ── helpers ───────────────────────────────────────────────────────────────
@@ -319,10 +360,12 @@ class DownloadManager:
             return name
 
     def kind(self, name):
-        """'whisper' / 'llm' / None for an unknown id."""
+        """'whisper' / 'speech_hy' (the Armenian model) / 'llm' / None for an unknown id."""
         name = self.normalize(name)
         if name in SPEECH_IDS:
             return WHISPER
+        if name in HY_IDS:
+            return HY
         if name in LLM_IDS:
             return LLM
         return None
@@ -370,7 +413,8 @@ class DownloadManager:
 
     def ready(self, kind=None):
         """Ready ids in display order; kind 'whisper' / 'llm' narrows it."""
-        ids = SPEECH_IDS if kind == WHISPER else LLM_IDS if kind == LLM else ALL_IDS
+        ids = (SPEECH_IDS if kind == WHISPER else LLM_IDS if kind == LLM
+               else HY_IDS if kind == HY else ALL_IDS)
         with self._lock:
             return [n for n in ids if self._states.get(n) == READY]
 
@@ -427,6 +471,7 @@ class DownloadManager:
                 return False
             self._set(name, DOWNLOADING)
             self._errors.pop(name, None)
+            self._cancels.discard(name)
             self._progress[name] = (0, 0, 0)
             self._last_emit.pop(name, None)
             done = threading.Event()
@@ -446,13 +491,27 @@ class DownloadManager:
             return
         props = {"kind": kind, "model": name}
         self.track("model_download_started", props)
+
+        def progress(pct, got=0, total=0):
+            self._on_progress(name, pct, got, total)
         try:
-            self._ops.download(kind, name, lambda pct, got=0, total=0: self._on_progress(name, pct, got, total))
+            if kind == HY:
+                # The Armenian download can be stopped (cancel) and says why it can't run in a
+                # plain sentence (Privacy mode, nothing to download from).
+                self._ops.download(kind, name, progress, should_cancel=lambda: name in self._cancels)
+            else:
+                self._ops.download(kind, name, progress)
             if not self._check_disk(kind, name):
                 raise _Incomplete()
         except _Incomplete:
             self.track("model_download_failed", dict(props, reason="incomplete"))
             self._finish(name, FAILED, MSG_INCOMPLETE, done)
+            return
+        except speech_hy.Cancelled:
+            with self._lock:
+                self._cancels.discard(name)
+            self.track("model_download_failed", dict(props, reason="cancelled"))
+            self._finish(name, MISSING, "", done)   # not an error: the card offers Download again
             return
         except BaseException as e:                  # noqa: B902 - a worker must always finish
             reason, msg = failure_message(e)
@@ -580,6 +639,39 @@ class DownloadManager:
                     if not waiting:
                         self._listeners.pop(name, None)
 
+    def cancel(self, name):
+        """Stop a running download that can be stopped (the Armenian model's): it keeps what it has
+        and the next start resumes. True when the request was made, False for any other model or
+        when nothing is downloading."""
+        name = self.normalize(name)
+        if self.kind(name) != HY:
+            return False
+        with self._lock:
+            if self._states.get(name) != DOWNLOADING:
+                return False
+            self._cancels.add(name)
+        try:
+            speech_hy.request_cancel()
+        except Exception:
+            pass
+        return True
+
+    def refresh_catalog(self, force=False):
+        """Look for the Armenian model's manifest entry (once a day at most, never in Privacy mode):
+        blocking, worker threads only. Emits ("catalog",) and returns True when the model's
+        listing changed - the pages then read speech_hy.listed() again."""
+        refresh = getattr(self._ops, "refresh_catalog", None)
+        if refresh is None:
+            return False
+        try:
+            changed = bool(refresh(force))
+        except Exception:
+            logger.debug("Model catalog refresh failed", exc_info=True)
+            return False
+        if changed:
+            self._notify("catalog")
+        return changed
+
     # ── remove ────────────────────────────────────────────────────────────────
     def remove(self, name):
         name = self.normalize(name)
@@ -648,6 +740,7 @@ def _build_qt_class():
         removed = Signal(str, bool, str)              # name, ok, msg
         state_changed = Signal(str, str)              # name, state
         scanned = Signal()
+        catalog_changed = Signal()                    # speech_hy.listed() may have changed (refresh_catalog)
         hardware_ready = Signal(object)               # hardware.HardwareSnapshot
         _relay = Signal(object)                       # worker -> GUI thread
 
@@ -661,7 +754,7 @@ def _build_qt_class():
             self._hw_again = False
             self._relay.connect(self._deliver, Qt.QueuedConnection)
             if ops is None:
-                ops = ModelOps(unload_whisper=self._unload_whisper)
+                ops = ModelOps(unload_whisper=self._unload_whisper, privacy=self._privacy_on)
             if track is None and app is not None:
                 track = getattr(app, "track", None)
             self.core = DownloadManager(ops=ops, track=track, notify=self._post, spawn=self._spawn)
@@ -683,6 +776,8 @@ def _build_qt_class():
                 self.removed.emit(*args)
             elif what == "scanned":
                 self.scanned.emit()
+            elif what == "catalog":
+                self.catalog_changed.emit()
             elif what == "hardware":                   # a probe finished
                 self._hw_running = False
                 if args[0] is not None:
@@ -702,6 +797,10 @@ def _build_qt_class():
             if rec is not None and hasattr(rec, "unload_model"):
                 rec.unload_model(name)
 
+        def _privacy_on(self):
+            cfg = getattr(self._app, "cfg", None)
+            return bool(cfg.get("privacy_mode")) if isinstance(cfg, dict) else False
+
         def _on_gui_thread(self):
             return threading.get_ident() == self._gui_ident
 
@@ -711,6 +810,16 @@ def _build_qt_class():
 
         def remove(self, name):
             return self.core.remove(name)
+
+        def cancel(self, name):
+            """Stop a running Armenian-model download (False for any other model)."""
+            return self.core.cancel(name)
+
+        def refresh_catalog(self, force=False):
+            """Look for the Armenian model's manifest entry on a worker (at most once a day, never
+            in Privacy mode, never at startup): call it when a page that would list the model
+            opens. catalog_changed fires when speech_hy.listed() changed."""
+            self._spawn(self.core.refresh_catalog, force)
 
         def scan(self, names=None):
             self.core.scan(names)

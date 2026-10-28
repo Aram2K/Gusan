@@ -55,6 +55,24 @@ def delete(index):
     return False
 
 
+def delete_entries(entries):
+    """Remove these entries (dicts as ``load()`` returned them) from the saved history - the first
+    equal one for each, so two dictations of the same words at the same second go one at a time.
+    Nothing else is touched. Returns how many were removed."""
+    removed = 0
+    with _write_lock:
+        current = load()
+        for entry in entries or []:
+            for i, e in enumerate(current):
+                if e == entry:
+                    del current[i]
+                    removed += 1
+                    break
+        if removed:
+            save_all(current)
+    return removed
+
+
 def _export_entries(entries=None):
     if entries is None:
         return load()

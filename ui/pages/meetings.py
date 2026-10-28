@@ -64,7 +64,20 @@ Integration notes for Wave 4
   signals changed / connected / disconnected / connecting / error.
 * ``AppController.record_from_calendar(m)`` can route here:
   ``show_main("meetings", record=True, title=m["title"], attendees=m["others"],
-  calendar_event_id=m["id"])`` - the page runs the Pro gate and consent.
+  calendar_event_id=m["id"], agenda=...)`` - the page runs the Pro gate and consent.
+  (It also opens here, with the start card filled in, when a calendar recording
+  could not start, and when a "Coming up" row is pressed.)
+* Google Calendar (docs/redesign/google-calendar-spec.md, decisions 11, 14, 16, 17):
+  every Connect button goes through ``MeetingsPage.connect_calendar()``, which asks
+  with the disclosure Google requires BEFORE the browser opens ("Not now" does
+  nothing). "Coming up" shows today and tomorrow in day groups (a weekday name
+  later), five meetings and "Show more" (up to 20); a row shows the time ("in 5 min"
+  / "Now"), the title, the call type, who is on it, a Join link (https only) and the
+  bell, and pressing it fills the start card (``start_from_meeting``). The start card
+  shows the invite's agenda - plain text the user can edit or clear - and passes it
+  to ``session.start(agenda=...)`` with the title and names; Record then tells the
+  controller (``note_calendar_start``) so that meeting is not asked about again. The
+  muted line under the list and in the rail is ``calendar.status``.
   ``show_meeting`` / tray "Record Meeting" / IPC: ``show_main("meetings")``
   (the live view opens by itself while a meeting records).
 * Live view "Open Live Assistant" (Pro) opens and never hides the card:
@@ -72,10 +85,16 @@ Integration notes for Wave 4
   ``app.live_assist.open_card()``, else ``toggle_live_assist()`` - the same
   path as the Live Assistant page.
 * Telemetry: only existing names are sent (meeting_exported with target
-  clipboard / word / markdown / notion / audio). A delete sends nothing: to
-  count deletes, add ``meeting_deleted`` to telemetry.ALLOWED_EVENTS and the
-  server allow-list first (tests/test_telemetry.py checks every call site), then
-  track it from apply_delete in meeting_views.py.
+  clipboard / word / markdown / notion / audio) and ``meeting_deleted`` (a count and
+  where it came from: row / selection / key / live / notes; never a name) from a delete in
+  a list (ui/pages/meeting_delete.py) or in the open meeting. It is in telemetry.ALLOWED_EVENTS
+  and in the server's list in the source; the server drops it until that function is deployed.
+* Delete from the list: a trash icon on each row (hover / keyboard), Select to tick
+  several, the Delete key; one question (mini_prompt.confirm), then the folder
+  moves to meetings/.trash for ten seconds of Undo (meeting_trash.py; the "Deleted 3
+  meetings - Undo" toast floats over the bottom of the page, in sight however far the
+  list is scrolled). The open
+  meeting's own Delete (meeting_views.py) asks the same question and deletes at once.
 * Audio export writes MP3 (or WAV), not the mockup's .m4a (audio_export can't);
   the menu says ".mp3". Play plays the recording inside the app
   (ui/components/audio_player.py, QtMultimedia): the parts of a continued
@@ -85,18 +104,22 @@ Integration notes for Wave 4
 import logging
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from PySide6.QtCore import QEvent, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPen, QPixmap, QRadialGradient
-from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QComboBox, QFrame, QHBoxLayout, QLabel,
-                               QLineEdit, QPushButton, QRadioButton, QScrollArea, QSizePolicy,
-                               QStackedWidget, QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtCore import QEvent, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import (QColor, QDesktopServices, QGuiApplication, QIcon, QKeySequence, QPainter, QPen,
+                           QPixmap, QRadialGradient, QShortcut)
+from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QComboBox, QFrame, QGraphicsOpacityEffect,
+                               QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QRadioButton,
+                               QScrollArea, QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
+import invite_context
+import live_context
 import notion_export
 from ui import notion_sheet, theme
 from ui.components import (Button, Card, Chip, Divider, IconButton, PageHeader, ProTag, SettingRow,
-                           SettingsRail, Toggle, icons, label)
+                           SettingsRail, Toggle, icons, label, mini_prompt, row_actions)
+from ui.pages import meeting_delete
 from ui.pages import meeting_views as views
 from ui.pages.meeting_views import (AUDIO_MODES, LANGS, NOTICE_TEXT, UPSELL_RECORD, BgRunner, ElidedLabel,
                                     Faces, call_mark, call_name, dot_label, dot_pixmap, fmt_duration, fmt_when,
@@ -105,7 +128,25 @@ from ui.pages.meeting_views import (AUDIO_MODES, LANGS, NOTICE_TEXT, UPSELL_RECO
 logger = logging.getLogger("transcribe")
 
 ASK_KEY = "calendar_ask_to_record"
-LINK_ONLY_KEY = "calendar_only_with_link"
+LINK_ONLY_KEY = "calendar_only_with_link"       # "Only meetings with other people" (the key keeps its old name)
+# The disclosure Google asks for, shown before the browser opens (every Connect button).
+CONNECT_TITLE = "Connect Google Calendar"
+CONNECT_BODY = (
+    "Gusan reads your events' title, time, people, call link and description. Read-only.\n"
+    "It uses them to show Coming up, remind you to record and name your meeting.\n"
+    "They stay on this computer, except a meeting's title, names and agenda, which go to the AI "
+    "when you use Live Assistant or AI notes.\n"
+    "Disconnect any time. Details: gusan.aibuben.xyz/privacy")
+# When the grant ran out (Google's 7-day limit while the app is in Testing, or revoked in the
+# Google account): shown on the Connect card and in the rail until the next connect.
+EXPIRED_NOTE = "Calendar access expired. Connect again."
+COMING_FIRST = 5                # "Coming up" rows before "Show more"
+COMING_MAX = 20
+# Coming up's own style (the page's shared sheet is views.page_qss): a meeting row you can press.
+_CALENDAR_QSS = """
+QFrame[gusan="upRow"][focusVisible="true"] { border: 2px solid %s; }
+QFrame[gusan="upRow"]:hover { background: %s; }
+"""
 CONSENT_KEY = "meeting_consent_reminder"
 NOTES_KEY = "meeting_notes_model"
 MANAGED = "managed"            # actions.API_MANAGED_ID
@@ -126,6 +167,24 @@ def _now_ts():
 
 def _utcnow():
     return datetime.now(timezone.utc)
+
+
+def _service_status(cal):
+    """The calendar service's muted line ("Paused in Privacy mode." ...), "" when it has none."""
+    fn = getattr(cal, "status_text", None)
+    try:
+        return str(fn() or "") if callable(fn) else ""
+    except Exception:
+        return ""
+
+
+def _paused_text():
+    """calendar_service.STATUS_PAUSED_TEXT ("Paused in Privacy mode.")."""
+    try:
+        from calendar_service import STATUS_PAUSED_TEXT
+        return STATUS_PAUSED_TEXT
+    except Exception:
+        return "Paused in Privacy mode."
 
 
 def _ensure_consent(parent, app):
@@ -199,7 +258,7 @@ class MeetingsPage(QWidget):
         self._downloads = None
         self._view = None
         self.setAccessibleName("Meetings")
-        self.setStyleSheet(views.page_qss())
+        self.setStyleSheet(views.page_qss() + _CALENDAR_QSS % (theme.qss_color("blue-l"), theme.qss_color("bg")))
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
@@ -338,8 +397,9 @@ class MeetingsPage(QWidget):
         if cal is not None and cal is not self._calendar and self._ready:
             self._calendar = cal
             for name, slot in (("changed", self._on_calendar_changed), ("connected", self._on_calendar_state),
-                               ("disconnected", self._on_calendar_state),
+                               ("disconnected", self._on_calendar_disconnected),
                                ("connecting", self.list_view.set_connecting),
+                               ("status", self.list_view.set_calendar_status),
                                ("error", self.list_view.calendar_error)):
                 sig = getattr(cal, name, None)
                 if sig is None:
@@ -354,6 +414,34 @@ class MeetingsPage(QWidget):
             return cal if cal.available else None
         except Exception:
             return None
+
+    def connect_calendar(self):
+        """Every Connect button's one door. Google asks that the app says what it reads
+        and why BEFORE the sign-in opens, so a card says it first; "Not now" does
+        nothing. (In Privacy mode there is nothing to ask - the service says it is
+        paused.) True when the browser sign-in started."""
+        cal = self.calendar()
+        if cal is None or getattr(cal, "is_connecting", False):
+            return False
+        if not self.cfg().get("privacy_mode") and not mini_prompt.ask(
+                self, CONNECT_TITLE, CONNECT_BODY, "Connect", "Not now", icon="calendar"):
+            return False
+        try:
+            return bool(cal.connect_calendar())
+        except Exception:
+            logger.warning("connect_calendar failed", exc_info=True)
+            return False
+
+    def start_from_meeting(self, m):
+        """A "Coming up" row was pressed: the start card, filled with that meeting
+        (title, people, agenda) and in view, so Record names it."""
+        ctx = invite_context.from_meeting(m)
+        self.list_view.start_card.prefill(title=ctx["title"] or "Meeting", attendees=ctx["others"],
+                                          calendar_event_id=ctx["event_id"], agenda=ctx["agenda"])
+        self.show_list()
+        holder = self._holders.get("list")
+        if holder is not None:
+            holder.verticalScrollBar().setValue(0)
 
     def downloads(self):
         """The app's model downloads (app.downloads), bound once so the
@@ -437,14 +525,25 @@ class MeetingsPage(QWidget):
     def list_changed(self):
         self.list_view.refresh()
 
+    def forget_vanished_notes(self):
+        """The meeting open in the notes view may have been deleted from another page (the Live
+        Assistant's Past sessions) while this page was away: show the list, not an empty meeting."""
+        import os
+        folder = self.notes_view.folder
+        if folder and not os.path.isdir(folder):
+            self.notes_view.forget_folder(folder)
+            if self._view == "notes":
+                self.show_list(refresh=True)
+
     def on_open(self, **opts):
         self.session()
         self.calendar()
         self.downloads()
+        self.forget_vanished_notes()
         phase = self.phase()
         folder = opts.get("folder") or opts.get("meeting")      # Live Assistant's Past sessions send meeting=
         view = opts.get("view")
-        prefill = {k: opts[k] for k in ("title", "attendees", "calendar_event_id") if k in opts}
+        prefill = {k: opts[k] for k in ("title", "attendees", "calendar_event_id", "agenda") if k in opts}
         if prefill:
             self.list_view.start_card.prefill(**prefill)
         if folder:
@@ -518,18 +617,26 @@ class MeetingsPage(QWidget):
             return False
         cfg = self.cfg()
         event_id = card.calendar_event_id
+        agenda = card.agenda()
+        people = card.people.names()
         try:
-            ok, _code, msg = s.start(title=card.title(), attendees=", ".join(card.people.names()),
-                                     audio_mode=card.audio_mode(), language=card.language(),
-                                     notes_engine=cfg.get(NOTES_KEY) or None,
-                                     source="calendar" if event_id else "page",
-                                     calendar_event_id=event_id or None)
+            # The agenda goes with it only when the card shows it (the user can read it
+            # and edit it there); the notes then get it with the title and the names.
+            ok, _code, msg = live_context.start_session(
+                s, agenda=agenda, title=card.title(), attendees=", ".join(people),
+                audio_mode=card.audio_mode(), language=card.language(),
+                notes_engine=cfg.get(NOTES_KEY) or None,
+                source="calendar" if event_id else "page",
+                calendar_event_id=event_id or None)
         except Exception as e:
             logger.warning("Starting the meeting failed", exc_info=True)
             ok, msg = False, str(e)
         if not ok:
             card.show_error(msg or "Couldn't start the recording.")
             return False
+        if event_id:        # that meeting counts as asked: no reminder for it any more
+            self.call("note_calendar_start", {"event_id": event_id, "agenda": agenda,
+                                              "others": people}, "start_card", False)
         card.reset()
         self.show_live()
         return True
@@ -561,6 +668,7 @@ class MeetingsPage(QWidget):
         """The background speaker pass of a meeting (the names that come after its
         notes) was queued, started or ended. The meeting open in the notes view
         shows its banner meanwhile and, once the pass ended, its new transcript."""
+        self.list_view.meetings.sync_blocked()          # "Finishing up": it can't be deleted until it ends
         if self._view != "notes" or not self.notes_view.folder or not folder or not self.is_same(folder):
             return
         s = self._session
@@ -588,6 +696,14 @@ class MeetingsPage(QWidget):
         self.list_view.set_upcoming(rows)
 
     def _on_calendar_state(self, *_):
+        """calendar.connected: whatever error the last tries left is over."""
+        self.list_view.calendar_error("")
+        self.list_view.sync_calendar()
+
+    def _on_calendar_disconnected(self, reason="", *_):
+        """calendar.disconnected: an old error goes away; an expiry says so on the Connect
+        card and in the rail (a tray balloon alone is easy to miss)."""
+        self.list_view.calendar_error(EXPIRED_NOTE if reason == "expired" else "", tone="muted")
         self.list_view.sync_calendar()
 
     # ── visibility ──
@@ -671,6 +787,10 @@ class ListView(QWidget):
     def items(self):
         return list(self._items)
 
+    def forget(self, folder):
+        """A meeting left the library (deleted from the list): a re-render must not bring it back."""
+        self._items = [m for m in self._items if m.get("dir") != folder]
+
     def sync_session(self):
         self.live_strip.sync()
         self.meetings.set_items(self._items)
@@ -694,11 +814,19 @@ class ListView(QWidget):
         self.connect_card.sync()
         self.coming_up.setVisible(connected)
         self.rail.sync_calendar()
+        self.coming_up.set_status(_service_status(cal) if connected else "")
         if connected:
             self.set_upcoming(None)
         else:
             self.coming_up.set_meetings([])
-            self.start_card.set_calendar_meeting(None)
+            # A disconnect releases a picked meeting; with no calendar service at all
+            # (nothing was ever connected) there is nothing to release.
+            self.start_card.set_calendar_meeting(None, () if cal is not None else None)
+
+    def set_calendar_status(self, text=""):
+        """calendar.status: one muted line under "Coming up" (and in the rail's hint)."""
+        self.coming_up.set_status(text)
+        self.rail.sync_calendar()
 
     def set_upcoming(self, rows=None):
         cal = self.page.calendar()
@@ -717,14 +845,16 @@ class ListView(QWidget):
             current = cal.current_meeting()
         except Exception:
             current = None
-        self.start_card.set_calendar_meeting(current)
+        self.start_card.set_calendar_meeting(current, {m.get("id") for m in rows or []})
 
     def set_connecting(self, on):
         self.connect_card.set_connecting(on)
         self.rail.sync_calendar()
 
-    def calendar_error(self, text):
-        self.connect_card.set_error(text)
+    def calendar_error(self, text, tone="red"):
+        """A line for the Connect card and the rail while the calendar isn't connected
+        ("" clears it): the last Connect's error, or that access expired."""
+        self.connect_card.set_error(text, tone)
         self.rail.set_calendar_error(text)
 
 
@@ -893,12 +1023,13 @@ class PersonChip(QPushButton):
         self.setFocusPolicy(Qt.TabFocus)
         theme.focus_ring(self)
         self.setAccessibleName("Remove %s" % name)
-        self.setToolTip("Remove %s" % name)
+        self.setToolTip(theme.plain_tip("Remove %s" % name))     # a name from an invite is text, never markup
         h = QHBoxLayout(self)
         h.setContentsMargins(2, 0, 10, 0)
         h.setSpacing(6)
         h.addWidget(Faces([name], 22, me=me, parent=self), 0, Qt.AlignVCenter)
         t = tlabel(name, 12.5, 600, "text2", parent=self)
+        t.setTextFormat(Qt.PlainText)
         t.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         h.addWidget(t, 0, Qt.AlignVCenter)
         self.setFixedWidth(h.sizeHint().width())
@@ -1011,7 +1142,7 @@ class PeopleField(QFrame):
         hidden = names[len(shown):]
         if hidden:
             self.more.setText("+%d" % len(hidden))
-            self.more.setToolTip(", ".join(hidden))
+            self.more.setToolTip(theme.plain_tip(", ".join(hidden)))
             self.more.setAccessibleName("%d more: %s" % (len(hidden), ", ".join(hidden)))
             self.more.show()
         else:
@@ -1104,7 +1235,9 @@ class StartCard(QFrame):
         theme.elevate(self, "lg")
         self.calendar_event_id = ""
         self._edited = False
+        self._picked = False            # a "Coming up" row (or a reminder) filled it: kept until that meeting is over
         self._cal_meeting_id = ""
+        self._has_agenda = False        # the invite had an agenda (the box shows it)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 24, 24, 24)
         lay.setSpacing(18)
@@ -1143,6 +1276,38 @@ class StartCard(QFrame):
         self.people = PeopleField(page, self)
         self.people.changed.connect(self._on_people_changed)
         form.addWidget(self.people)
+
+        # The invite's agenda (a meeting from the calendar that has one): plain text
+        # the user can read, edit or clear. It goes into the notes' header and to Live
+        # Assistant with the title and the names - never anything the user can't see.
+        self.agenda_box = QWidget(self)
+        ab = QVBoxLayout(self.agenda_box)
+        ab.setContentsMargins(0, 0, 0, 0)
+        ab.setSpacing(6)
+        ah = QHBoxLayout()
+        ah.setContentsMargins(0, 0, 0, 0)
+        ah.setSpacing(8)
+        ah.addWidget(tlabel("Agenda from your invite", 12.5, 600, "muted", parent=self.agenda_box))
+        ah.addStretch(1)
+        self.agenda_clear = Button("Clear", "link", "s", parent=self.agenda_box)
+        self.agenda_clear.setProperty("tone", "muted")
+        self.agenda_clear.setFont(theme.font(12.5, 600))
+        self.agenda_clear.setFixedHeight(22)
+        self.agenda_clear.setAccessibleName("Clear the agenda")
+        self.agenda_clear.clicked.connect(self._clear_agenda)
+        ah.addWidget(self.agenda_clear)
+        ab.addLayout(ah)
+        self.agenda_edit = QPlainTextEdit(self.agenda_box)
+        self.agenda_edit.setProperty("gusan", "notesBox")
+        self.agenda_edit.setAccessibleName("Agenda from your invite")
+        self.agenda_edit.setFont(theme.font(13.5))
+        self.agenda_edit.setTabChangesFocus(True)
+        self.agenda_edit.setFixedHeight(84)
+        self.agenda_edit.setToolTip("Goes into your notes and to Live Assistant. Edit it or clear it.")
+        self.agenda_edit.textChanged.connect(self._on_agenda_edited)
+        ab.addWidget(self.agenda_edit)
+        self.agenda_box.hide()
+        form.addWidget(self.agenda_box)
 
         fields = QVBoxLayout()
         fields.setSpacing(10)
@@ -1200,6 +1365,13 @@ class StartCard(QFrame):
     def language(self):
         return self.lang_combo.currentData() or None
 
+    def agenda(self):
+        """The agenda to start with: what the box shows (the user's own edit of the
+        invite's text), "" when there is none or no calendar meeting is on the card."""
+        if not (self.calendar_event_id and self._has_agenda):
+            return ""
+        return invite_context.clip_agenda(self.agenda_edit.toPlainText())
+
     # ── sync ──
     def sync_settings(self):
         cfg = self.page.cfg()
@@ -1217,16 +1389,24 @@ class StartCard(QFrame):
             return
         self.title_edit.setText(_default_title())
 
-    def set_calendar_meeting(self, m):
-        """Fill the card from the meeting on now (or starting within 5 min)."""
+    def set_calendar_meeting(self, m, live_ids=None):
+        """Fill the card from the meeting on now (or starting within 5 min).
+        ``live_ids``: the ids of the meetings still in the list. A meeting the user
+        picked (a "Coming up" row) stays on the card while it is in it, whichever
+        meeting is on now; once it is over the card follows the calendar again."""
         if self._edited:
             return
+        if self._picked:
+            if live_ids is None or self._cal_meeting_id in live_ids:
+                return                  # the meeting the user picked stays until it is over
+            self._picked = False        # it ended or is gone: follow the calendar again
         if not m:
             if self.calendar_event_id and self._cal_meeting_id:
                 self.calendar_event_id = ""
                 self._cal_meeting_id = ""
                 self.cal_sub.hide()
                 self.people.set_names([], "Add people (optional)")
+                self._set_agenda("")
                 self.sync_default(force=True)
             return
         if m.get("id") == self._cal_meeting_id:
@@ -1241,6 +1421,7 @@ class StartCard(QFrame):
         if not isinstance(others, list):
             others = [p.strip() for p in str(m.get("people") or "").split(",") if p.strip() and "+" not in p]
         self.people.set_names(others, "Add people")
+        self._set_agenda("" if m.get("private") else m.get("agenda"))
 
     def _sync_cal_time(self, m):
         when = ""
@@ -1252,8 +1433,8 @@ class StartCard(QFrame):
             when = start.astimezone().strftime("%H:%M") if hasattr(start, "astimezone") else ""
         self.cal_sub_label.setText("From your calendar · %s" % when if when else "From your calendar")
 
-    def prefill(self, title=None, attendees=None, calendar_event_id=None):
-        """Fill the card from outside (the calendar reminder)."""
+    def prefill(self, title=None, attendees=None, calendar_event_id=None, agenda=None):
+        """Fill the card from outside (the calendar reminder, a "Coming up" row)."""
         if title is not None:
             self.title_edit.setText(str(title))
         if attendees is not None:
@@ -1266,15 +1447,26 @@ class StartCard(QFrame):
             self.cal_sub.setVisible(bool(self.calendar_event_id))
             if self.calendar_event_id:
                 self.cal_sub_label.setText("From your calendar")
-        self._edited = True
+            if agenda is None:
+                self._set_agenda("")            # another meeting: not the last one's agenda
+        if agenda is not None:
+            self._set_agenda(agenda)
+        if calendar_event_id:
+            # A picked calendar meeting: kept until it is over, or until the user types
+            # (programmatic setText / set_names don't count as typing).
+            self._picked, self._edited = True, False
+        else:
+            self._edited = True
 
     def reset(self):
         """After a recording started: back to a fresh card."""
         self._edited = False
+        self._picked = False
         self.calendar_event_id = ""
         self._cal_meeting_id = ""
         self.cal_sub.hide()
         self.people.set_names([], "Add people (optional)")
+        self._set_agenda("")
         self._mode_pick = None                  # the next meeting: Both sides again
         self.mode_combo.set_mode(_default_mode())
         self.sync_default(force=True)
@@ -1283,6 +1475,26 @@ class StartCard(QFrame):
     def show_error(self, text):
         self.error_label.setText(text or "")
         self.error_label.setVisible(bool(text))
+
+    def _set_agenda(self, text):
+        """Fill the agenda box (the invite's text); it shows only for a calendar
+        meeting that has one."""
+        text = invite_context.clip_agenda(text)
+        self.agenda_edit.blockSignals(True)
+        self.agenda_edit.setPlainText(text)
+        self.agenda_edit.blockSignals(False)
+        self._has_agenda = bool(text)
+        self._sync_agenda_box()
+
+    def _sync_agenda_box(self):
+        self.agenda_box.setVisible(bool(self.calendar_event_id and self._has_agenda))
+
+    def _on_agenda_edited(self):
+        self._edited = True                     # what the user changed is not replaced by a refresh
+
+    def _clear_agenda(self):
+        self._set_agenda("")
+        self._edited = True
 
     # ── user actions ──
     def _on_title_edited(self, _t):
@@ -1317,6 +1529,9 @@ class ConnectCard(Card):
     def __init__(self, page, parent=None):
         super().__init__(parent)
         self.page = page
+        self._connecting = False
+        self._error = ""                        # shown until the next connect (set_error)
+        self._error_tone = "red"
         self.setAccessibleName("Connect Google Calendar")
         self.layout().setContentsMargins(14, 14, 16, 14)
         row = QHBoxLayout()
@@ -1341,31 +1556,37 @@ class ConnectCard(Card):
 
     def sync(self):
         cal = self.page.calendar()
+        if cal is not None and getattr(cal, "is_connected", False):
+            self._error = ""                    # connected: an old error is over
         self.set_connecting(bool(cal is not None and getattr(cal, "is_connecting", False)))
 
     def set_connecting(self, on):
         self.connect_btn.setVisible(not on)
         self.cancel_btn.setVisible(bool(on))
-        set_tone = views.set_tone
+        self._connecting = bool(on)
         if on:
+            self._error = ""                    # a new try: the last one's error is over
+        self._show_line()
+
+    def set_error(self, text, tone="red"):
+        """The line under the title for a Connect error or an expired grant; it stays
+        until the next connect (or "" clears it)."""
+        self._error, self._error_tone = str(text or ""), tone
+        self._show_line()
+
+    def _show_line(self):
+        if self._connecting and not self._error:
             self.sub.setText("Waiting for Google… Finish in your browser.")
-            set_tone(self.sub, "muted")
+            views.set_tone(self.sub, "muted")
+        elif self._error:
+            self.sub.setText(self._error)
+            views.set_tone(self.sub, self._error_tone)
         else:
             self.sub.setText("See your meetings and get a nudge to record.")
-            set_tone(self.sub, "muted")
-
-    def set_error(self, text):
-        if text:
-            self.sub.setText(text)
-            views.set_tone(self.sub, "red")
+            views.set_tone(self.sub, "muted")
 
     def _connect(self):
-        cal = self.page.calendar()
-        if cal is not None:
-            try:
-                cal.connect_calendar()
-            except Exception:
-                logger.warning("connect_calendar failed", exc_info=True)
+        self.page.connect_calendar()            # the disclosure first, then the browser
 
     def _cancel(self):
         cal = self.page.calendar()
@@ -1433,13 +1654,37 @@ class BellButton(QToolButton):
                                  1.9 if on else 1.7)))
 
 
+def _day_word(m, now):
+    """"Today", "Tomorrow" or "Thursday": the day a meeting is on, in local time (one
+    that began yesterday and still runs counts as today)."""
+    try:
+        start = m["start"].astimezone()
+        today = now.astimezone().date()
+    except Exception:
+        return "Today"
+    if start.date() <= today:
+        return "Today"
+    if start.date() == today + timedelta(days=1):
+        return "Tomorrow"
+    return start.strftime("%A")
+
+
 class UpcomingRow(QFrame):
+    """One meeting under "Coming up": time (and "in 5 min" / "Now"), title, the call
+    type and who is on it, a Join link (https only) and the bell. Pressing the row
+    fills the start card with it; there is no Record button here (calm)."""
+
+    clicked = Signal(object)
+
     def __init__(self, page, m, first, last, nxt, now, parent=None):
         super().__init__(parent)
         self.page = page
         self.meeting = m
         self.setProperty("gusan", "upRow")
         self.setProperty("next", bool(nxt))
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.TabFocus)
+        theme.focus_ring(self)
         if nxt:
             theme.elevate(self, "item")
         lay = QHBoxLayout(self)
@@ -1462,9 +1707,10 @@ class UpcomingRow(QFrame):
         self.time_label = tlabel(parts.get("time", ""), 14.5, 700, "ink", parent=tcol, tabular=True)
         self.time_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         tl.addWidget(self.time_label)
-        rel = parts.get("rel") or parts.get("day") or ""
-        self.rel_label = tlabel(rel, 11.5, 700 if nxt else 600, "blue" if (nxt and parts.get("rel")) else "muted",
-                                parent=tcol)
+        # The day is the group header's job now; this line is "in 5 min" or "Now".
+        rel = parts.get("rel") or ""
+        self.rel_label = tlabel(rel, 11.5, 700 if (nxt or rel == "Now") else 600,
+                                "blue" if (rel == "Now" or (nxt and rel)) else "muted", parent=tcol)
         self.rel_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.rel_label.setVisible(bool(rel))
         tl.addWidget(self.rel_label)
@@ -1493,11 +1739,30 @@ class UpcomingRow(QFrame):
             meta.addWidget(ml, 1)
             body.addLayout(meta)
         lay.addLayout(body, 1)
+        names = [str(n) for n in (m.get("others") or []) if n]
+        self.setToolTip(theme.plain_tip(", ".join(names)))      # everyone, when the label says "+2"
+        link = str(m.get("link") or "").strip()
+        self.join_button = None
+        self.join_link = ""
+        if link.lower().startswith("https://"):            # the only kind a Join opens
+            self.join_link = link
+            self.join_button = Button("Join", "link", "s", parent=self)
+            self.join_button.setFont(theme.font(12.5, 600))
+            self.join_button.setAccessibleName("Join %s" % title)
+            try:
+                from urllib.parse import urlsplit
+                self.join_button.setToolTip(theme.plain_tip(urlsplit(link).hostname or ""))
+            except ValueError:
+                pass
+            self.join_button.clicked.connect(lambda _=False: self._join())
+            lay.addWidget(self.join_button, 0, Qt.AlignVCenter)
         self.bell = BellButton(title, not m.get("muted"), self)
         self.bell.toggled.connect(self._on_bell)
         lay.addWidget(self.bell, 0, Qt.AlignVCenter)
         self.setMinimumHeight(62)
-        self.setAccessibleName("%s, %s" % (title, parts.get("time", "")))
+        who = (" with " + people) if people else ""
+        self.setAccessibleName("%s, %s%s" % (title, parts.get("time", ""), who))
+        self.setAccessibleDescription("Press to fill the start card with this meeting")
 
     def _on_bell(self, on):
         cal = self.page.calendar()
@@ -1508,9 +1773,31 @@ class UpcomingRow(QFrame):
         except Exception:
             logger.warning("set_muted failed", exc_info=True)
 
+    def _join(self):
+        try:
+            QDesktopServices.openUrl(QUrl(self.join_link))
+        except Exception:
+            logger.warning("Couldn't open the call link", exc_info=True)
+
+    def mousePressEvent(self, e):
+        e.accept()                                          # so the release comes here
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and self.rect().contains(e.position().toPoint()):
+            self.clicked.emit(self.meeting)
+
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+            self.clicked.emit(self.meeting)
+            return
+        super().keyPressEvent(e)
+
 
 class ComingUp(QWidget):
-    """Today's meetings from Google Calendar as a simple time line."""
+    """Your meetings from Google Calendar, today and tomorrow, as a simple time line:
+    a "Today" / "Tomorrow" header (a weekday name later), the first five meetings and
+    "Show more" for the rest (up to 20), one muted line when the calendar can't be
+    read or is paused."""
 
     def __init__(self, page, parent=None):
         super().__init__(parent)
@@ -1531,22 +1818,51 @@ class ComingUp(QWidget):
         self._rows = QVBoxLayout()
         self._rows.setSpacing(0)
         lay.addLayout(self._rows)
-        self.empty = label("Nothing else on your calendar today.", "muted", self)
+        self.more = Button("Show more", "link", "s", parent=self)
+        self.more.setFont(theme.font(12.5, 600))
+        self.more.clicked.connect(self._toggle_more)
+        self.more.hide()
+        lay.addWidget(self.more, 0, Qt.AlignLeft)
+        self.empty = label("No meetings coming up.", "muted", self)
         self.empty.setContentsMargins(6, 4, 0, 4)
         self.empty.hide()
         lay.addWidget(self.empty)
-        self.rows = []
+        self.status = label("", "muted", self, wrap=True)
+        self.status.setContentsMargins(6, 0, 0, 0)
+        self.status.hide()
+        lay.addWidget(self.status)
+        self.rows = []              # the meeting rows (the day headers are not in it)
+        self.headers = []
+        self._all = []
+        self._expanded = False
         self._key = None
+
+    def set_status(self, text):
+        """The muted line under the list ("" hides it)."""
+        text = str(text or "")
+        self.status.setText(text)
+        self.status.setVisible(bool(text))
+
+    def _toggle_more(self):
+        self._expanded = not self._expanded
+        self._key = None                                    # a different slice: rebuild
+        self.set_meetings(self._all)
 
     def set_meetings(self, meetings):
         now = _utcnow()
-        meetings = list(meetings or [])
-        key = tuple((m.get("id"), str(m.get("start")), m.get("title"), m.get("people"), m.get("call_type"))
-                    for m in meetings) + (now.strftime("%H:%M"),)
-        if key == self._key and len(self.rows) == len(meetings):
+        meetings = list(meetings or [])[:COMING_MAX]
+        self._all = meetings
+        shown = meetings if self._expanded else meetings[:COMING_FIRST]
+        # "No meetings coming up." only after a read: with Privacy mode on (or no
+        # network) at launch nothing was read yet, and an empty list says nothing.
+        read = bool(getattr(self.page.calendar(), "has_read", True))
+        key = tuple((m.get("id"), str(m.get("start")), m.get("title"), m.get("people"), m.get("call_type"),
+                     m.get("link"), len(m.get("others") or [])) for m in shown) + (
+            now.strftime("%H:%M"), len(meetings), read)
+        if key == self._key and len(self.rows) == len(shown):
             # Only a bell changed (set_muted re-emits the list): update the
             # bells in place, so the one just toggled keeps keyboard focus.
-            for row, m in zip(self.rows, meetings):
+            for row, m in zip(self.rows, shown):
                 row.meeting = m
                 row.bell.blockSignals(True)
                 row.bell.setChecked(not m.get("muted"))
@@ -1555,13 +1871,32 @@ class ComingUp(QWidget):
             return
         self._key = key
         views.clear_layout(self._rows)
-        self.rows = []
-        n = len(meetings)
-        for i, m in enumerate(meetings):
-            row = UpcomingRow(self.page, m, i == 0, i == n - 1, i == 0, now, self)
-            self._rows.addWidget(row)
-            self.rows.append(row)
-        self.empty.setVisible(n == 0)
+        self.rows, self.headers = [], []
+        # The meetings sit in day groups; the time line runs inside a group.
+        groups = []
+        for m in shown:
+            day = _day_word(m, now)
+            if groups and groups[-1][0] == day:
+                groups[-1][1].append(m)
+            else:
+                groups.append((day, [m]))
+        index = 0
+        for gi, (day, rows) in enumerate(groups):
+            head = tlabel(day, 12.5, 700, "muted", parent=self)
+            head.setContentsMargins(6, 10 if gi else 2, 0, 4)
+            head.setAccessibleName(day)
+            self._rows.addWidget(head)
+            self.headers.append(head)
+            for i, m in enumerate(rows):
+                row = UpcomingRow(self.page, m, i == 0, i == len(rows) - 1, index == 0, now, self)
+                row.clicked.connect(self.page.start_from_meeting)
+                self._rows.addWidget(row)
+                self.rows.append(row)
+                index += 1
+        self.empty.setVisible(not shown and read)
+        self.more.setVisible(len(meetings) > COMING_FIRST)
+        self.more.setText("Show less" if self._expanded else "Show more")
+        self.more.setAccessibleName("Show fewer meetings" if self._expanded else "Show more meetings")
 
 
 # ── Your meetings ────────────────────────────────────────────────────────────
@@ -1575,14 +1910,25 @@ STATUS = {
 
 class MeetingRow(QAbstractButton):
     """One past meeting: title (dot when the notes are new), date, status,
-    people, length."""
+    people, length. A trash icon at its right end (hover, or the keyboard on the row) deletes it
+    without opening it; while the list is selecting, a check box in front ticks it
+    (MeetingsList; ui/components/row_actions.py)."""
 
-    def __init__(self, page, m, status, first=False, parent=None):
+    def __init__(self, page, m, status, first=False, parent=None, owner=None):
         super().__init__(parent)
         self.page = page
+        self.owner = owner              # the MeetingsList (None: a row on its own)
         self.meeting = m
         self.status = status
         self._first = first
+        self._selected = False
+        self._select_mode = False
+        self._deleting = False
+        self._blocked = ""
+        self._base_name = ""
+        # A button's default policy cannot shrink below its size hint, so one long title made the whole
+        # column (and the page) wider than the window. The title elides; the row may be narrower.
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setFixedHeight(64)
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.TabFocus)
@@ -1590,8 +1936,11 @@ class MeetingRow(QAbstractButton):
         theme.focus_ring(self)
         new = status == "notes_ready" and not m.get("seen", True)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(14, 0, 12, 0)
+        lay.setContentsMargins(14, 0, 6, 0)
         lay.setSpacing(16)
+        self.check = row_actions.RowCheck(self)       # in front of the row while the list is selecting
+        self.check.hide()
+        lay.addWidget(self.check, 0, Qt.AlignVCenter)
         left = QVBoxLayout()
         left.setSpacing(2)
         left.addStretch(1)
@@ -1624,6 +1973,9 @@ class MeetingRow(QAbstractButton):
         holder.setFixedWidth(120)
         holder.setLayout(chip_box)
         chip_box.setContentsMargins(0, 0, 0, 0)
+        self.deleting_label = tlabel("Deleting…", 12.5, 600, "muted", parent=holder)
+        self.deleting_label.hide()                    # takes the chip's place while the folder goes
+        chip_box.addWidget(self.deleting_label)
         lay.addWidget(holder)
         faces_box = QWidget(self)
         faces_box.setFixedWidth(64)
@@ -1635,27 +1987,136 @@ class MeetingRow(QAbstractButton):
         lay.addWidget(faces_box)
         length = fmt_duration(m.get("duration_sec")) if m.get("duration_sec") else ""
         self.length_label = tlabel(length, 13, 400, "text2", parent=self, tabular=True)
-        self.length_label.setFixedWidth(52)
+        self.length_label.setFixedWidth(72)               # "1 h 05 min" fits (it was cut to "h 05 min")
         self.length_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         lay.addWidget(self.length_label)
-        lay.addWidget(icon_label("chev_r", 16, "faint", parent=self), 0, Qt.AlignVCenter)
-        for w in self.findChildren(QWidget):
+        end = QHBoxLayout()                           # the chevron, then the trash icon's place
+        end.setContentsMargins(0, 0, 0, 0)
+        end.setSpacing(4)
+        end.addWidget(icon_label("chev_r", 16, "faint", parent=self), 0, Qt.AlignVCenter)
+        lay.addLayout(end)
+        for w in self.findChildren(QWidget):          # the row takes every click...
             w.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.setAccessibleName(", ".join(x for x in (title, when, length, chip_text) if x))
-        self.clicked.connect(self._open)
+        # ...except the trash icon's: it is pressed on its own and never opens the meeting.
+        self.trash = row_actions.attach_trash(self, end, title, self._ask_delete)
+        self._base_name = ", ".join(x for x in (title, when, length, chip_text) if x)
+        self.setAccessibleName(self._base_name)
+        self.clicked.connect(self._on_click)
 
     def _open(self):
         self.page.open_notes(self.meeting.get("dir"), self.meeting)
 
+    def _on_click(self):
+        """Pressed: open the meeting - or, while the list is selecting, tick it."""
+        if self._deleting:
+            return
+        if self.owner is not None and self.owner.select_mode:
+            self.owner.toggle_row(self, shift=bool(QGuiApplication.keyboardModifiers() & Qt.ShiftModifier))
+            return
+        self._open()
+
+    def _ask_delete(self):
+        if self.owner is not None and not self._deleting:
+            self.owner.ask_delete([self.meeting], "row")
+
     def keyPressEvent(self, e):
-        if e.key() in (Qt.Key_Return, Qt.Key_Enter):
+        key, owner = e.key(), self.owner
+        if key in (Qt.Key_Return, Qt.Key_Enter):
             self.click()
             return
+        if owner is not None:
+            if key == Qt.Key_Delete:
+                owner.key_delete(self)
+                return
+            if key == Qt.Key_A and e.modifiers() & Qt.ControlModifier:
+                owner.select_all()
+                return
+            if key == Qt.Key_Escape and owner.select_mode:
+                owner.leave_select()
+                return
         super().keyPressEvent(e)
+
+    # ── delete / select state (driven by MeetingsList) ──
+    def set_first(self, first):
+        if bool(first) != self._first:
+            self._first = bool(first)
+            self.update()
+
+    def _sync_name(self):
+        name = self._base_name
+        if self._select_mode:
+            name += ", selected" if self._selected else ", not selected"
+        self.setAccessibleName(name)
+
+    def set_select_mode(self, on):
+        self._select_mode = bool(on)
+        self.check.setVisible(self._select_mode)
+        self.trash.reveal.enabled = not self._select_mode
+        self.trash.reveal.refresh(animate=False)
+        if not on:
+            self._selected = False
+            self.check.setChecked(False)
+        self.update()
+        self._sync_name()
+
+    def is_checked(self):
+        return self._selected
+
+    def set_checked(self, on):
+        on = bool(on) and not self._blocked and not self._deleting
+        self._selected = on
+        self.check.setChecked(on)
+        self.update()
+        self._sync_name()
+
+    def blocked(self):
+        return self._blocked
+
+    def set_blocked(self, reason):
+        """Why this meeting can't be deleted right now ("Recording now" / "Finishing up"), or ""."""
+        self._blocked = str(reason or "")
+        self.trash.set_blocked(self._blocked)
+        self.check.setEnabled(not self._blocked)
+        if self._blocked and self._selected:
+            self.set_checked(False)
+        self.trash.reveal.refresh(animate=False)
+
+    def is_deleting(self):
+        return self._deleting
+
+    def set_deleting(self, on):
+        """The folder is on its way to the trash: the row dims, says so, and can't be pressed."""
+        on = bool(on)
+        if on == self._deleting:
+            return
+        self._deleting = on
+        if on:
+            self._selected = False
+            self.check.setChecked(False)
+        for chip in self.findChildren(Chip):
+            chip.setVisible(not on)
+        self.deleting_label.setVisible(on)
+        self.setEnabled(not on)
+        self.trash.setEnabled(not on and not self._blocked)
+        if on:
+            self.trash.reveal.enabled = False
+            self.trash.reveal.refresh(animate=False)
+            fx = QGraphicsOpacityEffect(self)
+            fx.setOpacity(0.5)
+            self.setGraphicsEffect(fx)
+        else:
+            self.setGraphicsEffect(None)
+            self.trash.reveal.enabled = not self._select_mode
+            self.trash.reveal.refresh(animate=False)
+        self.update()
 
     def paintEvent(self, _e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
+        if self._selected:
+            p.setPen(Qt.NoPen)
+            p.setBrush(theme.qcolor("blue-sub"))
+            p.drawRoundedRect(QRectF(self.rect()).adjusted(0, 1, 0, 0), 10, 10)
         if self.underMouse() or self.isDown():
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(15, 23, 42, 10 if not self.isDown() else 16))
@@ -1745,6 +2206,11 @@ class MeetingsList(QWidget):
         head.setSpacing(12)
         head.addWidget(label("Your meetings", "h2", self), 0, Qt.AlignVCenter)
         head.addStretch(1)
+        self.select_button = Button("Select", "ghost", "s", parent=self)
+        self.select_button.setAccessibleName("Select meetings to delete")
+        self.select_button.setToolTip("Select meetings to delete")
+        self.select_button.clicked.connect(lambda _=False: self.enter_select())
+        head.addWidget(self.select_button, 0, Qt.AlignVCenter)
         self.search = QLineEdit(self)
         self.search.setProperty("gusan", "search")
         self.search.setPlaceholderText("Search meetings")
@@ -1760,6 +2226,21 @@ class MeetingsList(QWidget):
         self.search.textChanged.connect(lambda _t: self._search_timer.start())
         head.addWidget(self.search, 0, Qt.AlignVCenter)
         lay.addLayout(head)
+        # Delete from the list: a trash icon on each row, or Select and tick several (see
+        # ui/pages/meeting_delete.py for what happens, and meeting_trash.py for Undo).
+        self.select_mode = False
+        self.selected = set()               # folders ticked while selecting
+        self._anchor = None                 # the folder a Shift-click range starts from
+        self._focus_left = None             # the folder whose row had the keyboard when its delete began
+        self.select_bar = row_actions.SelectionBar(self)
+        self.select_bar.all_clicked.connect(self.select_all)
+        self.select_bar.delete_clicked.connect(self.delete_selected)
+        self.select_bar.cancel_clicked.connect(self.leave_select)
+        lay.addWidget(self.select_bar)
+        self.deleter = meeting_delete.MeetingDeleter(page.app, self, release=self._release_folder, dock=page)
+        self.deleter.removed.connect(self._on_removed)
+        self.deleter.busy.connect(self._on_busy)
+        self.deleter.restored.connect(self._on_restored)      # (its "Deleted 3 meetings - Undo" toast floats over the page)
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(250)
@@ -1769,6 +2250,14 @@ class MeetingsList(QWidget):
         self._rows.setContentsMargins(0, 0, 0, 0)
         self._rows.setSpacing(0)
         lay.addWidget(self.rows_box)
+        # Ctrl+A on a row selects every meeting shown; Esc leaves selecting (only while it is on).
+        self._all_shortcut = QShortcut(QKeySequence.SelectAll, self.rows_box)
+        self._all_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self._all_shortcut.activated.connect(self.select_all)
+        self._esc_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), self)
+        self._esc_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self._esc_shortcut.setEnabled(False)
+        self._esc_shortcut.activated.connect(self.leave_select)
         self.no_match = label("No meetings match.", "muted", self)
         self.no_match.setContentsMargins(14, 8, 0, 8)
         self.no_match.hide()
@@ -1780,15 +2269,19 @@ class MeetingsList(QWidget):
         self.set_items([])
 
     def set_items(self, items):
-        self._all = list(items or [])
+        # (a read that began before a delete and arrived after it must not bring the meeting back)
+        self._all = [m for m in (items or []) if not self.deleter.is_gone(m.get("dir"))]
         has = bool(self._all)
         self.search.setVisible(has)
+        self.select_button.setVisible(has and not self.select_mode)
         self.example.setVisible(not has)
         if not has:
+            self.leave_select()
             self._search_token += 1
             self._render([])
             self.no_match.hide()
             return
+        self.selected &= {m.get("dir") for m in self._all}          # a meeting that went is not ticked
         self._run_search()
 
     def _run_search(self):
@@ -1828,6 +2321,7 @@ class MeetingsList(QWidget):
         self._row_state = None
         views.clear_layout(self._rows)
         self.rows = []
+        self._shown = list(items)            # what the list shows now (Ctrl+A / a Shift range read it)
         s = self.page.session()
         active = None
         phase = "idle"
@@ -1845,6 +2339,7 @@ class MeetingsList(QWidget):
                            "store": meeting_store, "focused": focused}
         self._build_rows(self.FIRST_ROWS)
         self.no_match.setVisible(bool(searching and not items and self._all))
+        self._sync_select_ui()                   # "3 selected" counts what is on the list now
 
     def _continue_rows(self):
         self._build_rows(1)
@@ -1866,14 +2361,198 @@ class MeetingsList(QWidget):
                 self._row_state = None
                 return
             i, m = nxt
+            if self.deleter.is_gone(m.get("dir")):
+                continue                                # deleted while the list was still being built
             store = st["store"]
             status = store.meeting_status(m, st["active"], st["phase"]) if store else "notes_ready"
-            row = MeetingRow(self.page, m, status, first=(i == 0), parent=self.rows_box)
+            row = MeetingRow(self.page, m, status, first=(not self.rows), parent=self.rows_box, owner=self)
             self._rows.addWidget(row)
             self.rows.append(row)
+            self._prepare_row(row)
             if st["focused"] and m.get("dir") == st["focused"]:
                 row.setFocus(Qt.TabFocusReason)     # a re-render never drops keyboard focus
             built += 1
+
+    # ── delete, and select to delete ──
+    def _release_folder(self, folder):
+        nv = getattr(self.page, "notes_view", None)         # (built after the list)
+        if nv is not None:
+            nv.release_folder(folder)
+
+    def _prepare_row(self, row):
+        """A new row picks up what the list is doing: selecting, a delete on its way, a meeting that
+        can't go right now."""
+        folder = row.meeting.get("dir")
+        row.set_blocked(self.deleter.blocked(row.meeting))
+        if self.select_mode:
+            row.set_select_mode(True)
+            row.set_checked(folder in self.selected)
+        if self.deleter.is_deleting(folder):
+            row.set_deleting(True)
+
+    def row_for(self, folder):
+        return next((r for r in self.rows if r.meeting.get("dir") == folder), None)
+
+    def sync_blocked(self):
+        """A recording began or ended, or a names pass did: which meetings can go has changed."""
+        for r in self.rows:
+            r.set_blocked(self.deleter.blocked(r.meeting))
+        self.selected = {f for f in self.selected if not self.deleter.blocked(self._meeting_of(f) or {})}
+        self._sync_select_ui()
+
+    def _meeting_of(self, folder):
+        return next((m for m in self._shown if m.get("dir") == folder), None)
+
+    def ask_delete(self, meetings, source="row"):
+        """Ask once, then delete these meetings (a themed card; nothing opens). True when it started."""
+        started = self.deleter.ask(meetings, source)
+        if started and self.select_mode:
+            self.leave_select()
+        return started
+
+    def key_delete(self, row):
+        """The Delete key on a row: the ticked meetings while selecting, else that row's."""
+        picked = self.selected_items()
+        if self.select_mode and picked:
+            self.ask_delete(picked, "selection")
+        else:
+            self.ask_delete([row.meeting], "key")
+
+    def delete_selected(self):
+        picked = self.selected_items()
+        if picked:
+            self.ask_delete(picked, "selection")
+
+    def selected_items(self):
+        return [m for m in self._shown if m.get("dir") in self.selected]
+
+    def enter_select(self):
+        if self.select_mode or not self._all:
+            return
+        self.select_mode = True
+        self.selected = set()
+        self._anchor = None
+        self.select_button.hide()
+        self.select_bar.show()
+        self._esc_shortcut.setEnabled(True)
+        for r in self.rows:
+            r.set_select_mode(True)
+        self._sync_select_ui()
+
+    def leave_select(self):
+        if not self.select_mode:
+            return
+        self.select_mode = False
+        self.selected = set()
+        self._anchor = None
+        self.select_bar.hide()
+        self.select_button.setVisible(bool(self._all))
+        self._esc_shortcut.setEnabled(False)
+        for r in self.rows:
+            r.set_select_mode(False)
+
+    def toggle_row(self, row, shift=False):
+        """A click on a row while selecting: tick it (Shift: the whole range from the last one)."""
+        folder = row.meeting.get("dir")
+        if row.blocked() or row.is_deleting():
+            return
+        order = [m.get("dir") for m in self._shown]
+        if shift and self._anchor in order and folder in order:
+            a, b = sorted((order.index(self._anchor), order.index(folder)))
+            for f in order[a:b + 1]:
+                m = self._meeting_of(f)
+                if m is not None and not self.deleter.blocked(m) and not self.deleter.is_deleting(f):
+                    self.selected.add(f)
+        else:
+            if folder in self.selected:
+                self.selected.discard(folder)
+            else:
+                self.selected.add(folder)
+            self._anchor = folder
+        self._apply_ticks()
+
+    def select_all(self):
+        """Ctrl+A / "Select all": every meeting shown that can go."""
+        if not self.select_mode:
+            self.enter_select()
+        if not self.select_mode:
+            return
+        self.selected = {m.get("dir") for m in self._shown
+                         if not self.deleter.blocked(m) and not self.deleter.is_deleting(m.get("dir"))}
+        self._anchor = None
+        self._apply_ticks()
+
+    def _apply_ticks(self):
+        for r in self.rows:
+            r.set_checked(r.meeting.get("dir") in self.selected)
+        self._sync_select_ui()
+
+    def _sync_select_ui(self):
+        # the count is what Delete would delete: the ticked meetings that are on the list now (a search
+        # can hide some of them; they stay ticked for when they come back)
+        self.select_bar.set_count(len(self.selected_items()))
+
+    def _on_busy(self, folder, on):
+        row = self.row_for(folder)
+        if row is not None:
+            if on and row.hasFocus():
+                self._focus_left = folder          # (a row that dims is disabled, and Qt then moves the keyboard on)
+            row.set_deleting(on)
+            if not on and self._focus_left == folder:
+                self._focus_left = None            # it could not go: the keyboard comes back to it
+                row.setFocus(Qt.TabFocusReason)
+        if on:
+            self.selected.discard(folder)
+            self._sync_select_ui()
+
+    def _on_removed(self, folder):
+        """A folder is in the trash: its row leaves, one at a time, with no rebuild of the list."""
+        self._all = [m for m in self._all if m.get("dir") != folder]
+        self._shown = [m for m in self._shown if m.get("dir") != folder]
+        try:
+            self.page.list_view.forget(folder)
+            self.page.notes_view.forget_folder(folder)
+        except Exception:
+            logger.debug("could not forget a deleted meeting", exc_info=True)
+        self.selected.discard(folder)
+        row = self.row_for(folder)
+        heir = None
+        had_focus = self._focus_left == folder
+        if had_focus:
+            self._focus_left = None
+        if row is not None:
+            if (had_focus or row.hasFocus()) and len(self.rows) > 1:   # the keyboard was on it: a neighbour gets it
+                i = self.rows.index(row)                               # (else Tab would start from the top of the window)
+                order = self.rows[i + 1:] + self.rows[:i][::-1]        # the next row, else the one before
+                heir = next((r for r in order if not r.is_deleting()), None)   # (not one that is on its way out too)
+            self.rows.remove(row)
+            self._collapse(row)
+        for i, r in enumerate(self.rows):
+            r.set_first(i == 0)
+        if heir is not None:
+            heir.setFocus(Qt.TabFocusReason)
+        if not self._all:
+            self.set_items([])                                    # the Example card is back
+        else:
+            self.no_match.setVisible(bool(not self._shown and self.search.text().strip()))
+        self._sync_select_ui()
+
+    def _collapse(self, row):
+        """The row folds away (150 ms) and goes; its neighbours slide up."""
+        if not row_actions.ANIMATE or not row.isVisible():
+            row.hide()
+            row.deleteLater()
+            return
+        row.setMinimumHeight(0)
+        anim = QPropertyAnimation(row, b"maximumHeight", row)
+        anim.setDuration(row_actions.FADE_MS)
+        anim.setStartValue(row.height())
+        anim.setEndValue(0)
+        anim.finished.connect(row.deleteLater)
+        anim.start()
+
+    def _on_restored(self, _n=0):
+        self.page.list_changed()                                  # Undo: read the library again
 
 
 # ── the rail ─────────────────────────────────────────────────────────────────
@@ -2008,9 +2687,9 @@ class MeetingRail(SettingsRail):
         self.ask_toggle.toggled.connect(lambda on: self.page.set_setting(ASK_KEY, bool(on)))
         self.ask_row = self.add_row(SettingRow("Ask me to record", self.ask_toggle, hint="1 min before"))
         _label_icon(self.ask_row, icon_label("bell_on", 16, "muted"))
-        self.link_toggle = Toggle("Only meetings with a call link", True)
+        self.link_toggle = Toggle("Only meetings with other people", True)
         self.link_toggle.toggled.connect(lambda on: self.page.set_setting(LINK_ONLY_KEY, bool(on)))
-        self.link_row = self.add_row(SettingRow("Only meetings with a call link", self.link_toggle))
+        self.link_row = self.add_row(SettingRow("Only meetings with other people", self.link_toggle))
         # Language (no "Record from" here: every meeting starts on Both sides of
         # the call; the start card picks another for one meeting)
         self.lang_combo = LangCombo(accessible="Meeting language")
@@ -2201,10 +2880,20 @@ class MeetingRail(SettingsRail):
         self.cal_connect.setVisible(visible and not connected and not connecting)
         self.cal_cancel.setVisible(connecting)
         self.cal_disconnect.setVisible(connected)
+        if connecting or connected:
+            # An old error must not come back under "Google Calendar" after a later
+            # disconnect or expiry (a read error while connected is the list's line).
+            self._cal_error = ""
         if connecting:
             self.cal_row.set_hint("Waiting for Google…")
         elif connected:
-            self.cal_row.set_hint(getattr(cal, "email", "") or "")
+            # The account, and - while Privacy mode holds the reads back - why nothing
+            # new arrives (what is shown is the list from before).
+            hint = getattr(cal, "email", "") or ""
+            status = _service_status(cal)
+            if status and status == _paused_text():
+                hint = (hint + "\n" + status) if hint else status
+            self.cal_row.set_hint(hint)
         else:
             self.cal_row.set_hint(self._cal_error)
 
@@ -2245,12 +2934,7 @@ class MeetingRail(SettingsRail):
 
     def _cal_connect(self):
         self._cal_error = ""
-        cal = self.page.calendar()
-        if cal is not None:
-            try:
-                cal.connect_calendar()
-            except Exception:
-                logger.warning("connect_calendar failed", exc_info=True)
+        self.page.connect_calendar()            # the disclosure first, then the browser
         self.sync_calendar()
 
     def _cal_cancel(self):

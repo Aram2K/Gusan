@@ -23,6 +23,10 @@ imported the first time a job needs it.
                           the job goes on on this computer (Automatic). It is
                           a CloudFileError: catch it first.
     CloudFileError     -> ``message`` is one plain sentence for the card.
+* The model that RAN: Gusan Cloud chooses the engine per piece and says which one answered
+  (cloud_speech.send_ex); the default send returns it as the third value and the result carries
+  "model_id" = the model that answered most pieces (spec.model_id - the profile asked for - when no
+  piece said) and "models" = every model that answered, most pieces first.
 * How a file is cut (PROFILES): speech_probs runs the VAD a 5-minute block at
   a time, RegionTracker turns that into speech regions, and ONE streaming
   ChunkPlanner turns those into pieces as they arrive, so the first upload
@@ -517,15 +521,23 @@ def _retryable(err):
 
 
 def _answer(answer):
-    """(text, language) from what send returned: (text, language), a dict or text."""
+    """(text, language) from what send returned: (text, language[, model]), a dict or text."""
+    text, lang, _model = _answer_ex(answer)
+    return text, lang
+
+
+def _answer_ex(answer):
+    """(text, language, model) from what send returned: (text, language, model), (text, language),
+    a dict or text. ``model``: the model that ran, as the engine said it, or None."""
     if isinstance(answer, dict):
-        text, lang = answer.get("text"), answer.get("language")
+        text, lang, model = answer.get("text"), answer.get("language"), answer.get("model")
     elif isinstance(answer, (tuple, list)):
-        text, lang = (list(answer) + [None, None])[:2]
+        text, lang, model = (list(answer) + [None, None, None])[:3]
     else:
-        text, lang = answer, None
+        text, lang, model = answer, None, None
     lang = lang.strip() if isinstance(lang, str) and lang.strip() else None
-    return str(text or "").strip(), lang
+    model = model.strip() if isinstance(model, str) and model.strip() else None
+    return str(text or "").strip(), lang, model
 
 
 def _name(spec):
@@ -594,11 +606,12 @@ class _Sender:
         self.not_before = 0.0             # nobody sends before this (clock time)
         self.retries = 0
         self.requests = 0
+        self.models = collections.Counter()   # the models that answered, by pieces
         self._lock = threading.Lock()
 
     def piece(self, chunk):
         """(text, language) for one piece. Runs on a worker thread."""
-        wav, tries, until = None, 0, 0.0
+        wav, tries, until, off = None, 0, 0.0, 0
         while True:
             delay = max(until, self.not_before) - self.clock()
             if delay > 0 and self.sleep(delay):
@@ -617,21 +630,35 @@ class _Sender:
             except Exception as e:
                 if self.stop.is_set():
                     raise _Stopped() from None
-                if not _retryable(e) or tries >= MAX_ATTEMPTS:
-                    raise
-                pause = backoff(tries, getattr(e, "retry_after", None))
+                # A capable model that wrote another script twice for this piece (an English stretch
+                # in an Armenian file) is kept as spoken, like a live piece: one stretch in another
+                # language must not fail a whole file after the rest was read.
+                kept = None
+                if getattr(e, "why", None) and getattr(e, "answer", None):
+                    off += 1
+                    if cloud_speech.accept_off_script(e.why, getattr(e, "model", ""), off):
+                        kept = e.answer
+                if kept is None:
+                    if not _retryable(e) or tries >= MAX_ATTEMPTS:
+                        raise
+                    pause = backoff(tries, getattr(e, "retry_after", None))
+                    with self._lock:
+                        self.retries += 1
+                        if getattr(e, "kind", None) == RATE_LIMIT:
+                            # Everyone waits, and one piece at a time from now on.
+                            self.limit = 1
+                            self.not_before = max(self.not_before, self.clock() + pause)
+                        else:
+                            until = self.clock() + pause
+                    logger.info("Piece %d, try %d failed (%s); again in %.0f s",
+                                chunk.index, tries, getattr(e, "kind", type(e).__name__), pause)
+                    continue
+                logger.info("Piece %d: kept as spoken (another script, answered twice)", chunk.index)
+                answer = kept
+            text, language, ran = _answer_ex(answer)
+            if ran:
                 with self._lock:
-                    self.retries += 1
-                    if getattr(e, "kind", None) == RATE_LIMIT:
-                        # Everyone waits, and one piece at a time from now on.
-                        self.limit = 1
-                        self.not_before = max(self.not_before, self.clock() + pause)
-                    else:
-                        until = self.clock() + pause
-                logger.info("Piece %d, try %d failed (%s); again in %.0f s",
-                            chunk.index, tries, getattr(e, "kind", type(e).__name__), pause)
-                continue
-            text, language = _answer(answer)
+                    self.models[ran] += 1
             if text and self.fix is not None:
                 try:
                     text = self.fix(text)
@@ -751,11 +778,12 @@ def transcribe_chunks(audio, chunks, spec, profile, *, send, stop=None, cancelle
     empty = sum(1 for _, text, _ in pieces if not text)
     stats = {"pieces": len(pieces), "empty": empty, "retries": run.retries,
              "requests": run.requests, "seconds_sent": round(sent, 1)}
+    models = [m for m, _n in run.models.most_common()]
     logger.info("%s: %d pieces, %d with no words, %d retries", _name(spec),
                 len(pieces), empty, run.retries)
     if not pieces or empty == len(pieces):
         raise NoSpeech()
-    return {"pieces": pieces, "stats": stats}
+    return {"pieces": pieces, "stats": stats, "models": models}
 
 
 # ── one file ─────────────────────────────────────────────────────────────────
@@ -828,8 +856,8 @@ def _speller(spec, cfg_fn):
 
 
 def _default_send():
-    """cloud_speech.send with one requests.Session per worker thread, so a
-    connection is reused from piece to piece."""
+    """cloud_speech.send_ex with one requests.Session per worker thread, so a
+    connection is reused from piece to piece. It returns (text, language, model that ran)."""
     local = threading.local()
 
     def send(spec, wav):
@@ -838,7 +866,7 @@ def _default_send():
             import requests
             local.session = requests.Session()
             post = local.post = local.session.post
-        return cloud_speech.send(spec, wav, post=post)
+        return cloud_speech.send_ex(spec, wav, post=post)
     return send
 
 
@@ -858,8 +886,10 @@ def transcribe_file(audio, spec, *, emit=None, cancelled=None, send=None, cfg_fn
     speech_probs, ``sleep`` / ``clock`` the back-off's (tests).
 
     Returns {"segments": [{"start", "end", "text"}], "language": the set
-    language, else the most common one detected, else None, "model_id":
-    spec.model_id, "stats": {pieces, empty, retries, requests, seconds_sent}}."""
+    language, else the most common one detected, else None, "model_id": the
+    model that answered most pieces (spec.model_id when none said), "models":
+    every model that answered, "stats": {pieces, empty, retries, requests,
+    seconds_sent}}."""
     profile = profile_for(spec)
     stop = threading.Event()
     source = queue.Queue()
@@ -888,5 +918,10 @@ def transcribe_file(audio, spec, *, emit=None, cancelled=None, send=None, cfg_fn
         language = setting
     else:
         language = detected.most_common(1)[0][0] if detected else None
+    models = list(run.get("models") or [])
+    # (only Gusan Cloud chooses its own model: an own key is not second-guessed - Google may answer an
+    # alias with a versioned name)
+    ran = models[0] if models and getattr(spec, "engine", "") == "gusan" else None
     return {"segments": segments, "language": language,
-            "model_id": getattr(spec, "model_id", None) or None, "stats": run["stats"]}
+            "model_id": ran or getattr(spec, "model_id", None) or None,
+            "models": models, "stats": run["stats"]}

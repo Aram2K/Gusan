@@ -87,10 +87,11 @@ from PySide6.QtWidgets import (QComboBox, QFileDialog, QFrame, QHBoxLayout, QLab
 import engine_choice
 import file_jobs
 import hardware
+import speech_langs
 import transcript_store
-from ui import theme
+from ui import hy_model, theme
 from ui.components import (Button, Card, IconButton, PageHeader, SettingRow, SettingsRail, Toggle,
-                           WhiteCard, icons, label)
+                           WhiteCard, icons, label, row_actions)
 from ui.components.glass_orb import GlassOrb
 from ui.components.model_combo import PLAIN_ROLE, PlainNameCombo, combo as _combo  # noqa: F401 (re-exported)
 from ui.pages.transcript_view import (HEADPHONES, KIND_EMOJI, KIND_LABEL, LANGUAGES, MEMO,
@@ -104,6 +105,7 @@ TITLE = "Convert audio to text"
 DROP_TITLE = "Drop audio or video here"
 DROP_FORMATS = "MP3, WAV, M4A, FLAC or video · any length"
 RAIL_TITLE = "Audio to text settings"
+MODEL_COMBO_WIDTH = 260                  # room for a real model name and its chips
 RAIL_FOOT = "On this computer. Nothing is uploaded."
 RAIL_FOOT_CLOUD = "Sent to Gusan Cloud to transcribe."
 RAIL_FOOT_OWN = "Sent to {name} with your key."
@@ -143,6 +145,11 @@ def _is_pro(app):
         return bool(app.is_pro())
     except Exception:
         return False
+
+
+def _signed_in(app):
+    value = getattr(getattr(app, "auth", None), "is_authenticated", None)
+    return bool(value) if value is not None else None
 
 
 class MetaLine(QLabel):
@@ -222,6 +229,20 @@ class _LibraryContent(QWidget):
         p = QPainter(self)
         self.shadows.paint(p)
         p.end()
+
+
+def _model_text(item):
+    """What a file card says it was (or is being) converted with: the model's real name and
+    where it ran ("Whisper Small · Local", "Gemini 2.5 Flash · Cloud") - the same words as the
+    Accuracy picker."""
+    name = item.get("model_name") or ""
+    if not name:
+        return ""
+    try:
+        text = engine_choice.model_tagged(item.get("model"))
+    except Exception:
+        text = ""
+    return text if text.startswith(name) else name
 
 
 def stage_text(item):
@@ -500,8 +521,8 @@ class JobCard(WhiteCard):
         self.bar.setValue(max(0, min(100, int(item.get("pct") or 0))))
         self.bar.show()
         stage = stage_text(item)
-        model = item.get("model_name") or ""
-        if model and model in stage:            # "Downloading Whisper Small · 12%": named once
+        model = _model_text(item)
+        if model and (item.get("model_name") or "") in stage:   # "Downloading Whisper Small · 12%": named once
             model = ""
         self._set_meta(eta="" if stopping else (item.get("eta") or ""),
                        stage=stage, length=short_duration(item.get("duration")), model=model,
@@ -518,7 +539,7 @@ class JobCard(WhiteCard):
         self.state = "done"
         self.bar.hide()
         self._set_meta(ready="Ready", length=short_duration(item.get("duration")),
-                       model=item.get("model_name") or "")
+                       model=_model_text(item))
         problem = item.get("save_error") or ""
         self.error.setText(problem)
         self.error.setVisible(bool(problem))
@@ -595,6 +616,9 @@ class FileRow(QFrame):
         self.more_button = IconButton("more", "More for " + title, size=30, icon_size=16, parent=self)
         self.more_button.clicked.connect(self._show_menu)
         right.addWidget(self.more_button)
+        # A trash icon while the pointer is on the row: the same Delete / Keep question the ⋯ menu asks,
+        # right here in the row (ui/components/row_actions.py).
+        self.trash = row_actions.attach_trash(self, right, title, self.ask_delete)
         self.delete_button = Button("Delete", "danger", "s", parent=self)
         self.delete_button.setAccessibleName("Delete " + title)
         self.delete_button.clicked.connect(self._delete_now)
@@ -675,6 +699,8 @@ class FileRow(QFrame):
         self.meta.setText(DELETE_ASK)
         for b in (self.open_button, self.more_button):
             b.hide()
+        self.trash.reveal.enabled = False                   # the question has its own buttons
+        self.trash.reveal.refresh(animate=False)
         self.delete_button.show()
         self.keep_button.show()
         self.keep_button.setFocus(Qt.OtherFocusReason)      # the safe choice; keyboard stays in the row
@@ -686,6 +712,8 @@ class FileRow(QFrame):
         self.keep_button.hide()
         self.open_button.show()
         self.more_button.show()
+        self.trash.reveal.enabled = True
+        self.trash.reveal.refresh()
         if refocus:
             self.more_button.setFocus(Qt.OtherFocusReason)
 
@@ -888,17 +916,24 @@ class AudioToTextPage(QWidget):
         dl = getattr(self.app, "downloads", None)
         if dl is not None and dl is not self._dl_seen:
             self._dl_seen = dl
-            for name in ("state_changed", "scanned", "hardware_ready"):
+            for name in ("state_changed", "scanned", "hardware_ready", "progress", "finished"):
                 sig = getattr(dl, name, None)
                 if sig is not None and hasattr(sig, "connect"):
                     try:
                         sig.connect(self._update_model_line)
                     except Exception:
                         logger.debug("downloads.%s: no connect", name, exc_info=True)
+            catalog = getattr(dl, "catalog_changed", None)
+            if catalog is not None and hasattr(catalog, "connect"):
+                try:
+                    catalog.connect(self._sync_settings)      # the Armenian model became available (or went)
+                except Exception:
+                    logger.debug("downloads.catalog_changed: no connect", exc_info=True)
 
     # ── shell hooks ──
     def on_open(self, **opts):
         self._connect_services()
+        hy_model.refresh_catalog(self.app)          # a worker: once a day at most, never in Privacy mode
         tid = opts.get("transcript_id")
         if tid:
             self.open_transcript(tid)
@@ -1156,15 +1191,22 @@ class AudioToTextPage(QWidget):
         av = QVBoxLayout(acc)
         av.setContentsMargins(0, 0, 0, 0)
         av.setSpacing(3)
-        # Automatic / a Whisper model / Gusan Cloud (PRO) / your own key.
-        self.model_combo = _combo(PlainNameCombo(acc), "Accuracy", width=150)
+        # Automatic / a Whisper model [LOCAL] / Gusan Cloud's model [CLOUD] [PRO] / your own key [CLOUD]:
+        # real model names with a chip for where each runs (engine_choice.file_rows).
+        self.model_combo = _combo(PlainNameCombo(acc), "Accuracy", width=MODEL_COMBO_WIDTH)
         self._fill_model_combo()
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
         av.addWidget(self.model_combo)
         self.model_line = label("", "model", acc)
         self.model_line.setContentsMargins(13, 0, 0, 0)
         av.addWidget(self.model_line)
-        self.model_row = rail.add_row(SettingRow("Accuracy", acc))
+        # While the Armenian model downloads: a way to stop it.
+        self.model_cancel = Button(hy_model.CANCEL + " download", "link", "s", parent=acc)
+        self.model_cancel.setAccessibleName("Cancel the Armenian model download")
+        self.model_cancel.clicked.connect(self._cancel_model_download)
+        self.model_cancel.hide()
+        av.addWidget(self.model_cancel, 0, Qt.AlignLeft)
+        self.model_row = rail.add_row(SettingRow("Accuracy", acc, stacked=True))     # under its name: a real name and its chips need the room
 
         self.lang_combo = QComboBox(rail)
         for code, name in LANGUAGES:
@@ -1201,36 +1243,33 @@ class AudioToTextPage(QWidget):
         rail.set_foot(foot)
         return rail
 
-    def _fill_model_combo(self):
-        """The Accuracy list from engine_choice.file_choices."""
+    def _model_rows(self):
+        """The Accuracy rows (engine_choice.file_rows)."""
         try:
-            choices = engine_choice.file_choices(_cfg(self.app))
+            return engine_choice.file_rows(_cfg(self.app), _is_pro(self.app), self._language(),
+                                           _signed_in(self.app))
         except Exception:
-            logger.debug("file_choices failed", exc_info=True)
-            choices = [(AUTO, AUTO_PLAIN, AUTO_PLAIN, False)]
-            choices += [(mid, i.plain, i.label(), False) for mid, i in hardware.MODEL_INFO.items()]
-        pro = _is_pro(self.app)
+            logger.debug("file_rows failed", exc_info=True)
+            rows = [{"value": AUTO, "name": AUTO_PLAIN, "title": AUTO_PLAIN, "line": AUTO_PLAIN, "note": "",
+                     "tags": (), "pro": False, "group": "", "tip": ""}]
+            for mid, i in hardware.MODEL_INFO.items():
+                rows.append({"value": mid, "name": i.real, "title": i.real, "line": i.label(), "note": i.plain,
+                             "tags": (), "pro": False, "group": "", "tip": ""})
+            return rows
+
+    def _fill_model_combo(self, rows=None):
+        """The Accuracy list from engine_choice.file_rows: headings, names, chips."""
+        rows = self._model_rows() if rows is None else rows
         box = self.model_combo
         box.blockSignals(True)
-        box.clear()
-        for value, plain, line, needs_pro in choices:
-            # Calm Pro: a plain "PRO" after the name, for Free users only.
-            text = "%s  PRO" % line if (needs_pro and not pro) else line
-            box.add_choice(text, value, plain=plain)
+        box.fill_rows(rows)
         box.blockSignals(False)
-        fm = box.view().fontMetrics()
-        longest = max((fm.horizontalAdvance(box.itemText(i)) for i in range(box.count())), default=0)
-        box.view().setMinimumWidth(max(260, longest + 40))
-        self._model_fill = self._fill_key()
+        self._model_fill = rows
 
     def _fill_key(self):
-        """What the list's items depend on: the plan (the PRO marks), the Gusan
-        Cloud provider (its model's name) and the own keys and their models."""
-        cfg = _cfg(self.app)
-        return (_is_pro(self.app), str(cfg.get("managed_provider") or ""),
-                bool(str(cfg.get("google_api_key") or "").strip()),
-                bool(str(cfg.get("mistral_api_key") or "").strip()),
-                str(cfg.get("google_stt_model") or ""), str(cfg.get("mistral_stt_model") or ""))
+        """What the list's items depend on: its rows (the plan, the Gusan Cloud provider's model
+        and the own keys with their models)."""
+        return self._model_rows()
 
     def model_value(self):
         """What really converts a file now, as an Accuracy value: a cloud pick
@@ -1263,7 +1302,7 @@ class AudioToTextPage(QWidget):
                 i = box.findData(value)
                 if i >= 0:
                     box.set_choice_enabled(i, not privacy)     # Privacy mode keeps it on this computer
-            self.model_row.set_hint(PRIVACY_HINT if privacy else "")
+            self.model_row.set_hint(self._model_note())
             lang = self._value(K_LANG) or "auto"
             i = self.lang_combo.findData(lang)
             if i < 0:
@@ -1316,7 +1355,24 @@ class AudioToTextPage(QWidget):
                     except Exception:
                         logger.warning("_pro_upsell failed", exc_info=True)
             return
+        if hy_model.is_hy(value) and hy_model.state(self.app) in ("missing", "failed"):
+            # 105 MB: ask first (Audio to text starts the download now rather than at the first file)
+            if not hy_model.confirm_download(self, "Audio to text"):
+                self._sync_settings()               # back to what is really set
+                return
+            if not hy_model.start(self.app):
+                self._sync_settings()
+                return
         self._set(K_MODEL, value)
+
+    def _cancel_model_download(self):
+        """Stop the Armenian model's download; a pick of it that is not on this computer would only start
+        the download again with the next file, so Automatic is put back."""
+        if not hy_model.cancel(self.app):
+            return
+        if str(self._value(K_MODEL) or "") == hy_model.HY_ID:
+            self._set(K_MODEL, AUTO)
+        self._update_model_line()
 
     def _on_lang_changed(self, _i):
         self._set(K_LANG, self.lang_combo.currentData() or "auto")
@@ -1343,26 +1399,61 @@ class AudioToTextPage(QWidget):
             logger.debug("auto model unknown", exc_info=True)
             return None
 
-    def _cloud_engine(self, value):
-        """engine_choice.file_engine for a cloud value, or {} (it runs locally)."""
+    def _language(self):
+        return str(self._value(K_LANG) or "auto")
+
+    def _engine(self, value):
+        """engine_choice.file_engine for a value with the job's language (Automatic follows the order
+        for a language Whisper is poor at), or {}."""
         try:
-            ro = engine_choice.file_engine(_cfg(self.app), value, _is_pro(self.app))
+            return engine_choice.file_engine(_cfg(self.app), value, _is_pro(self.app), self._language(),
+                                             _signed_in(self.app))
         except Exception:
             logger.debug("file_engine failed", exc_info=True)
             return {}
+
+    def _cloud_engine(self, value):
+        """engine_choice.file_engine for a cloud value (or Automatic that moved to Gusan Cloud for the
+        language), or {} (it runs locally)."""
+        ro = self._engine(value)
         return ro if ro.get("kind") in ("cloud", "own_key") else {}
+
+    def _model_note(self):
+        """The plain hint under the picker: for a file in a language Whisper is poor at that Whisper
+        would convert - the same words as the Live Assistant's (in Privacy mode they say why the cloud is
+        off and offer the Armenian model, so they come first) - else Privacy mode's, else nothing."""
+        note = ""
+        try:
+            note = engine_choice.file_note(_cfg(self.app), _is_pro(self.app), self._language(),
+                                           _signed_in(self.app), self.model_combo.currentData() or AUTO)
+        except Exception:
+            logger.debug("file_note failed", exc_info=True)
+        if note:
+            return note
+        return PRIVACY_HINT if _cfg(self.app).get("privacy_mode") else ""
 
     def _update_model_line(self, *_a):
         mid = self.model_combo.currentData() or AUTO
-        ro = self._cloud_engine(mid) if mid in engine_choice.FILE_CLOUD_VALUES else {}
+        ro = self._cloud_engine(mid) if (mid in engine_choice.FILE_CLOUD_VALUES or mid == AUTO) else {}
         if ro:
-            text = ro.get("model_name") or ""       # "Gemini 2.5 Flash", never a Whisper name
+            text = ro.get("tagged") or ro.get("model_name") or ""    # "Best accuracy · Cloud", never a Whisper name
+            if ro.get("auto") and ro.get("reason") == "language":
+                text += " · for %s" % (speech_langs.local_whisper_poor(self._language(), _cfg(self.app))
+                                       or speech_langs.language_name(self._language()) or "this language")
         else:
             if mid == AUTO:
-                mid = self.auto_model()
-            text = hardware.real_name(mid) if mid and mid not in engine_choice.FILE_CLOUD_VALUES else ""
+                local = self._engine(AUTO)               # Automatic may be the Armenian model, for an Armenian file
+                mid = (local.get("model_id") if hy_model.is_hy(local.get("model_id")) else None) or self.auto_model()
+            text = engine_choice.model_tagged(mid) if mid and mid not in engine_choice.FILE_CLOUD_VALUES else ""
+            if mid and hy_model.is_hy(mid):
+                if hy_model.state(self.app) == "downloading":
+                    text = hy_model.progress_line(self.app)
+                elif str(self._value(K_MODEL) or "") == hy_model.HY_ID:
+                    text += " · Armenian only"           # (any other language of a file: Whisper reads it)
         self.model_line.setText(text)
         self.model_line.setVisible(bool(text))
+        self.model_cancel.setVisible(hy_model.can_cancel(self.app))
+        self.model_row.set_hint(self._model_note())
         self.model_combo.setAccessibleDescription(text)
         # The footer says where the audio goes.
         if ro.get("kind") == "cloud":

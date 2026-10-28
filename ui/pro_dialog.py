@@ -7,6 +7,8 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame
 )
 
+import account_actions
+
 
 class ProDialog(QDialog):
     """A friendly, visual upgrade dialog. Shows what Pro unlocks, lets the user
@@ -96,10 +98,6 @@ class ProDialog(QDialog):
         self.btn_go = QPushButton("Start 3-day free trial", self)
         self.btn_go.setObjectName("primaryButton")
         self.btn_go.setMinimumHeight(46)
-        self.btn_go.setStyleSheet(
-            "font-size: 15px; font-weight: 700;"
-            "background-color: #a855f7; border-color: #9333ea;"
-        )
         self.btn_go.clicked.connect(self._go)
         root.addWidget(self.btn_go)
 
@@ -177,22 +175,36 @@ class ProDialog(QDialog):
                 )
             )
 
+    def _is_guest(self):
+        """Not signed in - or a super admin previewing Guest (signed in underneath):
+        a subscription must be linked to an account, so the first step is signing in."""
+        if not self.app:
+            return True
+        try:
+            return account_actions.is_guest(self.app)
+        except Exception:
+            auth = getattr(self.app, "auth", None)
+            return not bool(auth is not None and getattr(auth, "is_authenticated", False))
+
     def _refresh_note(self):
-        authed = bool(
-            self.app
-            and getattr(self.app, "auth", None)
-            and self.app.auth.is_authenticated
-        )
-        if authed:
-            self.note.setText("3 days free, then your plan. Cancel anytime before it ends - no charge. Secure checkout by Stripe.")
+        if self._is_guest():
+            # Honest first step: sign in (or sign up), then the trial. A blue button - the app's
+            # sign-in colour - because that is what it does now; the purple one starts the trial.
+            self.btn_go.setText(account_actions.SIGN_IN_TO_UPGRADE)
+            self.btn_go.setStyleSheet("font-size: 15px; font-weight: 700;")
+            self.note.setText(account_actions.SIGN_IN_FIRST)
         else:
-            self.note.setText("You'll create or sign in to your account first, then start your free trial.")
+            self.btn_go.setText("Start 3-day free trial")
+            self.btn_go.setStyleSheet(
+                "font-size: 15px; font-weight: 700;"
+                "background-color: #a855f7; border-color: #9333ea;"
+            )
+            self.note.setText("3 days free, then your plan. Cancel anytime before it ends - no charge. Secure checkout by Stripe.")
 
     def _go(self):
         if not self.app:
             return
-        authed = getattr(self.app, "auth", None) and self.app.auth.is_authenticated
-        if not authed:
+        if self._is_guest():
             # A subscription must be linked to an account.
             self.accept()
             if hasattr(self.app, "show_auth_gate"):

@@ -50,6 +50,7 @@ const allowedEvents = new Set([
   'meeting_notes_completed',
   'meeting_notes_failed',
   'meeting_exported',
+  'meeting_deleted',
   'paywall_viewed',
   'upgrade_clicked',
   'checkout_opened',
@@ -73,6 +74,10 @@ const allowedEvents = new Set([
   'file_transcription_saved',
   'notion_connect_result',
   'notion_disconnected',
+  'calendar_connect_result',
+  'calendar_disconnected',
+  'calendar_reminder_action',
+  'calendar_meeting_started',
 ])
 
 const sensitiveKeys = new Set([

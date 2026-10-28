@@ -37,10 +37,10 @@ class FakeOpener:
 
 class TestKeptIdentifiers(unittest.TestCase):
     def test_repo_api_and_asset_names(self):
-        self.assertEqual(updater.RELEASES_API, "https://api.github.com/repos/Aram2K/transcribe-app/releases/latest")
+        self.assertEqual(updater.RELEASES_API, "https://api.github.com/repos/Aram2K/Gusan/releases/latest")
         self.assertEqual(updater.INSTALLER_NAME, "TranscribeApp-Windows-Setup.exe")
         self.assertEqual(updater.installer_url("v2.0.1"),
-                         "https://github.com/Aram2K/transcribe-app/releases/download/v2.0.1/"
+                         "https://github.com/Aram2K/Gusan/releases/download/v2.0.1/"
                          "TranscribeApp-Windows-Setup.exe")
         self.assertEqual(updater.checksum_url("v2.0.1"), updater.installer_url("v2.0.1") + ".sha256")
 
@@ -151,7 +151,7 @@ class TestInstall(unittest.TestCase):
 
     def test_release_page(self):
         self.assertEqual(updater.release_page("v2.0.1"),
-                         "https://github.com/Aram2K/transcribe-app/releases/tag/v2.0.1")
+                         "https://github.com/Aram2K/Gusan/releases/tag/v2.0.1")
         self.assertEqual(updater.release_page(None), updater.RELEASES_URL)
 
 

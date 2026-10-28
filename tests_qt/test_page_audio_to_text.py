@@ -174,14 +174,16 @@ def test_same_page_for_free_and_pro_with_no_limit_wording(build, store):
     for t in texts:
         low = t.lower()
         assert not any(b in low for b in ("limit", "hour", "upgrade", "minutes left", "unlock")), t
-        assert t != "PRO", "calm Pro: no Pro tag or banner, only the mark in the Accuracy list"
+        assert t != "PRO", "calm Pro: no Pro tag or banner, only the chip on the one row in the Accuracy list"
     assert "MP3, WAV, M4A, FLAC or video · any length" in texts
     assert "On this computer. Nothing is uploaded." in _texts(free)
-    # The one Pro item is Gusan Cloud in the list, marked for Free users only.
-    marked = [free.model_combo.itemText(i) for i in range(free.model_combo.count())
-              if "PRO" in free.model_combo.itemText(i)]
-    assert marked == ["Gusan Cloud · Gemini 2.5 Flash  PRO"]
-    assert not [i for i in range(pro.model_combo.count()) if "PRO" in pro.model_combo.itemText(i)]
+    # The one Pro row is Gusan Cloud's best profile (its server chooses the model), wearing its CLOUD
+    # and PRO chips (it says what a row IS, so it reads the same for Free and for Pro).
+    for page in (free, pro):
+        box = page.model_combo
+        assert [box.itemText(i) for i in box.row_indexes() if "pro" in box.row_tags(i)] == [
+            "Best accuracy · Cloud · Pro"]
+        assert box.headings() == ["On this computer", "Gusan Cloud"]
     assert not [c for c in free_app.calls + pro_app.calls if c[0] == "_pro_upsell"], "nothing opens by itself"
 
 
@@ -313,9 +315,10 @@ def test_rail_reads_cfg_and_writes_each_change_through_set_setting(build, store)
     page, app = build(file_model="small", file_language="fr", file_speakers=False,
                       file_timestamps=True, file_save_word=False)
     assert page.model_combo.currentData() == "small"
-    assert page.model_combo.currentData(Qt.UserRole + 1) == "Balanced"
-    assert page.model_combo.currentText() == "Balanced · Whisper Small"
-    assert page.model_line.text() == "Whisper Small"
+    assert page.model_combo.plain_text() == "Whisper Small"
+    assert page.model_combo.currentText() == "Whisper Small · Local"
+    assert page.model_combo.current_tags() == ("local",)
+    assert page.model_line.text() == "Whisper Small · Local"
     assert page.lang_combo.currentText() == "French"
     assert not page.speakers_toggle.isChecked() and page.timestamps_toggle.isChecked()
     assert not page.word_toggle.isChecked()
@@ -329,7 +332,7 @@ def test_rail_reads_cfg_and_writes_each_change_through_set_setting(build, store)
     sets = [c[1:] for c in app.calls if c[0] == "set_setting"]
     assert sets == [("file_model", "large-v3-turbo"), ("file_language", "multi"),
                     ("file_speakers", True), ("file_timestamps", False), ("file_save_word", True)]
-    assert page.model_line.text() == "Whisper Large v3 Turbo"
+    assert page.model_line.text() == "Whisper Large v3 Turbo · Local"
 
     # Somebody else changed it: the page follows.
     app.cfg["file_language"] = "de"
@@ -342,14 +345,20 @@ def test_language_list_and_model_list(build, store):
     langs = [page.lang_combo.itemText(i) for i in range(page.lang_combo.count())]
     assert langs == ["Detect automatically", "Mixed languages", "English", "Arabic", "Armenian",
                      "French", "German", "Russian", "Spanish"]
-    plain = [page.model_combo.itemData(i, Qt.UserRole + 1) for i in range(page.model_combo.count())]
-    assert plain == ["Automatic", "Lightest", "Fast", "Balanced", "Accurate", "Most accurate", "Maximum",
-                     "Gusan Cloud"]
-    assert page.model_combo.itemText(5) == "Most accurate · Whisper Large v3 Turbo"
-    assert page.model_combo.itemText(7) == "Gusan Cloud · Gemini 2.5 Flash  PRO"
-    fm = page.model_combo.view().fontMetrics()
-    longest = max(fm.horizontalAdvance(page.model_combo.itemText(i)) for i in range(page.model_combo.count()))
-    assert page.model_combo.view().minimumWidth() >= max(260, longest + 40), "the list fits its longest line"
+    box = page.model_combo
+    names = [box.itemData(i, Qt.UserRole + 1) for i in box.row_indexes()]
+    assert names == ["Automatic", "Whisper Tiny", "Whisper Base", "Whisper Small", "Whisper Medium",
+                     "Whisper Large v3 Turbo", "Whisper Large v3", "Best accuracy"]      # real names, no plain words
+    assert box.itemText(box.findData("large-v3-turbo")) == "Whisper Large v3 Turbo · Local"
+    assert box.itemText(box.findData("cloud")) == "Best accuracy · Cloud · Pro"
+    assert box.row_note(box.findData("medium")) == "Accurate"
+    assert box.row_note(box.findData("cloud")) == "Most accurate · Gusan chooses the model"
+    assert box.headings() == ["On this computer", "Gusan Cloud"]
+    box.showPopup()
+    QApplication.processEvents()
+    widest = max(box.itemDelegate().row_width(box.model().index(i, 0), box.font()) for i in range(box.count()))
+    assert box.view().minimumWidth() >= widest, "the list fits its longest row (name, chips and padding)"
+    box.hidePopup()
 
 
 def test_a_refused_setting_snaps_back(build, store):
@@ -369,13 +378,13 @@ def test_automatic_names_the_model_it_would_use(build, store):
     assert page.model_combo.currentData() == "auto"
     assert not page.model_line.isVisibleTo(page), "unknown without the download manager"
     page, app = build(file_model="auto", downloads=FakeDownloads(ready=["base", "small"]))
-    assert page.model_line.text() == "Whisper Small"
+    assert page.model_line.text() == "Whisper Small · Local"
     app.downloads._ready = ["tiny"]
     app.downloads.state_changed.emit("small", "missing")
-    assert page.model_line.text() == "Whisper Tiny"
+    assert page.model_line.text() == "Whisper Tiny · Local"
     page, app = build(file_model="auto",
                       downloads=FakeDownloads(ready=["small", "large-v3-turbo"], gpu_state="ready"))
-    assert page.model_line.text() == "Whisper Large v3 Turbo"
+    assert page.model_line.text() == "Whisper Large v3 Turbo · Local"
 
 
 # ── cloud models in Accuracy ─────────────────────────────────────────────────
@@ -393,7 +402,8 @@ def _sets(app):
 
 
 def _item_texts(page):
-    return {page.model_combo.itemData(i): page.model_combo.itemText(i) for i in range(page.model_combo.count())}
+    box = page.model_combo
+    return {box.itemData(i): box.itemText(i) for i in box.row_indexes()}
 
 
 def _foot(page):
@@ -410,32 +420,33 @@ def test_free_pick_of_gusan_cloud_opens_the_pro_window_and_saves_nothing(build, 
     assert app.calls.count(("_pro_upsell", "Fast cloud transcription")) == 1
     assert _sets(app) == [], "nothing saved"
     assert page.model_combo.currentData() == "small", "the combo snapped back"
-    assert page.model_line.text() == "Whisper Small"
+    assert page.model_line.text() == "Whisper Small · Local"
     assert _foot(page) == ("On this computer. Nothing is uploaded.", "shield")
 
 
 def test_pro_pick_of_gusan_cloud_is_saved_once_and_named(build, store):
     page, app = build("pro", file_model="small")
-    assert _item_texts(page)["cloud"] == "Gusan Cloud · Gemini 2.5 Flash"
+    assert _item_texts(page)["cloud"] == "Best accuracy · Cloud · Pro"
     page.model_combo.setCurrentIndex(page.model_combo.findData("cloud"))
     assert _sets(app) == [("file_model", "cloud")]
     assert not [c for c in app.calls if c[0] == "_pro_upsell"]
-    assert page.model_combo.plain_text() == "Gusan Cloud"
-    assert page.model_line.text() == "Gemini 2.5 Flash", "the real model, never a Whisper name"
+    assert page.model_combo.plain_text() == "Best accuracy", "the profile's name, never the service's"
+    assert page.model_combo.closed_text() == "Best accuracy · Cloud · Pro"
+    assert page.model_line.text() == "Best accuracy · Cloud", "what Gusan Cloud is asked for, never a Whisper name"
     assert _foot(page) == ("Sent to Gusan Cloud to transcribe.", "cloud")
     page.model_combo.setCurrentIndex(page.model_combo.findData("auto"))
     assert _sets(app)[-1] == ("file_model", "auto")
     assert _foot(page) == ("On this computer. Nothing is uploaded.", "shield")
 
-    # Saved, and Gusan Cloud runs Voxtral Mini: the list and the line follow.
+    # Saved: a file asks for the best profile whatever the old provider setting says (the server chooses)
     page, app = build("pro", file_model="cloud", managed_provider="mistral")
     assert page.model_combo.currentData() == "cloud"
-    assert _item_texts(page)["cloud"] == "Gusan Cloud · Voxtral Mini"
-    assert page.model_line.text() == "Voxtral Mini"
+    assert _item_texts(page)["cloud"] == "Best accuracy · Cloud · Pro"
+    assert page.model_line.text() == "Best accuracy · Cloud"
     app.cfg["managed_provider"] = "gemini"
     page.on_setting_changed("managed_provider")
-    assert _item_texts(page)["cloud"] == "Gusan Cloud · Gemini 2.5 Flash"
-    assert page.model_combo.currentData() == "cloud" and page.model_line.text() == "Gemini 2.5 Flash"
+    assert _item_texts(page)["cloud"] == "Best accuracy · Cloud · Pro"
+    assert page.model_combo.currentData() == "cloud" and page.model_line.text() == "Best accuracy · Cloud"
     assert _sets(app) == [], "following a setting never writes"
 
 
@@ -446,21 +457,22 @@ def test_own_key_items_appear_once_the_key_is_saved(build, store):
     app.cfg["google_api_key"] = "test-google-key"
     page.on_setting_changed("google_api_key")
     items = _item_texts(page)
-    assert items["own:google"] == "Google Gemini · Gemini 2.5 Flash · your own key", "never marked PRO"
+    assert items["own:google"] == "Gemini 2.5 Flash · your Google key · Cloud", "never marked PRO"
+    assert page.model_combo.row_tags(page.model_combo.findData("own:google")) == ("cloud",)
     assert "own:mistral" not in items
     page.model_combo.setCurrentIndex(page.model_combo.findData("own:google"))
     assert _sets(app) == [("file_model", "own:google")]
     assert not [c for c in app.calls if c[0] == "_pro_upsell"]
-    assert page.model_line.text() == "Gemini 2.5 Flash"
+    assert page.model_line.text() == "Gemini 2.5 Flash · your Google key · Cloud"
     assert _foot(page) == ("Sent to Google Gemini with your key.", "key")
 
     app.cfg["mistral_api_key"] = "test-mistral-key"
     page.on_setting_changed("mistral_api_key")
-    assert _item_texts(page)["own:mistral"] == "Mistral · Voxtral Mini · your own key"
+    assert _item_texts(page)["own:mistral"] == "Voxtral Mini · your Mistral key · Cloud"
     assert page.model_combo.currentData() == "own:google", "the pick stays through a refill"
     page.model_combo.setCurrentIndex(page.model_combo.findData("own:mistral"))
     assert _sets(app)[-1] == ("file_model", "own:mistral")
-    assert page.model_line.text() == "Voxtral Mini"
+    assert page.model_line.text() == "Voxtral Mini · your Mistral key · Cloud"
     assert _foot(page) == ("Sent to Mistral with your key.", "key")
 
     # The key removed (api_keys also resets file_model): the item goes, Automatic shows.
@@ -496,7 +508,7 @@ def test_privacy_mode_greys_out_the_cloud_items_and_says_why(build, store):
 def test_a_saved_cloud_pick_that_cannot_run_shows_automatic(build, store):
     page, app = build("free", file_model="cloud", downloads=FakeDownloads(ready=["base", "small"]))
     assert page.model_combo.currentData() == "auto"
-    assert page.model_line.text() == "Whisper Small"
+    assert page.model_line.text() == "Whisper Small · Local"
     assert _foot(page) == ("On this computer. Nothing is uploaded.", "shield")
     page, app = build("pro", file_model="own:google")              # no key saved
     assert page.model_combo.currentData() == "auto"
@@ -505,15 +517,15 @@ def test_a_saved_cloud_pick_that_cannot_run_shows_automatic(build, store):
 
 def test_refresh_account_follows_the_plan(build, store):
     page, app = build("free", file_model="cloud")
-    assert _item_texts(page)["cloud"].endswith("  PRO") and page.model_combo.currentData() == "auto"
+    assert _item_texts(page)["cloud"] == "Best accuracy · Cloud · Pro" and page.model_combo.currentData() == "auto"
     app.set_tier("pro")
     page.refresh_account()
-    assert _item_texts(page)["cloud"] == "Gusan Cloud · Gemini 2.5 Flash"
+    assert _item_texts(page)["cloud"] == "Best accuracy · Cloud · Pro"      # the row is what it is, whoever looks
     assert page.model_combo.currentData() == "cloud"
     assert _foot(page) == ("Sent to Gusan Cloud to transcribe.", "cloud")
     app.set_tier("free")                                         # Pro ended
     page.refresh_account()
-    assert _item_texts(page)["cloud"] == "Gusan Cloud · Gemini 2.5 Flash  PRO"
+    assert _item_texts(page)["cloud"] == "Best accuracy · Cloud · Pro"
     assert page.model_combo.currentData() == "auto"
     assert _foot(page) == ("On this computer. Nothing is uploaded.", "shield")
     assert _sets(app) == [] and not [c for c in app.calls if c[0] == "_pro_upsell"]
@@ -590,7 +602,7 @@ def test_running_job_card_follows_file_jobs_and_cancels(build, store):
     card = page.job_card
     assert card.isVisibleTo(page) and card.state == "running"
     assert card.meta_texts() == ["interview_mariam.m4a", "Ready in about 6 min", "Transcribing · 42%",
-                                 "24 min", "Whisper Small"]
+                                 "24 min", "Whisper Small · Local"]
     assert card.bar.value() == 42 and card.tile.accessibleName() == "Voice recording"
     fj.cur.update(pct=60)
     fj.queue = [{"id": 8}, {"id": 9}]
@@ -617,7 +629,7 @@ def test_the_model_is_named_once_while_it_downloads(build, store):
     assert "Whisper Small" not in texts, "not repeated after the stage"
     fj.cur.update(stage="Transcribing", pct=30)
     fj.progress.emit(30, "Transcribing", "")
-    assert "Whisper Small" in page.job_card.meta_texts()
+    assert "Whisper Small · Local" in page.job_card.meta_texts()
 
 
 def test_a_failure_stays_readable_when_the_next_file_starts(build, store):
@@ -694,7 +706,7 @@ def test_finished_job_says_ready_and_opens_the_transcript(build, store):
     view = page.transcript
     assert view.title_label.text() == "interview_mariam.m4a"
     texts = view.meta_texts()
-    assert texts[:4] == ["24 min 20 s", "2 speakers", "English", "Whisper Small"]
+    assert texts[:4] == ["24 min 20 s", "2 speakers", "English", "Whisper Small · Local"]
     assert texts[4].startswith("Today ")
 
 
@@ -746,7 +758,7 @@ def test_with_the_real_file_job_controller(build, store, tmp_path):
             QApplication.processEvents()
             time.sleep(0.01)
         assert page.job_card.state == "done"
-        assert "Whisper Small" in page.job_card.meta_texts()
+        assert "Whisper Small · Local" in page.job_card.meta_texts()
         assert [r.title() for r in page.files.rows] == ["interview_mariam.m4a"]
         page.job_card.open_button.click()
         assert page.current_view() == "transcript"

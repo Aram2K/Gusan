@@ -106,21 +106,30 @@ def mistral(cfg=None, model=None, language="auto"):
 # ── the job's settings ───────────────────────────────────────────────────────
 
 class TestSpecFromCfg(unittest.TestCase):
-    def test_gusan_cloud_runs_the_providers_real_model(self):
+    def test_gusan_cloud_asks_for_a_profile_and_the_server_chooses_the_model(self):
+        # A FILE asks for the best profile (engine_choice.file_session: ("managed", "best")); the model
+        # that really ran is reported per piece (cloud_files / send_ex), the Spec only holds what was asked.
         s = gusan()
         self.assertEqual((s.engine, s.kind, s.name, s.provider), ("gusan", "cloud", "Gusan Cloud", "gemini"))
-        self.assertEqual((s.model_id, s.model_name, s.label),
-                         ("gemini-2.5-flash", "Gemini 2.5 Flash", "Gusan Cloud · Gemini 2.5 Flash"))
+        self.assertEqual((s.model_id, s.model_name, s.label, s.request_model),
+                         ("best", "Best accuracy", "Gusan Cloud · Best accuracy", "best"))
         self.assertEqual(s.api_key, "")
-        m = gusan(provider="mistral")
-        self.assertEqual((m.provider, m.model_id, m.model_name, m.label),
-                         ("mistral", "voxtral-mini-latest", "Voxtral Mini", "Gusan Cloud · Voxtral Mini"))
+        # any older value is the same thing: a provider name, a Gemini id, nothing
+        for value in ("mistral", "gemini", "gemini-2.5-flash", "voxtral-mini-latest", None, "best"):
+            self.assertEqual(gusan(provider=value).request_model, "best", value)
+        self.assertEqual(gusan(provider="gemini-2.5-pro").request_model, "best")
+        # ...and "fast" is the one other word the server knows
+        f = gusan(provider="fast")
+        self.assertEqual((f.model_id, f.model_name, f.label, f.request_model),
+                         ("fast", "Fast", "Gusan Cloud · Fast", "fast"))
 
-    def test_gusan_provider_from_real_id_or_cfg(self):
-        self.assertEqual(cs.spec_from_cfg({}, "managed", "voxtral-mini-latest").provider, "mistral")
-        self.assertEqual(cs.spec_from_cfg({"managed_provider": "mistral"}, "managed").provider, "mistral")
-        self.assertEqual(cs.spec_from_cfg({"managed_provider": "Mistral"}, "cloud", None).provider, "mistral")
-        self.assertEqual(cs.spec_from_cfg({"managed_provider": "openai"}, "managed").provider, "gemini")
+    def test_the_old_provider_only_moves_the_fast_profile(self):
+        # 1.9's "mistral" provider still puts Voxtral first on the FAST profile (dictation); a file asks
+        # for the best one and never sends it
+        self.assertEqual(cs.spec_from_cfg({"managed_provider": "mistral"}, "managed", "fast").provider, "mistral")
+        self.assertEqual(cs.spec_from_cfg({"managed_provider": "Mistral"}, "cloud", "fast").provider, "mistral")
+        self.assertEqual(cs.spec_from_cfg({"managed_provider": "openai"}, "managed", "fast").provider, "gemini")
+        self.assertEqual(cs.spec_from_cfg({"managed_provider": "mistral"}, "managed").provider, "gemini")
 
     def test_model_id_is_what_engine_choice_stores(self):
         for provider in ("gemini", "mistral"):
@@ -147,10 +156,16 @@ class TestSpecFromCfg(unittest.TestCase):
 
     def test_labels_are_speech_engines(self):
         for backend, spec in (("google", google({"google_stt_model": "gemini-2.5-flash-lite"})),
-                              ("mistral", mistral()), ("managed", gusan(provider="mistral"))):
+                              ("mistral", mistral()), ("managed", gusan(provider="fast"))):
             cfg = dict(spec.cfg or {}, backend=backend, managed_provider=spec.provider)
             res = ec.speech_engine(cfg, True, "audio_to_text")
             self.assertEqual((spec.label, spec.model_name), (res["label"], res["model_name"]))
+        # a file's Gusan Cloud line is the file engine's
+        cfg = {"file_model": "cloud"}
+        res = ec.file_engine(cfg, pro=True)
+        spec = gusan(cfg)
+        self.assertEqual((spec.label, spec.model_name, spec.model_id),
+                         (res["label"], res["model_name"], res["model_id"]))
 
     def test_languages(self):
         self.assertEqual(gusan(language="auto").languages, ())
@@ -202,13 +217,18 @@ class TestBuildRequest(unittest.TestCase):
         self.assertEqual(req["headers"], {"Authorization": f"Bearer {TOKEN}"})
         self.assertEqual(req["timeout"], (10, 90))
         body = req["json"]
-        self.assertEqual(set(body), {"audio", "sample_rate", "language", "provider", "languages"})
+        self.assertEqual(set(body), {"audio", "sample_rate", "language", "provider", "languages", "model"})
         self.assertEqual(base64.b64decode(body["audio"]), WAV)
         self.assertEqual((body["sample_rate"], body["language"], body["provider"], body["languages"]),
                          (16000, "multi", "gemini", ["en", "hy"]))
+        self.assertEqual(body["model"], "best")                    # a file asks for accuracy; the server chooses
         self.assertEqual(cs.build_request(gusan(language="ru"), WAV, TOKEN)["json"]["languages"], ["ru"])
-        self.assertEqual(cs.build_request(gusan(provider="mistral"), WAV, TOKEN)["json"]["provider"],
-                         "mistral")
+        fast = cs.spec_from_cfg({"managed_provider": "mistral"}, "managed", "fast", token_fn=lambda: TOKEN)
+        fb = cs.build_request(fast, WAV, TOKEN)["json"]
+        self.assertEqual((fb["provider"], fb["model"]), ("mistral", "fast"))
+        for value in ("gemini-2.5-pro", "gemini-2.5-flash", "mistral", None):
+            self.assertNotIn(cs.build_request(gusan(provider=value), WAV, TOKEN)["json"]["model"],
+                             ("gemini-2.5-pro", "gemini-2.5-flash"))        # no Gemini id is sent to Gusan Cloud
 
     def test_gusan_cloud_vocabulary_only_when_shared(self):
         cfg = {"vocabulary": "Gusan, Doctolib"}
@@ -390,7 +410,8 @@ class TestClassify(unittest.TestCase):
 
     def test_fallback_and_retry_kinds(self):
         self.assertEqual(cs.LOCAL_FALLBACK_KINDS, {"cap", "pro_required", "no_token"})
-        self.assertEqual(cs.RETRY_KINDS, {"timeout", "network", "server", "rate_limit", "bad_response"})
+        self.assertEqual(cs.RETRY_KINDS, {"timeout", "network", "server", "rate_limit", "bad_response",
+                                          "busy", "off_language"})
         self.assertTrue(cs.RETRY_KINDS <= set(cs.MESSAGES))
         self.assertTrue(cs.LOCAL_FALLBACK_KINDS <= set(cs.MESSAGES))
         self.assertFalse(cs.RETRY_KINDS & cs.LOCAL_FALLBACK_KINDS)
@@ -615,8 +636,207 @@ def _main_constants():
     for node in tree.body:
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             if node.targets[0].id in ("MANAGED_PROXY_URL", "MISTRAL_LANGS"):
-                found[node.targets[0].id] = ast.literal_eval(node.value)
+                value = node.value
+                if isinstance(value, ast.Attribute) and ast.unparse(value) == "speech_langs.MISTRAL_LANGS":
+                    # main.py reads the ONE table (speech_langs.MISTRAL_LANGS), not a copy
+                    import speech_langs
+                    found[node.targets[0].id] = speech_langs.MISTRAL_LANGS
+                else:
+                    found[node.targets[0].id] = ast.literal_eval(value)
     return found["MANAGED_PROXY_URL"], found["MISTRAL_LANGS"]
+
+
+class TestLiveModels(unittest.TestCase):
+    """Gusan 2.0.1: a Gemini model can be asked for (Best accuracy = Gemini 2.5 Pro), the answer
+    says what RAN, and the live thinking budgets are valid for each model."""
+
+    def test_thinking_config_per_model(self):
+        self.assertEqual(cs.thinking_config("gemini-2.5-flash"), {"thinkingBudget": 0})
+        self.assertEqual(cs.thinking_config("gemini-2.5-flash-lite"), {"thinkingBudget": 0})
+        # 2.5 Pro cannot turn thinking off: its smallest valid budget, never a zero
+        self.assertEqual(cs.thinking_config("gemini-2.5-pro"), {"thinkingBudget": 128})
+        self.assertGreater(cs.thinking_config("gemini-2.5-pro")["thinkingBudget"], 0)
+        for model in ("gemini-3-flash-preview", "gemini-3.5-flash", "", None):
+            self.assertIsNone(cs.thinking_config(model), model)
+
+    def test_audio_to_texts_own_rule_is_unchanged(self):
+        # (build_request keeps _thinking_off: Pro and 3.x are sent with no thinkingConfig at all)
+        self.assertTrue(cs._thinking_off("gemini-2.5-flash"))
+        self.assertFalse(cs._thinking_off("gemini-2.5-pro"))
+
+    def test_gusan_cloud_spec_for_pro(self):
+        # the old "Best accuracy = Gemini 2.5 Pro" value is the best profile now: no Gemini id is sent
+        s = cs.spec_from_cfg({}, "managed", "gemini-2.5-pro")
+        self.assertEqual((s.provider, s.model_id, s.model_name, s.label, s.request_model),
+                         ("gemini", "best", "Best accuracy", "Gusan Cloud · Best accuracy", "best"))
+        body = cs.build_request(dataclasses.replace(s, token_fn=lambda: TOKEN), WAV, TOKEN)["json"]
+        self.assertEqual((body["model"], body["provider"]), ("best", "gemini"))
+        # every Gusan Cloud request says which profile it wants (a name the proxy doesn't know is "fast")
+        for spec in (gusan(), cs.spec_from_cfg({}, "managed", "gemini-2.5-flash"), gusan(provider="mistral")):
+            self.assertEqual(spec.request_model, "best")
+            self.assertEqual(cs.build_request(spec, WAV, TOKEN)["json"]["model"], "best")
+
+    def test_answered_model(self):
+        self.assertEqual(cs.answered_model("gusan", {"text": "x", "model": "gemini-2.5-pro"}), "gemini-2.5-pro")
+        self.assertEqual(cs.answered_model("gusan", {"text": "x"}, {"X-Gusan-Model": "gemini-2.5-flash"}),
+                         "gemini-2.5-flash")
+        self.assertEqual(cs.answered_model("gusan", {"text": "x"}, {"x-gusan-model": "voxtral-mini-latest"}),
+                         "voxtral-mini-latest")
+        self.assertEqual(cs.answered_model("gusan", {"text": "x"}), "")               # an older server
+        self.assertEqual(cs.answered_model("google", {"modelVersion": "gemini-2.5-pro"}), "gemini-2.5-pro")
+        self.assertEqual(cs.answered_model("mistral", {"model": "voxtral-mini-2602"}), "voxtral-mini-2602")
+        for odd in ({"model": ["x"]}, {"model": "a b c"}, {"model": "x" * 200}, {"model": ""}, None, "str", 5):
+            self.assertEqual(cs.answered_model("gusan", odd), "", odd)
+        self.assertEqual(cs.answered_model("gusan", {}, {"X-Gusan-Model": "<script>"}), "")
+
+    def test_send_ex_returns_the_model_that_ran_and_send_does_not_change(self):
+        post = FakePost(Resp(200, {"text": " Hi. ", "lang": "en", "model": "gpt-transcribe"}))
+        spec = cs.spec_from_cfg({}, "managed", "best", token_fn=lambda: TOKEN)
+        self.assertEqual(cs.send_ex(spec, WAV, post=post), ("Hi.", None, "gpt-transcribe"))
+        self.assertEqual(post.calls[0][1]["json"]["model"], "best")
+        self.assertEqual(cs.send(spec, WAV, post=post), ("Hi.", None))                 # still a pair
+        old = FakePost(Resp(200, {"text": "Hi.", "lang": "en"}))
+        self.assertEqual(cs.send_ex(spec, WAV, post=old)[2], "")                       # an older server: unknown
+        head = FakePost(Resp(200, {"text": "Hi."}, headers={"X-Gusan-Model": "scribe_v2"}))
+        self.assertEqual(cs.send_ex(spec, WAV, post=head)[2], "scribe_v2")
+        g = FakePost(Resp(200, {"candidates": [{"content": {"parts": [{"text": "Hi."}]}}],
+                                "modelVersion": "gemini-2.5-flash"}))
+        self.assertEqual(cs.send_ex(google(language="en"), WAV, post=g), ("Hi.", "en", "gemini-2.5-flash"))
+
+
+# ── what transcribe-proxy says when it fails (supabase/functions/transcribe-proxy) ─────────
+
+class TestTheProxysFixedAnswers(unittest.TestCase):
+    """The server answers with fixed codes (never a provider's words): 401/403/429 as before, 502
+    stt_failed with a `detail`, 400 invalid_audio, 413 audio_too_large, 503 stt_not_configured. Each is
+    a typed error with a plain sentence, and the right retry behaviour."""
+
+    def kind(self, status, payload=None, text=None, headers=None):
+        spec = gusan()
+        resp = Resp(status, payload, text=text, headers=headers)
+        with self.assertRaises(cs.CloudSpeechError) as cm:
+            cs.send(spec, WAV, post=FakePost(resp))
+        return cm.exception
+
+    def test_stt_failed_details_are_read_by_their_code(self):
+        want = {"timeout": ("server", True), "network_error": ("server", True),
+                "provider_unavailable": ("server", True), "rate_limited": ("busy", True),
+                "provider_auth": ("cap", False), "provider_credits": ("cap", False),
+                "provider_rejected": ("bad_request", False)}
+        for detail, (kind, retry) in want.items():
+            e = self.kind(502, {"error": "stt_failed", "detail": detail})
+            self.assertEqual((e.kind, e.retryable), (kind, retry), detail)
+
+    def test_no_engine_for_the_language_is_its_own_plain_kind(self):
+        e = self.kind(502, {"error": "stt_failed", "detail": "no engine for this language"})
+        self.assertEqual((e.kind, e.retryable), ("no_engine", False))
+        self.assertIn("can't transcribe this language", e.message)
+        self.assertNotIn("Pick Gusan Cloud", e.message)          # the sentence for a key that can't - not this
+
+    def test_the_other_codes(self):
+        self.assertEqual(self.kind(413, {"error": "audio_too_large"}).kind, "too_large")
+        self.assertFalse(self.kind(413, {"error": "audio_too_large"}).retryable)
+        self.assertEqual(self.kind(400, {"error": "bad_request", "detail": "invalid_audio"}).kind, "bad_request")
+        self.assertEqual(self.kind(400, {"error": "no_audio"}).kind, "bad_request")
+        self.assertEqual(self.kind(503, {"error": "stt_not_configured"}).kind, "cap")
+        self.assertEqual(self.kind(401, {"error": "unauthorized"}).kind, "signed_out")
+        self.assertEqual(self.kind(403, {"error": "pro_required"}).kind, "pro_required")
+        self.assertEqual(self.kind(429, {"error": "quota_exceeded"}).kind, "cap")
+        busy = self.kind(429, {"error": "rate_limited"}, headers={"Retry-After": "3"})
+        self.assertEqual((busy.kind, busy.retry_after), ("busy", 3.0))
+        # an answer that is not the proxy's (a gateway's page) is still read by its status
+        self.assertEqual(self.kind(502, text="<html>Bad gateway</html>").kind, "server")
+        self.assertEqual(self.kind(500, text="").kind, "server")
+
+    def test_every_sentence_is_plain(self):
+        for kind in ("server", "busy", "cap", "bad_request", "too_large", "no_engine", "timeout"):
+            text = cs.error_message(kind, "Gusan Cloud")
+            self.assertTrue(text.endswith("."), kind)
+            low = text.lower()
+            for word in ("provider", "502", "stt", "proxy", "detail", "elevenlabs", "openai", "voxtral"):
+                self.assertNotIn(word, low, (kind, word))
+
+    def test_provider_trouble_is_not_the_persons_connection(self):
+        # a server-side timeout / network error must not tell the person to check THEIR internet
+        for detail in ("timeout", "network_error"):
+            e = self.kind(502, {"error": "stt_failed", "detail": detail})
+            self.assertNotIn("internet", e.message)
+
+    def test_the_providers_own_words_never_reach_the_sentence(self):
+        e = self.kind(502, {"error": "stt_failed", "detail": "provider_auth", "extra": "sk-secret-123"})
+        self.assertNotIn("sk-secret-123", e.message)
+        self.assertEqual(cs.proxy_answer(b'{"error": "X", "detail": "Rate_Limited"}'), ("x", "rate_limited"))
+        for odd in ("", None, "[]", "not json", "{broken", b"\xff\xfe", 5):
+            self.assertEqual(cs.proxy_answer(odd), ("", ""), odd)
+
+
+class TestLiveTrying(unittest.TestCase):
+    """A live piece never holds the call's one worker for long: two tries, 12 s each, 20 s in all."""
+
+    def test_the_numbers(self):
+        self.assertEqual((cs.LIVE_RETRIES, cs.LIVE_ATTEMPT_TIMEOUT, cs.LIVE_PIECE_BUDGET), (1, 12.0, 20.0))
+        self.assertEqual(cs.live_timeout(5), 12.0)
+        self.assertEqual(cs.live_timeout(30), 12.0)
+        self.assertGreater(cs.live_timeout(120), 12.0)            # a long dictation take gets what it needs
+        self.assertEqual(cs.live_timeout(100000), 40.0)
+        self.assertEqual(cs.live_timeout("x"), 12.0)
+        self.assertEqual(cs.live_budget(12.0), 20.0)
+        self.assertEqual(cs.live_budget(40.0), 48.0)
+
+    def run_tries(self, fail_for, **kw):
+        """Every try takes ``fail_for`` seconds on a fake clock, then fails with a retryable error."""
+        now = [0.0]
+        timeouts = []
+        sleeps = []
+
+        def clock():
+            return now[0]
+
+        def sleep(s):
+            sleeps.append(s)
+            now[0] += s
+
+        def once(timeout=None):
+            timeouts.append(timeout)
+            now[0] += min(fail_for, timeout if timeout is not None else fail_for)
+            raise cs.CloudSpeechError("server", "x")
+        out = cs.attempt_with_retries(once, sleep=sleep, clock=clock, **kw)
+        return out, timeouts, sleeps, now[0]
+
+    def test_a_dead_proxy_costs_at_most_the_budget(self):
+        (value, err), timeouts, sleeps, spent = self.run_tries(
+            100.0, timeout=cs.LIVE_ATTEMPT_TIMEOUT, budget=cs.LIVE_PIECE_BUDGET)
+        self.assertIsNone(value)
+        self.assertEqual(err.kind, "server")
+        self.assertLessEqual(spent, cs.LIVE_PIECE_BUDGET)
+        self.assertEqual(len(timeouts), 2)                         # two tries, not three
+        self.assertEqual(timeouts[0], 12.0)
+        self.assertLessEqual(timeouts[1], 12.0)
+
+    def test_a_quick_failure_is_tried_once_more_after_a_short_wait(self):
+        (value, err), timeouts, sleeps, spent = self.run_tries(
+            0.5, timeout=cs.LIVE_ATTEMPT_TIMEOUT, budget=cs.LIVE_PIECE_BUDGET)
+        self.assertEqual((len(timeouts), sleeps), (2, [1.0]))
+        self.assertEqual(timeouts, [12.0, 12.0])
+
+    def test_without_a_timeout_the_call_is_as_before(self):
+        calls = []
+
+        def once():
+            calls.append(1)
+            raise cs.CloudSpeechError("server", "x")
+        value, err = cs.attempt_with_retries(once, sleep=lambda s: None, clock=lambda: 0.0)
+        self.assertEqual((value, len(calls)), (None, 2))
+
+    def test_a_capable_model_that_wrote_another_script_twice_is_code_switching(self):
+        for model in ("gpt-transcribe", "gpt-4o-transcribe", "scribe_v2", "gemini-2.5-pro"):
+            self.assertFalse(cs.accept_off_script("script", model, 1), model)       # the first time: try again
+            self.assertTrue(cs.accept_off_script("script", model, 2), model)
+        # Voxtral does not cover Armenian, an unknown engine can't be trusted: the old rule (a gap)
+        for model in ("voxtral-mini-latest", "", None, "whisper-1", "base", "unknown-model"):
+            self.assertFalse(cs.accept_off_script("script", model, 2), model)
+        self.assertFalse(cs.accept_off_script("engine", "gpt-transcribe", 5))      # "engine": it does not cover it
+        self.assertFalse(cs.accept_off_script("", "gpt-transcribe", 5))
 
 
 class TestParityWithMain(unittest.TestCase):

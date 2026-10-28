@@ -153,6 +153,32 @@ Who said what (Gusan 2.0.1)
     come from the live pieces, as before.
   * A long stretch without any sound from either source is a notice (meta
     ``notices``) and, while recording, one tray hint (``_watch_sound``).
+What transcribes a session (Gusan 2.0.1)
+  * A session started from the Live Assistant (source "live_assist") transcribes with ITS OWN
+    pick - cfg ``live_assist_speech_model``, engine_choice.live_speech_session: Automatic (=
+    Dictation's, but Gusan Cloud for a call in Armenian when allowed), a Whisper model, Gusan
+    Cloud (Flash / "Best accuracy" = Gemini 2.5 Pro) or your own Google key - handed to the
+    recorder as start_recording(speech=...). Meetings and the calendar keep Dictation's.
+  * DECISION - the final re-read. AudioRecorder.transcribe_segments is ALWAYS local Whisper,
+    whatever engine made the live pieces, and the labelled transcript it produces REPLACES the
+    plain one. So a cloud session (any live_assist session whose recorder backend is a cloud
+    one) is NOT read again: its live pieces carry their own start/end on the retained
+    recording (AudioRecorder.piece_segments) and become the segments - the cloud's words
+    stay, the You / Them labels and later the speaker names are worked out on them (a piece
+    is the finest grain: no word times are asked of Gemini). A piece that failed stays missing
+    (the transcript says so); a model on this computer is read again as before, with the
+    session's own Whisper model. Meetings with a cloud Dictation backend are NOT changed by
+    this - EXCEPT in a language local Whisper is poor at (Armenian): there the re-read would replace
+    good words (the cloud's, or the Armenian model's) with Whisper's much worse text, so a Meetings or
+    calendar session in such a language keeps its words exactly like a Live Assistant one. For any
+    other language its re-read still replaces them - see _reread_plan.
+  * LATER STEPS. A session whose words came from a cloud engine (the recorder's backend, or any
+    piece the cloud answered) carries meta ``transcribed_with: "cloud"`` - written when it
+    starts, so a session the app never finishes has it too. Nothing afterwards may read its
+    recording again with local Whisper (that replaces the words): Identify speakers only tells
+    the people on the call apart from the segments kept at Stop (meeting_speakers.refine_meeting)
+    and otherwise says the words were left as they are; finishing an interrupted session keeps
+    its live pieces as the transcript; the Transcript tab doesn't suggest a re-read for one.
 """
 import importlib.util
 import json
@@ -167,9 +193,11 @@ from pathlib import Path
 
 import actions
 import diarization
+import invite_context
 import meeting_speakers
 import meeting_store
 import speaker_followup
+import speech_langs
 import storage
 import telemetry
 from app_info import APP_VERSION
@@ -185,6 +213,16 @@ PHASE_FAILED = "failed"
 
 AUDIO_MODES = ("smart_meeting", "default_mic", "system_only")
 SOURCES = ("page", "live_assist", "calendar", "classic")
+
+# _reread_plan's answer for a cloud session that can't be labelled: keep its plain transcript.
+_KEEP_PLAIN = object()
+# The recorder backends that are a cloud engine (a take on one has the cloud's words).
+_CLOUD_BACKENDS = ("managed", "google", "mistral")
+# meta.json "transcribed_with": a Live Assistant session whose words came from a cloud engine.
+TRANSCRIBED_CLOUD = "cloud"
+# What the live transcript shows for a stretch the cloud could not transcribe in a language local
+# Whisper is poor at (Armenian): never stored as words - the final transcript has nothing there.
+GAP_MARK = "[...]"
 
 # Refusal codes of start() / continue_meeting() (also emitted as error(code, msg)).
 ERR_CONSENT = "consent_needed"
@@ -215,6 +253,14 @@ QUIT_CHUNK_WAIT = 3.0      # s: pieces being transcribed at Quit may still land
 # An interrupted meeting finished from its saved recording (see _recover_then_notes).
 RECOVERED_NOTICE = ("Gusan was closed before this meeting was finished, so the transcript was "
                     "rebuilt from the saved recording.")
+# The same for a Live Assistant session whose words came from a cloud engine: the recording is NOT
+# read again (that would replace them with this computer's much worse text, see _reread_plan).
+RECOVERED_CLOUD_NOTICE = ("Gusan was closed before this meeting was finished, so the transcript is "
+                          "what was heard live. The recording wasn't read again, so it has no "
+                          "speaker labels.")
+# Identify speakers on a meeting whose words came from a cloud engine, with nothing left to name.
+CLOUD_WORDS_KEPT = ("This meeting was transcribed in the cloud. Reading the recording again on this "
+                    "computer would replace those words, so they were left as they are.")
 # A device that stopped delivering sound: a tray hint from this long on (seconds).
 QUIET_HINT_SEC = 180.0
 
@@ -473,8 +519,17 @@ class MeetingCore:
         self._notes_engine = None
         self._session_audio_mode = ""
         self._session_language = None
+        # A Live Assistant session's own speech engine - the recorder's ``speech=`` tuple
+        # (None = like Dictation) - and whether the final labels were worked out on its live
+        # pieces (a cloud session keeps its words) instead of a local re-read.
+        self._session_speech = None
+        self._labels_from_pieces = False
         self._source = "page"
         self._calendar_event_id = ""
+        # The calendar invite's agenda (plain text, what the user saw and edited):
+        # goes in front of the transcript when the AI notes are written, and to
+        # the Live Assistant card. start() sets it for every new meeting.
+        self._meeting_agenda = ""
         self._meeting_minutes = None
         self._rewrite_only = False
         # Processing that only writes notes from a saved transcript (Retry,
@@ -536,6 +591,11 @@ class MeetingCore:
     @property
     def meeting_dir(self):
         return self._meeting_dir
+
+    @property
+    def source(self):
+        """Where this session was started from: page / live_assist / calendar / classic."""
+        return self._source
 
     @property
     def phase(self):
@@ -708,14 +768,17 @@ class MeetingCore:
 
     # ── start ──
     def start(self, title="", attendees="", audio_mode=None, language=None,
-              notes_engine=None, resume_dir=None, source=None, calendar_event_id=None):
+              notes_engine=None, resume_dir=None, source=None, calendar_event_id=None,
+              agenda=""):
         """Start recording. Returns (ok, code, message); on refusal also emits
         error(code, message). ``audio_mode``/``language``/``notes_engine`` are
         this meeting's (never saved); None = the saved meeting settings.
         ``resume_dir`` continues a saved meeting in its folder. ``source``:
         page / live_assist / calendar (or "classic", the 1.x window's; None:
         live_assist when Live Assistant switched the recorder to fast pieces,
-        else page).
+        else page). ``agenda``: the calendar invite's agenda as the user left it
+        (a continued meeting keeps its own); saved in meta.json and sent with the
+        title and people when the AI notes are written.
         Consent is the caller's (ensure_recording_consent); without the saved
         acknowledgement this refuses with "consent_needed"."""
         app = self.app
@@ -777,6 +840,9 @@ class MeetingCore:
             source = ("live_assist" if getattr(rec, "fast_live_chunks", False) else "page")
         self._source = source
         self._calendar_event_id = str(calendar_event_id or "")
+        # Always set: a previous meeting's agenda never carries over.
+        self._meeting_agenda = invite_context.clip_agenda(
+            agenda or (meta.get("agenda") if resume_dir is not None else ""))
 
         # Local timestamp folder for auto-save recovery (a resumed meeting
         # keeps writing into its original folder).
@@ -810,7 +876,10 @@ class MeetingCore:
             "on_partial": getattr(rec, "on_partial", None),
             "on_lang_detected": getattr(rec, "on_lang_detected", None),
             "on_source_levels": getattr(rec, "on_source_levels", None),
+            "on_chunk_gap": getattr(rec, "on_chunk_gap", None),
         }
+        self._gap_marked = False
+        rec.on_chunk_gap = self._on_chunk_gap
         rec.on_chunk_complete = self._on_chunk_transcribed
         rec.on_levels = self._on_audio_levels
         rec.on_partial = lambda *a, **k: None
@@ -857,12 +926,23 @@ class MeetingCore:
         # loopback device, driver errors) so a failure never crashes the app or
         # leaves a fake "recording" state.
         try:
-            rec.start_recording(capture_mode=meeting_mode, language=language)
+            # A Live Assistant session transcribes with ITS OWN pick (Transcribes with on the
+            # Live Assistant page: engine_choice.live_speech_session); every other source with
+            # Dictation's model, exactly as before.
+            speech = self._live_speech(app, rec, language) if source == "live_assist" else None
+            self._session_speech = speech
+            if speech:
+                rec.start_recording(capture_mode=meeting_mode, language=language, speech=speech)
+            else:
+                rec.start_recording(capture_mode=meeting_mode, language=language)
             # Load the speech model while the first seconds are recorded (the
             # idle sweep may have freed it), not when the first piece is due.
             if hasattr(app, "prewarm_speech_model"):
                 try:
-                    app.prewarm_speech_model()
+                    if speech:
+                        app.prewarm_speech_model(speech=speech)
+                    else:
+                        app.prewarm_speech_model()
                 except Exception:
                     pass                       # never a recording failure
         except Exception as e:
@@ -892,8 +972,19 @@ class MeetingCore:
                 first["started"] = started
         if self._calendar_event_id:
             first["calendar_event_id"] = self._calendar_event_id
+        if self._meeting_agenda:
+            first["agenda"] = self._meeting_agenda
         if language and language != "auto":
             first["language"] = language
+        if self._keeps_cloud_words(rec):
+            # Written now, not only at Stop: a session the app never finishes keeps the mark,
+            # so its recovery doesn't replace the cloud's words with a local re-read.
+            first["transcribed_with"] = TRANSCRIBED_CLOUD
+        armenian = self._local_armenian_model(rec)
+        if armenian:
+            # The words are the Armenian model's (a local take): a later Identify speakers or
+            # recovery reads the recording with it again - never with Dictation's Whisper.
+            first["speech_model"] = armenian
         self._write_meta(**first)
 
         # Only now that the device is open does the overlay go live (a failed
@@ -901,7 +992,11 @@ class MeetingCore:
         la = getattr(app, "live_assist", None)
         if la is not None:
             try:
-                la.set_meeting_active(True, self._meeting_title, self._meeting_attendees)
+                if self._meeting_agenda:
+                    la.set_meeting_active(True, self._meeting_title, self._meeting_attendees,
+                                          agenda=self._meeting_agenda)
+                else:
+                    la.set_meeting_active(True, self._meeting_title, self._meeting_attendees)
                 if self._resume_prior:
                     la.feed_transcript(self._resume_prior[-1500:], answer=False)  # context only
             except Exception:
@@ -921,6 +1016,20 @@ class MeetingCore:
         self._emit_state()
         return True, "", ""
 
+    def _live_speech(self, app, rec, language):
+        """The ``speech=`` of a Live Assistant session (engine_choice.live_speech_session), or
+        None = like Dictation. Never raises: a problem here is a session on Dictation's
+        model, not a refused start."""
+        try:
+            import engine_choice
+            pro = bool(app.is_pro()) if callable(getattr(app, "is_pro", None)) else False
+            signed_in = bool(getattr(getattr(app, "auth", None), "is_authenticated", pro))
+            speech = engine_choice.live_speech_session(app.cfg, pro, language, signed_in)
+        except Exception:
+            logger.debug("Live Assistant speech choice ignored", exc_info=True)
+            return None
+        return speech if speech and speech[0] else None
+
     def continue_meeting(self, folder, audio_mode=None, language=None,
                          notes_engine=None, source=None):
         """Record more into a saved meeting (same folder, next audio part; the
@@ -934,6 +1043,13 @@ class MeetingCore:
                           attendees=meta.get("attendees") or "", audio_mode=audio_mode,
                           language=language, notes_engine=notes_engine,
                           resume_dir=folder, source=source)
+
+    def set_agenda(self, text):
+        """The invite's agenda changed on the Live Assistant card (an edit, or its
+        Clear): keep it for the notes and in the meeting's folder. An empty text
+        clears it. Never calls the card back - the card is the caller."""
+        self._meeting_agenda = invite_context.clip_agenda(text)
+        self._write_meta(agenda=self._meeting_agenda)      # best effort: never an error
 
     # ── pause ──
     def pause(self):
@@ -1123,6 +1239,7 @@ class MeetingCore:
         rec.on_partial = saved.get("on_partial") or (lambda text: None)
         rec.on_lang_detected = saved.get("on_lang_detected") or (lambda code, name: None)
         rec.on_source_levels = saved.get("on_source_levels")
+        rec.on_chunk_gap = saved.get("on_chunk_gap")
 
     def _on_audio_levels(self, levels):
         pass  # the dictation bar's 20 bands - unused by meetings
@@ -1161,6 +1278,8 @@ class MeetingCore:
         }
         with self._chunks_lock:
             self._chunks.append(chunk)
+        if text:
+            self._gap_marked = False          # words again: the next gap is a new "[...]"
         # Recoverable write to JSONL log
         try:
             with open(self._chunks_path, "a", encoding="utf-8") as f:
@@ -1175,6 +1294,49 @@ class MeetingCore:
                 self._piece.emit(text, self._speaker_for(idx))
             except RuntimeError:
                 pass  # session already destroyed
+
+    def _on_chunk_gap(self, idx, kind=""):
+        """A piece the cloud could not transcribe in a language local Whisper is poor at
+        (the recorder keeps its audio): "[...]" on the live transcript, once for a run of them,
+        never stored as words. Runs on a transcription worker thread."""
+        if self.state != STATE_RECORDING or getattr(self, "_gap_marked", False):
+            return
+        self._gap_marked = True
+        try:
+            self.sig_chunk.emit(GAP_MARK)
+            self._piece.emit(GAP_MARK, "")
+        except RuntimeError:
+            pass  # session already destroyed
+
+    def _unread_language(self, rec):
+        """The name of the language ("Armenian") when parts of this take were never read by the
+        cloud (the recorder kept their audio), else ""."""
+        report = self._speech_report(rec)
+        try:
+            if int(report.get("gap_total") or 0) <= 0:
+                return ""
+        except (TypeError, ValueError):
+            return ""
+        return (str(report.get("gap_language") or "")
+                or speech_langs.language_name(report.get("language")) or "this language")
+
+    def _note_unread_pieces(self, rec):
+        """After the last piece: parts of the call the cloud never read in a language local
+        Whisper is poor at are left out of the transcript - say so (the recording has them)."""
+        report = self._speech_report(rec)
+        try:
+            count = int(report.get("gap_pieces") or 0)
+        except (TypeError, ValueError):
+            return
+        if count <= 0:
+            return
+        try:
+            import engine_choice
+            language = (str(report.get("gap_language") or "")
+                        or speech_langs.language_name(report.get("language")) or "this language")
+            self._add_notice(engine_choice.gap_summary(language, count))
+        except Exception:
+            logger.debug("gap summary skipped", exc_info=True)
 
     def _on_piece(self, text, who):
         # GUI thread: the running live text, re-flowed into sentences by readers.
@@ -1209,7 +1371,7 @@ class MeetingCore:
         self._last_summary_at = now
         self._summary_len_at_last = len(self._live_text)
         self._summary_running = True
-        self._spawn(self._compute_live_summary, self._live_text)
+        self._spawn(self._compute_live_summary, self._live_text.replace(GAP_MARK, " "))
         return True
 
     def _watch_sound(self):
@@ -1445,6 +1607,12 @@ class MeetingCore:
             # the meeting empty (which would also reset the resume state).
             if not self._final_transcript and not prior:
                 msg = "No transcription recorded. The meeting is empty."
+                unread = self._unread_language(rec)
+                if unread:
+                    # Every part stayed unread (a language local Whisper is poor at, and the cloud
+                    # never answered): say that, not "empty" - the recording has everything.
+                    import engine_choice
+                    msg = engine_choice.gap_nothing(unread)
                 # In a system-audio mode, a dead-silent loopback means the
                 # sound the user heard was playing on a DIFFERENT output
                 # device than the Windows default - tell them exactly that.
@@ -1467,6 +1635,8 @@ class MeetingCore:
             # used to take the whole transcript with it (transcript.txt was only
             # written after it). The final write below replaces it.
             self._save_plain_transcript_early(prior)
+            self._note_cloud_words(rec)             # where the words came from (before any re-read)
+            self._note_unread_pieces(rec)           # parts the cloud never read (Armenian): a notice
 
             if getattr(rec, "_full_audio_truncated", False) is True:
                 # The recorder stops keeping full audio at its memory cap
@@ -1486,19 +1656,22 @@ class MeetingCore:
                 # here ("Speaker 1/2/3: ..."). When it cannot be done the plain
                 # transcript stays - and the notices say why, with a way to retry.
                 attributed = ""
+                self._labels_from_pieces = False
                 try:
                     attributed = self._build_attributed_transcript()
                     if attributed:
                         self._final_transcript = attributed
                         # That pass re-transcribed ALL the retained audio, so
                         # chunks that failed live are covered now; audio a dead
-                        # device never captured still isn't.
-                        if not capture_failed:
+                        # device never captured still isn't. (A cloud session's
+                        # labels come from its live pieces: nothing was re-read,
+                        # so a piece that failed stays missing.)
+                        if not capture_failed and not self._labels_from_pieces:
                             failure = ""
                 except Exception as e:
                     logger.warning("Speaker attribution failed, using plain transcript: %s", e)
                     self._add_notice(meeting_speakers.notice_for(meeting_speakers.R_ERROR))
-                if not attributed:
+                if not attributed or self._labels_from_pieces:
                     self._note_live_gaps()
             self._note_quiet_stretches()
 
@@ -1558,9 +1731,14 @@ class MeetingCore:
         """The language to decode a recording again in: "multi" stays mixed (the
         recorder decodes mixed languages per window), otherwise the language the
         meeting's live pieces found."""
-        setting = self._session_language or self._cfg().get("meeting_language") \
-            or self._cfg().get("language") or ""
-        return "multi" if setting == "multi" else (self._final_lang or None)
+        setting = speech_langs.normalize(
+            self._session_language or self._cfg().get("meeting_language")
+            or self._cfg().get("language") or "", default="")
+        if setting == "multi":
+            return "multi"
+        if setting and setting != "auto":
+            return setting              # the language that was SET: never a guess from the live pieces
+        return self._final_lang or None
 
     def _build_attributed_transcript(self):
         """Re-transcribe the meeting's full audio and label who spoke. A mic +
@@ -1601,15 +1779,146 @@ class MeetingCore:
         call_only = bool(mode == "system_only" and mic is None and part_path is not None)
         notes_first = bool(part_path is not None and (
             (mic is not None and system is not None and self._tracks_saved) or call_only))
+        plan = self._reread_plan(rec)
+        if plan is _KEEP_PLAIN:
+            return ""
+        reader, model = plan
         out = meeting_speakers.build_transcript(
             rec, [meeting_speakers.Part(audio=audio, mic=mic, system=system, call_only=call_only)],
             language=self._decode_language(), privacy=bool(self._cfg().get("privacy_mode")),
-            status=self._emit_status, names=self._speaker_names, diarize=not notes_first)
+            status=self._emit_status, names=self._speaker_names, diarize=not notes_first,
+            reader=reader, model=model)
+        self._labels_from_pieces = bool(reader is not None and out.texts)
         if out.notice and not meeting_speakers.is_benign(out.reason):
             self._add_notice(out.notice)
         if notes_first and out.texts and out.parts:
             self._sources_part = self._segments_entry(part_path, out, len(audio) / float(diarization.SAMPLE_RATE))
         return out.text
+
+    @staticmethod
+    def _speech_report(rec):
+        """The recorder's speech_report() as a dict ({} for a recorder that has none)."""
+        getter = getattr(rec, "speech_report", None)
+        if not callable(getter):
+            return {}
+        try:
+            report = getter()
+        except Exception:
+            return {}
+        return report if isinstance(report, dict) else {}
+
+    def _live_cloud_words(self, rec):
+        """Did a cloud engine make words of this take? True for a take on a cloud backend, and
+        also when a piece was answered by the cloud and Privacy mode then moved the rest of the
+        take onto this computer (the backend reads local by Stop, the words are still the
+        cloud's). Those words must not be replaced by a local re-read, now or later."""
+        report = self._speech_report(rec)
+        if report.get("backend") in _CLOUD_BACKENDS:
+            return True
+        try:
+            return int(report.get("cloud_pieces") or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
+    def _poor_language(self, rec=None):
+        """The name ("Armenian") of the language local Whisper is poor at in THIS session
+        (speech_langs.LOCAL_WHISPER_POOR), else "": the language the session was started with, else
+        the Meetings / Dictation setting, else - for "auto" - the one the recorder reports or the live
+        pieces found. "multi" counts when a language the user mixes is one."""
+        try:
+            cfg = self._cfg()
+            setting = speech_langs.normalize(
+                self._session_language or cfg.get("meeting_language") or cfg.get("language") or "",
+                default="")
+            if setting in ("", "auto"):
+                setting = (speech_langs.normalize(self._speech_report(rec).get("language"), default="")
+                           or speech_langs.normalize(self._final_lang, default=""))
+            return speech_langs.local_whisper_poor(setting, cfg)
+        except Exception:
+            return ""
+
+    def _keeps_cloud_words(self, rec):
+        """Must the words of this take stay as they are - never be replaced by reading the recording
+        again with local Whisper? True for a take whose words came from the cloud (_live_cloud_words)
+        when it is a Live Assistant session (always) or a session in a language local Whisper is
+        poor at (Armenian: Whisper's text there is far worse than the cloud's)."""
+        if not self._live_cloud_words(rec):
+            return False
+        return self._source == "live_assist" or bool(self._poor_language(rec))
+
+    def _local_armenian_model(self, rec):
+        """The Armenian speech model's id when THIS take's words are read by it on this computer (the
+        recorder says: a local take whose model, in the take's language, is that one), else "". It is
+        kept in meta.json (``speech_model``): the recording is read again later (Identify speakers, an
+        interrupted meeting) and Whisper would replace its words with a far worse Armenian text."""
+        try:
+            import speech_hy
+            report = self._speech_report(rec)
+            model = str(report.get("whisper_model") or "")
+            return model if report.get("backend") == "local" and speech_hy.is_hy_model(model) else ""
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _saved_speech_kwargs(folder):
+        """{"model": <id>} for meeting_speakers.build_transcript when a saved session's words were the
+        Armenian model's (meta ``speech_model``): the recording is read with it again. {} otherwise
+        (Dictation's model, as always)."""
+        try:
+            import speech_hy
+            value = str(meeting_store.load_meta(folder).get("speech_model") or "")
+            return {"model": value} if speech_hy.is_hy_model(value) else {}
+        except Exception:
+            return {}
+
+    def _note_cloud_words(self, rec):
+        """A session says in meta.json where its words came from (transcribed_with "cloud"): a
+        later Identify speakers or recovery must not read the recording again with local Whisper and
+        replace them. That is every Live Assistant session whose words are the cloud's, and a Meetings
+        or calendar session in a language local Whisper is poor at. A meeting of its own whose words
+        are the computer's carries no such mark; a continued one keeps the mark it has."""
+        if self._keeps_cloud_words(rec):
+            self._write_meta(transcribed_with=TRANSCRIBED_CLOUD)
+        elif self._source == "live_assist" and self._resume_dir is None:
+            self._write_meta(transcribed_with=None)
+
+    def _reread_plan(self, rec):
+        """How the final labels get their segments: (reader, model) for
+        meeting_speakers.build_transcript, or _KEEP_PLAIN. DECISION (Gusan 2.0.1): the re-read of
+        the recording (AudioRecorder.transcribe_segments) is ALWAYS local Whisper, and what it
+        finds REPLACES the live transcript. So a Live Assistant session whose words came from
+        a cloud engine (a Gusan Cloud or own-key pick, or Dictation's cloud backend under
+        Automatic) is not read again: its live pieces, with their own timestamps
+        (AudioRecorder.piece_segments), are the segments - the cloud's words stay and only
+        the You / Them labels (and later the speaker names) are worked out on them. No word
+        times are asked of a cloud model: a piece is the finest grain. A session on a model on
+        this computer is read again as always - with ITS model (a Whisper model, or the Armenian
+        model, whose own segments they are), not Dictation's. A Meetings or calendar session is
+        unchanged - the re-read, Dictation's model - EXCEPT in a language local Whisper is poor at
+        (Armenian): when its words came from the cloud it is kept exactly like a Live Assistant one
+        (the re-read would replace them with Whisper's much worse text). In any other language the
+        re-read replaces them as before.
+        _KEEP_PLAIN: a cloud session whose pieces can't be placed in the recording keeps its
+        plain transcript (it is never put through local Whisper)."""
+        if self._source != "live_assist" and not self._keeps_cloud_words(rec):
+            return None, None
+        if self._keeps_cloud_words(rec):
+            segments = None
+            placer = getattr(rec, "piece_segments", None)
+            if callable(placer):
+                try:
+                    segments = placer()
+                except Exception:
+                    logger.warning("The live pieces could not be placed", exc_info=True)
+            if not segments:
+                logger.info("Speaker labels skipped: the live pieces of this cloud session have "
+                            "no place in the recording (the plain transcript is kept)")
+                return _KEEP_PLAIN
+            kept = [dict(s) for s in segments]
+            return (lambda audio, **_kw: [dict(s) for s in kept]), None
+        speech = self._session_speech
+        model = speech[1] if speech and speech[0] == "local" and speech[1] else None
+        return None, model
 
     @staticmethod
     def _segments_entry(part_path, out, seconds):
@@ -1680,6 +1989,19 @@ class MeetingCore:
             "call. If the meeting was still going, check the microphone and the speaker output in "
             "Windows sound settings." % span)
 
+    def _notes_input(self, with_invite=True):
+        """What the notes engine is given: the calendar invite's title, people and
+        agenda (invite_context.notes_header - framed as data, empty for a generic
+        title, nobody and no agenda) in front of the transcript, then the user's
+        own notes. The bare transcript when there is no invite context."""
+        transcript = self._final_transcript or ""
+        header = (invite_context.notes_header(self._meeting_title, self._meeting_attendees,
+                                              self._meeting_agenda) if with_invite else "")
+        note_context = (header + "\n\nTranscript:\n" + transcript) if header else transcript
+        if self._user_notes:
+            note_context += ("\n\nAdditional visual meeting notes provided by "
+                             f"attendee:\n{self._user_notes}")
+        return note_context
 
     def _summarize_and_finish(self):
         """Generate the AI notes for the already-finalized transcript and emit
@@ -1690,11 +2012,6 @@ class MeetingCore:
             if not transcript.strip():
                 self.proc_signals.finished.emit("", "No transcript to summarize.")
                 return
-
-            note_context = transcript
-            if self._user_notes:
-                note_context += ("\n\nAdditional visual meeting notes provided by "
-                                 f"attendee:\n{self._user_notes}")
 
             # Resolve the engine with Pro routing - a signed-in Pro user runs
             # through the managed cloud (no BYO key). For a non-Pro user whose
@@ -1720,6 +2037,9 @@ class MeetingCore:
             if (engine_config or {}).get("privacy_mode") and kind in ("cloud", "managed"):
                 used = actions.RULE_BASED_ID       # actions.process does the same
 
+            # The built-in formatter reads every line as speech, so the invite's
+            # header (and its agenda bullets) goes only to an AI engine.
+            note_context = self._notes_input(with_invite=used != actions.RULE_BASED_ID)
             self._emit_status("Writing notes…")
             notes = actions.process(
                 note_context,
@@ -2037,6 +2357,8 @@ class MeetingCore:
         self._chunks_path = self._meeting_dir / "chunks.jsonl"
         self._meeting_title = str(meta.get("title") or "Untitled Meeting")
         self._meeting_attendees = str(meta.get("attendees") or "")
+        # Rewrite and Retry build the same header again from what the meeting kept.
+        self._meeting_agenda = invite_context.clip_agenda(str(meta.get("agenda") or ""))
         self._final_transcript = transcript
         self._final_notes = meeting_store.load_notes(folder)
         # Notes a Quit left for later are due now, whatever an earlier part of a
@@ -2115,15 +2437,20 @@ class MeetingCore:
         text = live_text = self._final_transcript or ""
         try:
             self._drop_speaker_notices()
-            self._add_notice(RECOVERED_NOTICE)
-            self._emit_status("Reading the saved recording…")
-            out = meeting_speakers.build_transcript(
-                self.app.recorder, self._saved_parts(folder), language=self._decode_language(),
-                privacy=bool(self._cfg().get("privacy_mode")), status=self._emit_status,
-                names=self._speaker_names)
-            self._add_notice(out.notice)
-            if out.texts:
-                text = self._join_parts(out.texts)
+            if meeting_store.load_meta(folder).get("transcribed_with") == TRANSCRIBED_CLOUD:
+                # A Live Assistant session whose words came from a cloud engine: they are all
+                # there is of a good text (for Armenian, local Whisper gives a much worse one).
+                self._add_notice(RECOVERED_CLOUD_NOTICE)
+            else:
+                self._add_notice(RECOVERED_NOTICE)
+                self._emit_status("Reading the saved recording…")
+                out = meeting_speakers.build_transcript(
+                    self.app.recorder, self._saved_parts(folder), language=self._decode_language(),
+                    privacy=bool(self._cfg().get("privacy_mode")), status=self._emit_status,
+                    names=self._speaker_names, **self._saved_speech_kwargs(folder))
+                self._add_notice(out.notice)
+                if out.texts:
+                    text = self._join_parts(out.texts)
         except Exception as e:
             logger.warning("Finishing the interrupted meeting from its recording failed: %s", e,
                            exc_info=True)
@@ -2200,6 +2527,10 @@ class MeetingCore:
         if not self._followup.wait_idle(folder, 30.0):
             logger.warning("The background speaker pass of %s did not stop in time", Path(folder).name)
         try:
+            if meeting_store.load_meta(folder).get("transcribed_with") == TRANSCRIBED_CLOUD:
+                self._identify_cloud_words(folder)
+                self.proc_signals.finished.emit(self._final_notes or "", "")
+                return
             old_text = meeting_store.load_transcript(folder) if meeting_store.has_transcript_file(folder) else ""
             if old_text.strip():
                 backup = self._backup_transcript(folder)
@@ -2207,7 +2538,8 @@ class MeetingCore:
             out = meeting_speakers.build_transcript(
                 self.app.recorder, self._saved_parts(folder), language=self._decode_language(),
                 privacy=bool(self._cfg().get("privacy_mode")), status=self._emit_status,
-                should_cancel=self._cancel_run.is_set, names=self._speaker_names)
+                should_cancel=self._cancel_run.is_set, names=self._speaker_names,
+                **self._saved_speech_kwargs(folder))
             if out.cancelled:
                 logger.info("Identify speakers cancelled; %s is unchanged", folder)
                 self._remove_backup(backup)
@@ -2233,6 +2565,37 @@ class MeetingCore:
             except Exception:
                 pass
         self.proc_signals.finished.emit(self._final_notes or "", "")
+
+    def _identify_cloud_words(self, folder):
+        """Identify speakers on a meeting whose words came from a cloud engine (a Live Assistant
+        session). Its recording is NEVER read again - that is local Whisper, and what it finds
+        would replace the cloud's words. What can still be done is the second half of the speaker
+        pass, which needs no re-read: tell the people on the call apart from the segments kept at
+        Stop (segments.json) and the call's saved sound. A meeting with nothing of that left
+        says so and stays as it is."""
+        result = meeting_speakers.refine_meeting(
+            folder, privacy=bool(self._cfg().get("privacy_mode")), status=self._emit_status,
+            should_cancel=self._cancel_run.is_set, names=self._speaker_names)
+        state = result.state
+        if state in (meeting_speakers.PassResult.DONE, meeting_speakers.PassResult.CONCLUDED,
+                     meeting_speakers.PassResult.FAILED):
+            # (the pass wrote the transcript and its notices itself: take them as it left them)
+            text = meeting_store.load_transcript(folder).strip()
+            if text:
+                self._final_transcript = text
+            meta = meeting_store.load_meta(folder)
+            notices = meta.get("notices") if isinstance(meta.get("notices"), list) else []
+            old_notice = meta.get("notes_notice") or ""
+            self._transcript_notices = [str(n) for n in notices if n and n != old_notice]
+        if state == meeting_speakers.PassResult.FAILED:
+            self._identify_error = result.notice or meeting_speakers.notice_for(meeting_speakers.R_ERROR)
+        elif state == meeting_speakers.PassResult.NOTHING:
+            # Said where the person looks (the notice above the notes), not only as an error
+            # signal nothing on the Meetings page shows.
+            self._identify_error = CLOUD_WORDS_KEPT
+            self._add_notice(CLOUD_WORDS_KEPT)
+            self._write_meta(notices=self.notices())
+        # CANCELLED: nothing changed
 
     @staticmethod
     def _backup_transcript(folder):

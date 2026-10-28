@@ -32,6 +32,9 @@ class PageHeader(QWidget):
         trow.setContentsMargins(0, 0, 0, 0)
         trow.setSpacing(10)
         self.title_label = label(title, "title", self)
+        # Plain text: the live meeting's title and people come from a calendar
+        # invite, and a QLabel would read markup in them (an <img> loads a file).
+        self.title_label.setTextFormat(Qt.PlainText)
         self.title_label.setAccessibleName(title)
         # CSS line-height 34px: the face's own line (~37 px at 28 px) would
         # push the header, and every page under it, 3 px lower than the mockup.
@@ -44,6 +47,7 @@ class PageHeader(QWidget):
         trow.addStretch(1)
         col.addLayout(trow)
         self.sub_label = label(sub or "", "subtitle", self, wrap=True)
+        self.sub_label.setTextFormat(Qt.PlainText)
         self.sub_label.setMinimumHeight(20)                 # line-height 20px
         self.sub_label.setVisible(bool(sub))
         col.addWidget(self.sub_label)

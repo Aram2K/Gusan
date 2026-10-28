@@ -354,13 +354,17 @@ def speakers_text(doc):
 
 
 def model_text(model_id):
-    """'small' -> 'Whisper Small'; a cloud model's id -> its real name
-    ('gemini-2.5-flash' -> 'Gemini 2.5 Flash')."""
+    """What a transcript was made with, as the pickers name it: 'small' -> 'Whisper Small ·
+    Local'; a cloud model's id -> its real name and where it ran ('gemini-2.5-flash' ->
+    'Gemini 2.5 Flash · Cloud'); a name nothing knows as it is."""
     if not model_id:
         return ""
-    if hardware.info(model_id):
-        return hardware.real_name(model_id)
-    return engine_choice.model_display_name(model_id)
+    try:
+        return engine_choice.model_tagged(model_id)
+    except Exception:
+        if hardware.info(model_id):
+            return hardware.real_name(model_id)
+        return engine_choice.model_display_name(model_id)
 
 
 # ── a worker for disk work (results come back on the GUI thread) ──────────────

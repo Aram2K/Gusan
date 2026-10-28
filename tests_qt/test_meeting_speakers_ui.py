@@ -95,6 +95,19 @@ def test_no_recording_means_no_line_and_no_menu_entry(shell, meetings_root):
     assert not page.notes_view.act_identify.isEnabled()
 
 
+def test_a_cloud_transcript_without_labels_is_not_offered_a_re_read(shell, meetings_root):
+    # A Live Assistant session whose words came from a cloud engine: Identify speakers would not
+    # read the recording again (that would replace the words), so it is not suggested for labels.
+    page, _s, _f = _open_notes(shell, meetings_root, transcribed_with="cloud")
+    assert "Identify speakers" not in _hint(page)
+    assert "Hello team, we ship Friday." in _hint(page)
+
+
+def test_a_cloud_call_that_was_never_told_apart_still_gets_the_suggestion(shell, meetings_root):
+    page, _s, _f = _open_notes(shell, meetings_root, transcript=YOU_THEM, transcribed_with="cloud")
+    assert _hint(page).startswith("The people on the call aren't told apart yet. Identify speakers")
+
+
 def test_a_three_second_recording_is_not_worth_a_line(shell, meetings_root):
     page, _s, _f = _open_notes(shell, meetings_root, duration_sec=3)
     assert "Identify speakers" not in _hint(page)

@@ -100,11 +100,12 @@ import api_keys
 import engine_choice
 import hardware
 import history_actions
+import speech_hy
 import updater
 from app_info import APP_NAME, APP_VERSION
-from ui import theme
+from ui import hy_model, theme
 from ui.components import (Avatar, Button, Card, Chip, Divider, IconButton, IconTile, Keycap, NavItem,
-                           PageHeader, Segmented, SettingRow, Toggle, icons, label)
+                           PageHeader, Segmented, SettingRow, Toggle, icons, label, mini_prompt)
 from ui.components.badges import ProTag
 from ui.components.controls import keycap_labels
 
@@ -333,55 +334,18 @@ def red_button(text, size="s", parent=None):
     return b
 
 
-class AskDialog(QDialog):
-    """A small v2 question: a title, one line, and buttons [(key, text, kind)].
-    ``typed`` asks the user to type a word before a danger button works."""
+class AskDialog(mini_prompt.MiniPrompt):
+    """A small v2 question: a title, one line, and buttons [(key, text, kind)]. ``typed`` asks the user
+    to type a word before a danger button works. The same card as every other question in the app
+    (ui/components/mini_prompt.py); a question with a red button opens on its "cancel" button, so a
+    stray Enter never confirms. ``choice`` is the key pressed (None for Cancel / Esc)."""
 
     def __init__(self, parent, title, text, buttons, typed=None):
-        super().__init__(parent.window() if parent is not None else None)
-        theme.apply(self)
-        self.setWindowTitle(title)
-        self.setMinimumWidth(420)
-        self.choice = None
-        self._typed = typed
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 22, 24, 20)
-        lay.setSpacing(8)
-        lay.addWidget(label(title, "h2", self, wrap=True))
-        if text:
-            lay.addWidget(label(text, "body", self, wrap=True))
-        self.input = None
-        if typed:
-            lay.addSpacing(4)
-            lay.addWidget(label("Type %s to confirm." % typed, "hint", self))
-            self.input = field_font(QLineEdit(self))
-            self.input.setPlaceholderText(typed)
-            self.input.setAccessibleName("Type %s to confirm" % typed)
-            self.input.textChanged.connect(self._sync)
-            lay.addWidget(self.input)
-        lay.addSpacing(10)
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        row.addStretch(1)
-        self.buttons = {}
-        for key, btext, kind in buttons:
-            b = Button(btext, kind, "m", parent=self)
-            b.clicked.connect(lambda _=False, k=key: self._pick(k))
-            row.addWidget(b)
-            self.buttons[key] = b
-        lay.addLayout(row)
-        self._sync()
-
-    def _sync(self):
-        if self._typed:
-            ok = (self.input.text() if self.input else "").strip() == self._typed
-            for b in self.buttons.values():
-                if b.kind() == "danger":
-                    b.setEnabled(ok)
-
-    def _pick(self, key):
-        self.choice = None if key == "cancel" else key
-        self.accept()
+        danger = any(kind == "danger" for _key, _text, kind in buttons)
+        keys = [key for key, _text, _kind in buttons]
+        super().__init__(parent, title, text, None, None, icon="trash" if danger else "info",
+                         tone="danger" if danger else "info", buttons=buttons, type_word=typed,
+                         default="cancel" if danger and "cancel" in keys else None)
 
 
 def ask(parent, title, text, buttons, typed=None):
@@ -563,7 +527,7 @@ class _SectionItem(NavItem):
 
 
 class _AccountLink(QPushButton):
-    def __init__(self, name, parent=None):
+    def __init__(self, name, parent=None, guest=False):
         super().__init__(parent)
         self.setProperty("gusan", "accountRow")
         self.setProperty("active", False)
@@ -575,7 +539,7 @@ class _AccountLink(QPushButton):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(10, 0, 10, 0)
         lay.setSpacing(10)
-        self.avatar = Avatar(name, 22, self)
+        self.avatar = Avatar(name, 22, self, guest=guest)       # a guest: the person icon, never a letter
         lay.addWidget(self.avatar, 0, Qt.AlignVCenter)
         text = text_label("Account & plan", 13.5, 500, color="text2", parent=self)
         text.setAttribute(Qt.WA_TransparentForMouseEvents, True)
@@ -590,7 +554,7 @@ class SectionNav(QWidget):
     picked = Signal(str)
     account = Signal()
 
-    def __init__(self, name, parent=None):
+    def __init__(self, name, parent=None, guest=False):
         super().__init__(parent)
         self.setFixedWidth(196)
         self.setAccessibleName("Settings sections")
@@ -609,7 +573,7 @@ class SectionNav(QWidget):
         dv.addWidget(Divider(self))
         lay.addLayout(dv)
         lay.addSpacing(10)
-        self.account_link = _AccountLink(name, self)
+        self.account_link = _AccountLink(name, self, guest=guest)
         self.account_link.clicked.connect(lambda _=False: self.account.emit())
         lay.addWidget(self.account_link)
         lay.addStretch(1)
@@ -1414,6 +1378,112 @@ class GpuCard(_Box):
             self.sub.setText("Downloading · %d%%" % int(pct))
 
 
+class ArmenianCard(_Box):
+    """The Armenian speech model (speech_hy.py): one wide card under the Whisper sizes - its real name
+    (NVIDIA is credited in it), "Armenian only · about 105 MB · free, works offline", and the action of
+    the moment: Download / progress + Cancel / Use / In use + Remove / Try again. Hidden until the model
+    is on this computer or has somewhere to be downloaded from (speech_hy.listed)."""
+    download = Signal()
+    cancel = Signal()
+    use = Signal()
+    remove = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__("rgba(255,255,255,0.72)", "line", 1, 12, parent)
+        self.setAccessibleName("Armenian speech model")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(14, 10, 14, 10)
+        lay.setSpacing(12)
+        lay.addWidget(IconTile("mic", size=32, icon_size=18, radius=10, parent=self), 0, Qt.AlignVCenter)
+        col = QVBoxLayout()
+        col.setSpacing(0)
+        self.title = text_label(hardware.HY_INFO.real, 13.5, 600, role="label", parent=self)
+        self.sub = text_label("", 12, role="model", parent=self, wrap=True)
+        col.addWidget(self.title)
+        col.addWidget(self.sub)
+        lay.addLayout(col, 1)
+        self.action = QWidget(self)
+        self.action_lay = QHBoxLayout(self.action)
+        self.action_lay.setContentsMargins(0, 0, 0, 0)
+        self.action_lay.setSpacing(8)
+        lay.addWidget(self.action, 0, Qt.AlignVCenter)
+        self.progress = None
+        self.buttons = {}
+        self._key = None
+
+    def set_state(self, state, selected=False, pct=None, error="", removing=False, enabled=True):
+        """state: missing | downloading | ready | failed."""
+        key = (state, bool(selected), error or "", bool(removing), bool(enabled))
+        if key == self._key and state == "downloading":
+            self._progress(pct)
+            return
+        if key == self._key:
+            return
+        self._key = key
+        clear_layout(self.action_lay)
+        self.buttons = {}
+        self.progress = None
+        real = hardware.HY_INFO.real
+        size = hardware.HY_INFO.size
+        self.sub.setStyleSheet("")
+        self.sub.setText(engine_choice.HY_ROW_NOTE_READY if state == "ready"
+                         else engine_choice.HY_ROW_NOTE.format(size=size))
+        if removing:
+            self.action_lay.addWidget(text_label("Removing…", 13, role="muted", parent=self.action))
+        elif state == "downloading":
+            self.progress = QProgressBar(self.action)
+            self.progress.setTextVisible(False)
+            self.progress.setFixedSize(120, 6)
+            self.progress.setAccessibleName("Downloading %s" % real)
+            self.action_lay.addWidget(self.progress, 0, Qt.AlignVCenter)
+            b = Button("Cancel", "ghost", "s", parent=self.action)
+            b.setAccessibleName("Cancel the download of %s" % real)
+            b.clicked.connect(lambda _=False: self.cancel.emit())
+            self.buttons["cancel"] = b
+            self.action_lay.addWidget(b)
+            self._progress(pct)
+        elif state == "failed":
+            self.sub.setText(error or "The download stopped. Try again.")
+            tint(self.sub, "red-tx")
+            b = Button("Try again", "secondary", "s", icon="refresh", parent=self.action)
+            b.setAccessibleName("Download %s again" % real)
+            b.clicked.connect(lambda _=False: self.download.emit())
+            self.buttons["download"] = b
+            self.action_lay.addWidget(b)
+        elif state == "ready":
+            if selected:
+                self.action_lay.addWidget(Chip("In use", "ok", "check", parent=self.action))
+            else:
+                b = Button("Use", "secondary", "s", parent=self.action)
+                b.setAccessibleName("Use %s" % real)
+                b.clicked.connect(lambda _=False: self.use.emit())
+                self.buttons["use"] = b
+                self.action_lay.addWidget(b)
+            r = Button("Remove", "ghost", "s", parent=self.action)
+            r.setAccessibleName("Remove %s" % real)
+            r.clicked.connect(lambda _=False: self.remove.emit())
+            self.buttons["remove"] = r
+            self.action_lay.addWidget(r)
+        else:
+            b = Button("Download", "secondary", "s", icon="download", parent=self.action)
+            b.setAccessibleName("Download %s (%s)" % (real, size))
+            b.setEnabled(bool(enabled))
+            b.clicked.connect(lambda _=False: self.download.emit())
+            self.buttons["download"] = b
+            self.action_lay.addWidget(b)
+
+    def _progress(self, pct):
+        if self.progress is None:
+            return
+        if pct is None:
+            self.progress.setRange(0, 0)
+            self.sub.setText("Downloading…")
+        else:
+            self.progress.setRange(0, 100)
+            self.progress.setValue(int(pct))
+            self.sub.setText("Downloading · %d%%" % int(pct))
+
+
 class OptionTile(_Painted):
     """A radio choice drawn as a tile: name (+ PRO), hint line(s), optional
     extra widget (e.g. the AI writer sizes). The page decides the selection."""
@@ -2044,7 +2114,7 @@ class SettingsPage(QWidget):
         body.setContentsMargins(32, 0, 0, 0)
         body.setSpacing(32)
         tier_name = self._account_name()
-        self.nav = SectionNav(tier_name, self)
+        self.nav = SectionNav(tier_name, self, guest=self._account_guest())
         self.nav.picked.connect(lambda sid: self.show_section(sid))
         self.nav.account.connect(lambda: go(self, self.app, "account"))
         body.addWidget(self.nav, 0, Qt.AlignTop)
@@ -2103,6 +2173,14 @@ class SettingsPage(QWidget):
             return account_state(self.app)[1]
         except Exception:
             return "A"
+
+    def _account_guest(self):
+        """A guest's "Account & plan" link wears the person icon, not a letter."""
+        try:
+            from ui.shell import account_state
+            return account_state(self.app)[0] == "guest"
+        except Exception:
+            return False
 
     def _set(self, key, value):
         """One setting from a control; the control shows the truth again after."""
@@ -2506,6 +2584,14 @@ class SettingsPage(QWidget):
             self.size_tiles[mid] = t
         more.addWidget(self.tiles_row)
         bv.addLayout(more)
+        # The Armenian model: its own wide card under the sizes (hidden until it is available).
+        self.hy_card = ArmenianCard(blk)
+        self.hy_card.download.connect(self._hy_download)
+        self.hy_card.cancel.connect(self._hy_cancel)
+        self.hy_card.use.connect(lambda: self._model_use(hardware.HY_MODEL_ID))
+        self.hy_card.remove.connect(lambda: self._model_remove(hardware.HY_MODEL_ID))
+        self.hy_card.hide()
+        bv.addWidget(self.hy_card)
         self.gpu_card = GpuCard(blk)
         self.gpu_card.start.connect(self._gpu_start)
         self.gpu_card.cancel.connect(lambda: call(self.app, "cancel_gpu_download"))
@@ -2692,6 +2778,7 @@ class SettingsPage(QWidget):
                 except Exception:
                     pass
             tile.set_state(st, selected=(mid == sel), pct=prog, removing=removing, enabled=dl is not None)
+        self._refresh_hy()
         rec = self._recommended()
         if rec in self.model_cards:
             self.cards_row.set_recommended(self.model_cards[rec])
@@ -2704,6 +2791,37 @@ class SettingsPage(QWidget):
             self.tiles_row.set_recommended(None, room=False)
         for mid, card in self.model_cards.items():
             card.setAccessibleDescription("Best for your computer" if mid == rec else "")
+
+    def _refresh_hy(self):
+        """The Armenian model's card: hidden while it isn't listed, else its state from the downloads."""
+        card = getattr(self, "hy_card", None)
+        if card is None:
+            return
+        shown = hy_model.state(self.app) != "hidden"
+        card.setVisible(shown)
+        if not shown:
+            return
+        dl = self._dl()
+        st = hy_model.state(self.app)
+        sel = str(self.cfg.get("whisper_model") or "") == hardware.HY_MODEL_ID
+        removing = False
+        if dl is not None:
+            try:
+                removing = bool(dl.is_removing(hardware.HY_MODEL_ID))
+            except Exception:
+                removing = False
+        card.set_state(st, selected=sel, pct=hy_model.percent(self.app), error=hy_model.failure(self.app),
+                       removing=removing, enabled=dl is not None)
+
+    def _hy_download(self):
+        """Download the Armenian model and use it when it is on this computer (like a Whisper card).
+        Privacy mode does not stop it: it only fetches the model (speech_hy)."""
+        self._model_download(hardware.HY_MODEL_ID)
+
+    def _hy_cancel(self):
+        hy_model.cancel(self.app)
+        self._pending_use.pop(hardware.HY_MODEL_ID, None)
+        self._refresh_models()
 
     def _model_download(self, mid, use_as="speech"):
         dl = self._dl()
@@ -2780,8 +2898,16 @@ class SettingsPage(QWidget):
             # Smart Actions transcribed with it: back to Same as Dictation
             # (not a fresh download at the next Smart Action).
             apply_settings(self.app, {SMART_SPEECH_KEY: engine_choice.SMART_SPEECH_SAME})
+        if ok and name and hardware.is_speech_id(name):
+            # The Live Assistant and Audio to text picked it: back to Automatic, the same reason.
+            if name == str(cfg.get(engine_choice.LIVE_SPEECH_KEY) or ""):
+                apply_settings(self.app, {engine_choice.LIVE_SPEECH_KEY: engine_choice.LIVE_SPEECH_AUTO})
+            if name == str(cfg.get(engine_choice.FILE_KEY) or ""):
+                apply_settings(self.app, {engine_choice.FILE_KEY: engine_choice.FILE_AUTO})
         if not ok and msg and "speech" in self._built and name in self.model_cards:
             self.model_cards[name].set_note(msg)
+        if not ok and msg and "speech" in self._built and hardware.HY_MODEL_ID == name:
+            self.hy_card.sub.setText(msg)
         self._queue_refresh()
 
     def _on_finished(self, name, state, msg):
@@ -2800,6 +2926,8 @@ class SettingsPage(QWidget):
         text = "…" if pct is None else "%d%%" % pct
         if name in self.model_cards:
             self.model_cards[name]._set_progress(pct)
+        elif name == hardware.HY_MODEL_ID:
+            self.hy_card._set_progress(pct)
         elif name in self.size_tiles:
             tile = self.size_tiles[name]
             if tile._state[0] == "downloading":
@@ -2931,15 +3059,17 @@ class SettingsPage(QWidget):
         for k, t in self.speech_tiles.items():
             t.setChecked(k == kind)
             t.set_paused(privacy and k != "local")
-        self.speech_tiles["local"].set_hints(["%s · %s · offline" % (local["plain"], local["model_name"])])
+        # The real model name and where it runs, as the pickers say it ("Whisper Small · Local").
+        self.speech_tiles["local"].set_hints(["%s · %s" % (local["tagged"], local["plain"])])
         cloud = engine_choice.CLOUD_SPEECH_MODELS.get(str(cfg.get("managed_provider") or "gemini").lower(),
                                                       hardware.CLOUD_SPEECH_MODEL)
         self.speech_tiles["cloud"].set_hints(["Off while Privacy mode is on" if privacy else
-                                              "%s · fastest, nothing to download" % cloud])
+                                              "%s · nothing to download"
+                                              % engine_choice.tagged_name(cloud, "cloud")])
         if privacy:
             own = "Off while Privacy mode is on"
         elif kind == "own_key":
-            own = "%s · %s" % (speech.get("plain"), speech.get("model_name"))
+            own = speech.get("tagged") or "%s · %s" % (speech.get("plain"), speech.get("model_name"))
         else:
             own = "Mistral or Google Gemini"
         self.speech_tiles["own_key"].set_hints([own])
@@ -3341,6 +3471,18 @@ class SettingsPage(QWidget):
         fb.clicked.connect(lambda _=False: self._feedback())
         self.feedback_button = fb
         rows.append(self._row("Send feedback", fb, hint="Ideas, bugs, a language you need."))
+        # The credit NVIDIA's licence asks for (CC BY 4.0), shown while the Armenian model is
+        # listed anywhere in the app (speech_hy.listed): on this computer, or ready to download.
+        credit = speech_hy.credit()
+        cbtn = Button(credit["name"], "link", "s")
+        cbtn.setAccessibleName("Open the page of %s" % credit["name"])
+        cbtn.clicked.connect(lambda _=False, u=credit["url"]: open_url(u))
+        self.credit_button = cbtn
+        self.row_credit = self._row("Armenian speech model", cbtn,
+                                    hint="By NVIDIA, license %s. Converted for Gusan; not made or endorsed by NVIDIA."
+                                         % credit["license"])
+        self.row_credit.setVisible(bool(speech_hy.listed()))
+        rows.append(self.row_credit)
         links = QFrame()
         links.setProperty("gusan", "row")
         links.setProperty("last", True)
@@ -3574,7 +3716,8 @@ class SettingsPage(QWidget):
     def _dl_slots(self):
         return (("state_changed", self._on_dl_state), ("progress", self._on_progress),
                 ("finished", self._on_finished), ("removed", self._on_removed),
-                ("hardware_ready", self._on_hardware), ("scanned", self._on_dl_state))
+                ("hardware_ready", self._on_hardware), ("scanned", self._on_dl_state),
+                ("catalog_changed", self._on_dl_state))
 
     def _connect_services(self):
         """Connect app.downloads and the GPU signals - once per object. Runs at
@@ -3651,6 +3794,9 @@ class SettingsPage(QWidget):
 
     def _refresh_updates(self):
         self._sync_toggle(self.t_install)
+        credit_row = getattr(self, "row_credit", None)
+        if credit_row is not None:
+            credit_row.setVisible(bool(speech_hy.listed()))
         # Before any "Check now": what the startup check left in the config.
         st, tag = self._initial_update_state()
         if self._update is None or (self._update[0] == updater.LATEST and st == updater.AVAILABLE):
@@ -3659,6 +3805,7 @@ class SettingsPage(QWidget):
     def on_open(self, **opts):
         self.opts = dict(opts)
         self._connect_services()
+        hy_model.refresh_catalog(self.app)  # a worker: once a day at most, never in Privacy mode
         self._queue_refresh()               # catch up with anything changed while hidden
         if self.dictionary is not None:
             self.dictionary.on_open()       # its lists and the "now spelled right" proof
@@ -3676,7 +3823,7 @@ class SettingsPage(QWidget):
 
     def refresh_account(self):
         name = self._account_name()
-        self.nav.account_link.avatar.set_name(name)
+        self.nav.account_link.avatar.set_name(name, guest=self._account_guest())
         self._queue_refresh()
 
     # ── sections and scrolling ──

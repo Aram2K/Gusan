@@ -46,8 +46,49 @@ def qapp():
     from PySide6.QtWidgets import QApplication
     app = QApplication.instance() or QApplication([])
     from ui import theme
+    theme.install_light_scheme(app)           # what main() does first: one light look, whatever the OS is set to
     theme.load_fonts()
     yield app
+
+
+def os_dark_palette():
+    """The palette Qt's Windows theme hands the application on a Windows set to dark mode
+    (window #2b2b2b, white text, #333333 buttons). QStyleHints.setColorScheme() is a no-op on the
+    offscreen platform in Qt 6.8 (colorScheme() stays Unknown, the palette does not change), so a
+    dark OS is simulated by giving the application this palette BEFORE main()'s own call
+    (theme.install_light_scheme) - which must then make the app light all the same."""
+    from PySide6.QtGui import QColor, QPalette
+    pal = QPalette()
+    for group in (QPalette.Active, QPalette.Inactive, QPalette.Disabled):
+        for role, col in ((QPalette.Window, "#2b2b2b"), (QPalette.WindowText, "#ffffff"),
+                          (QPalette.Base, "#1f1f1f"), (QPalette.AlternateBase, "#2b2b2b"),
+                          (QPalette.Text, "#ffffff"), (QPalette.Button, "#333333"),
+                          (QPalette.ButtonText, "#ffffff"), (QPalette.BrightText, "#ffffff"),
+                          (QPalette.PlaceholderText, "#a0a0a0"), (QPalette.Link, "#4cc2ff"),
+                          (QPalette.ToolTipBase, "#2b2b2b"), (QPalette.ToolTipText, "#ffffff"),
+                          (QPalette.Highlight, "#0078d4"), (QPalette.HighlightedText, "#ffffff")):
+            pal.setColor(group, role, QColor(col))
+    for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
+        pal.setColor(QPalette.Disabled, role, QColor("#808080"))
+    return pal
+
+
+def os_light_palette():
+    """The palette of a Windows in light mode (what Qt's own Fusion style hands out)."""
+    from PySide6.QtWidgets import QStyleFactory
+    return QStyleFactory.create("fusion").standardPalette()
+
+
+@pytest.fixture(params=["light", "dark"])
+def scheme(request, qapp):
+    """Runs the test twice: the OS is in light mode, then in dark mode. The OS's palette goes in first,
+    then the app's own start-up call (theme.install_light_scheme) - exactly the order of main()."""
+    from ui import theme
+    qapp.setPalette(os_dark_palette() if request.param == "dark" else os_light_palette())
+    theme.install_light_scheme(qapp)
+    yield request.param
+    qapp.setPalette(os_light_palette())
+    theme.install_light_scheme(qapp)
 
 
 def make_stub_app(tier="free", name="Aram Adamyan", email="aram@aibuben.xyz"):

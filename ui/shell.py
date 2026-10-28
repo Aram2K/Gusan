@@ -22,6 +22,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (QHBoxLayout, QMainWindow, QScrollArea, QSizePolicy, QStackedWidget,
                                QVBoxLayout, QWidget)
 
+import account_actions
 from app_info import APP_NAME
 from ui import theme
 from ui.components import Button, Card, IconTile, PageHeader, Sidebar, label
@@ -113,32 +114,15 @@ def page_factory(route):
 
 
 def account_state(main_app):
-    """(tier, first name) for the sidebar: tier is 'pro' | 'free' | 'guest'."""
-    auth = getattr(main_app, "auth", None)
-    signed_in = bool(getattr(auth, "is_authenticated", False))
-    tier = None
-    ct = getattr(main_app, "current_tier", None)
-    if callable(ct):
-        try:
-            tier = ct()
-        except Exception:
-            tier = None
-    try:
-        pro = bool(main_app.is_pro())
-    except Exception:
-        pro = False
-    if pro:
-        tier = "pro"
-    elif tier not in ("pro", "free", "guest"):
-        tier = "free" if signed_in else "guest"
-    name = (getattr(auth, "user_name", None) or "").strip()
-    if not name:
-        email = (getattr(auth, "user_email", None) or "").strip()
-        name = email.split("@")[0] if email else ""
-    name = name.split()[0] if name else ""
-    if not name:
-        name = "Guest" if tier == "guest" else "Account"
-    return tier, name
+    """(tier, first name) for the sidebar: tier is 'pro' | 'free' | 'guest'.
+
+    A guest is always (``"guest"``, GUEST_NAME): whatever profile the session
+    still holds (a super admin previewing Guest is signed in underneath) never
+    reaches the sidebar, the Settings link or the greeting."""
+    tier = account_actions.app_tier(main_app)
+    if tier == "guest":
+        return tier, account_actions.GUEST_NAME
+    return tier, account_actions.first_name(main_app) or "Account"
 
 
 def _call(main_app, method, *args, **kwargs):
@@ -214,6 +198,7 @@ class MainWindow(QMainWindow):
         self.sidebar = Sidebar(root)
         self.sidebar.navigate.connect(self.open)
         self.sidebar.upgrade.connect(self._on_upgrade)
+        self.sidebar.sign_in.connect(self._on_sign_in)
         self.sidebar.account.connect(lambda: self.open("account"))
         h.addWidget(self.sidebar)
         self.stack = QStackedWidget(root)
@@ -324,6 +309,10 @@ class MainWindow(QMainWindow):
 
     def _on_upgrade(self):
         _call(self.app, "_pro_upsell")
+
+    def _on_sign_in(self):
+        """A guest's "Sign in / Sign up": the sign-in sheet (signed in already: Account & plan)."""
+        _call(self.app, "show_auth_gate")
 
     # ── window ──
     def showEvent(self, event):

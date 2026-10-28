@@ -25,7 +25,7 @@ Integration notes for Wave 4 (Gusan 2.0; this module is the card, not the page)
       set_auto_answer(on)    live_assist_auto_answer
       set_screen_auto(on)    live_assist_screen_auto (Let it see my screen)
       set_theme(name)        live_assist_theme ("light" | "dark")
-      set_context(text)      live_assist_context (About my calls)
+      set_context(text)      live_assist_context (Context: who you are, what calls are about, or a rule)
       set_opacity(value)     live_assist_opacity (0.55-1.0)
       reset_position()       live_assist_pos -> None, back to the default spot
   (dragging the card saves live_assist_pos = [x, y] the same way). The sync
@@ -45,6 +45,12 @@ Integration notes for Wave 4 (Gusan 2.0; this module is the card, not the page)
   computer", "your Cerebras key"). engine_choice.runs_on(app,
   "live_assistant") has the page's longer label (e.g. "Gusan Cloud · DeepSeek
   V4.1 Flash") if the two should match.
+* Under the live transcript, who TRANSCRIBES it ("Transcribing with Gemini 2.5 Pro · Gusan
+  Cloud" - what the recorder's speech_report() says ran, so a server that answered with
+  another model, or pieces that went through this computer, are named: engine_choice.
+  live_speech_status) and, when local Whisper would be transcribing a language it is poor at
+  (Armenian), one plain hint naming the cloud options. The choice is the page's "Transcribes
+  with" row (cfg live_assist_speech_model, ui/pages/live_speech.py).
 * Hidden status without the card open: ``live_context.hide_status(wanted)``
   (Qt-free; key/text/tone/icon/headline/tip). With the card open, prefer
   ``card.hide_state()`` - it reflects what the window really got. Page hero:
@@ -71,6 +77,34 @@ What it is (product contract):
 * A session context: before (or during) a call the user writes what it is
   about - who they are, who they're talking to, what they want. It's locked
   in for the session: every answer is shaped by it.
+* Context = STANDING INSTRUCTIONS (live_rules.py, live_context.standing_block): what the user
+  writes there is the first block of every prompt, on every route - "Standing instructions
+  from the user - follow them in every answer; they override your defaults on language, format
+  and length". With the switch "Apply to everything I hear" (cfg live_assist_rules_everything;
+  off until the user turns it on - offered, never switched silently, when the text reads like
+  such a rule) the instruction runs on EVERY new piece of the conversation (translate it,
+  subtitle it, correct it...), not only when a question is heard: pieces heard within a couple
+  of seconds go as one, one request runs at a time, the OLDEST waiting group is dropped when the
+  model is slower than the talk (the feed says "catching up"), a soft cap per session keeps the
+  day's cloud allowance safe, and Pause stops it. The results are a running feed in place of
+  the single answer (the original muted above its result, newest first); a typed question still
+  gets its own answer, with a "Live results" link back. The chip above says plainly which it
+  is: "Everything you hear" or "Questions only".
+* Documents: the Context editor has an Add documents button and a paper-clip in the text
+  box's corner; files dropped anywhere on the card (the open editor included) become documents
+  ("Drop files to add"). The picker is Qt's own dialog, excluded from screen share like the
+  card, whenever the card is hidden from shares.
+* A calendar invite (Google Calendar, docs/redesign/google-calendar-spec.md,
+  decision 12): a session that starts for a calendar meeting - the card's own Start
+  or hotkey (AppController.calendar_start_context), the reminder's Record + Live
+  Assistant, the card opened mid-call - shows the meeting's title in the header and an
+  INVITE chip ("Anna, David +2 · Agenda"). A click opens the agenda, editable ("Sent
+  with each answer."); it goes to the model as its own section, framed as data
+  (rolling_context(invite=)), and to the meeting's folder through
+  session.set_agenda. It is per session and never "About my calls" (cfg
+  live_assist_context). The chip's x is "Not this meeting": title, people and agenda
+  stop going with the answers. Public: set_meeting_active(active, title, attendees,
+  agenda=""), set_invite(agenda, others), has_invite(), invite_text().
 * HIDDEN on screen share by default: excluded from screen capture
   (ui/glass.py) so it never appears on a shared screen or in a recording while
   staying visible on the user's own monitor. The chip says "Hidden" only when
@@ -100,6 +134,7 @@ signals; every widget touch happens on the GUI thread.
 """
 import base64
 import logging
+import os
 import re
 import sys
 import threading
@@ -113,8 +148,8 @@ from PySide6.QtGui import (
     QPainterPath, QPen, QPixmap, QRadialGradient,
 )
 from PySide6.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
-    QSizePolicy, QTextEdit, QVBoxLayout, QWidget,
+    QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
+    QPushButton, QSizePolicy, QTextEdit, QVBoxLayout, QWidget,
 )
 
 import actions
@@ -123,7 +158,10 @@ from live_context import (  # noqa: F401 - re-exported for callers of this modul
     hide_status, last_question, looks_like_question, mac_partial_tip, private_state,
     rolling_context, safe_answer_markdown, should_attach_screen,
 )
+from live_context import others_of, start_session
+import invite_context
 import live_docs
+import live_rules
 from ui import glass, live_docs_ui
 
 logger = logging.getLogger("transcribe")
@@ -160,6 +198,15 @@ _THEMES = {
     },
 }
 
+# Settings that change who transcribes the call (the line and the hint under the live transcript).
+HEAR_KEYS = frozenset({"live_assist_speech_model", "live_assist_language", "language", "mix_languages",
+                       "privacy_mode", "backend", "whisper_model", "managed_provider", "google_api_key",
+                       "google_stt_model", "mistral_api_key", "mistral_stt_model",
+                       "admin_tier_override"})
+
+# What the live transcript shows for a stretch the cloud could not read (meeting_session.GAP_MARK).
+GAP_MARK = "[...]"
+
 # After an answer the user asked for, how long an automatic one waits before
 # it may replace it (they are still reading it, or saying it).
 USER_ANSWER_HOLD_S = 12
@@ -175,13 +222,18 @@ ANSWER_PLACEHOLDER = "Answers appear here the moment someone asks you something.
 # Sent with an image and no typed question.
 SNIP_QUESTION = "Answer or solve what's in the attached image. Give the answer directly."
 
+INVITE_PLACEHOLDER = "Nothing from the invite. Add what this call is about."
+INVITE_HINT = "Sent with each answer."
+INVITE_CHARS = invite_context.AGENDA_CHARS
 CONTEXT_EMPTY = "+ Add context - what's this call about?"
 CONTEXT_PLACEHOLDER = (
-    "What's this call about? Who you are, who you're talking to, what you want "
-    "from it. Every answer this session uses it.\n\n"
+    "What's this call about, and how should answers go? Who you are, who you're "
+    "talking to, what you want from it - or a rule like \"Translate everything "
+    "you hear into French.\" Every answer follows it.\n\n"
     "e.g. Call with Acme's data team about moving their reports to our platform. "
     "I'm the solutions engineer; they care most about cost and security. Keep "
     "answers short, in my voice.")
+CTX_EDIT_H = 84                  # the editor's text box (the rows under it need the room)
 
 # Documents the user added on the Live Assistant page (live_docs.py): the chip above the ask
 # box says how many answers can read, and the answer's footer says when they were used.
@@ -191,8 +243,24 @@ FOOT_DOCS_USED = "from your documents"
 FOOT_DOCS_KEPT = "documents stayed on this computer"
 FOOT_DOCS_ASK = "documents not used yet - Gusan asks when you type a question"
 FOOT_PICTURES = "pictures need Gusan Cloud or your own key"
-DOC_DROP = "Drop to add documents"
+DOC_DROP = "Drop files to add"
 DOC_ASK_WAIT_S = 180                        # how long an answer waits for the documents question
+ADD_DOCS = "Add documents"
+ADD_DOCS_TIP = "Add documents the assistant can use. You can also drop files on this card."
+
+# "Apply to everything I hear" (live_rules.py): the running feed that replaces the single answer.
+FEED_LABEL = "LIVE RESULTS"
+RULES_IDLE = "Press Start. Everything you hear gets your rule, and the results show here."
+RULES_LIVE = "Listening… each sentence gets your rule, and its result shows here."
+AUTO_TIP = "Answer automatically the moment someone asks a question."
+AUTO_TIP_RULES = ("Off while your rule applies to everything you hear: every sentence "
+                  "already gets its result in Live results.")
+RULES_TIP_ON = ("Everything you hear: each new sentence is handled by your rule - "
+                "translated, summarised, corrected... whatever you wrote.")
+RULES_TIP_OFF = ("Questions only: your rule shapes every answer, but nothing is done to "
+                 "everything you hear. Turn on \"Apply to everything I hear\" for that.")
+NEEDS_RULE_TEXT = "Write a rule in the context first."
+LIMIT_WORDS = "Today's cloud allowance is used up. It comes back tomorrow."
 
 QUICK_ACTIONS = (
     ("Answer", ""),
@@ -249,6 +317,12 @@ def chip_colors(tone, theme="light"):
     """(background, text, border) of the Hidden chip for a tone and card theme."""
     colors = _CHIP_COLORS.get(theme, _CHIP_COLORS["light"])
     return colors.get(tone, colors["amber"])
+
+
+def _wrap_tip(text):
+    """A plain sentence as a tooltip that wraps (Qt wraps only rich text)."""
+    import html as html_mod
+    return "<p style='white-space:normal'>%s</p>" % html_mod.escape(text or "", quote=False)
 
 
 def _engine_label(engine):
@@ -534,7 +608,12 @@ class _ElidedLabel(QLabel):
     run wider on macOS) instead of being cut off mid-letter."""
 
     def __init__(self, text, parent=None):
-        super().__init__(text, parent)
+        super().__init__(parent)
+        # Always plain text: the title and the people come from a calendar invite
+        # (anyone can send one), and a QLabel reads "<img src=...>" in its text as
+        # markup and loads that image - from the disk, or from a network share.
+        self.setTextFormat(Qt.PlainText)
+        QLabel.setText(self, text)
         self._full = text
 
     def setText(self, text):
@@ -876,6 +955,12 @@ class _ContextChip(QFrame):
         self.text = _ElidedLabel("", self)
         self.text.setObjectName("laCtxText")
         lay.addWidget(self.text, 1)
+        # Plainly which it is: "Everything you hear" or "Questions only".
+        self.scope = QLabel("", self)
+        self.scope.setObjectName("laCtxScope")
+        self.scope.setFixedHeight(16)
+        self.scope.hide()
+        lay.addWidget(self.scope)
         self.edit_hint = QLabel("Edit", self)
         self.edit_hint.setObjectName("laCtxEditHint")
         lay.addWidget(self.edit_hint)
@@ -893,12 +978,137 @@ class _ContextEdit(QPlainTextEdit):
     a plain Enter is a new line."""
     finished = Signal()
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.clip_button = None
+
+    def attach_button(self, button):
+        """A small button in the bottom-right corner, inside the frame (the paper-clip); the
+        text wraps before it (a gutter on the right), so it never runs under it."""
+        self.clip_button = button
+        button.setParent(self)
+        self.setViewportMargins(0, 0, button.width() + 8, 0)
+        self._place_button()
+
+    def _place_button(self):
+        b = self.clip_button
+        if b is not None:
+            b.move(max(0, self.width() - b.width() - 6), max(0, self.height() - b.height() - 3))
+            b.raise_()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._place_button()
+
     def keyPressEvent(self, e):
         if e.key() == Qt.Key_Escape or (e.key() in (Qt.Key_Return, Qt.Key_Enter)
                                         and e.modifiers() & Qt.ControlModifier):
             self.finished.emit()
             return
         super().keyPressEvent(e)
+
+
+class _InviteChip(_ContextChip):
+    """The line under the header while the session came from a calendar invite:
+    "INVITE  Anna, David +2 · Agenda". A click opens the agenda to read or edit;
+    the small x says "Not this meeting" and the answers stop using the invite."""
+    dismissed = Signal()
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.tag.setText("INVITE")
+        self.setAccessibleName("Invite from your calendar")
+        self.drop = _IconButton("close", self, "Not this meeting")
+        self.drop.setFixedSize(20, 20)
+        self.drop.setAccessibleName("Not this meeting")
+        self.drop.clicked.connect(self.dismissed.emit)
+        self.layout().addWidget(self.drop)
+
+
+class _RuleOffer(QFrame):
+    """One calm offer: "This sounds like a rule for everything you hear. Apply it to every
+    sentence?  [Yes] [No]". It only ever asks - the answer is the user's."""
+    yes = Signal()
+    no = Signal()
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setObjectName("laRuleOffer")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(10, 6, 6, 6)
+        lay.setSpacing(8)
+        self.text = QLabel(live_rules.OFFER_TEXT, self)
+        self.text.setObjectName("laRuleOfferText")
+        self.text.setWordWrap(True)
+        self.text.setTextFormat(Qt.PlainText)
+        lay.addWidget(self.text, 1)
+        self.btn_yes = QPushButton(live_rules.OFFER_YES, self)
+        self.btn_yes.setObjectName("laCtxDone")
+        self.btn_no = QPushButton(live_rules.OFFER_NO, self)
+        for b in (self.btn_yes, self.btn_no):
+            b.setFixedHeight(22)
+            b.setCursor(Qt.PointingHandCursor)
+            lay.addWidget(b, 0, Qt.AlignVCenter)
+        self.btn_yes.setAccessibleName("Yes, apply it to every sentence")
+        self.btn_no.setAccessibleName("No, questions only")
+        self.btn_yes.clicked.connect(self.yes)
+        self.btn_no.clicked.connect(self.no)
+        self.setAccessibleName(live_rules.OFFER_TEXT)
+        self.hide()
+
+
+class _Switch(QPushButton):
+    """A real switch (track and knob) with its words beside it. Painted, so it follows the
+    card's glass theme; a ring shows the keyboard focus; Space flips it."""
+    TRACK_W, TRACK_H = 30, 16
+
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.setCheckable(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setFixedHeight(24)
+        self._t = _THEMES["light"]
+        self.setAccessibleName(text)
+
+    def set_theme(self, t):
+        self._t = t
+        self.update()
+
+    def sizeHint(self):
+        return QSize(self.TRACK_W + 11 + self.fontMetrics().horizontalAdvance(self.text()) + 6, 24)
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        t, on, enabled = self._t, self.isChecked(), self.isEnabled()
+        h = self.height()
+        track = QRectF(1.5, (h - self.TRACK_H) / 2.0, self.TRACK_W, self.TRACK_H)
+        if on:
+            fill = QColor(t["accent"])
+        else:
+            fill = QColor(t["faint"])
+            fill.setAlpha(150)
+        if not enabled:
+            fill.setAlpha(70)
+        p.setPen(Qt.NoPen)
+        p.setBrush(fill)
+        p.drawRoundedRect(track, self.TRACK_H / 2.0, self.TRACK_H / 2.0)
+        d = self.TRACK_H - 4
+        x = track.right() - d - 2 if on else track.left() + 2
+        p.setBrush(QColor("#ffffff"))
+        p.drawEllipse(QRectF(x, track.top() + 2, d, d))
+        if self.hasFocus():
+            ring = QPen(QColor(t["accent"]), 1.4)
+            p.setPen(ring)
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(track.adjusted(-1.5, -1.5, 1.5, 1.5), (self.TRACK_H + 3) / 2.0,
+                              (self.TRACK_H + 3) / 2.0)
+        p.setPen(QColor(t["text"] if enabled else t["faint"]))
+        p.setFont(self.font())
+        p.drawText(QRectF(track.right() + 10, 0, max(0, self.width() - track.right() - 10), h),
+                   Qt.AlignVCenter | Qt.AlignLeft, self.text())
+        p.end()
 
 
 class _DocsChip(QPushButton):
@@ -997,6 +1207,11 @@ class LiveAssistOverlay(QWidget):
     # The worker asks the GUI thread to put the one-time "use your documents with the cloud?"
     # question (a dict: gen, managed, event, answer - see _documents_for_answer).
     sig_doc_ask = Signal(object)
+    # "Apply to everything I hear": the result of one piece, from the worker thread. The last
+    # int is the rule generation: Pause, turning the mode off or a new session bumps it, and a
+    # stale result is dropped.
+    sig_rule_partial = Signal(int, str, int)     # entry id, the result so far, generation
+    sig_rule_done = Signal(int, str, str, int)   # entry id, the result, error, generation
     # The card's own state for a live_assist_* key changed (its buttons, a
     # public setter or a cfg sync): (config key, new value). Pages listen.
     settings_changed = Signal(str, object)
@@ -1037,6 +1252,12 @@ class LiveAssistOverlay(QWidget):
         self._text_since_suggest = 0
         self._title = ""
         self._attendees = ""
+        # The calendar invite this session started from: the agenda the user sees
+        # on the INVITE chip and every answer is sent (per session, in memory and in
+        # the meeting's own folder; never "About my calls"), and who is on it.
+        self._invite_on = False
+        self._invite = ""
+        self._invite_others = []
         self._image_b64 = ""               # an image attached to the next question
         self._image = None
         self._crop_shots = []              # [(screen, pixmap)] while the crop view is open
@@ -1044,6 +1265,22 @@ class LiveAssistOverlay(QWidget):
         self._crop_safe = None             # index of the card's own monitor in the shots
         # What the user wrote about the call: every answer is shaped by it.
         self._context = clip_context(str(cfg.get("live_assist_context") or ""))
+        # "Apply to everything I hear" (live_rules.py): the context run on every new piece of the
+        # conversation. Off until the user turns it on; the card and the page follow cfg.
+        self._rules_everything = bool(cfg.get(live_rules.RULES_KEY, False))
+        self._rule_feed = live_rules.RuleFeed()
+        self._rule_budget = live_rules.RuleBudget()
+        self._rule_entries = []            # live_rules.Entry, newest first
+        self._rule_busy = False            # one request at a time
+        self._rule_paused = False
+        self._rule_note = ""               # why it is paused
+        self._rule_fails = 0               # errors in a row
+        self._rule_gen = 0                 # bumped to cancel what is running
+        self._rule_next_id = 1
+        self._rule_last_start = 0.0
+        self._rule_engine = None           # the engine that last applied the rule
+        self._view = "feed"                # "feed" | "answer" (a typed question's answer) while a rule runs
+        self._docs_dir = os.path.expanduser("~")
         # The documents the user added (live_docs.py): read off the GUI thread, used by
         # answers through the worker (see _documents_for_answer).
         self._doc_queue = None             # live_docs_ui.AddQueue, made with the card
@@ -1052,6 +1289,10 @@ class LiveAssistOverlay(QWidget):
         self._doc_asking = False
         self._exclusion_ok = False
         self._mac_partial = False          # macOS: sharingType none is set (best effort)
+        # Who transcribes the call (engine_choice.live_speech_status): the engine dict the
+        # session started with, and the two lines last shown (line, note).
+        self._hear_engine = None
+        self._hear_shown = ("", "")
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -1067,6 +1308,8 @@ class LiveAssistOverlay(QWidget):
         self.sig_partial.connect(self._on_partial)
         self.sig_export_done.connect(self._on_export_done)
         self.sig_doc_ask.connect(self._on_doc_ask)
+        self.sig_rule_partial.connect(self._on_rule_partial)
+        self.sig_rule_done.connect(self._on_rule_done)
         self._first_token_at = 0.0
         self._build()
         self._doc_queue = live_docs_ui.AddQueue(self)
@@ -1075,17 +1318,27 @@ class LiveAssistOverlay(QWidget):
         self._doc_queue.batch_done.connect(self._on_doc_batch_done)
         live_docs_ui.bridge().changed.connect(self._refresh_docs_chip)
         self.setAcceptDrops(True)
-        for name in ("input_ask", "txt_summary", "txt_suggestion", "ctx_edit"):
+        for name in ("input_ask", "txt_summary", "txt_suggestion", "txt_feed", "ctx_edit", "inv_edit"):
             w = getattr(self, name, None)
             if w is not None:              # a file dropped on them reaches the card (a document),
                 w.setAcceptDrops(False)    # it is never pasted as a path into what's being typed
         self._refresh_docs_chip()
+        # Typing in the context: the offer ("This sounds like a rule...") follows a moment later.
+        self._offer_timer = QTimer(self)
+        self._offer_timer.setSingleShot(True)
+        self._offer_timer.setInterval(350)
+        self._offer_timer.timeout.connect(self._on_rules_typed)
+        self._feed_timer = QTimer(self)
+        self._feed_timer.setSingleShot(True)
+        self._feed_timer.setInterval(100)
+        self._feed_timer.timeout.connect(self._render_feed)
         self._tip_from_card = False
         self._popup_privacy = _PopupPrivacy(self)
         if QApplication.instance():
             QApplication.instance().installEventFilter(self._popup_privacy)
         self._richify_tooltips()
         self._apply_theme()
+        self._on_rules_changed()           # the chip, the offer and the answer area as the saved context says
 
         pos = cfg.get("live_assist_pos")
         if isinstance(pos, (list, tuple)) and len(pos) == 2:
@@ -1199,18 +1452,74 @@ class LiveAssistOverlay(QWidget):
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(8)
 
+        # The calendar invite - only while the session came from one: who is on it
+        # and whether it has an agenda. A click swaps it (and the transcript card)
+        # for the agenda, editable; the x drops the invite for this session.
+        self.inv_chip = _InviteChip(self.body)
+        self.inv_chip.clicked.connect(self._open_invite_editor)
+        self.inv_chip.dismissed.connect(self._drop_invite)
+        self.inv_chip.hide()
+        body.addWidget(self.inv_chip)
+        self.inv_panel = QWidget(self.body)
+        ip = QVBoxLayout(self.inv_panel)
+        ip.setContentsMargins(0, 0, 0, 0)
+        ip.setSpacing(8)
+        inv_head = QHBoxLayout()
+        inv_head.setSpacing(6)
+        self.lbl_inv_head = QLabel("FROM YOUR INVITE", self.inv_panel)
+        inv_head.addWidget(self.lbl_inv_head)
+        inv_head.addStretch()
+        self.lbl_inv_count = QLabel("", self.inv_panel)
+        self.lbl_inv_count.setObjectName("laFoot")
+        inv_head.addWidget(self.lbl_inv_count)
+        self.btn_inv_clear = QPushButton("Clear", self.inv_panel)
+        self.btn_inv_clear.setFixedHeight(22)
+        self.btn_inv_clear.setCursor(Qt.PointingHandCursor)
+        self.btn_inv_clear.clicked.connect(self._clear_invite_text)
+        inv_head.addWidget(self.btn_inv_clear)
+        self.btn_inv_done = QPushButton("Done", self.inv_panel)
+        self.btn_inv_done.setObjectName("laCtxDone")
+        self.btn_inv_done.setFixedHeight(22)
+        self.btn_inv_done.setCursor(Qt.PointingHandCursor)
+        self.btn_inv_done.setToolTip("Keep it for this session (Ctrl+Enter)"
+                                     if sys.platform != "darwin"
+                                     else "Keep it for this session (⌘↩)")
+        self.btn_inv_done.clicked.connect(self._finish_invite_edit)
+        inv_head.addWidget(self.btn_inv_done)
+        ip.addLayout(inv_head)
+        self.inv_edit = _ContextEdit(self.inv_panel)
+        self.inv_edit.setObjectName("laCtxEdit")
+        self.inv_edit.setPlaceholderText(INVITE_PLACEHOLDER)
+        self.inv_edit.setAccessibleName("Agenda from your invite")
+        self.inv_edit.setTabChangesFocus(True)
+        self.inv_edit.setFixedHeight(128)
+        self.inv_edit.textChanged.connect(self._on_invite_typed)
+        self.inv_edit.finished.connect(self._finish_invite_edit)
+        ip.addWidget(self.inv_edit)
+        self.lbl_inv_hint = QLabel(INVITE_HINT, self.inv_panel)
+        self.lbl_inv_hint.setObjectName("laFoot")
+        ip.addWidget(self.lbl_inv_hint)
+        self.inv_panel.hide()
+        body.addWidget(self.inv_panel)
+
         # Session context: one line showing what the answers are told about
         # this call; a click swaps it (and the transcript card) for an editor.
         self.ctx_chip = _ContextChip(self.body)
         self.ctx_chip.clicked.connect(self._open_context_editor)
         body.addWidget(self.ctx_chip)
+        # "This sounds like a rule for everything you hear. Apply it to every sentence?" - the
+        # calm offer, under the chip (the editor has its own, under its switch).
+        self.rule_offer = _RuleOffer(self.body)
+        self.rule_offer.yes.connect(self._offer_yes)
+        self.rule_offer.no.connect(self._offer_no)
+        body.addWidget(self.rule_offer)
         self.ctx_panel = QWidget(self.body)
         cp = QVBoxLayout(self.ctx_panel)
         cp.setContentsMargins(0, 0, 0, 0)
-        cp.setSpacing(8)
+        cp.setSpacing(6)
         ctx_head = QHBoxLayout()
         ctx_head.setSpacing(6)
-        self.lbl_ctx_head = QLabel("SESSION CONTEXT", self.ctx_panel)
+        self.lbl_ctx_head = QLabel("CONTEXT", self.ctx_panel)
         ctx_head.addWidget(self.lbl_ctx_head)
         ctx_head.addStretch()
         self.lbl_ctx_count = QLabel("", self.ctx_panel)
@@ -1235,11 +1544,41 @@ class LiveAssistOverlay(QWidget):
         self.ctx_edit.setObjectName("laCtxEdit")
         self.ctx_edit.setPlaceholderText(CONTEXT_PLACEHOLDER)
         self.ctx_edit.setTabChangesFocus(True)
-        # Exactly the chip + transcript slot it replaces: nothing below moves.
-        self.ctx_edit.setFixedHeight(136)
+        self.ctx_edit.setFixedHeight(CTX_EDIT_H)
         self.ctx_edit.textChanged.connect(self._on_context_typed)
         self.ctx_edit.finished.connect(self._finish_context_edit)
+        # The paper-clip in the box's corner: add documents.
+        self.btn_ctx_clip = QPushButton("", self.ctx_edit)
+        self.btn_ctx_clip.setObjectName("laClip")
+        self.btn_ctx_clip.setFixedSize(26, 22)
+        self.btn_ctx_clip.setCursor(Qt.PointingHandCursor)
+        self.btn_ctx_clip.setToolTip(ADD_DOCS_TIP)
+        self.btn_ctx_clip.setAccessibleName(ADD_DOCS)
+        self.btn_ctx_clip.clicked.connect(self._pick_documents)
+        self.ctx_edit.attach_button(self.btn_ctx_clip)
         cp.addWidget(self.ctx_edit)
+        # Under it: the documents (Add documents, and the count with its "Use in answers" list)...
+        docs_row = QHBoxLayout()
+        docs_row.setSpacing(6)
+        self.btn_ctx_add = QPushButton(ADD_DOCS, self.ctx_panel)
+        self.btn_ctx_add.setFixedHeight(22)
+        self.btn_ctx_add.setCursor(Qt.PointingHandCursor)
+        self.btn_ctx_add.setToolTip(ADD_DOCS_TIP)
+        self.btn_ctx_add.clicked.connect(self._pick_documents)
+        docs_row.addWidget(self.btn_ctx_add)
+        self.ctx_docs_chip = _DocsChip(self.ctx_panel)
+        self.ctx_docs_chip.clicked.connect(self._open_docs_menu)
+        docs_row.addWidget(self.ctx_docs_chip)
+        docs_row.addStretch()
+        cp.addLayout(docs_row)
+        # ...and the rule's reach: everything you hear, or questions only.
+        self.btn_rules = _Switch(live_rules.SWITCH_LABEL, self.ctx_panel)
+        self.btn_rules.toggled.connect(self._on_rules_switch)
+        cp.addWidget(self.btn_rules, 0, Qt.AlignLeft)
+        self.ctx_offer = _RuleOffer(self.ctx_panel)
+        self.ctx_offer.yes.connect(self._offer_yes)
+        self.ctx_offer.no.connect(self._offer_no)
+        cp.addWidget(self.ctx_offer)
         self.ctx_panel.hide()
         body.addWidget(self.ctx_panel)
 
@@ -1263,6 +1602,15 @@ class LiveAssistOverlay(QWidget):
         self.txt_summary.setMaximumHeight(110)
         self.txt_summary.setPlaceholderText(TRANSCRIPT_PLACEHOLDER)
         body.addWidget(self.txt_summary)
+        # Who transcribes it, in one line ("Transcribing with Gemini 2.5 Pro · Gusan Cloud"), and
+        # the plain hint when local Whisper would be transcribing a language it is poor at.
+        self.lbl_hear = QLabel("", self.body)
+        self.lbl_hear.setObjectName("laFoot")
+        self.lbl_hear.setWordWrap(True)
+        self.lbl_hear.setTextFormat(Qt.PlainText)
+        self.lbl_hear.setAccessibleName("Speech engine")
+        self.lbl_hear.hide()
+        body.addWidget(self.lbl_hear)
 
         head_row = QHBoxLayout()
         self.lbl_sug_head = QLabel("ANSWER", self.body)
@@ -1283,11 +1631,41 @@ class LiveAssistOverlay(QWidget):
         self.btn_auto = QPushButton("Auto", self.body)
         self.btn_auto.setCheckable(True)
         self.btn_auto.setChecked(self._auto)
-        self.btn_auto.setToolTip("Answer automatically the moment someone asks a question.")
+        self.btn_auto.setToolTip(AUTO_TIP)
         self.btn_auto.toggled.connect(self._on_auto_toggled)
         self.btn_auto.setFixedHeight(22)
         head_row.addWidget(self.btn_auto)
         body.addLayout(head_row)
+        # While the context applies to EVERYTHING heard: its state and Pause above the running
+        # feed, which takes the single answer's place (see _apply_rules_view).
+        self.feed_bar = QWidget(self.body)
+        fb = QHBoxLayout(self.feed_bar)
+        fb.setContentsMargins(0, 0, 0, 0)
+        fb.setSpacing(6)
+        self.lbl_feed_state = _ElidedLabel("", self.feed_bar)
+        self.lbl_feed_state.setObjectName("laFoot")
+        self.lbl_feed_state.setAccessibleName("Rule state")
+        fb.addWidget(self.lbl_feed_state, 1)
+        self.btn_feed_back = QPushButton("Live results", self.feed_bar)
+        self.btn_feed_back.setFixedHeight(22)
+        self.btn_feed_back.setCursor(Qt.PointingHandCursor)
+        self.btn_feed_back.setToolTip(_wrap_tip("Back to the running results of your rule."))
+        self.btn_feed_back.clicked.connect(lambda: self._set_view("feed"))
+        fb.addWidget(self.btn_feed_back)
+        self.btn_feed_pause = QPushButton("Pause", self.feed_bar)
+        self.btn_feed_pause.setFixedHeight(22)
+        self.btn_feed_pause.setCursor(Qt.PointingHandCursor)
+        self.btn_feed_pause.clicked.connect(self._toggle_rule_pause)
+        fb.addWidget(self.btn_feed_pause)
+        self.feed_bar.hide()
+        body.addWidget(self.feed_bar)
+        self.txt_feed = _AnswerEdit(self.body)
+        self.txt_feed.setReadOnly(True)
+        self.txt_feed.setObjectName("laCard")
+        self.txt_feed.setAccessibleName("Live results")
+        self.txt_feed.setPlaceholderText(RULES_IDLE)
+        self.txt_feed.hide()
+        body.addWidget(self.txt_feed, 1)
         self.txt_suggestion = _AnswerEdit(self.body)
         self.txt_suggestion.setReadOnly(True)
         self.txt_suggestion.setObjectName("laCard")
@@ -1479,6 +1857,7 @@ class LiveAssistOverlay(QWidget):
                 border-radius: 11px; padding: 2px 10px; font-size: 12px; font-weight: 700;
             }}
             QLabel#laFoot {{ color: {t['faint']}; font-size: 11px; }}
+            QLabel#laFoot[emph="true"] {{ color: {t['text']}; font-weight: 600; }}
             QFrame#laCtxChip {{
                 background: {t['card']}; border: 1px solid {t['card_border']};
                 border-radius: 9px;
@@ -1505,15 +1884,37 @@ class LiveAssistOverlay(QWidget):
             }}
             QPushButton#laDocs:hover {{ border-color: {accent}; color: {t['text']}; }}
             QPushButton#laDocs[off="true"] {{ color: {t['faint']}; border-style: dashed; }}
+            QLabel#laCtxScope {{
+                color: {t['muted']}; font-size: 10px; font-weight: 700;
+                border: 1px solid {t['card_border']}; border-radius: 8px; padding: 0px 7px;
+            }}
+            QLabel#laCtxScope[on="true"] {{
+                color: white; background: {accent}; border-color: {accent};
+            }}
+            QFrame#laRuleOffer {{
+                background: {t['card']}; border: 1px solid {accent}; border-radius: 9px;
+            }}
+            QLabel#laRuleOfferText {{ color: {t['text']}; font-size: 11.5px; }}
+            QPushButton#laClip {{ background: transparent; border: none; padding: 0; }}
+            QPushButton#laClip:hover {{ background: rgba(37,99,235,0.14); border-radius: 8px; }}
         """)
         self.drop_veil.set_theme(t)
+        self.btn_rules.set_theme(t)
+        try:
+            from ui.components import icons as comp_icons
+            self.btn_ctx_clip.setIcon(comp_icons.icon("paperclip", 15, t["muted"], 1.8))
+            self.btn_ctx_clip.setIconSize(QSize(15, 15))
+            self.btn_ctx_add.setIcon(comp_icons.icon("paperclip", 13, t["muted"], 1.8))
+            self.btn_ctx_add.setIconSize(QSize(13, 13))
+        except Exception:
+            logger.debug("Live Assistant: paper-clip icon", exc_info=True)
         for lbl in (self.lbl_now_head, self.lbl_sum_head, self.lbl_sug_head,
-                    self.lbl_ctx_head, self.lbl_crop_head):
+                    self.lbl_ctx_head, self.lbl_inv_head, self.lbl_crop_head):
             lbl.setStyleSheet(f"color: {t['faint']}; font-size: 10px; font-weight: 700; "
                               "letter-spacing: 1px; background: transparent;")
         self.lbl_title.setStyleSheet(f"color: {t['text']}; font-weight: 700; font-size: 13px;")
         for b in (self.btn_theme, self.btn_collapse, self.btn_close, self.btn_screen,
-                  self.btn_stop, self.btn_snip):
+                  self.btn_stop, self.btn_snip, self.inv_chip.drop):
             b.set_theme(t)
         self._shadow_key = None          # shadow tint depends on theme
         self._refresh_private_chip()
@@ -1576,7 +1977,7 @@ class LiveAssistOverlay(QWidget):
             self._store("live_assist_screen_auto", on)
 
     def set_context(self, text):
-        """About my calls: what every answer is told about the call."""
+        """Context: the standing instructions every answer follows (about the call, or a rule)."""
         if not self.ctx_panel.isHidden():
             # The editor is open: what's typed there would overwrite this on Done.
             self.ctx_edit.blockSignals(True)
@@ -1613,6 +2014,8 @@ class LiveAssistOverlay(QWidget):
     def on_setting_changed(self, key):
         """app.sig_setting_changed: a page or Settings changed ``key`` in cfg.
         Follow it; never writes back (the value is already there)."""
+        if self.app and key in HEAR_KEYS:
+            self._refresh_hear()           # who transcribes (and the language hint) follows
         if not self.app or not str(key).startswith("live_assist_"):
             return
         cfg = self.app.cfg
@@ -1629,6 +2032,11 @@ class LiveAssistOverlay(QWidget):
             elif key == "live_assist_context":
                 if clip_context(str(cfg.get(key) or "")) != self._context:
                     self.set_context(str(cfg.get(key) or ""))
+            elif key == live_rules.RULES_KEY:
+                if bool(cfg.get(key, False)) != self._rules_everything:
+                    self.set_rules_everything(cfg.get(key, False))
+            elif key == live_rules.DECLINED_KEY:
+                self._refresh_offers()
             elif key == "live_assist_opacity":
                 self.set_opacity(cfg.get(key, 0.96))
             elif key == "live_assist_pos" and cfg.get(key) is None:
@@ -1772,6 +2180,48 @@ class LiveAssistOverlay(QWidget):
         if old is None or old.key != st.key:
             self.hide_status_changed.emit(st.key)
 
+    # ── who transcribes the call ──
+    def _hear_lines(self):
+        """(line, note) for the label under the live transcript. While a session runs: what the
+        recorder says RAN ("Transcribing with Gemini 2.5 Pro · Gusan Cloud", engine_choice.
+        live_speech_status) and, for a session started here, the plain hint when local Whisper
+        is poor at the call's language. Before one: only that hint, for what Start would use."""
+        app = self.app
+        if not app:
+            return "", ""
+        try:
+            import engine_choice
+            cfg = app.cfg
+            pro = bool(app.is_pro()) if callable(getattr(app, "is_pro", None)) else False
+            signed_in = bool(getattr(getattr(app, "auth", None), "is_authenticated", pro))
+            if not self._meeting_active:
+                ro = engine_choice.live_speech_engine(cfg, pro, signed_in, self._call_language())
+                return "", ro.get("note") or ""
+            rec = getattr(app, "recorder", None)
+            getter = getattr(rec, "speech_report", None)
+            report = (getter() if callable(getter) else None) or {}
+            ro = engine_choice.take_engine(cfg, report)
+            session = getattr(app, "meeting_session", None)
+            note = ""
+            if getattr(session, "source", "") == "live_assist":
+                note = engine_choice.live_speech_note(cfg, pro, report.get("language"), signed_in,
+                                                      engine=ro, report=report)
+            return engine_choice.live_speech_status(ro, report), note
+        except Exception:
+            logger.debug("Live Assistant: transcriber line unavailable", exc_info=True)
+            return "", ""
+
+    def _refresh_hear(self):
+        """Show who transcribes the call (and the language hint); only when it changed."""
+        line, note = self._hear_lines()
+        if (line, note) == self._hear_shown:
+            return
+        self._hear_shown = (line, note)
+        text = "\n".join(x for x in (line, note) if x)
+        self.lbl_hear.setText(text)
+        self.lbl_hear.setToolTip(text)
+        self.lbl_hear.setVisible(bool(text))
+
     def _refresh_live_controls(self):
         live = self._meeting_active
         self.btn_start.setVisible(not live)
@@ -1779,6 +2229,8 @@ class LiveAssistOverlay(QWidget):
         self.btn_stop.setVisible(live)
         if live:
             self._update_timer()
+        self._refresh_title()
+        self._refresh_invite_chip()
         self._refresh_context_chip()
 
     def _update_timer(self):
@@ -2041,6 +2493,7 @@ class LiveAssistOverlay(QWidget):
     def _refresh_plan(self):
         """The PRO pill beside the title: there until the plan is Pro."""
         self.lbl_pro.setVisible(self._is_pro() is False)
+        self._refresh_hear()               # what Start would transcribe with follows the plan
 
     def _pro_blocks(self):
         """Free and guests: Start is the Pro action - show the Pro window.
@@ -2078,6 +2531,7 @@ class LiveAssistOverlay(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         QTimer.singleShot(0, self._apply_glass)
+        self._refresh_hear()
 
     def set_expanded(self, expanded):
         self._expanded = bool(expanded)
@@ -2094,6 +2548,7 @@ class LiveAssistOverlay(QWidget):
     def _refresh_context_chip(self):
         chip, ctx = self.ctx_chip, self._context
         locked = bool(ctx) and self._meeting_active
+        everything = self.rules_active()
         chip.lock.setVisible(locked)
         if locked:
             chip.lock.setPixmap(_lock_pixmap(12, _THEMES[self._theme_name]["accent"]))
@@ -2101,12 +2556,20 @@ class LiveAssistOverlay(QWidget):
         chip.tag.setText("LOCKED IN" if locked else "CONTEXT")
         chip.text.setText(" ".join(ctx.split())[:300] if ctx else CONTEXT_EMPTY)
         chip.edit_hint.setVisible(bool(ctx))
+        # Plainly which it is: the rule runs on everything heard, or only shapes the answers.
+        chip.scope.setVisible(bool(ctx))
+        chip.scope.setText(live_rules.scope_text(everything))
         empty = "false" if ctx else "true"
         for w in (chip, chip.text):
             if w.property("empty") != empty:
                 w.setProperty("empty", empty)          # restyle: dashed / muted
                 w.style().unpolish(w)
                 w.style().polish(w)
+        on = "true" if everything else "false"
+        if chip.scope.property("on") != on:
+            chip.scope.setProperty("on", on)
+            chip.scope.style().unpolish(chip.scope)
+            chip.scope.style().polish(chip.scope)
         if not ctx:
             tip = ("Tell the assistant what this call is about - who you are, who "
                    "you're talking to, what you want from it. Every answer this "
@@ -2119,12 +2582,15 @@ class LiveAssistOverlay(QWidget):
                 "<b>Session context</b> - every answer uses it until you change it. "
                 "Click to edit.")
         shown = ctx if len(ctx) <= 700 else ctx[:700] + "…"
+        reach = html_mod.escape(RULES_TIP_ON if everything else RULES_TIP_OFF, quote=False)
         chip.setToolTip(f"<p style='white-space:normal'>{head}</p>"
-                        f"<p style='white-space:pre-wrap'>{html_mod.escape(shown)}</p>")
+                        f"<p style='white-space:pre-wrap'>{html_mod.escape(shown)}</p>"
+                        f"<p style='white-space:normal'>{reach}</p>")
 
     def _open_context_editor(self):
         if not self.ctx_panel.isHidden():
             return
+        self._finish_invite_edit()             # one editor at a time
         self.ctx_edit.blockSignals(True)
         self.ctx_edit.setPlainText(self._context)
         self.ctx_edit.blockSignals(False)
@@ -2132,7 +2598,11 @@ class LiveAssistOverlay(QWidget):
         self.ctx_chip.hide()
         self.lbl_sum_head.hide()
         self.txt_summary.hide()
+        self.lbl_hear.hide()
         self.ctx_panel.show()
+        self._refresh_docs_chip()              # the editor has its own row: the bar under the answer gives way
+        self._sync_rules_switch()
+        self._refresh_offers()
         self.activateWindow()                  # typing needs the keyboard focus
         self.ctx_edit.setFocus()
         self.ctx_edit.moveCursor(self.ctx_edit.textCursor().MoveOperation.End)
@@ -2152,6 +2622,9 @@ class LiveAssistOverlay(QWidget):
         n = len(text)
         self.lbl_ctx_count.setText(f"{n:,} / {CONTEXT_CHARS:,}"
                                    if n >= CONTEXT_CHARS * 0.8 else "")
+        timer = getattr(self, "_offer_timer", None)
+        if timer is not None:
+            timer.start()                      # the switch and the offer follow what is typed
 
     def _clear_context_text(self):
         self.ctx_edit.clear()
@@ -2164,22 +2637,284 @@ class LiveAssistOverlay(QWidget):
         self.ctx_chip.show()
         self.lbl_sum_head.show()
         self.txt_summary.show()
+        self.lbl_hear.setVisible(bool(self.lbl_hear.text()))
         self._set_context(self.ctx_edit.toPlainText())
+        self._refresh_docs_chip()
+        self._on_rules_changed()               # the switch, the chip and the offer, now the editor is closed
 
     def _set_context(self, text):
         text = clip_context(text)
         if text == self._context:
             return
+        old = self._context
         self._context = text
         self.settings_changed.emit("live_assist_context", text)
         self._store("live_assist_context", text)
-        self._refresh_context_chip()
-        if not text:
+        self._on_rules_changed()
+        # "Apply to everything I hear" must not outlive its rule: cleared, or no longer a rule, it
+        # turns itself off and says so once; a different rule that stays on says so too.
+        turn_off, said = live_rules.reconcile(self._rules_everything, text, old)
+        if turn_off:
+            self.set_rules_everything(False)
+            self._set_status(said)
+        elif not text:
             self._set_status("Context cleared.")
+        elif self.rules_active():
+            # A rule for everything heard changes at the next sentence: the one in flight is not recalled.
+            self._set_status("✓ Rule updated - it applies from the next sentence." if self._meeting_active
+                             else "✓ Rule saved - it applies to everything you hear.")
         elif self._meeting_active:
             self._set_status("✓ Context locked in - every answer from now on uses it.")
         else:
             self._set_status("✓ Context saved - every answer uses it.")
+
+    # ── Context = standing instructions: "Apply to everything I hear" (live_rules.py) ──
+    def rules_everything(self):
+        """True while the context is set to apply to everything heard (cfg
+        live_assist_rules_everything), whether or not a rule is written yet."""
+        return bool(self._rules_everything)
+
+    def rules_active(self):
+        """The mode is really on: switched on AND there is a rule to apply."""
+        return bool(self._rules_everything and self._context)
+
+    def set_rules_everything(self, on):
+        """"Apply to everything I hear" (live_assist_rules_everything): updates the card at
+        once, writes the key, announces it. On, it starts with the next sentence heard."""
+        on = bool(on)
+        changed = on != self._rules_everything
+        self._rules_everything = on
+        if changed:
+            if on:
+                self._rule_paused, self._rule_note, self._rule_fails = False, "", 0
+                self._rule_budget.reset()
+            else:
+                self._cancel_rules()
+            self.settings_changed.emit(live_rules.RULES_KEY, on)
+            self._set_status("✓ Your rule now applies to everything you hear, from the next sentence."
+                             if on else "Back to questions only.")
+        self._store(live_rules.RULES_KEY, on)
+        self._on_rules_changed()
+
+    def _on_rules_switch(self, checked):
+        self.set_rules_everything(checked)
+
+    def _editing_context_text(self):
+        """The context as it stands: what is typed while the editor is open, else what is locked in."""
+        return self.ctx_edit.toPlainText() if not self.ctx_panel.isHidden() else self._context
+
+    def _on_rules_changed(self):
+        """The mode, the context or the declined mark changed: every place that shows it follows."""
+        self._sync_rules_switch()
+        self._refresh_context_chip()
+        self._refresh_offers()
+        self._apply_rules_view()
+
+    def _on_rules_typed(self):
+        self._sync_rules_switch()
+        self._refresh_offers()
+
+    def _sync_rules_switch(self):
+        has = bool(self._editing_context_text().strip())
+        self.btn_rules.blockSignals(True)
+        self.btn_rules.setChecked(self._rules_everything)
+        self.btn_rules.blockSignals(False)
+        self.btn_rules.setEnabled(has)
+        self.btn_rules.setToolTip(_wrap_tip(RULES_TIP_ON if self._rules_everything else RULES_TIP_OFF)
+                                  if has else _wrap_tip(NEEDS_RULE_TEXT))
+        self.btn_rules.update()
+
+    def _offer_wanted(self):
+        """The text reads like a rule for everything heard, the mode is off, and the user hasn't
+        said No to this very text."""
+        text = clip_context(self._editing_context_text())
+        if not text or self._rules_everything or not live_rules.looks_like_rule(text):
+            return False
+        declined = str(((self.app.cfg if self.app else {}) or {}).get(live_rules.DECLINED_KEY) or "")
+        return live_rules.declined_mark(text) != declined
+
+    def _refresh_offers(self):
+        want = self._offer_wanted()
+        editing = not self.ctx_panel.isHidden()
+        self.ctx_offer.setVisible(want and editing)
+        self.rule_offer.setVisible(want and not editing and self.inv_panel.isHidden())
+
+    def _offer_yes(self):
+        self.set_rules_everything(True)
+
+    def _offer_no(self):
+        mark = live_rules.declined_mark(clip_context(self._editing_context_text()))
+        self.settings_changed.emit(live_rules.DECLINED_KEY, mark)
+        self._store(live_rules.DECLINED_KEY, mark)
+        self._refresh_offers()
+
+    # ── the calendar invite (this session only; never "About my calls") ──
+    def has_invite(self):
+        """True while the session came from a calendar invite (the INVITE chip shows)."""
+        return bool(self._invite_on)
+
+    def invite_text(self):
+        """The agenda every answer of this session is sent with ("" when none)."""
+        return self._invite
+
+    def set_invite(self, agenda="", others=None):
+        """This session came from a calendar invite: show the INVITE chip with who is
+        on it (``others``: their names, without you) and its agenda - the text the user
+        can read and edit here and every answer is sent with. Held in memory for this
+        session (and, through the session, in the meeting's own folder); it is never
+        written to the settings. Called by whoever started the session: the card's own
+        Start, the reminder's Record + Live Assistant, the card opened mid-call."""
+        self._invite_on = True
+        self._invite = invite_context.clip_agenda(agenda)
+        self._invite_others = invite_context.cap_names(others) if others is not None else []
+        self._refresh_invite_chip()
+
+    def _me_name(self):
+        auth = getattr(self.app, "auth", None) if self.app else None
+        return str(getattr(auth, "user_name", "") or "").strip()
+
+    def _invite_summary(self):
+        """"Anna, David +2 · Agenda": who is on the invite, and whether it has an agenda."""
+        names = self._invite_others or others_of(self._attendees, self._me_name())
+        label = ""
+        if names:
+            try:
+                from calendar_sync import people_label
+                label = people_label(names)
+            except Exception:
+                label = ", ".join(names[:2]) + (" +%d" % (len(names) - 2) if len(names) > 2 else "")
+        return " · ".join(p for p in (label, "Agenda" if self._invite else "") if p)
+
+    def _refresh_title(self):
+        """The header: the meeting's own title while a meeting with a real one is on
+        ("Live session 14:30" and "Untitled Meeting" keep "Live Assistant")."""
+        shown = ""
+        if self._meeting_active and not invite_context.is_generic_title(self._title):
+            shown = invite_context.one_line(self._title, invite_context.MAX_TITLE_CHARS)
+        self.lbl_title.setText(shown or "Live Assistant")
+        import html as html_mod
+        self.lbl_title.setToolTip(f"<p style='white-space:normal'>{html_mod.escape(shown)}</p>"
+                                  if shown else "")
+
+    def _refresh_invite_chip(self):
+        chip = self.inv_chip
+        chip.setVisible(bool(self._invite_on and self._meeting_active
+                             and self.inv_panel.isHidden()))
+        summary = self._invite_summary()
+        chip.text.setText(summary or "Nothing on the invite")
+        empty = "false" if summary else "true"
+        for w in (chip, chip.text):
+            if w.property("empty") != empty:
+                w.setProperty("empty", empty)          # restyle: dashed / muted
+                w.style().unpolish(w)
+                w.style().polish(w)
+        import html as html_mod
+        head = ("<b>From your calendar invite</b> - sent with each answer. Click to read or "
+                "edit the agenda; the x says it isn't this meeting.")
+        shown = self._invite if len(self._invite) <= 500 else self._invite[:500] + "…"
+        chip.setToolTip(f"<p style='white-space:normal'>{head}</p>"
+                        + (f"<p style='white-space:pre-wrap'>{html_mod.escape(shown)}</p>"
+                           if shown else ""))
+        self._refresh_offers()
+
+    def _open_invite_editor(self):
+        if not self.inv_panel.isHidden():
+            return
+        self._finish_context_edit()            # one editor at a time
+        self.inv_edit.blockSignals(True)
+        self.inv_edit.setPlainText(self._invite)
+        self.inv_edit.blockSignals(False)
+        self._on_invite_typed()
+        self.inv_chip.hide()
+        self.ctx_chip.hide()
+        self.lbl_sum_head.hide()
+        self.txt_summary.hide()
+        self.inv_panel.show()
+        self._refresh_offers()
+        self.activateWindow()                  # typing needs the keyboard focus
+        self.inv_edit.setFocus()
+        self.inv_edit.moveCursor(self.inv_edit.textCursor().MoveOperation.End)
+
+    def _on_invite_typed(self):
+        text = self.inv_edit.toPlainText()
+        if len(text) > INVITE_CHARS:
+            # A pasted document: keep what the model will get.
+            pos = min(self.inv_edit.textCursor().position(), INVITE_CHARS)
+            self.inv_edit.blockSignals(True)
+            self.inv_edit.setPlainText(text[:INVITE_CHARS])
+            self.inv_edit.blockSignals(False)
+            cur = self.inv_edit.textCursor()
+            cur.setPosition(pos)
+            self.inv_edit.setTextCursor(cur)
+            text = text[:INVITE_CHARS]
+        n = len(text)
+        self.lbl_inv_count.setText(f"{n:,} / {INVITE_CHARS:,}" if n >= INVITE_CHARS * 0.8 else "")
+
+    def _clear_invite_text(self):
+        self.inv_edit.clear()
+        self.inv_edit.setFocus()
+
+    def _finish_invite_edit(self, commit=True):
+        """Close the agenda editor; ``commit`` False drops what was typed (a new
+        session began, or the invite was dropped)."""
+        if self.inv_panel.isHidden():
+            return
+        self.inv_panel.hide()
+        self.ctx_chip.show()
+        self.lbl_sum_head.show()
+        self.txt_summary.show()
+        if commit:
+            self._set_invite_text(self.inv_edit.toPlainText())
+        self._refresh_invite_chip()
+
+    def _set_invite_text(self, text):
+        """The agenda as the user left it: what answers use from now on, and what the
+        meeting keeps in its folder (session.set_agenda, when the recorder has it)."""
+        text = invite_context.clip_agenda(text)
+        if text == self._invite:
+            return
+        self._invite = text
+        self._refresh_invite_chip()
+        session = getattr(self.app, "meeting_session", None) if self.app else None
+        setter = getattr(session, "set_agenda", None)
+        if callable(setter):
+            try:
+                setter(text)
+            except Exception:
+                logger.debug("Live Assistant: couldn't keep the agenda", exc_info=True)
+        self._set_status("✓ Invite updated - every answer from now on uses it." if text
+                         else "Invite agenda cleared.")
+
+    def _drop_invite(self):
+        """The x on the INVITE chip - "Not this meeting": for the rest of this session the
+        answers stop getting its title, people and agenda."""
+        self._finish_invite_edit(commit=False)
+        had = self._invite
+        self._invite_on, self._invite, self._invite_others = False, "", []
+        self._title, self._attendees = "", ""
+        session = getattr(self.app, "meeting_session", None) if self.app else None
+        setter = getattr(session, "set_agenda", None)
+        if had and callable(setter):
+            try:
+                setter("")
+            except Exception:
+                logger.debug("Live Assistant: couldn't clear the agenda", exc_info=True)
+        self._refresh_title()
+        self._refresh_invite_chip()
+        self._set_status("Not this meeting - answers won't use its invite.")
+
+    def _calendar_start(self):
+        """The calendar meeting a Start from here belongs to - {"title", "attendees",
+        "others", "agenda", "event_id"} - or {} (no calendar, none on now)."""
+        fn = getattr(self.app, "calendar_start_context", None) if self.app else None
+        if not callable(fn):
+            return {}
+        try:
+            ctx = fn()
+        except Exception:
+            logger.debug("Live Assistant: calendar context unavailable", exc_info=True)
+            return {}
+        return ctx if isinstance(ctx, dict) and (ctx.get("title") or ctx.get("event_id")) else {}
 
     # ── start / stop (drives the meeting recorder) ──
     def _meeting_session(self):
@@ -2212,6 +2947,7 @@ class LiveAssistOverlay(QWidget):
     def _start_listening(self):
         # An open context editor: what's typed is this session's context.
         self._finish_context_edit()
+        self._finish_invite_edit(commit=False)
         session = self._meeting_session()
         if session is None:
             if not self._pro_blocks():          # Free: the Pro window, whatever the recorder
@@ -2238,12 +2974,25 @@ class LiveAssistOverlay(QWidget):
             self._set_fast_chunks(True)
             # Wake the answer engine now, so the first question isn't a cold start.
             threading.Thread(target=self._warm_up_engine, daemon=True).start()
+            # The calendar meeting on now (or starting within 5 minutes) names this
+            # session: its title, people, event id and agenda (the INVITE chip).
+            cal = self._calendar_start()
+            who = {}
+            if cal:
+                who = {"attendees": ", ".join(cal.get("attendees") or []),
+                       "calendar_event_id": cal.get("event_id") or None}
             # Both sides of the call, as the Start button promises: mic +
             # system sound, whatever Meetings is set to record (when this
             # system can capture both). Always a new meeting.
-            ok, code, msg = session.start(
-                title="Live session " + time.strftime("%H:%M"), audio_mode="smart_meeting",
-                language=lang, source="live_assist")
+            ok, code, msg = start_session(
+                session, agenda=(cal or {}).get("agenda", ""),
+                title=(cal or {}).get("title") or "Live session " + time.strftime("%H:%M"),
+                audio_mode="smart_meeting", language=lang, source="live_assist", **who)
+            if ok and cal:
+                self.set_invite(cal.get("agenda", ""), cal.get("others"))
+                note = getattr(self.app, "note_calendar_start", None)
+                if callable(note):
+                    note(cal, "live_card")
             if not ok:
                 self._set_fast_chunks(False)
                 if code == "device":
@@ -2295,17 +3044,25 @@ class LiveAssistOverlay(QWidget):
             self._set_status(f"Couldn't stop: {str(e)[:80]}")
 
     # ── data feed (GUI thread) ──
-    def set_meeting_active(self, active, title="", attendees=""):
+    def set_meeting_active(self, active, title="", attendees="", agenda=""):
+        """A session began (``active``) or ended. ``agenda``: the calendar invite's
+        agenda when the session came from one (the INVITE chip shows); without it the
+        session is not an invite's (``set_invite`` says so when it is)."""
         self._meeting_active = bool(active)
         if active:
             # Started from Meetings with the editor open: what's typed
             # is this session's context.
             self._finish_context_edit()
+            self._finish_invite_edit(commit=False)
+            self._invite = invite_context.clip_agenda(agenda)
+            self._invite_on = bool(self._invite)
+            self._invite_others = []
             self._live_since = time.time()
             self._live_text = ""
             self._summary = ""
             self._qa_history = []
             self._qa_docs = []
+            self._reset_rules_session()
             self._audio_folder, self._audio_ready, self._audio_size = None, False, -1
             self._audio_polls = 0
             self.btn_audio.hide()
@@ -2316,6 +3073,11 @@ class LiveAssistOverlay(QWidget):
                                     else "")
         else:
             self._set_fast_chunks(False)
+            self._cancel_rules()               # what was still being worked on stops; the feed stays to read
+            # The session is over: its invite chip goes and answers stop using the
+            # agenda (the title and people stay for a follow-up, as they always did).
+            self._finish_invite_edit(commit=False)
+            self._invite_on, self._invite, self._invite_others = False, "", []
             # The recording lands in the meeting folder moments after Stop;
             # _on_tick shows Download audio once THIS session's part is fully
             # written - a resumed meeting already has earlier parts, so count
@@ -2326,6 +3088,8 @@ class LiveAssistOverlay(QWidget):
             self._audio_polls, self._audio_size = 0, -1
             self.lbl_status.setText("Stopped - saving the recording and the notes…")
         self._refresh_live_controls()
+        self._refresh_hear()
+        self._apply_rules_view()
 
     def discard_session_audio(self):
         """The session was discarded: nothing to offer for download."""
@@ -2340,6 +3104,13 @@ class LiveAssistOverlay(QWidget):
         piece = (piece or "").strip()
         if not piece:
             return
+        if piece == GAP_MARK:
+            # A stretch the cloud could not read (a language local Whisper is poor at): shown in the
+            # transcript once, as "[...]" - and never heard as speech by an answer or a rule.
+            if not self._live_text.endswith(GAP_MARK):
+                self._live_text = (self._live_text + " " + GAP_MARK).strip()
+                self.txt_summary.setPlainText(self._live_text[-700:])
+            return
         self._live_text = (self._live_text + " " + piece).strip()
         self._text_since_suggest += len(piece)
         tail = self._live_text[-700:]
@@ -2348,6 +3119,13 @@ class LiveAssistOverlay(QWidget):
         self.txt_summary.setPlainText(tail)
         sb = self.txt_summary.verticalScrollBar()
         sb.setValue(sb.maximum())
+        # "Apply to everything I hear": every new piece goes to the rule (merged with the ones heard
+        # a moment ago), not only a question. Same guard as below: only while the card is on screen.
+        if answer and self._meeting_active and self.isVisible() and self.rules_active():
+            if not self._rule_paused:          # paused: what is said meanwhile is not worked on later
+                self._rule_feed.add(piece, time.monotonic())
+                self._pump_rules()
+            return
         # The companion part: someone just asked something - answer right away.
         # Only while the overlay is on screen: a hidden overlay must never
         # grab screenshots or send the call to an AI behind the user's back
@@ -2370,27 +3148,31 @@ class LiveAssistOverlay(QWidget):
             logger.debug("Live Assistant: documents unavailable", exc_info=True)
             docs = []
         active = [d for d in docs if d.active]
-        self.docs_bar.setVisible(bool(docs))
+        editing = not self.ctx_panel.isHidden()
+        # The bar under the answer, or - while the context editor is open - the editor's own row.
+        self.docs_bar.setVisible(bool(docs) and not editing)
+        self.ctx_docs_chip.setVisible(bool(docs))
         text = live_docs.chip_text(len(active)) if active else DOCS_OFF
-        self.docs_chip.setText(text)
         off = "false" if active else "true"
-        if self.docs_chip.property("off") != off:
-            self.docs_chip.setProperty("off", off)              # restyle: dashed / faint
-            self.docs_chip.style().unpolish(self.docs_chip)
-            self.docs_chip.style().polish(self.docs_chip)
-        try:
-            from ui.components import icons as comp_icons
-            t = _THEMES[self._theme_name]
-            self.docs_chip.setIcon(comp_icons.icon("file", 13, t["muted"] if active else t["faint"], 1.9))
-            self.docs_chip.setIconSize(QSize(13, 13))
-        except Exception:
-            logger.debug("Live Assistant: documents chip icon", exc_info=True)
         shown = ", ".join(d.name for d in active[:4]) + (" +%d" % (len(active) - 4) if len(active) > 4 else "")
         import html as html_mod
-        self.docs_chip.setToolTip(
-            "<p style='white-space:normal'>%s</p>" % html_mod.escape(
-                ((shown + ". ") if shown else "") + DOCS_TIP, quote=False))
-        self.docs_chip.setAccessibleName("%s. %s" % (text, DOCS_TIP))
+        tip = "<p style='white-space:normal'>%s</p>" % html_mod.escape(
+            ((shown + ". ") if shown else "") + DOCS_TIP, quote=False)
+        for chip in (self.docs_chip, self.ctx_docs_chip):
+            chip.setText(text)
+            if chip.property("off") != off:
+                chip.setProperty("off", off)                    # restyle: dashed / faint
+                chip.style().unpolish(chip)
+                chip.style().polish(chip)
+            try:
+                from ui.components import icons as comp_icons
+                t = _THEMES[self._theme_name]
+                chip.setIcon(comp_icons.icon("file", 13, t["muted"] if active else t["faint"], 1.9))
+                chip.setIconSize(QSize(13, 13))
+            except Exception:
+                logger.debug("Live Assistant: documents chip icon", exc_info=True)
+            chip.setToolTip(tip)
+            chip.setAccessibleName("%s. %s" % (text, DOCS_TIP))
 
     def _open_docs_menu(self):
         """The chip's list: tick the documents the answers may use (the same switches as
@@ -2414,7 +3196,8 @@ class LiveAssistOverlay(QWidget):
             act.toggled.connect(lambda on, i=d.id, n=d.name: self._set_doc_active(i, n, on))
         menu.aboutToHide.connect(menu.deleteLater)
         self._doc_menu = menu
-        at = self.docs_chip.mapToGlobal(QPoint(0, 0))
+        anchor = self.sender() if isinstance(self.sender(), _DocsChip) else self.docs_chip
+        at = anchor.mapToGlobal(QPoint(0, 0))
         menu.popup(QPoint(at.x(), at.y() - menu.sizeHint().height() - 4))
 
     def _set_doc_active(self, doc_id, name, on):
@@ -2425,6 +3208,43 @@ class LiveAssistOverlay(QWidget):
         live_docs_ui.bridge().changed.emit()           # this chip and the page's rows
         self._set_status("✓ %s is used in answers." % name if on else
                          "%s isn't used in answers." % name)
+
+    def ask_open_paths(self):
+        """The file picker (every kind of file). While the card is hidden from screen shares the
+        picker is hidden too - Qt's own dialog, excluded from capture like the card - never the
+        system one, which a share would show (it lists the person's folders). Tests replace this."""
+        hidden = self._private and (self._exclusion_ok or self._mac_partial)
+        if hidden:
+            dlg = QFileDialog(self, ADD_DOCS, self._docs_dir, "All files (*)")
+            dlg.setFileMode(QFileDialog.ExistingFiles)
+            dlg.setOption(QFileDialog.DontUseNativeDialog, True)
+            try:
+                # The card's own sheet (below) gives every QLabel the card's text colour - near white
+                # on the dark card look - and a dialog opened from the card is its child: the picker's
+                # "Look in:" / "File name:" words came out white on the light panel (1:1). The app's own
+                # sheet on the dialog wins over the inherited one (a widget's own sheet always does).
+                from ui import theme
+                dlg.setStyleSheet(theme.stylesheet())
+            except Exception:
+                logger.debug("Live Assistant: couldn't style the file picker", exc_info=True)
+            try:
+                dlg.winId()                    # the native window, before it maps
+                glass.exclude_from_capture(dlg, True)
+            except Exception:
+                logger.debug("Live Assistant: couldn't hide the file picker", exc_info=True)
+            paths = list(dlg.selectedFiles()) if dlg.exec() else []
+            dlg.deleteLater()                  # (it is the card's child: it would otherwise stay as long as the card)
+        else:
+            paths, _ = QFileDialog.getOpenFileNames(self, ADD_DOCS, self._docs_dir, "All files (*)")
+        if paths:
+            self._docs_dir = os.path.dirname(paths[0]) or self._docs_dir
+        return list(paths or [])
+
+    def _pick_documents(self):
+        """The paper-clip or Add documents: read what was picked, off the GUI thread."""
+        paths = self.ask_open_paths()
+        if paths:
+            self._doc_queue.add(paths)
 
     # -- files dropped on the card become documents --
     def _takes_files(self, mime):
@@ -2583,6 +3403,267 @@ class LiveAssistOverlay(QWidget):
             self.sig_doc_ask.emit({"gen": 0, "managed": kind == "managed",
                                    "event": threading.Event(), "answer": None})
         store.warm()
+
+    # ── "Apply to everything I hear": the running feed ──
+    def _set_view(self, view):
+        self._view = "answer" if view == "answer" else "feed"
+        self._apply_rules_view()
+
+    def _apply_rules_view(self):
+        """Show the running feed (and its bar) while a rule applies to everything heard, the
+        single answer otherwise; a typed question's answer shows with a way back."""
+        active = self.rules_active()
+        if not active:
+            self._view = "feed"
+        feed = active and self._view == "feed"
+        self.feed_bar.setVisible(active)
+        self.txt_feed.setVisible(feed)
+        self.txt_suggestion.setVisible(not feed)
+        self.btn_feed_back.setVisible(active and not feed)
+        self.lbl_sug_head.setText(FEED_LABEL if feed else "ANSWER")
+        self.btn_auto.setEnabled(not active)
+        self.btn_auto.setToolTip(_wrap_tip(AUTO_TIP_RULES if active else AUTO_TIP))
+        self.txt_feed.setPlaceholderText(RULES_LIVE if self._meeting_active else RULES_IDLE)
+        self._refresh_feed_bar()
+        self._render_feed()
+
+    def _rule_engine_words(self):
+        """Who applies the rule, in plain words ("DeepSeek V4.1 Flash · Gusan Cloud"): the writer
+        the answers use (Answers written by). Read from the settings only - it never asks the
+        network (a sign-in refresh) on the GUI thread, which runs this every second."""
+        try:
+            import engine_choice
+            r = engine_choice.runs_on(self.app, "live_assistant") if self.app else {}
+        except Exception:
+            logger.debug("Live Assistant: couldn't name the writer", exc_info=True)
+            return ""
+        kind, model, plain = r.get("kind"), r.get("model_name") or "", r.get("plain") or ""
+        if kind in ("cloud", "own_key"):
+            return " · ".join(x for x in (model, plain) if x)
+        if kind == "local":
+            return (model + " · on this computer") if model else "on this computer"
+        return ""
+
+    def _refresh_feed_bar(self):
+        if not self.rules_active():
+            return
+        if self._rule_paused:
+            state = "Paused" + (" - " + self._rule_note if self._rule_note else "")
+        else:
+            who = self._rule_engine_words()
+            if self._rule_feed.catching_up:
+                n = self._rule_feed.dropped_total
+                lead = "Catching up" + (" - skipped %d" % n if n else "")
+            elif self._rule_busy:
+                lead = "Applying your rule"
+            else:
+                lead = "Your rule runs on everything you hear"
+            state = lead + (" · " + who if who else "")
+        self.lbl_feed_state.setText(state)
+        self.lbl_feed_state.setToolTip(_wrap_tip(
+            state + ". It uses the same writer as your answers (Answers written by, on the Live Assistant page)."))
+        emph = "true" if (self._rule_paused or self._rule_feed.catching_up) else "false"
+        if self.lbl_feed_state.property("emph") != emph:     # "Paused" and "Catching up" read stronger
+            self.lbl_feed_state.setProperty("emph", emph)
+            self.lbl_feed_state.style().unpolish(self.lbl_feed_state)
+            self.lbl_feed_state.style().polish(self.lbl_feed_state)
+        self.btn_feed_pause.setText("Resume" if self._rule_paused else "Pause")
+        self.btn_feed_pause.setToolTip(_wrap_tip("Start applying your rule again." if self._rule_paused
+                                                 else "Stop applying your rule until you resume."))
+
+    def _schedule_feed_render(self):
+        timer = getattr(self, "_feed_timer", None)
+        if timer is not None and not timer.isActive():
+            timer.start()
+
+    def _render_feed(self):
+        """The feed as HTML, newest first. Plain, escaped, no links or images; the scroll
+        position stays where the reader left it."""
+        if not self.rules_active():
+            return
+        t = _THEMES[self._theme_name]
+        sb = self.txt_feed.verticalScrollBar()
+        keep = sb.value()
+        self.txt_feed.setHtml(live_rules.feed_html(
+            self._rule_entries, {"text": t["text"], "muted": t["muted"], "faint": t["faint"]}))
+        sb.setValue(min(keep, sb.maximum()))
+
+    def _entry_set(self, entry_id, **kw):
+        for i, e in enumerate(self._rule_entries):
+            if e.id == entry_id:
+                self._rule_entries[i] = e._replace(**kw)
+                return True
+        return False
+
+    def _add_entry(self, src, state, note=""):
+        e = live_rules.Entry(self._rule_next_id, src, "", state, note)
+        self._rule_next_id += 1
+        self._rule_entries.insert(0, e)
+        del self._rule_entries[live_rules.FEED_KEEP:]
+        return e.id
+
+    def _reset_rules_session(self):
+        """A new session: nothing waiting, nothing from the last one, the allowance fresh."""
+        self._cancel_rules()
+        self._rule_feed = live_rules.RuleFeed()
+        self._rule_entries = []
+        self._rule_paused, self._rule_note, self._rule_fails = False, "", 0
+        self._rule_budget.reset()
+        self._view = "feed"
+        self.txt_feed.clear()
+        self._apply_rules_view()
+
+    def _cancel_rules(self):
+        """Stop what is running and forget what is waiting (a result still on its way is dropped)."""
+        self._rule_gen += 1
+        self._rule_busy = False
+        self._rule_feed.clear()
+        for i, e in enumerate(self._rule_entries):
+            if e.state == "working":
+                self._rule_entries[i] = e._replace(state="skipped", note="Stopped.")
+        self._schedule_feed_render()
+
+    def _toggle_rule_pause(self):
+        if self._rule_paused:
+            self._resume_rules()
+        else:
+            self._pause_rules("user")
+
+    def _pause_rules(self, why, note=""):
+        self._rule_paused = True
+        self._rule_note = note
+        self._cancel_rules()
+        self._refresh_feed_bar()
+
+    def _resume_rules(self):
+        self._rule_paused, self._rule_note, self._rule_fails = False, "", 0
+        self._rule_budget.reset()
+        self._refresh_feed_bar()
+        self._pump_rules()
+
+    def _pump_rules(self):
+        """On every new piece and once a second: hand the next group to the model when it is free."""
+        if not (self.rules_active() and self._meeting_active):
+            return
+        now = time.monotonic()
+        self._rule_feed.poll(now)
+        if self._rule_paused or self._rule_busy:
+            self._refresh_feed_bar()
+            return
+        if now - self._rule_last_start < live_rules.MIN_GAP_S:
+            return
+        group = self._rule_feed.take(now, idle=True)
+        if group is None:
+            self._refresh_feed_bar()
+            return
+        if self._rule_budget.exhausted:
+            self._pause_rules("budget", "stopped after %d sentences. Resume to keep going."
+                              % self._rule_budget.cap)
+            return
+        self._start_rule_group(group, now)
+
+    def _start_rule_group(self, group, now):
+        if group.skipped:
+            n = group.skipped
+            self._add_entry("", "skipped", "Skipped %d part%s to catch up." % (n, "" if n == 1 else "s"))
+        entry_id = self._add_entry(group.text, "working")
+        # The user's standing instructions as they are RIGHT NOW (an edit applies from here on).
+        context = live_rules.rule_context(
+            group.text, group.recent, session_context=self._context, title=self._title,
+            attendees=self._attendees, output_lang=self._answer_language())
+        self._rule_budget.spend()
+        self._rule_busy = True
+        self._rule_last_start = now
+        threading.Thread(target=self._rule_worker, args=(entry_id, context, self._rule_gen),
+                         daemon=True).start()
+        self._refresh_feed_bar()
+        self._schedule_feed_render()
+
+    def _emit_rule_partial(self, entry_id, text, gen):
+        try:
+            self.sig_rule_partial.emit(entry_id, text, gen)
+        except RuntimeError:
+            pass                               # the card is gone
+
+    def _emit_rule_done(self, entry_id, text, error, gen):
+        try:
+            self.sig_rule_done.emit(entry_id, text, error, gen)
+        except RuntimeError:
+            pass
+
+    def _rule_worker(self, entry_id, context, gen):
+        """One piece, on a worker thread: the writer the answers use (actions.live_engine), the
+        short "apply the rule" brief (actions.ACTION_LIVE_RULE), streamed into the feed."""
+        try:
+            engine, cfg = self._resolve_engine()
+            if engine is None:
+                self._emit_rule_done(entry_id, "", actions.no_live_engine_message(cfg), gen)
+                return
+            self._rule_engine = engine
+            cfg = dict(cfg or {})
+            acc = []
+            last = [0.0]
+
+            def on_token(delta):
+                if gen != self._rule_gen:
+                    raise _Superseded()        # paused, switched off, or a new session
+                if isinstance(delta, actions.action_api.ReplaceText):
+                    acc[:] = [str(delta)]      # what streamed so far was reasoning
+                    last[0] = 0.0
+                else:
+                    acc.append(delta)
+                now = time.time()
+                if now - last[0] >= 0.1:
+                    last[0] = now
+                    self._emit_rule_partial(entry_id, "".join(acc), gen)
+
+            text = actions.process_stream(context, actions.ACTION_LIVE_RULE, on_token,
+                                          model=engine, config=cfg)
+            self._emit_rule_done(entry_id, (text or "".join(acc)).strip(), "", gen)
+        except _Superseded:
+            return
+        except Exception as e:
+            self._emit_rule_done(entry_id, "", str(e)[:240], gen)
+
+    def _on_rule_partial(self, entry_id, text, gen):
+        if gen != self._rule_gen:
+            return
+        self._entry_set(entry_id, out=text)
+        self._schedule_feed_render()
+
+    def _on_rule_done(self, entry_id, text, error, gen):
+        if gen != self._rule_gen:
+            return                             # a result of a rule that was stopped
+        self._rule_busy = False
+        if error:
+            self._rule_failed(entry_id, error)
+        else:
+            self._rule_fails = 0
+            if text.strip():
+                self._entry_set(entry_id, out=text, state="done")
+            else:                              # filler, or nothing to do with this piece: no line
+                self._rule_entries = [e for e in self._rule_entries if e.id != entry_id]
+        self._schedule_feed_render()
+        self._refresh_feed_bar()
+        self._pump_rules()
+
+    def _rule_failed(self, entry_id, error):
+        """One piece failed: say so on its line. A limit or a missing engine stops the mode at once
+        (it would fail every time); a few errors in a row pause it - Resume tries again."""
+        low = (error or "").lower()
+        if "daily" in low and "limit" in low:
+            plain, hard = LIMIT_WORDS, True
+        elif error in (actions.NO_ENGINE_MESSAGE, actions.LOCAL_ANSWERS_MESSAGE, NEEDS_PRO_ANSWERS) \
+                or low.startswith("sign in"):
+            plain, hard = error, True
+        else:
+            plain, hard = "Couldn't apply the rule to this part: %s" % (error or "try again").strip()[:140], False
+        self._entry_set(entry_id, state="failed", note=plain)
+        self._rule_fails += 1
+        if hard:
+            self._pause_rules("limit", plain)
+        elif self._rule_fails >= live_rules.FAILS_BEFORE_PAUSE:
+            self._pause_rules("errors", "a few errors in a row. Resume to try again.")
 
     # ── suggestions ──
     def _set_status(self, text):
@@ -2766,6 +3847,8 @@ class LiveAssistOverlay(QWidget):
         if image_b64 and self.app.cfg.get("privacy_mode"):
             self._images_blocked()
             return
+        if auto and self.rules_active():
+            return                                # every sentence already gets its result (Live results)
         if self._no_answer_engine_for_free():
             return                                # said so in the answer box; nothing went out
         if auto and ((self._suggesting and not getattr(self, "_suggest_auto", False))
@@ -2801,6 +3884,8 @@ class LiveAssistOverlay(QWidget):
         self._gen += 1
         gen = self._gen
         self._pending_auto = False
+        if self.rules_active():
+            self._set_view("answer")          # a typed question's answer, with a way back to the feed
         self._screen_note = ""                # this answer's screen status, if any
         self._suggest_auto = auto
         self._suggest_asked = bool(question)
@@ -2817,7 +3902,7 @@ class LiveAssistOverlay(QWidget):
             live_text=self._live_text, question=question, title=self._title,
             attendees=self._attendees, screen="snip" if attached else bool(image_b64),
             output_lang=self._answer_language(), history=list(self._qa_history),
-            session_context=self._context)
+            session_context=self._context, invite=self._invite)
         context = rolling_context(**ctx_args)
         # The documents the user added are added by the worker, once the engine that will
         # answer is known (its kind sets how much of them fits, and whether they may go).
@@ -3170,6 +4255,10 @@ class LiveAssistOverlay(QWidget):
             self.app.track("meeting_exported", {"target": "audio", "ok": True})
 
     def _on_tick(self):
+        self._pump_rules()
+        if (self._view == "answer" and self.rules_active() and not self._suggesting
+                and time.time() >= getattr(self, "_hold_until", 0.0)):
+            self._set_view("feed")             # the typed answer has been read: back to the running results
         if (getattr(self, "_pending_auto", False) and not self._suggesting
                 and time.time() >= getattr(self, "_hold_until", 0.0)):
             self._pending_auto = False
@@ -3184,6 +4273,7 @@ class LiveAssistOverlay(QWidget):
             self._apply_glass()
         if self._meeting_active:
             self._update_timer()
+            self._refresh_hear()          # what the cloud answered (and a piece that fell back) shows
         if self._audio_folder and not self._audio_ready:
             self._check_audio_ready()
         if self._suggesting:

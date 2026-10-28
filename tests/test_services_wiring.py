@@ -317,8 +317,18 @@ class TestCalmUpdates(unittest.TestCase):
 
     def test_one_quiet_notice_a_run_never_a_modal(self):
         app = self._app()
+        # (the real ui.components needs Qt's SVG module, which these tests' stand-ins of Qt do not
+        # have: a stand-in dialog module catches any attempt to open a dialog all the same)
+        import types
+        dialogs = types.ModuleType("ui.components.mini_prompt")
+        dialogs.confirm = mock.MagicMock()
+        package = types.ModuleType("ui.components")
+        package.__path__ = []
+        package.mini_prompt = dialogs
+        modal = dialogs.confirm
         with mock.patch.object(main, "APP_VERSION", "2.0.0"), \
-                mock.patch.object(main.QMessageBox, "question") as modal:
+                mock.patch.dict(sys.modules, {"ui.components": package,
+                                              "ui.components.mini_prompt": dialogs}):
             app._prompt_update("v2.0.1")
             app._prompt_update("v2.0.1")                 # after the next dictation
         modal.assert_not_called()

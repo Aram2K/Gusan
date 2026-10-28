@@ -959,7 +959,13 @@ class CloudCard(_Choice):
         top.addWidget(self.pro_tag, 0, Qt.AlignVCenter)
         top.addStretch(1)
         col.addLayout(top)
-        self.model_label = text_label(hardware.CLOUD_SPEECH_MODEL, 12.5, 400, "muted", parent=self)
+        # The real model and where it runs, the same words as the pickers ("Gemini 2.5 Flash · Cloud").
+        try:
+            import engine_choice
+            model_text = engine_choice.tagged_name(hardware.CLOUD_SPEECH_MODEL, "cloud")
+        except Exception:
+            model_text = hardware.CLOUD_SPEECH_MODEL
+        self.model_label = text_label(model_text, 12.5, 400, "muted", parent=self)
         self.model_label.setFixedHeight(16)
         col.addWidget(self.model_label)
         col.addStretch(1)
@@ -970,7 +976,7 @@ class CloudCard(_Choice):
         for wdg in self.findChildren(QWidget):
             wdg.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setAccessibleName("Gusan Cloud, %s, Pro feature, fastest, nothing to download"
-                               % hardware.CLOUD_SPEECH_MODEL)
+                               % model_text)
 
     def paintEvent(self, _e):
         p = QPainter(self)

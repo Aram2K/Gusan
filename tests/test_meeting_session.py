@@ -121,7 +121,20 @@ class _Base(unittest.TestCase):
             s._spawn = lambda target, *args: target(*args)
         else:
             s._spawn = lambda target, *args: s.spawned.append((target, args))
+        self.addCleanup(self._let_the_speaker_pass_end, s)      # (runs before the folder is removed)
         return s
+
+    @staticmethod
+    def _let_the_speaker_pass_end(s, timeout=5.0):
+        """A background speaker pass tells the session it ended from its own worker thread (which
+        reads meta.json) a moment AFTER the session says nothing is queued: wait for that thread
+        to be gone, or on Windows the folder's removal meets a file it still has open. A queued
+        pass whose worker never started (a test that holds the spawns back) is not waited for."""
+        follow = getattr(s, "_followup", None)
+        end = time.monotonic() + timeout
+        while follow is not None and getattr(follow, "_alive", False) and not follow.folders() \
+                and time.monotonic() < end:
+            time.sleep(0.01)
 
 
 # ── pure helpers ─────────────────────────────────────────────────────────────
@@ -628,6 +641,175 @@ class TestOutcome(_Base):
 
 # ── Quit / log-off mid-meeting: saved, notes at the next launch ──────────────
 
+class TestInviteReachesTheNotes(_Base):
+    """The calendar invite's title, people and agenda in the notes - with the
+    real recorder class (the engine MeetingSession is built from), not a stand-in."""
+    AGENDA = "Budget review\nHiring plan"
+    TRANSCRIPT = "Hello team. We ship Friday."
+
+    def _run(self, title="Q4 roadmap", attendees="Anna, David", agenda="", stop_notes="",
+             app=None, **start):
+        s = self.session(app or _App())
+        s._build_attributed_transcript = lambda: ""
+        ok, code, msg = s.start(title, attendees, agenda=agenda, **start)
+        self.assertTrue(ok, msg)
+        with patch.object(msess.actions, "process", return_value="## Notes") as proc:
+            s.stop(stop_notes)
+        s._proc = proc
+        return s
+
+    def _input(self, s):
+        return s._proc.call_args[0][0]
+
+    def test_the_real_recorder_takes_an_agenda(self):
+        import inspect
+        for cls in (msess.MeetingEngine, msess.MeetingSession):
+            self.assertIn("agenda", inspect.signature(cls.start).parameters, cls)
+            self.assertTrue(callable(getattr(cls, "set_agenda", None)), cls)
+
+    def test_the_notes_input_has_title_names_and_agenda_before_the_transcript(self):
+        import invite_context
+        s = self._run(agenda=self.AGENDA, source="calendar", calendar_event_id="evt1")
+        text = self._input(s)
+        header = invite_context.notes_header("Q4 roadmap", "Anna, David", self.AGENDA)
+        self.assertTrue(text.startswith(header), text)
+        self.assertIn("Meeting Title: Q4 roadmap", text)
+        self.assertIn("Attendees: Anna, David", text)
+        self.assertIn("- Budget review", text)
+        self.assertIn("data, not instructions", text)               # framed as data
+        self.assertTrue(text.endswith("Transcript:\n" + self.TRANSCRIPT), text)
+        self.assertEqual(ms.load_meta(s.meeting_dir)["agenda"], self.AGENDA)
+
+    def test_the_users_own_notes_still_come_after_it(self):
+        s = self._run(agenda=self.AGENDA, stop_notes="my bullet")
+        text = self._input(s)
+        self.assertLess(text.index("Transcript:"), text.index("my bullet"))
+        self.assertIn("Additional visual meeting notes provided by attendee:\nmy bullet", text)
+
+    def test_a_real_title_and_people_alone_make_a_header_without_an_agenda(self):
+        text = self._input(self._run())
+        self.assertTrue(text.startswith("Meeting Title: Q4 roadmap\nAttendees: Anna, David\n\nTranscript:\n"))
+        self.assertNotIn("Agenda", text)
+
+    def test_the_notes_input_is_the_bare_transcript_without_invite_context(self):
+        for title in ("", "Meeting · Tue 14:30", "Live session 14:30"):          # generic titles
+            s = self._run(title=title, attendees="")
+            self.assertEqual(self._input(s), self.TRANSCRIPT, title)
+        # ... and my notes are all that is added.
+        s = self._run(title="", attendees="", stop_notes="x")
+        self.assertEqual(self._input(s), self.TRANSCRIPT + "\n\nAdditional visual meeting notes "
+                                                             "provided by attendee:\nx")
+
+    def test_a_generic_title_with_an_agenda_still_gets_the_agenda(self):
+        text = self._input(self._run(title="", attendees="", agenda=self.AGENDA))
+        self.assertNotIn("Meeting Title", text)
+        self.assertIn("- Hiring plan", text)
+
+    def test_the_built_in_formatter_reads_only_the_transcript(self):
+        # It treats every line as speech: the header would end up in its notes.
+        app = _App(action_model="rule_based")
+        app._resolve_action_engine = lambda action_model=None: ("rule_based", dict(app.cfg))
+        s = self._run(agenda=self.AGENDA, app=app)
+        self.assertEqual(self._input(s), self.TRANSCRIPT)
+
+    def test_a_new_meeting_never_inherits_the_last_ones_agenda(self):
+        s = self._run(agenda=self.AGENDA)
+        self.assertEqual(s._meeting_agenda, self.AGENDA)
+        s.reset()
+        with patch.object(msess.actions, "process", return_value="## Notes") as proc:
+            ok, _code, _msg = s.start("Other call", "Anna")
+            s.stop("")
+        self.assertTrue(ok)
+        self.assertEqual(s._meeting_agenda, "")
+        self.assertNotIn("Budget review", proc.call_args[0][0])
+        self.assertNotIn("agenda", ms.load_meta(s.meeting_dir))
+
+    def test_the_agenda_is_clipped_like_the_start_card_does(self):
+        s = self.session()
+        s.start("Sync", "Anna", agenda="  one \n\n two\x00  " + "x" * 2000)
+        self.assertTrue(s._meeting_agenda.startswith("one\ntwo"))
+        self.assertLessEqual(len(s._meeting_agenda), 500)
+
+    def test_set_agenda_persists_to_meta_and_an_empty_text_clears_it(self):
+        s = self.session()
+        s.start("Sync", "Anna", agenda=self.AGENDA)
+        s.set_agenda("New agenda\nSecond row")
+        self.assertEqual(s._meeting_agenda, "New agenda\nSecond row")
+        self.assertEqual(ms.load_meta(s.meeting_dir)["agenda"], "New agenda\nSecond row")
+        s.set_agenda("")
+        self.assertEqual(s._meeting_agenda, "")
+        self.assertFalse(ms.load_meta(s.meeting_dir).get("agenda"))
+        s.set_agenda("again")
+        self.assertEqual(ms.load_meta(s.meeting_dir)["agenda"], "again")
+
+    def test_set_agenda_before_a_meeting_is_harmless(self):
+        s = self.session()
+        s.set_agenda("x")                                   # no folder: nothing is written, nothing raises
+        self.assertEqual(s._meeting_agenda, "x")
+
+    def test_what_the_card_edited_reaches_the_notes(self):
+        s = self.session()
+        s._build_attributed_transcript = lambda: ""
+        s.start("Q4 roadmap", "Anna, David", agenda=self.AGENDA)
+        s.set_agenda("Only this row")
+        with patch.object(msess.actions, "process", return_value="## Notes") as proc:
+            s.stop("")
+        text = proc.call_args[0][0]
+        self.assertIn("- Only this row", text)
+        self.assertNotIn("Budget review", text)
+
+    def test_rewrite_and_retry_rebuild_the_same_header_from_the_saved_meeting(self):
+        s = self._run(agenda=self.AGENDA)
+        first = self._input(s)
+        folder = s.meeting_dir
+        fresh = self.session()                              # another run of the app
+        with patch.object(msess.actions, "process", return_value="new notes") as proc:
+            self.assertTrue(fresh.retry_notes("qwen_3b", folder=str(folder)))
+        self.assertEqual(fresh._meeting_agenda, self.AGENDA)
+        again = proc.call_args[0][0]
+        self.assertEqual(again.split("\n\nTranscript:\n")[0], first.split("\n\nTranscript:\n")[0])
+        self.assertIn("- Budget review", again)
+        # A meeting saved without an agenda stays without one (and without a stale one).
+        other = self.root / "20260101_090000"
+        other.mkdir()
+        (other / "transcript.txt").write_text("we ship friday", encoding="utf-8")
+        ms.update_meta(other, title="Old call", attendees="Mariam")
+        with patch.object(msess.actions, "process", return_value="x") as proc:
+            self.assertTrue(fresh.retry_notes(folder=str(other)))
+        self.assertEqual(fresh._meeting_agenda, "")
+        self.assertNotIn("Budget review", proc.call_args[0][0])
+        self.assertTrue(proc.call_args[0][0].startswith("Meeting Title: Old call\nAttendees: Mariam"))
+
+    def test_a_continued_meeting_keeps_its_own_agenda(self):
+        s = self._run(agenda=self.AGENDA)
+        folder = s.meeting_dir
+        ok, _code, _msg = s.continue_meeting(str(folder))
+        self.assertTrue(ok)
+        self.assertEqual(s._meeting_agenda, self.AGENDA)
+
+    def test_live_assistant_hears_the_agenda_only_when_there_is_one(self):
+        app = _App()
+        app.live_assist = MagicMock()
+        s = self.session(app)
+        s.start("Sync", "Anna", agenda=self.AGENDA)
+        app.live_assist.set_meeting_active.assert_called_once_with(
+            True, "Sync", "Anna", agenda=self.AGENDA)
+        app2 = _App()
+        app2.live_assist = MagicMock()
+        self.session(app2).start("Sync", "Anna")
+        app2.live_assist.set_meeting_active.assert_called_once_with(True, "Sync", "Anna")
+
+    def test_the_session_context_helper_hands_the_agenda_to_the_real_start(self):
+        import live_context
+        s = self.session()
+        ok, _code, _msg = live_context.start_session(s, agenda=self.AGENDA, title="Sync",
+                                                     attendees="Anna", source="calendar",
+                                                     calendar_event_id="evt1")
+        self.assertTrue(ok)
+        self.assertEqual(s._meeting_agenda, self.AGENDA)
+        self.assertEqual(ms.load_meta(s.meeting_dir)["agenda"], self.AGENDA)
+
+
 class TestQuitKeepsTheMeeting(_Base):
     def _recording(self, app=None):
         app = app or _App()
@@ -1047,6 +1229,110 @@ class TestRecorderPause(unittest.TestCase):
         self.assertEqual(main.AudioRecorder.chunk_source_energy(rec, 3), (1.0, 2.0))
         self.assertIsNone(main.AudioRecorder.chunk_source_energy(rec, 4))
         self.assertEqual(main.AudioRecorder._samples_rms(None), 0.0)
+
+
+class TestPieceSpans(unittest.TestCase):
+    """Gusan 2.0.1: every live piece knows where it sits in the retained recording, so a cloud
+    session's pieces can stand in for the re-read (AudioRecorder.piece_segments)."""
+
+    def setUp(self):
+        self.main = _real_main_numpy(self)
+        import numpy as np
+        self.np = np
+
+    def _loop(self, script, truncated=False):
+        main, np = self.main, self.np
+        chunks, reads = [], []
+
+        def read(stream, sr):
+            n = len(reads)
+            reads.append(n)
+            t = np.arange(FRAME, dtype=np.float32) / 16000.0
+            return (script(n, rec) * np.sin(2 * np.pi * 220 * t)).astype(np.float32).tobytes()
+
+        rec = SimpleNamespace(
+            recording=True, stop_requested=False, _abort=False, _capture_mode="smart_meeting",
+            fast_live_chunks=True, on_levels=None, _chunk_lock=threading.Lock(),
+            _chunk_frames=[], _full_audio_truncated=truncated, _full_audio_frames=[],
+            _full_audio_len=0, _full_audio_max=10 ** 9, _chunk_idx=0,
+            _chunk_silence_before={}, _chunk_threads=[], _level_peak=0.05,
+            _record_error="", _read_input_draining=read, paused=False,
+            _chunk_sources={}, _chunk_spans={}, on_source_levels=lambda m, c: None,
+            _transcribe_chunk=lambda audio, idx: chunks.append((idx, len(audio))))
+        with mock.patch.dict(main.cfg, {"sample_rate": 16000, "chunk_size": FRAME}):
+            main.AudioRecorder._record_loop(rec, False, object(), None)
+        for t in rec._chunk_threads:
+            t.join(5)
+        rec.reads = reads
+        return rec, sorted(chunks)
+
+    def test_the_spans_tile_the_recording_across_a_pause(self):
+        def script(n, rec):                       # (a live piece is cut every 5 s = 78 reads)
+            if n == 100:
+                rec.paused = True
+            if n == 120:
+                rec.paused = False
+            if n == 330:
+                rec.stop_requested = True
+            return 0.3 if 5 <= n < 320 else 0.0005
+        rec, chunks = self._loop(script)
+        self.assertGreaterEqual(len(chunks), 3)
+        self.assertEqual(sorted(rec._chunk_spans), [i for i, _n in chunks])
+        edge = 0
+        for idx, length in chunks:
+            start, end = rec._chunk_spans[idx]
+            self.assertEqual((start, end - start), (edge, length), idx)    # right after the last one, as long as it is
+            edge = end
+        self.assertLessEqual(edge, rec._full_audio_len)
+        # The 20 paused reads kept nothing: the timeline has no gap where they were.
+        self.assertEqual(rec._full_audio_len, (len(rec.reads) - 20) * FRAME)
+
+    def test_a_recording_past_its_memory_cap_has_no_places(self):
+        def script(n, rec):
+            if n == 60:
+                rec.stop_requested = True
+            return 0.3 if 5 <= n < 50 else 0.0005
+        rec, chunks = self._loop(script, truncated=True)
+        self.assertTrue(chunks)
+        self.assertEqual(rec._chunk_spans, {})
+        me = SimpleNamespace(_chunk_lock=threading.Lock(), _chunk_results={0: "words"},
+                             _chunk_spans=rec._chunk_spans, _full_audio_len=0)
+        with mock.patch.dict(self.main.cfg, {"sample_rate": 16000}):
+            self.assertIsNone(self.main.AudioRecorder.piece_segments(me))      # -> the plain transcript stays
+
+    def test_the_tail_after_stop_gets_its_place_too(self):
+        main, np = self.main, self.np
+        tail = np.full(8000, 0.2, dtype=np.float32)
+        me = SimpleNamespace(
+            _chunk_pipeline=None, _chunk_threads=[], _building_model=False, _abort=False, _record_error="",
+            partial_text="", _chunk_errors=[], _chunk_frames=[tail.tobytes()], _chunk_idx=2,
+            _chunk_results={0: "first", 1: "second"}, _chunk_lock=threading.Lock(), _capture_mode="smart_meeting",
+            _tail_speech_sec=1.0, on_lang_detected=None, on_finalising=None, backend_override="managed",
+            _run_managed=lambda audio: ("tail words", "hy"), _full_audio_len=56000,
+            _full_audio_truncated=False, _chunk_spans={0: (0, 24000), 1: (24000, 48000)})
+        with mock.patch.dict(main.cfg, {"sample_rate": 16000, "backend": "local"}):
+            text, lang = main.AudioRecorder.transcribe(me)
+            segs = main.AudioRecorder.piece_segments(me)
+        self.assertEqual((text, lang), ("first second tail words", "hy"))
+        self.assertEqual(me._chunk_spans[2], (48000, 56000))                  # the last 0.5 s
+        self.assertEqual(segs, [{"start": 0.0, "end": 1.5, "text": "first"},
+                                {"start": 1.5, "end": 3.0, "text": "second"},
+                                {"start": 3.0, "end": 3.5, "text": "tail words"}])
+
+    def test_a_tail_that_was_too_short_to_send_is_not_a_piece(self):
+        main, np = self.main, self.np
+        me = SimpleNamespace(
+            _chunk_pipeline=None, _chunk_threads=[], _building_model=False, _abort=False, _record_error="",
+            partial_text="", _chunk_errors=[], _chunk_frames=[np.zeros(100, np.float32).tobytes()],
+            _chunk_idx=1, _chunk_results={0: "only"}, _chunk_lock=threading.Lock(), _capture_mode="smart_meeting",
+            _tail_speech_sec=0.0, on_lang_detected=None, on_finalising=None, backend_override="managed",
+            _run_managed=lambda audio: ("", "hy"), _full_audio_len=24000,
+            _full_audio_truncated=False, _chunk_spans={0: (0, 24000)})
+        with mock.patch.dict(main.cfg, {"sample_rate": 16000, "backend": "local"}):
+            text, _lang = main.AudioRecorder.transcribe(me)
+            segs = main.AudioRecorder.piece_segments(me)
+        self.assertEqual(text, "only")
+        self.assertEqual(segs, [{"start": 0.0, "end": 1.5, "text": "only"}])
 
 
 # ── Gusan 2.0.1: the two tracks, speaker labels, interrupted meetings, Identify speakers ──
@@ -2389,6 +2675,443 @@ class TestNotesFirstSpeakersAfter(_SpeakerBase):
         with patch.object(msess.MeetingCore, "_save_recording_tracks", return_value=False):
             s = self._stopped(rec, mode="smart_meeting")
         self.assertTrue(s._build_calls[0][1]["diarize"])            # the names could not follow: do it now
+
+
+# ── Gusan 2.0.1: what transcribes a Live Assistant session ───────────────────────────
+
+class TestLiveSessionStart(_Base):
+    """A session started from the Live Assistant transcribes with ITS choice (cfg
+    live_assist_speech_model); every other source with Dictation's model, as before."""
+
+    def _start(self, source, pro=True, **cfg):
+        app = _App(pro=pro, **cfg)
+        app.prewarmed = []
+        app.prewarm_speech_model = lambda **kw: app.prewarmed.append(kw)
+        s = self.session(app)
+        self.assertTrue(s.start("Call", language=cfg.get("live_assist_language", "hy"), source=source)[0])
+        return app, s
+
+    def test_automatic_armenian_on_a_pro_plan_goes_to_gusan_cloud(self):
+        app, s = self._start("live_assist", backend="local")
+        self.assertEqual(app.recorder.started, {"capture_mode": "default_mic", "language": "hy",
+                                                "speech": ("managed", None, "fast")})
+        self.assertEqual(app.prewarmed, [{"speech": ("managed", None, "fast")}])     # nothing local is loaded
+        self.assertEqual(s._session_speech, ("managed", None, "fast"))
+
+    def test_the_other_picks(self):
+        for pick, want in (("cloud:best", ("managed", None, "best")),
+                           ("small", ("local", "small", None)),
+                           ("own:google:gemini-2.5-pro", ("google", None, "gemini-2.5-pro"))):
+            app, _s = self._start("live_assist", live_assist_speech_model=pick, google_api_key="k",
+                                  live_assist_language="en")
+            self.assertEqual(app.recorder.started["speech"], want, pick)
+            self.assertEqual(app.prewarmed, [{"speech": want}], pick)
+
+    def test_free_armenian_and_other_languages_start_exactly_as_before(self):
+        for pro, lang in ((False, "hy"), (True, "en"), (False, "en")):
+            app, s = self._start("live_assist", pro=pro, live_assist_language=lang, backend="local")
+            self.assertEqual(app.recorder.started, {"capture_mode": "default_mic", "language": lang})
+            self.assertEqual(app.prewarmed, [{}])                    # the plain prewarm, no speech
+            self.assertIsNone(s._session_speech)
+
+    def test_meetings_and_the_calendar_keep_dictations_model(self):
+        for source in ("page", "calendar", "classic"):
+            app, s = self._start(source, live_assist_speech_model="cloud:best", backend="local")
+            self.assertEqual(app.recorder.started, {"capture_mode": "default_mic", "language": "hy"}, source)
+            self.assertNotIn("speech", app.recorder.started)
+            self.assertEqual(app.prewarmed, [{}], source)
+            self.assertIsNone(s._session_speech, source)
+
+    def test_a_live_session_the_recorder_tagged_by_fast_pieces_counts_as_the_live_assistant(self):
+        app = _App(pro=True, backend="local", live_assist_language="hy")
+        app.recorder.fast_live_chunks = True
+        s = self.session(app)
+        s.start("Live session 10:00", language="hy")                  # source None -> live_assist
+        self.assertEqual(app.recorder.started["speech"], ("managed", None, "fast"))
+
+    def test_a_problem_in_the_choice_is_dictations_model_not_a_refused_start(self):
+        app = _App(pro=True, backend="local")
+        s = self.session(app)
+        with patch("engine_choice.live_speech_session", side_effect=RuntimeError("boom")):
+            ok, code, _msg = s.start("Call", language="hy", source="live_assist")
+        self.assertEqual((ok, code), (True, ""))
+        self.assertEqual(app.recorder.started, {"capture_mode": "default_mic", "language": "hy"})
+
+    def test_an_app_whose_prewarm_takes_no_argument_still_starts_a_live_session(self):
+        app = _App(pro=True, backend="local")
+        calls = []
+        app.prewarm_speech_model = lambda: calls.append(1)           # an older controller
+        s = self.session(app)
+        self.assertTrue(s.start("Call", language="hy", source="live_assist")[0])
+        self.assertEqual(s.phase, "recording")                       # (the failed call is never fatal)
+
+    def test_the_session_says_where_it_came_from(self):
+        s = self.session(_App())
+        s.start("Call", source="live_assist")
+        self.assertEqual(s.source, "live_assist")
+
+
+class _CloudRec(_SegRec):
+    """A Live Assistant session whose words came from a cloud engine: the recorder reports its
+    backend and hands over the live pieces with their own timestamps; reading the recording
+    again (local Whisper) is counted - and would give a different, worse text."""
+
+    PIECES = [{"start": 2.0, "end": 6.0, "text": "Բարև ձեզ"},
+              {"start": 7.0, "end": 11.0, "text": "Ինչպե՞ս եք"},
+              {"start": 12.0, "end": 15.0, "text": "Շնորհակալություն"},
+              {"start": 16.0, "end": 36.0, "text": "Եկեք սկսենք աշխատանքը"}]
+    PLAIN = "Բարև ձեզ Ինչպե՞ս եք Շնորհակալություն Եկեք սկսենք աշխատանքը"
+
+    def __init__(self, backend="managed", pieces="default", whisper_model="base", cloud_pieces=None,
+                 **kw):
+        kw.setdefault("result", (self.PLAIN, "hy"))
+        super().__init__(segments=[{"start": 2.0, "end": 36.0, "text": "bad local whisper text"}], **kw)
+        self.backend = backend
+        self.pieces = [dict(p) for p in self.PIECES] if pieces == "default" else pieces
+        self.whisper_model = whisper_model
+        # Pieces the cloud answered: all of them on a cloud backend, none on a local one - unless
+        # Privacy mode moved the rest of the take onto this computer part-way (backend local, 2).
+        if cloud_pieces is None:
+            cloud_pieces = 4 if backend in ("managed", "google", "mistral") else 0
+        self.cloud_pieces = cloud_pieces
+        self.models = []
+
+    def speech_report(self):
+        return {"backend": self.backend, "whisper_model": self.whisper_model, "language": "hy",
+                "cloud_model": "" if self.backend == "managed" else None,
+                "ran_model": "gemini-2.5-flash" if self.cloud_pieces else "",
+                "cloud_pieces": self.cloud_pieces, "local_pieces": 0}
+
+    def piece_segments(self):
+        return None if self.pieces is None else [dict(p) for p in self.pieces]
+
+    def transcribe_segments(self, audio, language=None, model_name=None, on_progress=None,
+                            should_cancel=None):
+        self.models.append(model_name)
+        return super().transcribe_segments(audio, language, model_name, on_progress, should_cancel)
+
+
+YOU_THEM = "You: Բարև ձեզ\nThem: Ինչպե՞ս եք\nYou: Շնորհակալություն\nThem: Եկեք սկսենք աշխատանքը"
+YOU_SPEAKER = "You: Բարև ձեզ\nSpeaker 1: Ինչպե՞ս եք\nYou: Շնորհակալություն\nSpeaker 1: Եկեք սկսենք աշխատանքը"
+
+
+@unittest.skipUnless(_real_numpy(), "real numpy not importable (stubbed)")
+class TestFinalRereadOfALiveSession(_SpeakerBase):
+    """DECISION (meeting_session._reread_plan): the re-read is always local Whisper and replaces
+    the plain transcript, so a cloud session is not read again - its pieces are the segments."""
+
+    def _run(self, rec, source="live_assist", mode="smart_meeting", speech_cfg=None, **app_kw):
+        from tests.test_meeting_speakers import FakeDiarizer
+        conf = {"meeting_audio_mode": mode, "backend": "local", "live_assist_language": "hy"}
+        conf.update(speech_cfg or {})
+        conf.update(app_kw)
+        app = _App(rec, **conf)
+        s = self.session(app)
+        s._followup.poll_s = 0.0
+        s._followup.settle_polls = 0
+        notes_in = []
+        p = patch.object(msess.meeting_speakers, "diarization", FakeDiarizer())
+        p.start()
+        self.addCleanup(p.stop)
+        with patch.object(msess.actions, "process",
+                          side_effect=lambda text, action, **kw: notes_in.append(text) or "## Notes") as proc:
+            self.assertTrue(s.start("Call", "Anna", audio_mode=mode, source=source,
+                                    language=conf["live_assist_language"])[0])
+            s._on_chunk_transcribed(0, "live piece", "hy")
+            self.assertTrue(s.stop(""))
+        folder = s.meeting_dir
+        s._notes_in, s._proc = notes_in, proc
+        s._text = (folder / "transcript.txt").read_text(encoding="utf-8")
+        return s, folder, app
+
+    def test_a_cloud_session_keeps_the_clouds_words_and_never_calls_local_whisper(self):
+        rec = _CloudRec()
+        s, folder, _app = self._run(rec)
+        self.assertEqual(rec.reads, 0)                               # transcribe_segments was never called
+        self.assertEqual(rec.models, [])
+        self.assertNotIn("bad local whisper", s._text)
+        self.assertEqual(s._text, YOU_SPEAKER)                       # You, and the call's voice by name after
+        self.assertIn(YOU_THEM, s._notes_in[0])                      # the notes were written from the cloud's words
+        part = ms.load_segments(folder)["parts"][0]
+        self.assertEqual(part["kind"], "sources")
+        self.assertEqual(part["segments"][1], {"s": 7.0, "e": 11.0, "t": "Ինչպե՞ս եք", "src": "them"})
+        self.assertEqual(ms.load_meta(folder)["transcribed_with"], "cloud")      # said where the words came from
+        self.assertEqual(ms.load_meta(folder)["notices"], [])
+
+    def test_every_cloud_backend_counts(self):
+        for backend in ("managed", "google", "mistral"):
+            rec = _CloudRec(backend=backend)
+            s, _folder, _app = self._run(rec)
+            self.assertEqual(rec.reads, 0, backend)
+            self.assertEqual(s._text, YOU_SPEAKER, backend)
+
+    def test_a_local_choice_is_read_again_with_the_sessions_own_whisper_model(self):
+        rec = _CloudRec(backend="local", whisper_model="small")
+        s, _folder, _app = self._run(rec, speech_cfg={"live_assist_speech_model": "small"})
+        self.assertEqual(rec.reads, 1)
+        self.assertEqual(rec.models, ["small"])                      # not Dictation's "base"
+        self.assertIn("bad local whisper text", s._text)             # the re-read's words, as always
+
+    def test_automatic_on_a_local_dictation_is_read_again_with_dictations_model(self):
+        rec = _CloudRec(backend="local")
+        s, _folder, _app = self._run(rec, live_assist_language="en")      # nothing moved it to the cloud
+        self.assertEqual((rec.reads, rec.models), (1, [None]))
+        self.assertIn("bad local whisper text", s._text)
+        self.assertNotIn("transcribed_with", ms.load_meta(s.meeting_dir))
+
+    def test_meetings_in_a_language_whisper_is_poor_at_keep_the_words_the_cloud_made(self):
+        # A Meetings or calendar session on a cloud Dictation backend, in Armenian: the local Whisper
+        # re-read would REPLACE the cloud's good words with its own poor ones, so - like a Live
+        # Assistant session - it is not read again: the live pieces are the segments.
+        for source in ("page", "calendar", "classic"):
+            rec = _CloudRec(backend="managed")
+            s, folder, _app = self._run(rec, source=source)          # (the call's language is Armenian)
+            self.assertEqual((rec.reads, rec.models), (0, []), source)
+            self.assertNotIn("bad local whisper text", s._text, source)
+            self.assertEqual(s._text, YOU_SPEAKER, source)
+            self.assertEqual(ms.load_meta(folder)["transcribed_with"], "cloud", source)   # later steps must know
+
+    def test_meetings_in_any_other_language_are_unchanged(self):
+        # The same recorder report, but a language local Whisper reads well: the re-read still runs (and
+        # still replaces the words) exactly as it did before. Only Armenian moved.
+        for source in ("page", "calendar"):
+            rec = _CloudRec(backend="managed")
+            s, _folder, _app = self._run(rec, source=source, speech_cfg={"live_assist_language": "en"})
+            self.assertEqual((rec.reads, rec.models), (1, [None]), source)
+            self.assertIn("bad local whisper text", s._text, source)
+            self.assertNotIn("transcribed_with", ms.load_meta(s.meeting_dir), source)
+
+    def test_a_meeting_that_made_its_words_with_whisper_here_is_read_again_in_armenian_too(self):
+        # (nothing good to keep: the words were Whisper's, the re-read is Whisper's again)
+        rec = _CloudRec(backend="local")
+        s, _folder, _app = self._run(rec, source="page")
+        self.assertEqual((rec.reads, rec.models), (1, [None]))
+        self.assertNotIn("transcribed_with", ms.load_meta(s.meeting_dir))
+
+    def test_the_armenian_model_reads_the_recording_again_with_its_own_segments(self):
+        # A Live Assistant session on the Armenian model on this computer: the re-read is the model's own
+        # (AudioRecorder.transcribe_segments takes its id: the recorder reads Armenian with it)
+        rec = _CloudRec(backend="local", whisper_model="hy-fastconformer")
+        s, _folder, _app = self._run(rec, speech_cfg={"live_assist_speech_model": "hy-fastconformer"})
+        self.assertEqual(rec.reads, 1)
+        self.assertEqual(rec.models, ["hy-fastconformer"])
+        self.assertNotIn("transcribed_with", ms.load_meta(s.meeting_dir))
+        # A Meetings session whose Dictation model is the Armenian one: Dictation's model, as ever
+        rec = _CloudRec(backend="local", whisper_model="hy-fastconformer")
+        s, _folder, _app = self._run(rec, source="page", speech_cfg={"whisper_model": "hy-fastconformer"})
+        self.assertEqual((rec.reads, rec.models), (1, [None]))
+
+    def test_pieces_that_cannot_be_placed_keep_the_plain_transcript_never_local_whisper(self):
+        rec = _CloudRec(pieces=None)
+        with self.assertLogs("transcribe", level="INFO") as cm:
+            s, _folder, _app = self._run(rec)
+        self.assertEqual(rec.reads, 0)
+        self.assertEqual(s._text, _CloudRec.PLAIN)
+        self.assertTrue([r for r in cm.records if "Speaker labels skipped" in r.getMessage()])
+        self.assertFalse((s.meeting_dir / "segments.json").exists())
+        self.assertEqual(s.notices(), [])                            # no "try Identify speakers" (it would re-read)
+        self.assertEqual(s.phase, "done")
+        self.assertEqual(ms.load_meta(s.meeting_dir)["transcribed_with"], "cloud")   # (later steps must know)
+
+    def test_privacy_mode_part_way_does_not_turn_the_clouds_words_into_a_local_reread(self):
+        # The cloud answered two pieces, then Privacy mode moved the rest of the take onto this
+        # computer: the recorder's backend reads "local" by Stop, but those words are the cloud's.
+        rec = _CloudRec(backend="local", cloud_pieces=2)
+        s, folder, _app = self._run(rec)
+        self.assertEqual(rec.reads, 0)
+        self.assertEqual(s._text, YOU_SPEAKER)
+        self.assertEqual(ms.load_meta(folder)["transcribed_with"], "cloud")
+
+    def test_a_piece_that_failed_stays_missing_and_the_transcript_says_so(self):
+        rec = _CloudRec(result=("", "!managed:Session expired - sign in again."))
+        rec.partial_text = _CloudRec.PLAIN
+        s, _folder, _app = self._run(rec)
+        self.assertEqual(rec.reads, 0)
+        self.assertIn("Part of the audio couldn't be transcribed", s._text)
+        self.assertIn("Բարև ձեզ", s._text)
+        self.assertTrue(any("Part of the audio couldn't be transcribed" in n for n in s.notices()))
+
+    def test_a_recorder_without_the_new_methods_is_read_again_as_before(self):
+        rec = _SegRec()                                              # (an older recorder / a test double)
+        s, _folder, _app = self._run(rec)
+        self.assertEqual(rec.reads, 1)
+        self.assertEqual(s._text.split("\n")[0], "You: Hello team.")
+
+
+@unittest.skipUnless(_real_numpy(), "real numpy not importable (stubbed)")
+class TestACloudSessionIsNeverReadAgainLater(_SpeakerBase):
+    """meta.json says where a Live Assistant session's words came from (transcribed_with "cloud"):
+    Identify speakers and the recovery of an interrupted one must not read the recording again
+    with local Whisper - that would replace the cloud's words (for Armenian: with a far worse text)."""
+
+    def _stopped(self, rec=None, inline=False, **cfg):
+        from tests.test_meeting_speakers import FakeDiarizer
+        rec = rec or _CloudRec()
+        app = _App(rec, meeting_audio_mode="smart_meeting", backend="local", live_assist_language="hy", **cfg)
+        s = self.session(app, inline=inline)
+        s._followup.poll_s = 0.0
+        s._followup.settle_polls = 0
+        p = patch.object(msess.meeting_speakers, "diarization", FakeDiarizer())
+        p.start()
+        self.addCleanup(p.stop)
+        with patch.object(msess.actions, "process", return_value="## Notes"):
+            self.assertTrue(s.start("Call", "Anna", audio_mode="smart_meeting", source="live_assist",
+                                    language="hy")[0])
+            self.mark_at_start = ms.load_meta(s.meeting_dir).get("transcribed_with")
+            s._on_chunk_transcribed(0, "live piece", "hy")
+            self.assertTrue(s.stop(""))
+            if not inline:
+                target, args = s.spawned.pop(0)               # Stop's worker; the names are only queued
+                target(*args)
+        return s, rec, s.meeting_dir
+
+    def _identify(self, s, folder):
+        errors = _Recorder(s.error)
+        self.assertTrue(s.identify_speakers(folder)[0])
+        for target, args in [t for t in s.spawned if t[0].__name__ == "_run_identify"]:
+            target(*args)
+        return errors
+
+    def test_the_mark_is_written_when_the_session_starts_not_only_at_stop(self):
+        s, rec, folder = self._stopped()
+        self.assertEqual(self.mark_at_start, "cloud")                # a crash in the middle would keep it
+        s2, rec2, folder2 = self._stopped(_CloudRec(backend="local"))
+        self.assertIsNone(self.mark_at_start)                        # a model on this computer: no mark
+        self.assertNotIn("transcribed_with", ms.load_meta(folder2))
+        # A Meetings session on a cloud Dictation backend carries it too in a language local Whisper is
+        # poor at (Armenian) - and none in any other.
+        app = _App(_CloudRec(), meeting_audio_mode="smart_meeting")
+        page = self.session(app)
+        self.assertTrue(page.start("Call", audio_mode="smart_meeting", source="page", language="hy")[0])
+        self.assertEqual(ms.load_meta(page.meeting_dir)["transcribed_with"], "cloud")
+        app = _App(_CloudRec(), meeting_audio_mode="smart_meeting")
+        page = self.session(app)
+        self.assertTrue(page.start("Call", audio_mode="smart_meeting", source="page", language="en")[0])
+        self.assertNotIn("transcribed_with", ms.load_meta(page.meeting_dir))
+
+    def test_identify_speakers_names_the_call_from_the_kept_segments_and_never_reads_the_recording(self):
+        s, rec, folder = self._stopped()
+        self.assertEqual((folder / "transcript.txt").read_text(encoding="utf-8"), YOU_THEM)
+        self.assertEqual(s.speakers_state(str(folder)), "waiting")
+        errors = self._identify(s, folder)
+        self.assertEqual(rec.reads, 0)                               # the recording was never read again
+        self.assertEqual((folder / "transcript.txt").read_text(encoding="utf-8"), YOU_SPEAKER)
+        self.assertIn("speakers_at", ms.load_meta(folder))
+        self.assertEqual(errors.calls, [])
+        self.assertEqual((s.phase, s.last_run_speakers), ("done", True))
+        self.assertFalse((folder / ms.BEFORE_SPEAKERS).exists())
+        self.assertEqual(s._final_transcript, YOU_SPEAKER)
+
+    def test_identify_speakers_with_nothing_left_to_name_keeps_the_words_and_says_why(self):
+        s, rec, folder = self._stopped(inline=True)                  # the names came at Stop already
+        self.assertEqual((folder / "transcript.txt").read_text(encoding="utf-8"), YOU_SPEAKER)
+        errors = self._identify(s, folder)
+        self.assertEqual(rec.reads, 0)
+        self.assertEqual((folder / "transcript.txt").read_text(encoding="utf-8"), YOU_SPEAKER)
+        self.assertEqual(errors.calls, [(msess.ERR_SPEAKERS, msess.CLOUD_WORDS_KEPT)])
+        self.assertIn("transcribed in the cloud", msess.CLOUD_WORDS_KEPT)
+        self.assertIn(msess.CLOUD_WORDS_KEPT, ms.load_meta(folder)["notices"])    # where the page shows it
+        self.assertEqual(ms.load_meta(folder)["notices"].count(msess.CLOUD_WORDS_KEPT), 1)
+        self.assertFalse((folder / ms.BEFORE_SPEAKERS).exists())
+        self.assertEqual(s.phase, "done")
+
+    def test_a_meeting_without_the_mark_is_still_read_again(self):
+        # (the same flow for a meeting whose words are this computer's: nothing changed)
+        s, rec, folder = self._stopped(_CloudRec(backend="local"), inline=True)
+        self.assertEqual(rec.reads, 1)                               # the re-read at Stop
+        self._identify(s, folder)
+        self.assertEqual(rec.reads, 2)                               # Identify speakers reads it again, as always
+
+    def test_a_session_the_armenian_model_read_is_read_again_by_it_never_by_dictations_whisper(self):
+        # The Live Assistant picked the Armenian model; Dictation runs a Whisper model. Stop's re-read
+        # uses the session's model - and so must Identify speakers later, or Whisper's far worse Armenian
+        # would replace the model's words.
+        rec = _CloudRec(backend="local", whisper_model="hy-fastconformer")
+        s, rec, folder = self._stopped(rec, inline=True, live_assist_speech_model="hy-fastconformer",
+                                       whisper_model="small")
+        meta = ms.load_meta(folder)
+        self.assertEqual(meta["speech_model"], "hy-fastconformer")          # written when the session starts
+        self.assertNotIn("transcribed_with", meta)                          # (these are not the cloud's words)
+        self.assertEqual(rec.models, ["hy-fastconformer"])                  # Stop's re-read
+        self._identify(s, folder)
+        self.assertEqual(rec.models, ["hy-fastconformer", "hy-fastconformer"])
+
+    def test_a_session_on_a_whisper_model_writes_no_speech_model_and_is_read_as_before(self):
+        rec = _CloudRec(backend="local", whisper_model="small")
+        s, rec, folder = self._stopped(rec, inline=True)
+        self.assertNotIn("speech_model", ms.load_meta(folder))
+        self._identify(s, folder)
+        self.assertEqual(rec.models, [None, None])                          # Dictation's model, as always
+
+    def test_a_cloud_take_never_writes_it_even_when_the_pick_is_the_armenian_model(self):
+        rec = _CloudRec(backend="managed", whisper_model="hy-fastconformer")
+        _s, _rec, folder = self._stopped(rec)
+        self.assertNotIn("speech_model", ms.load_meta(folder))
+        self.assertEqual(ms.load_meta(folder)["transcribed_with"], "cloud")
+
+    def test_a_cancelled_run_on_a_cloud_meeting_changes_nothing(self):
+        s, rec, folder = self._stopped()
+        s._cancel_run.set()
+        s.identify_speakers(folder)                                  # (identify clears the flag: cancel from inside)
+        errors = _Recorder(s.error)
+        original = msess.meeting_speakers.refine_meeting
+
+        def cancelled(folder, **kw):
+            s._cancel_run.set()
+            return original(folder, **kw)
+        with patch.object(msess.meeting_speakers, "refine_meeting", side_effect=cancelled):
+            for target, args in [t for t in s.spawned if t[0].__name__ == "_run_identify"]:
+                target(*args)
+        self.assertEqual((folder / "transcript.txt").read_text(encoding="utf-8"), YOU_THEM)
+        self.assertEqual(rec.reads, 0)
+        self.assertEqual(errors.calls, [])
+
+
+class TestRecoveringACloudSession(_SavedMeeting):
+    """An interrupted Live Assistant session (no transcript.txt, only its live pieces and the saved
+    recording) whose words came from a cloud engine is finished from those pieces."""
+
+    def test_the_live_pieces_are_the_transcript_and_the_recording_is_not_read_again(self):
+        d = self._folder(transcribed_with="cloud", language="hy")
+        s = self.session(_App())
+        calls = self._build(s, _outcome(("You: bad local text",)))
+        with patch.object(msess.actions, "process", return_value="## Notes") as proc:
+            self.assertTrue(s.retry_notes(None, folder=str(d)))
+        self.assertEqual(calls, [])                                  # no local re-read
+        self.assertEqual((d / "transcript.txt").read_text(encoding="utf-8"), "live one live two")
+        self.assertIn("live one live two", proc.call_args[0][0])
+        notices = ms.load_meta(d)["notices"]
+        self.assertIn(msess.RECOVERED_CLOUD_NOTICE, notices)
+        self.assertNotIn(msess.RECOVERED_NOTICE, notices)
+        self.assertEqual(s.phase, "done")
+
+    def test_an_interrupted_armenian_model_session_is_rebuilt_with_that_model(self):
+        # (the recovery must not hand an Armenian recording to Dictation's Whisper)
+        d = self._folder(speech_model="hy-fastconformer", language="hy")
+        s = self.session(_App())
+        calls = self._build(s, _outcome(("You: rebuilt",)))
+        with patch.object(msess.actions, "process", return_value="## Notes"):
+            self.assertTrue(s.retry_notes(None, folder=str(d)))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1].get("model"), "hy-fastconformer")
+
+    def test_a_saved_model_that_is_not_the_armenian_one_is_ignored(self):
+        d = self._folder(speech_model="large-v3")                    # (a made-up or hand-edited meta.json)
+        s = self.session(_App())
+        calls = self._build(s, _outcome(("You: rebuilt",)))
+        with patch.object(msess.actions, "process", return_value="## Notes"):
+            self.assertTrue(s.retry_notes(None, folder=str(d)))
+        self.assertNotIn("model", calls[0][1])
+
+    def test_an_interrupted_session_on_this_computer_is_rebuilt_as_before(self):
+        d = self._folder()                                           # (source live_assist, no mark)
+        s = self.session(_App())
+        calls = self._build(s, _outcome(("You: rebuilt",)))
+        with patch.object(msess.actions, "process", return_value="## Notes"):
+            self.assertTrue(s.retry_notes(None, folder=str(d)))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual((d / "transcript.txt").read_text(encoding="utf-8"), "You: rebuilt")
+        self.assertIn(msess.RECOVERED_NOTICE, ms.load_meta(d)["notices"])
 
 
 if __name__ == "__main__":

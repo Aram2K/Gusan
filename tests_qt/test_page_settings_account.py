@@ -516,7 +516,7 @@ def test_speech_runs_on_free_user_gets_the_pro_window(env):
     win, app = env.build("free")
     page = _settings(win)
     assert page.speech_tiles["local"].isChecked()
-    assert page.speech_tiles["local"].hints() == ["Balanced · Whisper Small · offline"]
+    assert page.speech_tiles["local"].hints() == ["Whisper Small · Local · Balanced"]
     assert page.speech_tiles["cloud"].pro_tag is not None
     page.speech_tiles["cloud"].click()
     assert ("_pro_upsell", "Fast cloud transcription") in app.calls
@@ -747,7 +747,7 @@ def test_about_rows(env):
     texts = [c.text() for c in page.row_computer.findChildren(Chip)]
     assert texts == ["i7-1260P · 12 cores", "16 GB memory", "Intel Iris Xe"]
     page.about_links["Source code"].click()
-    assert env.opened[-1] == "https://github.com/Aram2K/transcribe-app"
+    assert env.opened[-1] == "https://github.com/Aram2K/Gusan"
     page.about_links["Website"].click()
     assert env.opened[-1] == "https://gusan.aibuben.xyz"                 # Gusan's own site
     page.about_links["AIBUBEN community"].click()

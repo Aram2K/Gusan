@@ -583,21 +583,21 @@ def test_another_meeting_lets_go_of_the_first(shell, meetings_root, fake):
 
 
 def test_delete_releases_the_file_first(shell, meetings_root, fake, monkeypatch):
-    import meeting_store
+    import meeting_trash
     folder = _with_audio(meetings_root)
     win, _app = shell("pro")
     page, nv = _notes(win, folder)
     nv.play_btn.click()
     player = fake["made"][0]
-    real = meeting_store.delete_meeting
+    real = meeting_trash.move_to_trash
     at_delete = []
 
-    def delete(f):
+    def move(f):
         at_delete.append(player.source().isEmpty())
         return real(f)
-    monkeypatch.setattr(meeting_store, "delete_meeting", delete)
+    monkeypatch.setattr(meeting_trash, "move_to_trash", move)
     nv.apply_delete()
-    assert at_delete == [True]
+    assert at_delete == [True]                                            # the player had let go of the file
     assert not folder.exists() and page.current_view() == "list"
 
 

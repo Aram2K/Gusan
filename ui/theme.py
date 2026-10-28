@@ -18,14 +18,15 @@ Split of work:
   override the display face chosen in code.
 """
 
+import html as _html
 import logging
 import os
 import re
 import sys
 
-from PySide6.QtCore import QEvent, QObject, Qt
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QGuiApplication
-from PySide6.QtWidgets import QGraphicsDropShadowEffect, QWidget
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QGuiApplication, QPalette
+from PySide6.QtWidgets import QApplication, QGraphicsDropShadowEffect, QWidget
 
 from app_info import resource_path
 
@@ -89,6 +90,145 @@ def qss_color(value):
     if a >= 255:
         return "#%02x%02x%02x" % (r, g, b)
     return "rgba(%d, %d, %d, %d)" % (r, g, b, a)
+
+
+# ── One light look, whatever the OS is set to ────────────────────────────────
+# Gusan's look is light only. Qt, though, follows the OS colour scheme for everything a
+# stylesheet does not paint: a window's background, a button's fill, a menu's panel, a
+# placeholder, a disabled word all come from the OS palette, which is DARK on a Windows set
+# to dark mode. The stylesheet (build_qss) sets a text colour on every widget under the main
+# window - and a dialog, a menu or a message box opened from a page is a child of it, so it
+# got that dark-blue text on the OS's dark-grey panel: "Delete meeting" with a navy question
+# on charcoal (about 1:1), the same for a rename box, the Export menu on Dictation and every
+# text field's right-click menu. Two halves of one rule, so nothing depends on the OS again:
+#   1. install_light_scheme() - called once, right after the QApplication exists (main() and the
+#      test session), before any window: Qt's "Fusion" style (paints only from the palette, so
+#      what the tests render is what runs; Windows 11's and macOS's own styles paint unstyled
+#      controls from OS tables that ignore the palette) and an explicit LIGHT palette from the
+#      tokens, every role in every group. Nothing else changes with the OS: the window frames and
+#      title bars stay the OS's (the colour scheme itself is never touched), and the system tray
+#      menu - drawn by the OS look on purpose - asks os_is_dark() and sets its own palette.
+#   2. build_qss() paints the pop-ups itself (menus, tooltips, message boxes) so a window that
+#      has the stylesheet is complete: text AND background from the same tokens.
+# The pop-ups Gusan asks questions with are ui/components/mini_prompt.py cards (confirm, notify,
+# choose, ask_text), never QMessageBox / QInputDialog (tests_qt/test_dialog_visibility.py
+# renders them all in both schemes and refuses the old classes).
+_SCHEME = {"os_dark": None, "hooked": False}
+
+
+def light_palette():
+    """The one palette every Gusan widget gets from the application: the tokens, in the active,
+    inactive and disabled groups and for every role, so no role is left to the OS."""
+    c = qcolor
+    roles = {
+        QPalette.WindowText: c("text"), QPalette.Button: c("white"), QPalette.Light: c("white"),
+        QPalette.Midlight: c("bg2"), QPalette.Dark: c("faint"), QPalette.Mid: c("line2"),
+        QPalette.Text: c("text"), QPalette.BrightText: c("white"), QPalette.ButtonText: c("text2"),
+        QPalette.Base: c("white"), QPalette.Window: c("bg"), QPalette.Shadow: c("ink"),
+        QPalette.Highlight: c("blue"), QPalette.HighlightedText: c("white"),
+        QPalette.Link: c("blue-tx"), QPalette.LinkVisited: c("pro-tx"), QPalette.AlternateBase: c("bg2"),
+        QPalette.ToolTipBase: c("ink"), QPalette.ToolTipText: c("white"),
+        QPalette.PlaceholderText: c("muted"),
+    }
+    accent = getattr(QPalette, "Accent", None)            # Qt 6.6+
+    if accent is not None:
+        roles[accent] = c("blue")
+    pal = QPalette()
+    for group in (QPalette.Active, QPalette.Inactive, QPalette.Disabled):
+        for role, colour in roles.items():
+            pal.setColor(group, role, colour)
+    for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText, QPalette.PlaceholderText):
+        pal.setColor(QPalette.Disabled, role, c("faint"))
+    return pal
+
+
+def dark_menu_palette():
+    """The palette of an OS menu on a dark Windows (the tray menu follows the system)."""
+    pal = QPalette()
+    for group in (QPalette.Active, QPalette.Inactive, QPalette.Disabled):
+        for role, colour in ((QPalette.Window, "#2b2b2b"), (QPalette.Base, "#2b2b2b"),
+                             (QPalette.Button, "#2b2b2b"), (QPalette.AlternateBase, "#333333"),
+                             (QPalette.WindowText, "#ffffff"), (QPalette.Text, "#ffffff"),
+                             (QPalette.ButtonText, "#ffffff"), (QPalette.BrightText, "#ffffff"),
+                             (QPalette.Highlight, "#3a3a3a"), (QPalette.HighlightedText, "#ffffff"),
+                             (QPalette.ToolTipBase, "#2b2b2b"), (QPalette.ToolTipText, "#ffffff"),
+                             (QPalette.PlaceholderText, "#c2c2c2"), (QPalette.Link, "#4cc2ff"),
+                             (QPalette.Light, "#4a4a4a"), (QPalette.Midlight, "#3a3a3a"),
+                             (QPalette.Mid, "#3a3a3a"), (QPalette.Dark, "#202020"), (QPalette.Shadow, "#000000")):
+            pal.setColor(group, role, QColor(colour))
+    for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
+        pal.setColor(QPalette.Disabled, role, QColor("#9d9d9d"))
+    return pal
+
+
+def _is_light(pal):
+    """True for the palette light_palette() builds (the app already carries it)."""
+    try:
+        return (pal.color(QPalette.Window) == qcolor("bg") and pal.color(QPalette.Base) == qcolor("white")
+                and pal.color(QPalette.Text) == qcolor("text"))
+    except Exception:
+        return False
+
+
+def os_is_dark():
+    """True when the OS is set to dark: what Qt reports (Windows 10/11 and macOS; Qt 6.5+), else the
+    palette the application had before install_light_scheme() replaced it. For the few surfaces
+    that follow the system on purpose (the tray menu); the app itself is light either way."""
+    try:
+        scheme = QGuiApplication.styleHints().colorScheme()
+        if scheme == Qt.ColorScheme.Dark:
+            return True
+        if scheme == Qt.ColorScheme.Light:
+            return False
+    except Exception:
+        pass
+    return bool(_SCHEME["os_dark"])
+
+
+def menu_palette():
+    """The palette for a menu that follows the OS (see os_is_dark)."""
+    return dark_menu_palette() if os_is_dark() else light_palette()
+
+
+def _reassert_light():
+    app = QApplication.instance()
+    if app is None:
+        return
+    try:
+        pal = app.palette()
+        if not _is_light(pal):                 # the OS pushed its palette (dark mode switched while running)
+            _SCHEME["os_dark"] = pal.color(QPalette.Window).lightness() < 128
+            app.setPalette(light_palette())
+    except Exception:
+        logger.debug("could not keep the light palette", exc_info=True)
+
+
+def install_light_scheme(app=None):
+    """Make the application itself light (see "One light look" above). Call it once, right
+    after the QApplication exists and before any window; safe to call again. True when applied."""
+    app = app or QApplication.instance()
+    if app is None:
+        return False
+    cur = app.palette()
+    if not _is_light(cur):
+        _SCHEME["os_dark"] = cur.color(QPalette.Window).lightness() < 128   # what the OS handed over
+    try:
+        if isinstance(app, QApplication) and (app.style() is None or app.style().objectName().lower() != "fusion"):
+            app.setStyle("Fusion")
+    except Exception:
+        logger.debug("could not set the Fusion style", exc_info=True)
+    app.setPalette(light_palette())
+    try:
+        QApplication.setFont(font(13.5), "QMenu")      # a plain menu (Export, a field's right-click) reads in Gusan's face
+    except Exception:
+        logger.debug("could not set the menu font", exc_info=True)
+    if not _SCHEME["hooked"]:
+        try:
+            QGuiApplication.styleHints().colorSchemeChanged.connect(lambda *_a: QTimer.singleShot(0, _reassert_light))
+            _SCHEME["hooked"] = True
+        except Exception:
+            logger.debug("no colorSchemeChanged signal", exc_info=True)
+    return True
 
 
 # ── Fonts ────────────────────────────────────────────────────────────────────
@@ -263,6 +403,17 @@ def set_role(widget, role):
     return widget
 
 
+def plain_tip(text):
+    """A tooltip that wraps, holding ``text`` as plain text: a tooltip is rich text
+    unless told otherwise, and rich text loads an image it names - from the disk, or
+    from a network share (a Windows UNC path is a connection to that host). Use it for
+    every tooltip that can hold text somebody else wrote (a calendar title, a guest's
+    name). "" for no text, so a tooltip can be cleared with it."""
+    if not text:
+        return ""
+    return "<p style='white-space:normal'>%s</p>" % _html.escape(str(text), quote=False)
+
+
 def repolish(widget, children=True):
     """Re-apply the stylesheet after a dynamic property changed."""
     try:
@@ -347,6 +498,7 @@ def build_qss():
     pro_btn_h = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #9333ea, stop:0.55 #7e22ce, stop:1 #6b21a8)"
     chev = _asset_url("chevron.svg")
     check = _asset_url("check.svg")
+    check_ink = _asset_url("check_ink.svg")
     c = qss_color
     return f"""
 /* ── window ── */
@@ -357,6 +509,36 @@ QWidget {{ color: {t['text']}; }}
 QLabel {{ background: transparent; }}
 QToolTip {{
     background: {t['ink']}; color: #ffffff; border: none; border-radius: 6px; padding: 4px 8px;
+}}
+
+/* ── pop-ups: a menu, a text field's right-click menu and a stray message box are children of
+      the window that has this sheet, so they get a background as well as a text colour (the
+      text colour alone is what once left navy words on the OS's dark panel; see theme.py) ── */
+QMenu {{
+    background: #ffffff; color: {t['text']}; border: 1px solid {t['line2']}; padding: 4px;
+}}
+QMenu::item {{
+    background: transparent; color: {t['text']}; padding: 7px 26px 7px 28px; border-radius: 6px;
+}}
+QMenu::item:selected {{ background: {t['blue-sub']}; color: {t['blue-tx']}; }}
+QMenu::item:disabled {{ background: transparent; color: {t['faint']}; }}
+QMenu::separator {{ height: 1px; background: {t['line']}; margin: 4px 6px; }}
+QMenu::indicator {{ width: 14px; height: 14px; left: 8px; }}
+QMenu::indicator:checked {{ image: url("{check_ink}"); }}
+QMessageBox, QInputDialog {{ background: {t['bg']}; }}
+QMessageBox QLabel, QInputDialog QLabel {{ color: {t['text']}; }}
+QMessageBox QPushButton, QInputDialog QPushButton, QDialogButtonBox QPushButton {{
+    background: #ffffff; color: {t['text2']}; border: 1px solid {t['line2']}; border-radius: 8px;
+    padding: 6px 16px; min-width: 72px; min-height: 22px;
+}}
+QMessageBox QPushButton:hover, QInputDialog QPushButton:hover, QDialogButtonBox QPushButton:hover {{
+    background: {t['bg']}; border-color: {t['blue-l']}; color: {t['text']};
+}}
+QMessageBox QPushButton:default, QInputDialog QPushButton:default, QDialogButtonBox QPushButton:default {{
+    background: {t['blue']}; color: #ffffff; border-color: {t['blue-h']};
+}}
+QMessageBox QPushButton:disabled, QInputDialog QPushButton:disabled, QDialogButtonBox QPushButton:disabled {{
+    background: {t['bg2']}; color: {t['faint']}; border-color: {t['line']};
 }}
 QScrollArea[gusan="scroll"] {{ background: transparent; border: none; }}
 QScrollArea[gusan="scroll"] > QWidget#qt_scrollarea_viewport {{ background: transparent; }}
@@ -455,6 +637,16 @@ QToolButton[gusan="playBtn"]:hover {{ background: {t['blue-h']}; }}
 QToolButton[gusan="playBtn"]:pressed, QToolButton[gusan="playBtn"][loading="true"] {{ background: #1e40af; }}
 QToolButton[gusan="playBtn"][focusVisible="true"] {{ border: 2px solid #93c5fd; }}
 
+/* ── delete from a list (ui/components/row_actions.py) ── */
+QToolButton[gusan="trashBtn"] {{ background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 0px; }}
+QToolButton[gusan="trashBtn"]:hover {{ background: {t['red-sub']}; border: 1px solid #fecaca; }}
+QToolButton[gusan="trashBtn"]:pressed {{ background: #fecaca; }}
+QToolButton[gusan="trashBtn"]:disabled {{ background: transparent; border: 1px solid transparent; }}
+QFrame[gusan="actionBar"] {{ background: {t['blue-sub']}; border: 1px solid {t['blue-line']}; border-radius: 12px; }}
+QFrame[gusan="actionBar"][tone="error"] {{ background: {t['red-sub']}; border: 1px solid #fecaca; }}
+QFrame[gusan="actionBar"][docked="true"] {{ background: #ffffff; border: 1px solid {t['blue-line']}; }}
+QFrame[gusan="actionBar"][docked="true"][tone="error"] {{ background: {t['red-sub']}; border: 1px solid #fecaca; }}
+
 /* ── pills, chips, keycaps ── */
 QLabel[gusan="pill"] {{ border-radius: 9px; padding: 0px 10px; }}
 QLabel[gusan="pill"][gsize="xs"] {{ padding: 0px 6px; }}
@@ -462,6 +654,8 @@ QLabel[gusan="pill"][gsize="s"] {{ padding: 0px 8px; }}
 QLabel[gusan="pill"][tone="pro"] {{ background: {pro_pill}; color: #ffffff; border: 1px solid {c('rgba(255,255,255,0.59)')}; }}
 QLabel[gusan="pill"][tone="free"] {{ background: {c('rgba(34,197,94,0.18)')}; color: #15803d; border: 1px solid {c('rgba(34,197,94,0.47)')}; }}
 QLabel[gusan="pill"][tone="guest"] {{ background: {c('rgba(148,163,184,0.18)')}; color: #475569; border: 1px solid {c('rgba(148,163,184,0.35)')}; }}
+QLabel[gusan="pill"][tone="local"] {{ background: {t['ok-sub']}; color: {t['ok-tx']}; border: 1px solid {t['ok-line']}; }}
+QLabel[gusan="pill"][tone="cloud"] {{ background: {t['blue-sub']}; color: {t['blue-tx']}; border: 1px solid {t['blue-line']}; }}
 
 QFrame[gusan="chip"] {{ border-radius: 12px; }}
 QFrame[gusan="chip"][tone="neutral"] {{ background: {t['bg2']}; border: 1px solid {t['line']}; }}
@@ -499,6 +693,7 @@ QPushButton[gusan="seg"][focusVisible="true"] {{ border: 2px solid {t['blue-l']}
 QLineEdit, QPlainTextEdit, QTextEdit {{
     background: #ffffff; color: {t['text']}; border: 1px solid {t['line2']}; border-radius: 8px;
     padding: 6px 12px; selection-background-color: {t['blue']}; selection-color: #ffffff;
+    placeholder-text-color: {t['muted']};
 }}
 QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus {{ border: 1px solid {t['blue-l']}; }}
 QLineEdit:disabled, QPlainTextEdit:disabled, QTextEdit:disabled {{

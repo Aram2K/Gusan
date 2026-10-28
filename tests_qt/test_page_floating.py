@@ -183,7 +183,7 @@ def test_join_opens_only_https_links(toast, mr, monkeypatch):
     assert opened == ["https://meet.google.com/abc-defg-hij"]
     assert joined == ["evt-1"]
     assert t.isVisible()                       # still there: Record after joining
-    assert t.join_button.toolTip() == "meet.google.com"
+    assert t.join_button.toolTip() == "<p style='white-space:normal'>meet.google.com</p>"     # shown as text
     t.show_meeting(meeting(link="http://meet.google.com/abc"))
     assert not t.join_button.isVisibleTo(t)
     t._on_join()
@@ -253,7 +253,7 @@ def test_long_titles_are_cut_with_the_full_text_kept(toast):
     t, _ = toast("pro", meeting(title=title))
     assert t.title_label.full_text() == title
     assert t.title_label.text().endswith("…")
-    assert t.title_label.toolTip() == title
+    assert t.title_label.toolTip() == "<p style='white-space:normal'>%s</p>" % title     # the full text, as text
 
 
 def test_privacy_hook_and_hide_are_safe(toast):
@@ -430,8 +430,10 @@ def test_tray_rows_pro_and_guest(tray):
     assert dict(tr.visible_texts())["account"].endswith("Pro")
     tr, _ = tray("guest")
     keys = _keys(tr)
-    assert "account" not in keys and "upgrade" not in keys
-    assert dict(tr.visible_texts())["signin"] == "Sign in…"
+    assert "upgrade" not in keys                                # no upgrade wording for a guest
+    texts = dict(tr.visible_texts())
+    assert texts["account"] == "Guest"                          # no email, no plan, no name
+    assert texts["signin"] == "Sign in / Sign up"
 
 
 def test_tray_pro_tags_and_hints(tray, tm):

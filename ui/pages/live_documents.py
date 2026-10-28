@@ -1,9 +1,20 @@
-"""The Documents section of the Live Assistant page: what the assistant may read.
+"""The Context card of the Live Assistant page: what the assistant is told, and may read.
 
-    section = DocumentsSection(app, parent)       # a Card; the page puts it under "About my calls"
+    card = ContextCard(app, parent, cfg=..., setter=...)   # ONE card: the text box, its reach, the documents
+    card.documents                                # the DocumentsSection under the text box
+    card.drag_enter(mime) / drag_leave() / drop(mime)       # the whole card is the drop target
+
+The text box on top takes what the user writes - who they are, what their calls are about, or a
+RULE ("Translate everything you hear into French"); a paper-clip in its corner adds documents.
+Under it, "Apply to everything I hear" (cfg live_assist_rules_everything): off, the context shapes
+the answers to questions; on, it is applied to every sentence heard (live_rules.py). A calm offer
+(Yes / No - never switched silently) appears when the text reads like such a rule. Under that, the
+documents: what the assistant may read.
+
+    section = DocumentsSection(app, parent)       # a plain widget; the card puts it under the text box
     section.reload()                              # the list, read on a worker thread
     section.add_paths(paths)                      # a pick or a drop: read off the GUI thread
-    section.drag_enter(mime) / drop(mime)         # the page forwards its drag and drop here
+    section.drag_enter(mime) / drop(mime)         # its own drag and drop, when it stands alone
 
 One row per document: a file-type tile, the name, "12 pages · 340 KB", a switch "Use in
 answers" (new ones start on: that is the person's choice of what the assistant may use) and
@@ -26,12 +37,14 @@ import os
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import (QFileDialog, QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import (QFileDialog, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QSizePolicy,
+                               QVBoxLayout, QWidget)
 
+import live_context
 import live_docs
+import live_rules
 from ui import live_docs_ui, theme
-from ui.components import Button, Card, IconButton, Toggle, icons, label, mini_prompt
+from ui.components import Button, Card, Chip, Divider, IconButton, Toggle, icons, label, mini_prompt
 
 logger = logging.getLogger("transcribe")
 
@@ -41,7 +54,14 @@ CLEAR = "Clear all"
 USE_IN_ANSWERS = "Use in answers"
 EMPTY = live_docs.EMPTY_LINE
 EMPTY_TIP = "Click to choose files, or drop them here."
-DROP = "Drop files to add them"
+DROP = "Drop files to add"
+CONTEXT_TITLE = "Context"
+CONTEXT_PLACEHOLDER = ("Who you are and what your calls are about. Or a rule, like "
+                       "\u201cTranslate everything you hear into French.\u201d")
+ADD_TIP = "Add documents the assistant can use. You can also drop files here."
+RULE_HINT_ON = "Every sentence you hear gets your rule."
+RULE_HINT_OFF = "Used whenever an answer is written."
+RULE_HINT_NONE = "Write a rule above first."
 READING = "Reading %s"
 STOPPING = "Stopping…"
 FIRST_PART = "first part only"
@@ -480,14 +500,20 @@ class _DropOverlay(QWidget):
         p.end()
 
 
-class DocumentsSection(Card):
-    """See the module docstring."""
+class DocumentsSection(QWidget):
+    """See the module docstring. A plain widget: the Context card holds it right under the text
+    box and is itself the drop target (``overlay=False``); standing alone (``overlay=True``) it
+    takes drops over itself."""
 
     changed = Signal()                  # this section changed the documents (the page may care)
 
-    def __init__(self, app, parent=None):
-        super().__init__(parent, pad=(20, 16), gap=10)
+    def __init__(self, app, parent=None, overlay=True):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(10)
         self.app = app
+        self._own_overlay = bool(overlay)
         self.setAccessibleName(TITLE)
         self._docs = []                 # DocInfo, newest first
         self._notes = []                # NoteRow, newest first
@@ -510,7 +536,7 @@ class DocumentsSection(Card):
         head = QHBoxLayout()
         head.setContentsMargins(0, 0, 0, 0)
         head.setSpacing(8)
-        self.title_label = _h2(TITLE, self)
+        self.title_label = _h2(TITLE, self, px=14)
         head.addWidget(self.title_label, 0, Qt.AlignVCenter)
         head.addStretch(1)
         self.add_button = Button(ADD, "secondary", "s", icon="plus", parent=self)
@@ -564,6 +590,18 @@ class DocumentsSection(Card):
         self.setTabOrder(self.add_button, self.clear_button)
         live_docs_ui.bridge().changed.connect(self._on_bridge)
         self._refresh_state()
+
+    def add(self, item, stretch=0, align=None):
+        """Add a widget or a layout to the section's column."""
+        lay = self.layout()
+        if isinstance(item, QWidget):
+            if align is not None:
+                lay.addWidget(item, stretch, align)
+            else:
+                lay.addWidget(item, stretch)
+        else:
+            lay.addLayout(item, stretch)
+        return item
 
     # ── what the page tells it ──
     def set_route(self, kind):
@@ -859,8 +897,8 @@ class DocumentsSection(Card):
         """A drag carrying files came over the page: True when they can be added."""
         ok = live_docs_ui.wants_files(mime)
         self._overlay.setGeometry(self.rect())
-        self._overlay.setVisible(ok)
-        if ok:
+        self._overlay.setVisible(ok and self._own_overlay)
+        if ok and self._own_overlay:
             self._overlay.raise_()
         return ok
 
@@ -918,4 +956,214 @@ class DocumentsSection(Card):
         self._emit_changed()
 
 
-__all__ = ["DocRow", "DocumentsSection", "FileTile", "NoteRow", "ReadingStrip"]
+class ContextBox(QPlainTextEdit):
+    """The Context text box, with a paper-clip in its bottom-right corner (inside the frame) that
+    adds documents. The text wraps before the clip: a gutter on the right."""
+    GUTTER = 38
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.clip = IconButton("paperclip", ADD, size=28, icon_size=16, color="muted", parent=self)
+        self.clip.setToolTip(_tip(ADD_TIP))
+        self.setViewportMargins(0, 0, self.GUTTER, 0)
+        self._place()
+
+    def _place(self):
+        self.clip.move(max(0, self.width() - self.clip.width() - 6),
+                       max(0, self.height() - self.clip.height() - 5))
+        self.clip.raise_()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._place()
+
+
+class ContextCard(Card):
+    """One card for the Live Assistant's Context: the text box on top (a paper-clip in its corner),
+    "Apply to everything I hear" under it, then the documents - and the whole card takes dropped
+    files, with a "Drop files to add" veil while they are dragged over it.
+
+    ``cfg``: a function giving the settings dict; ``setter(key, value) -> bool``: how a change is
+    written (the page's set_setting). Nothing here writes unless the user chose it."""
+
+    def __init__(self, app, parent=None, cfg=None, setter=None):
+        super().__init__(parent, pad=(20, 16), gap=10)
+        self.app = app
+        self._cfg_fn = cfg
+        self._setter = setter
+        self.setAccessibleName(CONTEXT_TITLE)
+        head = QHBoxLayout()
+        head.setSpacing(4)
+        head.addWidget(_h2(CONTEXT_TITLE, self))
+        head.addStretch(1)
+        self.saved_icon = QLabel(self)
+        self.saved_icon.setPixmap(icons.pixmap("check", 14, "ok-tx", sw=2.2))
+        self.saved_label = label("Saved", "muted", self)
+        head.addWidget(self.saved_icon, 0, Qt.AlignVCenter)
+        head.addWidget(self.saved_label, 0, Qt.AlignVCenter)
+        self.add(head)
+
+        self.context_edit = ContextBox(self)
+        self.context_edit.setAccessibleName(CONTEXT_TITLE)
+        self.context_edit.setPlaceholderText(CONTEXT_PLACEHOLDER)
+        self.context_edit.setFont(theme.font(13.5))
+        self.context_edit.setTabChangesFocus(True)
+        self.context_edit.document().setDocumentMargin(3)
+        self.add(self.context_edit)
+
+        # Its reach: everything you hear, or questions only.
+        self.rules_row = QWidget(self)
+        rl = QHBoxLayout(self.rules_row)
+        rl.setContentsMargins(0, 2, 0, 0)
+        rl.setSpacing(10)
+        self.rules_toggle = Toggle(live_rules.SWITCH_LABEL, False, self.rules_row)
+        self.rules_toggle.toggled.connect(self._on_toggled)
+        rl.addWidget(self.rules_toggle, 0, Qt.AlignVCenter)
+        col = QVBoxLayout()
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(1)
+        self.rules_label = label(live_rules.SWITCH_LABEL, "label", self.rules_row)
+        self.rules_hint = label("", "hint", self.rules_row, wrap=True)
+        self.rules_hint.setTextFormat(Qt.PlainText)
+        col.addWidget(self.rules_label)
+        col.addWidget(self.rules_hint)
+        rl.addLayout(col, 1)
+        self.scope_chip = Chip(live_rules.SCOPE_QUESTIONS, "neutral", parent=self.rules_row)
+        rl.addWidget(self.scope_chip, 0, Qt.AlignVCenter)
+        self.add(self.rules_row)
+
+        # The calm offer: never switches anything by itself.
+        self.offer = QFrame(self)
+        self.offer.setObjectName("laRuleOffer")
+        self.offer.setStyleSheet("QFrame#laRuleOffer { background: %s; border: 1px solid %s; "
+                                 "border-radius: 12px; }" % (theme.qss_color("blue-sub"),
+                                                              theme.qss_color("blue-line")))
+        ol = QHBoxLayout(self.offer)
+        ol.setContentsMargins(14, 8, 8, 8)
+        ol.setSpacing(10)
+        self.offer_text = label(live_rules.OFFER_TEXT, "label", self.offer, wrap=True)
+        self.offer_text.setTextFormat(Qt.PlainText)
+        ol.addWidget(self.offer_text, 1)
+        self.offer_yes = Button(live_rules.OFFER_YES, "primary", "s", parent=self.offer)
+        self.offer_yes.setAccessibleName("Yes, apply it to every sentence")
+        self.offer_yes.clicked.connect(self._offer_yes)
+        self.offer_no = Button(live_rules.OFFER_NO, "secondary", "s", parent=self.offer)
+        self.offer_no.setAccessibleName("No, questions only")
+        self.offer_no.clicked.connect(self._offer_no)
+        ol.addWidget(self.offer_yes, 0, Qt.AlignVCenter)
+        ol.addWidget(self.offer_no, 0, Qt.AlignVCenter)
+        self.offer.hide()
+        self.add(self.offer)
+
+        self.add(Divider(self))
+        self.documents = DocumentsSection(app, self, overlay=False)
+        self.add(self.documents)
+        self.context_edit.clip.clicked.connect(self.documents.choose_files)
+
+        self._overlay = _DropOverlay(self)
+        self._rules_note = ""             # what the switch said about itself last (see say_rules)
+        self.refresh_rules()
+
+    # ── the rule's reach ──
+    def _cfg(self):
+        try:
+            cfg = self._cfg_fn() if self._cfg_fn else getattr(self.app, "cfg", None)
+        except Exception:
+            cfg = None
+        return cfg if isinstance(cfg, dict) else {}
+
+    def _write(self, key, value):
+        if self._setter is None:
+            return False
+        try:
+            return bool(self._setter(key, value))
+        except Exception:
+            logger.warning("set_setting(%s) failed", key, exc_info=True)
+            return False
+
+    def rules_on(self):
+        """The switch as the settings have it (whether or not a rule is written)."""
+        return bool(self._cfg().get(live_rules.RULES_KEY, False))
+
+    def rules_active(self):
+        return self.rules_on() and bool(live_context.clip_context(self.context_edit.toPlainText()))
+
+    def refresh_rules(self, on=None, declined=None):
+        """Show the switch, its words, the chip and the offer as the settings and the text say
+        (``on`` / ``declined``: a value just announced, before it reached the settings).
+        Never writes."""
+        cfg = self._cfg()
+        text = live_context.clip_context(self.context_edit.toPlainText())
+        has = bool(text)
+        on = bool(cfg.get(live_rules.RULES_KEY, False)) if on is None else bool(on)
+        if declined is None:
+            declined = str(cfg.get(live_rules.DECLINED_KEY) or "")
+        self.rules_toggle.blockSignals(True)
+        if self.rules_toggle.isChecked() != on:
+            self.rules_toggle.setChecked(on)
+        self.rules_toggle.blockSignals(False)
+        self.rules_toggle.setEnabled(has)
+        self.rules_toggle.update()
+        active = on and has
+        self.rules_hint.setText(self._rules_note or (RULE_HINT_ON if active else (RULE_HINT_OFF if has else RULE_HINT_NONE)))
+        self.scope_chip.setVisible(has)
+        self.scope_chip.setText(live_rules.scope_text(active))
+        theme.set_prop(self.scope_chip, "tone", "blue" if active else "neutral")
+        want = (has and not on and live_rules.looks_like_rule(text)
+                and live_rules.declined_mark(text) != str(declined))
+        self.offer.setVisible(bool(want))
+
+    def say_rules(self, text):
+        """The switch tells the person what it did by itself ("Back to questions only - the context is
+        empty."): one calm line in its own hint, said once - it stays until the next thing the
+        person does with the text or the switch."""
+        self._rules_note = str(text or "")
+        self.refresh_rules()
+
+    def clear_rules_note(self):
+        if self._rules_note:
+            self._rules_note = ""
+            self.refresh_rules()
+
+    def _on_toggled(self, on):
+        self._rules_note = ""
+        if self._write(live_rules.RULES_KEY, bool(on)):
+            self.refresh_rules()
+        else:
+            self.refresh_rules()                # refused: back to what is really set
+
+    def _offer_yes(self):
+        self._write(live_rules.RULES_KEY, True)
+        self.refresh_rules()
+
+    def _offer_no(self):
+        mark = live_rules.declined_mark(live_context.clip_context(self.context_edit.toPlainText()))
+        self._write(live_rules.DECLINED_KEY, mark)
+        self.refresh_rules()
+
+    # ── the whole card is the drop target ──
+    def drag_enter(self, mime):
+        """A drag carrying files came over the page: True when they can be added. The veil covers
+        the whole card and says "Drop files to add"."""
+        ok = live_docs_ui.wants_files(mime)
+        self._overlay.setGeometry(self.rect())
+        self._overlay.setVisible(ok)
+        if ok:
+            self._overlay.raise_()
+        return ok
+
+    def drag_leave(self):
+        self._overlay.hide()
+        self.documents.drag_leave()
+
+    def drop(self, mime):
+        """Files were dropped on the card (or the page). Returns how many were taken."""
+        self._overlay.hide()
+        return self.documents.drop(mime)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._overlay.setGeometry(self.rect())
+
+
+__all__ = ["ContextBox", "ContextCard", "DocRow", "DocumentsSection", "FileTile", "NoteRow", "ReadingStrip"]

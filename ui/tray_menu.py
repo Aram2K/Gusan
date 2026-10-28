@@ -23,8 +23,8 @@ meeting is coming up; the account rows depend on the plan):
     ──
     ✓ Privacy mode                    (checkable)
     ──
-    aram@aibuben.xyz  ·  Free         (disabled; Free and Pro)
-    Upgrade to Pro…                   (purple, Free only)  |  Sign in…  (guests)
+    aram@aibuben.xyz  ·  Free         (disabled; Free and Pro)  |  Guest  (guests: no name, no email)
+    Upgrade to Pro…                   (purple, Free only)  |  Sign in / Sign up  (blue, guests)
     ──
     Settings…
     Quit Gusan
@@ -77,7 +77,7 @@ toggle_dictation exists. The Live Assistant row opens the card for every plan
                             then show_tray_hint(title, text) - settings_apply calls
                             set_privacy_mode with notify=False, so the tray says it
     Upgrade to Pro…         _pro_upsell()
-    Sign in…                show_auth_gate()
+    Sign in / Sign up       show_auth_gate()   (guests; a super admin previewing Guest too)
     Settings…               show_main("settings")
     Quit Gusan              quit_app()
 * Reads: app.cfg ("hotkey", "live_assist_hotkey", "privacy_mode"),
@@ -102,6 +102,7 @@ from PySide6.QtCore import QObject, QRectF, QSize, Qt
 from PySide6.QtGui import QAction, QColor, QFontMetricsF, QLinearGradient, QPainter, QPainterPath, QPalette, QPen
 from PySide6.QtWidgets import QApplication, QMenu, QProxyStyle, QStyle, QStyleFactory, QStyleOptionMenuItem
 
+import account_actions
 from app_info import APP_NAME, APP_VERSION
 from ui import theme
 from ui.components import icons
@@ -129,16 +130,16 @@ SEP = "  ·  "
 # The system menu colours the mockup draws (floating.py MENU), light and dark.
 COLORS = {
     "light": {"text": "#1a1a1a", "sub": "#5c5c5c", "dis": "#6b6b6b", "sep": "rgba(0,0,0,0.08)",
-              "hover": "rgba(0,0,0,0.05)", "upgrade": "pro-tx"},
+              "hover": "rgba(0,0,0,0.05)", "upgrade": "pro-tx", "signin": "blue-tx"},
     "dark": {"text": "#ffffff", "sub": "#c2c2c2", "dis": "#9d9d9d", "sep": "rgba(255,255,255,0.09)",
-             "hover": "rgba(255,255,255,0.08)", "upgrade": "#d8b4fe"},
+             "hover": "rgba(255,255,255,0.08)", "upgrade": "#d8b4fe", "signin": "#93c5fd"},
 }
 
 FEATURE_MEETING = "Meeting recording"
 RECENT_ICONS = {"dictation": "mic", "smart": "wand", "audio": "wave", "meeting": "people"}
 
 # Action properties the style reads.
-P_KIND = "gusanKind"            # header | next | item | info | upgrade | recent | empty
+P_KIND = "gusanKind"            # header | next | item | info | upgrade | signin | recent | empty
 P_HINT = "gusanHint"            # right-hand text (shortcut, time)
 P_PRO = "gusanPro"              # PRO pill after the words
 P_BOLD = "gusanBold"
@@ -430,6 +431,8 @@ class MenuLook(QProxyStyle):
             colour = c["dis"]
         elif kind == "upgrade":
             colour = c["upgrade"]
+        elif kind == "signin":
+            colour = c["signin"]
         else:
             colour = c["text"]
         pro = bool(_prop(a, P_PRO, False))
@@ -491,6 +494,16 @@ class TrayMenu(QObject):
         look.setParent(menu)
         menu.setStyle(look)
         menu.setFont(theme.font(14))
+        self._follow_os(menu)
+
+    @staticmethod
+    def _follow_os(menu):
+        """This menu is the system's, not Gusan's: it keeps the OS's light or dark colours (the app's
+        own palette is light always - ui/theme.py), so it gets its own palette from the OS scheme."""
+        try:
+            menu.setPalette(theme.menu_palette())
+        except Exception:
+            logger.debug("tray menu palette failed", exc_info=True)
 
     # ── building ──
     def _add(self, key, text, slot=None, kind="item", menu=None, **props):
@@ -533,8 +546,8 @@ class TrayMenu(QObject):
         self._sep("sep_privacy")
         acct = self._add("account", "", kind="info")
         acct.setEnabled(False)
-        self._add("upgrade", "Upgrade to Pro…", self.upgrade, kind="upgrade", **{P_BOLD: True})
-        self._add("signin", "Sign in…", self.sign_in)
+        self._add("upgrade", account_actions.UPGRADE + "…", self.upgrade, kind="upgrade", **{P_BOLD: True})
+        self._add("signin", account_actions.SIGN_IN_UP, self.sign_in, kind="signin", **{P_BOLD: True})
         self._sep("sep_account")
         self._add("settings", "Settings…", self.open_settings)
         self._add("quit", "Quit %s" % APP_NAME, self.quit_app)
@@ -559,22 +572,15 @@ class TrayMenu(QObject):
         return cfg if isinstance(cfg, dict) else {}
 
     def account(self):
-        """(tier, email): tier 'pro' | 'free' | 'guest'."""
+        """(tier, email): tier 'pro' | 'free' | 'guest' - the same rule as the
+        sidebar's (account_actions.app_tier). A guest has no email: a super
+        admin previewing Guest is signed in underneath, and the menu must not
+        show "<email> · Free" or "Upgrade to Pro…" for them."""
+        tier = account_actions.app_tier(self.app)
+        if tier == "guest":
+            return tier, ""
         auth = getattr(self.app, "auth", None)
-        signed_in = bool(getattr(auth, "is_authenticated", False))
-        email = str(getattr(auth, "user_email", None) or "").strip()
-        if self._pro():
-            return "pro", email
-        tier = None
-        fn = getattr(self.app, "current_tier", None)
-        if callable(fn):
-            try:
-                tier = fn()
-            except Exception:
-                tier = None
-        if tier not in ("free", "guest") or (tier == "guest" and signed_in):
-            tier = "free" if signed_in else "guest"
-        return tier, email
+        return tier, str(getattr(auth, "user_email", None) or "").strip()
 
     def tooltip(self):
         tier, email = self.account()
@@ -623,10 +629,10 @@ class TrayMenu(QObject):
         tier, email = self.account()
         acct = self.actions["account"]
         if tier == "guest":
-            acct.setVisible(False)
+            acct.setText(_esc(account_actions.GUEST_BADGE))          # just "Guest": no name, no email, no plan
         else:
             acct.setText(_esc("%s%s%s" % (email or "Signed in", SEP, "Pro" if tier == "pro" else "Free")))
-            acct.setVisible(True)
+        acct.setVisible(True)
         self.actions["upgrade"].setVisible(tier == "free")
         self.actions["signin"].setVisible(tier == "guest")
 
@@ -646,19 +652,24 @@ class TrayMenu(QObject):
         a.setChecked(bool(self._cfg().get("privacy_mode", False)))
 
     def refresh_next(self, *_args):
-        """The calendar's next meeting (cached, no network) - or no row."""
-        m = None
+        """The calendar's running meeting ("Now: ...") or next one (cached, no network) - or no row."""
+        m, running = None, False
         cal = getattr(self.app, "calendar", None)
         if cal is not None:
             try:
                 if getattr(cal, "available", True) and getattr(cal, "is_connected", True):
-                    m = cal.next_meeting()
+                    now_or_next = getattr(cal, "now_or_next", None)
+                    if callable(now_or_next):
+                        kind, m = now_or_next()
+                        running = kind == "now"
+                    else:                                  # a service from before "Now"
+                        m = cal.next_meeting()
             except Exception:
-                logger.debug("calendar next_meeting failed", exc_info=True)
-                m = None
-        self.set_next_meeting(m)
+                logger.debug("calendar now_or_next failed", exc_info=True)
+                m, running = None, False
+        self.set_next_meeting(m, running=running)
 
-    def set_next_meeting(self, meeting):
+    def set_next_meeting(self, meeting, running=False):
         a, sep = self.actions["next"], self.actions["sep_next"]
         if not isinstance(meeting, dict) or not meeting.get("start"):
             a.setVisible(False)
@@ -667,8 +678,10 @@ class TrayMenu(QObject):
             return
         self._next = meeting
         title = str(meeting.get("title") or "").strip() or "Meeting"
-        a.setText(_esc("Next: " + title))
-        self._set_hint("next", self._next_time(meeting))
+        word = "Now:" if running else "Next:"
+        a.setText(_esc(word + " " + title))
+        a.setProperty(P_PREFIX, word)                      # drawn in the muted colour
+        self._set_hint("next", "" if running else self._next_time(meeting))
         a.setVisible(True)
         sep.setVisible(True)
 
@@ -777,6 +790,9 @@ class TrayMenu(QObject):
         self.actions["show_all"] = show_all
 
     def _on_about_to_show(self):
+        if self.custom:
+            self._follow_os(self.menu)                  # the OS may have switched light / dark since
+            self._follow_os(self.recent)
         self.refresh()
         if self._recent_items is None or time.monotonic() - self._recent_at > RECENT_STALE_S:
             self.refresh_recent()

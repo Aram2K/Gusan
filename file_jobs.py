@@ -136,7 +136,14 @@ What this module is
   Privacy mode, the key) into a cloud_speech.Spec, and run_file_job sends the
   decoded file in pieces (cloud_files) instead of loading Whisper; speaker
   labels and paragraphs are the same. A pick that can't run, or Gusan Cloud
-  refusing the first piece, runs as Automatic on this computer.
+  refusing the first piece, runs as Automatic on this computer. Gusan Cloud is asked for
+  its "best" profile (the server chooses the engine) and the job stores the model that
+  really answered ("gpt-transcribe", "scribe_v2": engine_choice.MODEL_NAMES).
+* Automatic for a file in a language Whisper is poor at (Armenian): engine_choice.file_session
+  with the job's language - Gusan Cloud (best) when it is allowed (signed-in Pro, no Privacy
+  mode), else the Armenian model when it is on this computer, else Whisper with a hint
+  (engine_choice.file_note). A cloud pick Gusan Cloud refuses at the first piece is read by the
+  Armenian model when it is here instead of failing the file.
 * No length limit for anyone (BRIEF rev 2). The file is decoded straight into
   one float32 array sized from the probed length (about 4 bytes per sample
   instead of faster-whisper's ~10 at peak), with progress and Cancel while it
@@ -154,6 +161,7 @@ import time
 import weakref
 
 import docx_export
+import speech_hy
 import transcript_store
 from transcript_store import VIDEO_EXTS, file_kind, format_duration  # noqa: F401  (re-exported)
 
@@ -166,6 +174,9 @@ AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wma",
 
 # MODELS keys (main.MODELS), lightest first; the real names shown under plain ones.
 WHISPER_MODELS = ("tiny", "base", "small", "medium", "large-v3-turbo", "large-v3")
+# The Armenian model (speech_hy) is a local model too: a job may name it ("hy-fastconformer"). It
+# reads Armenian only - run_file_job puts any other language on a Whisper model.
+LOCAL_MODELS = WHISPER_MODELS + (speech_hy.MODEL_ID,)
 WHISPER_NAMES = {"tiny": "Whisper Tiny", "base": "Whisper Base", "small": "Whisper Small",
                  "medium": "Whisper Medium", "large-v3-turbo": "Whisper Large v3 Turbo",
                  "large-v3": "Whisper Large v3"}
@@ -173,7 +184,7 @@ WHISPER_NAMES = {"tiny": "Whisper Tiny", "base": "Whisper Base", "small": "Whisp
 CLOUD_MODELS = ("cloud", "own:google", "own:mistral")
 
 FILE_DEFAULTS = {
-    "file_model": "auto",           # "auto" | a WHISPER_MODELS key | a CLOUD_MODELS value (rail: Accuracy)
+    "file_model": "auto",           # "auto" | a LOCAL_MODELS key | a CLOUD_MODELS value (rail: Accuracy)
     "file_language": "auto",        # "auto" | "multi" | a LANG_NAMES code (rail: Language)
     "file_speakers": True,          # rail: Speaker labels
     "file_timestamps": True,        # rail: Timestamps
@@ -218,6 +229,10 @@ MSG_UNREADABLE = "This file couldn't be read. It may be damaged or not an audio 
 MSG_MEMORY = "There isn't enough free memory to read this file. Close some apps and try again."
 MSG_NO_SPEECH = "No speech was detected in this file."
 MSG_ERROR = "Something went wrong while converting this file. Try again."
+# Gusan Cloud could not take the file and this computer's Whisper is poor at its language
+# (speech_langs.LOCAL_WHISPER_POOR): the file is never put through Whisper under a cloud pick.
+MSG_POOR_LOCAL = ("Gusan Cloud couldn't take this file just now, and Whisper on this computer isn't "
+                  "reliable for {language}. Try again in a moment, or use your own Google key.")
 
 
 class JobCancelled(Exception):
@@ -239,13 +254,15 @@ class JobError(Exception):
 def whisper_name(model):
     if not model:
         return "Whisper"
+    if speech_hy.is_hy_model(model):
+        return speech_hy.REAL_NAME
     return WHISPER_NAMES.get(model, f"Whisper {model}")
 
 
 def display_name(model):
     """The plain model name a card shows: "Whisper Small", or a cloud model's
     real name ("gemini-2.5-flash" -> "Gemini 2.5 Flash")."""
-    if not model or model in WHISPER_NAMES:
+    if not model or model in WHISPER_NAMES or speech_hy.is_hy_model(model):
         return whisper_name(model)
     try:
         import engine_choice
@@ -301,7 +318,7 @@ def options_from_cfg(cfg):
     A cloud pick stays as it is: the queue resolves it when the job starts."""
     get = (cfg or {}).get
     model = get("file_model", FILE_DEFAULTS["file_model"])
-    if model not in WHISPER_MODELS and model not in CLOUD_MODELS:
+    if model not in LOCAL_MODELS and model not in CLOUD_MODELS:
         model = None
     return normalize_options({
         "model": model,
@@ -555,9 +572,18 @@ def run_file_job(path, opts, recorder, on_progress=None, should_cancel=None, *,
         except cloud_files.CloudUnavailable as e:
             # Gusan Cloud refused the first piece (daily cap, Pro ended, no
             # token). Nothing came back, so the whole file runs here instead:
-            # models are never mixed.
-            logger.info("Gusan Cloud can't take this file (%s); converting it on this computer",
-                        e.kind)
+            # models are never mixed - except in a language Whisper here is poor at
+            # (Armenian): that file is never put through it, the person is told.
+            import speech_langs
+            poor = speech_langs.local_whisper_poor(
+                getattr(cloud, "language", "auto"), {"mix_languages": list(getattr(cloud, "languages", ()) or ())})
+            if poor and not speech_hy.is_hy_model(
+                    _armenian_if_ready("", getattr(cloud, "language", None) or opts["language"], recorder)):
+                logger.info("Gusan Cloud can't take this file (%s); %s is not read on this computer",
+                            e.kind, poor)
+                raise JobError("cloud", MSG_POOR_LOCAL.format(language=poor)) from None
+            logger.info("Gusan Cloud can't take this file (%s); converting it on this computer%s",
+                        e.kind, " with the Armenian model" if poor else "")
         except cloud_files.Cancelled:
             raise JobCancelled() from None
         except cloud_files.NoSpeech:
@@ -578,6 +604,8 @@ def run_file_job(path, opts, recorder, on_progress=None, should_cancel=None, *,
             model = opts["model"]
         else:
             model = (auto_model or pick_auto_model)(recorder)
+            model = _armenian_if_ready(model, opts["language"] or getattr(cloud, "language", None), recorder)
+        model = _model_for_language(model, opts["language"], recorder, model_downloaded)
         name = whisper_name(model)
         info(model=model)
         if model_downloaded is None:
@@ -610,7 +638,10 @@ def run_file_job(path, opts, recorder, on_progress=None, should_cancel=None, *,
         # read as "no speech in this file" - so load here, with the real reason.
         emit(t_start, f"Loading {name}")
         try:
-            recorder.load_model(model)
+            if speech_hy.is_hy_model(model):
+                recorder.load_model(model, language=opts["language"])
+            else:
+                recorder.load_model(model)
         except Exception as e:
             raise JobError("model", f"{name} couldn't be loaded: {str(e)[:200]}") from None
         check()
@@ -686,6 +717,34 @@ def run_file_job(path, opts, recorder, on_progress=None, should_cancel=None, *,
         "language_setting": setting,
         "decode_seconds": decode_s if isinstance(decode_s, (int, float)) else None,
     }
+
+
+def _armenian_if_ready(model, language, recorder):
+    """Automatic, for an Armenian file, picks the Armenian model when it is already on this
+    computer (never a download for it, and never for any other language): Whisper on this
+    computer is poor at Armenian."""
+    try:
+        if (not speech_hy.is_hy_model(model) and speech_hy.ready() and speech_hy.listed()
+                and speech_hy.is_hy_model(recorder.engine_model(speech_hy.MODEL_ID, language))):
+            return speech_hy.MODEL_ID
+    except Exception:                       # a stand-in recorder without engine_model, a odd state
+        pass
+    return model
+
+
+def _model_for_language(model, language, recorder, downloaded=None):
+    """The model that really reads this job: the Armenian one only for an Armenian file; for any
+    other language (or Automatic) a Whisper model - the best one on this computer (the recorder
+    decides, AudioRecorder.engine_model)."""
+    if not speech_hy.is_hy_model(model):
+        return model
+    try:
+        return recorder.engine_model(model, language)
+    except Exception:                       # a stand-in recorder without engine_model
+        pass
+    if speech_hy.covers(language or "auto") and speech_hy.listed():
+        return model
+    return speech_hy.fallback_whisper(downloaded)
 
 
 def _takes(fn, name):
@@ -841,6 +900,12 @@ class FileJobQueue:
         except Exception:
             return False
 
+    def _signed_in(self):
+        """Is a person signed in (None when the app can't say: engine_choice then asks is_pro)."""
+        auth = getattr(self.app, "auth", None)
+        value = getattr(auth, "is_authenticated", None)
+        return bool(value) if value is not None else None
+
     def _planned_name(self, model):
         """The card's model name while queued: the Whisper name, the cloud
         model's name when that pick can run now, "" for Automatic."""
@@ -861,7 +926,8 @@ class FileJobQueue:
         mode off, the key saved). Otherwise - or on any error here, so the
         job always starts - it runs as Automatic on this computer."""
         opts = item["opts"]
-        if opts["model"] not in CLOUD_MODELS:
+        automatic = not opts["model"]
+        if opts["model"] not in CLOUD_MODELS and not automatic:
             return
         spec = None
         try:
@@ -869,7 +935,10 @@ class FileJobQueue:
             import engine_choice
             cfg = getattr(self.app, "cfg", None) or {}
             backend, model = engine_choice.file_session(
-                dict(cfg, **{engine_choice.FILE_KEY: opts["model"]}), self._is_pro())
+                dict(cfg, **{engine_choice.FILE_KEY: opts["model"] or engine_choice.FILE_AUTO}),
+                self._is_pro(), language=opts["language"] or "auto", signed_in=self._signed_in())
+            if automatic and backend != "managed":
+                return                      # Automatic stays on this computer (a model there is picked later)
             if backend != "local":
                 # The live cfg: Privacy mode and the key are checked again before every piece.
                 token_fn = getattr(getattr(self.app, "recorder", None), "get_auth_token", None)
@@ -880,6 +949,8 @@ class FileJobQueue:
             logger.warning("Cloud model not usable; converting on this computer", exc_info=True)
             spec = None
         if spec is None:
+            if automatic:
+                return
             opts["model"] = None
             item.update(model=None, model_name="", engine="local", _cloud=None)
         else:
@@ -1002,7 +1073,7 @@ class FileJobQueue:
         if info.get("model"):
             item["model"] = info["model"]
             item["model_name"] = display_name(info["model"])
-            if info["model"] in WHISPER_MODELS:
+            if info["model"] in LOCAL_MODELS:
                 item["engine"] = "local"        # Gusan Cloud refused it: this computer now
         self._emit("progress", item["pct"], item["stage"], item["eta"])
 
@@ -1023,7 +1094,7 @@ class FileJobQueue:
         item["eta"], item["eta_seconds"] = "", None
         if err is None and result is not None:
             model = result.get("model")
-            local = model in WHISPER_MODELS
+            local = model in LOCAL_MODELS
             engine = result.get("engine") or ("local" if local else item.get("engine") or "local")
             item.update(state="done", pct=100, stage=STAGE_DONE, result=result,
                         duration=result.get("duration"), model=model,
@@ -1055,7 +1126,7 @@ class FileJobQueue:
             item.update(state="failed", reason=err[0], error=err[1])
             self._track("file_transcription_failed", {"reason": "error", "took_minutes": took})
             outcome = ("failed", item, err[1])
-        if item.get("model") in WHISPER_MODELS:
+        if item.get("model") in LOCAL_MODELS:
             self._local_model = item["model"]
         if self._current is None and not self._queue:
             self._set_flag(False)

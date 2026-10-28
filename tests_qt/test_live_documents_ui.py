@@ -636,9 +636,10 @@ def test_files_dropped_on_the_page_are_added(build, store, files):
     assert page.acceptDrops() and not page.context_edit.acceptDrops()  # a drop on the About box isn't a pasted path
     mime = _mime(_pdf(files), _docx(files))
     assert _drag_enter(page, mime).isAccepted()
-    assert sec._overlay.isVisibleTo(sec)                             # "Drop files to add them"
+    card = page.context_card                                         # ONE card: the whole card is the drop target
+    assert card._overlay.isVisibleTo(card)                           # "Drop files to add"
     ev = _drop(page, mime)
-    assert ev.isAccepted() and not sec._overlay.isVisibleTo(sec)
+    assert ev.isAccepted() and not card._overlay.isVisibleTo(card)
     _idle(sec)
     assert store.count() == 2
 
@@ -650,7 +651,7 @@ def test_a_web_link_or_text_dragged_over_the_page_is_not_taken(build, store):
     text.setText("just words")
     assert not _drag_enter(page, text).isAccepted()
     assert not _drop(page, _mime(urls=["https://example.com/a.pdf"])).isAccepted()
-    assert store.count() == 0 and not page.documents._overlay.isVisibleTo(page.documents)
+    assert store.count() == 0 and not page.context_card._overlay.isVisibleTo(page.context_card)
 
 
 def test_a_folder_dropped_gets_a_plain_note(build, tmp_path):
@@ -665,9 +666,10 @@ def test_a_folder_dropped_gets_a_plain_note(build, tmp_path):
 def test_leaving_the_page_clears_the_drop_veil(build, files):
     page, _ = build()
     _drag_enter(page, _mime(_pdf(files)))
-    assert page.documents._overlay.isVisibleTo(page.documents)
-    page.documents.drag_leave()
-    assert not page.documents._overlay.isVisibleTo(page.documents)
+    card = page.context_card
+    assert card._overlay.isVisibleTo(card)
+    card.drag_leave()
+    assert not card._overlay.isVisibleTo(card)
 
 
 def test_a_huge_drop_is_cut_to_a_batch(build, files, monkeypatch):

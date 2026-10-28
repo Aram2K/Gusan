@@ -88,6 +88,7 @@ ALLOWED_EVENTS = {
     "meeting_notes_completed",
     "meeting_notes_failed",
     "meeting_exported",
+    "meeting_deleted",            # {"count": n, "from": "row" | "selection" | "key" | "live" | "notes"} - a count, never a name
     # Monetization / accounts funnel.
     "paywall_viewed",
     "upgrade_clicked",
@@ -116,6 +117,12 @@ ALLOWED_EVENTS = {
     # Notion export (no text, ids, names or URLs: a mode, a result, a reason).
     "notion_connect_result",
     "notion_disconnected",
+    # Google Calendar (no titles, names, ids, emails or counts of people: a result and
+    # a reason word, who ended it, which button was tapped, where a recording began).
+    "calendar_connect_result",
+    "calendar_disconnected",
+    "calendar_reminder_action",
+    "calendar_meeting_started",
 }
 
 _queue_lock = threading.Lock()   # guards every read-modify-write of the queue file

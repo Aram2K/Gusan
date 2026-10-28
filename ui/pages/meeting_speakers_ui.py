@@ -73,6 +73,11 @@ def wants_hint(data):
     if 0 < seconds < MIN_SECONDS:
         return False
     text = data.get("transcript") or ""
+    if (data.get("meta") or {}).get("transcribed_with") == "cloud":
+        # Its words came from a cloud engine (a Live Assistant session): Identify speakers would
+        # not read the recording again (that would replace them), so the one thing it can still
+        # do is tell the people on the call apart - offered only while that is undone.
+        return call_untold(data)
     return (not speaker_labels.has_labels(text)) or call_untold(data)
 
 

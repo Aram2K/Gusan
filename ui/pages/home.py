@@ -20,8 +20,9 @@ error card):
   meeting (the meeting row stands for both).
 - app.meeting_session (active_dir() + phase) for a meeting being recorded;
   its state_changed re-reads Recent (Recording -> Writing notes… -> Notes ready).
-- app.calendar (calendar_service.CalendarService): "Next:" chip from
-  next_meeting() when available and connected, updated on changed(list).
+- app.calendar (calendar_service.CalendarService): the "Next:" chip from
+  now_or_next() when available and connected ("Now: ..." while that meeting is
+  running; next_meeting() for a service without it), updated on changed(list).
 - app.downloads (model_manager.ModelDownloads): "Getting ready · 42%" while
   the speech model downloads.
 - app.rename_note_due() / dismiss_rename_note(): the one-time "Transcribe is
@@ -757,7 +758,7 @@ class Runs(QWidget):
         self._runs = [(str(t), f, c) for t, f, c in runs if t]
         full = "".join(t for t, _, _ in self._runs)
         self.setAccessibleName(full)
-        self.setToolTip(full if len(full) > 60 else "")
+        self.setToolTip(theme.plain_tip(full) if len(full) > 60 else "")
         self.updateGeometry()
         self.update()
 
@@ -985,7 +986,8 @@ class Tile(QAbstractButton):
 
 
 class NextChip(QAbstractButton):
-    """"🔔 Next: Weekly product sync · 14:30" - one calm pill in the header (34 px)."""
+    """"🔔 Next: Weekly product sync · 14:30" - one calm pill in the header (34 px).
+    While that meeting is running it reads "Now: Weekly product sync" (``time()`` is "Now")."""
 
     H = 34
     MAX_TITLE = 300
@@ -994,6 +996,7 @@ class NextChip(QAbstractButton):
         super().__init__(parent)
         self._title = ""
         self._time = ""
+        self._running = False
         self._f_muted = theme.font(13.5, 400)
         self._f_title = theme.font(13.5, 600)
         self._f_time = theme.font(13.5, 400, tabular=True)
@@ -1005,12 +1008,22 @@ class NextChip(QAbstractButton):
         self.setAccessibleName("Next meeting")
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
-    def set_meeting(self, title, when):
+    def set_meeting(self, title, when, running=False):
+        """``when``: "14:30" / "Tomorrow 09:30", or "Now" with ``running`` (it has started)."""
         self._title = one_line(title) or "Meeting"
         self._time = when or ""
-        self.setAccessibleName("Next meeting: %s%s" % (self._title, (" at " + self._time) if self._time else ""))
+        self._running = bool(running)
+        if self._running:
+            self.setAccessibleName("Meeting now: %s" % self._title)
+        else:
+            self.setAccessibleName("Next meeting: %s%s" % (self._title,
+                                                           (" at " + self._time) if self._time else ""))
         self.setFixedWidth(self._width())
         self.update()
+
+    def prefix(self):
+        """The muted word in front of the title."""
+        return "Now:" if self._running else "Next:"
 
     def title(self):
         return self._title
@@ -1021,8 +1034,9 @@ class NextChip(QAbstractButton):
     def _parts(self):
         fm_m, fm_t, fm_n = (QFontMetricsF(f) for f in (self._f_muted, self._f_title, self._f_time))
         title = fm_t.elidedText(self._title, Qt.ElideRight, self.MAX_TITLE)
-        tail = (" · " + self._time) if self._time else ""
-        return (fm_m.horizontalAdvance("Next:"), title, fm_t.horizontalAdvance(title), tail,
+        # A running meeting says "Now:" in front; nothing after the title (no clock time).
+        tail = (" · " + self._time) if self._time and not self._running else ""
+        return (fm_m.horizontalAdvance(self.prefix()), title, fm_t.horizontalAdvance(title), tail,
                 fm_n.horizontalAdvance(tail))
 
     def _width(self):
@@ -1040,14 +1054,15 @@ class NextChip(QAbstractButton):
         p.drawPixmap(12, (self.height() - 16) // 2, icons.pixmap("bell", 16, "blue"))
         w_next, title, w_title, tail, w_tail = self._parts()
         x = 12 + 16 + 8
-        for text, font, token, w in (("Next:", self._f_muted, "muted", w_next), (title, self._f_title, "ink", w_title),
+        for text, font, token, w in ((self.prefix(), self._f_muted, "muted", w_next),
+                                     (title, self._f_title, "ink", w_title),
                                      (tail, self._f_time, "text2", w_tail)):
             fm = QFontMetricsF(font)
             base = (self.height() + fm.ascent() - fm.descent()) / 2.0
             p.setFont(font)
             p.setPen(theme.qcolor(token))
             p.drawText(QPointF(x, base), text)
-            x += w + (8 if text == "Next:" else 0)
+            x += w + (8 if text == self.prefix() else 0)
         p.end()
 
     def enterEvent(self, e):
@@ -1504,30 +1519,42 @@ class HomePage(QWidget):
 
     # ── calendar ──
     def _update_next(self):
-        m = None
+        """The header chip: the meeting running now ("Now: ..."), else the next one."""
+        kind, m = "", None
         cal = getattr(self.app, "calendar", None)
         try:
             if cal is not None and getattr(cal, "available", False) and getattr(cal, "is_connected", False):
-                m = cal.next_meeting()
+                now_or_next = getattr(cal, "now_or_next", None)
+                if callable(now_or_next):
+                    kind, m = now_or_next()
+                else:                               # a service from before "Now"
+                    m = cal.next_meeting()
+                    kind = "next" if m else ""
         except Exception:
-            logger.debug("calendar.next_meeting failed", exc_info=True)
-            m = None
+            logger.debug("calendar.now_or_next failed", exc_info=True)
+            kind, m = "", None
         if not m:
             self.next_chip.hide()
             self._minute.stop()
             return
+        running = kind == "now"
         when = ""
-        try:
-            import calendar_sync
-            parts = calendar_sync.when_parts(m, datetime.now().astimezone())
-            when = ("%s %s" % (parts["day"], parts["time"])).strip()
-        except Exception:
-            start = m.get("start")
-            when = start.strftime("%H:%M") if hasattr(start, "strftime") else ""
-        self.next_chip.set_meeting(m.get("title") or "Meeting", when)
-        # The promise in the tooltip only when the reminder is on (Meetings' setting).
+        if running:
+            when = "Now"
+        else:
+            try:
+                import calendar_sync
+                parts = calendar_sync.when_parts(m, datetime.now().astimezone())
+                when = ("%s %s" % (parts["day"], parts["time"])).strip()
+            except Exception:
+                start = m.get("start")
+                when = start.strftime("%H:%M") if hasattr(start, "strftime") else ""
+        self.next_chip.set_meeting(m.get("title") or "Meeting", when, running=running)
+        # The promise in the tooltip only when the reminder is on (Meetings' setting)
+        # and the meeting hasn't started (a started one is past its reminder).
         asks = cfg_of(self.app).get("calendar_ask_to_record", True)
-        self.next_chip.setToolTip("Gusan asks to record 1 min before" if asks else "Opens Meetings")
+        self.next_chip.setToolTip("Gusan asks to record 1 min before" if asks and not running
+                                  else "Opens Meetings")
         self.next_chip.show()
         if not self._minute.isActive():
             self._minute.start()

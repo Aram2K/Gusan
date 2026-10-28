@@ -226,7 +226,8 @@ def test_controller_runs_a_gusan_cloud_job(qapp, audio_files, monkeypatch):
 
     def send(spec, wav):
         sent.append((spec.engine, threading.current_thread() is not threading.main_thread()))
-        return "Hello there. Nice to meet you.", None
+        # Gusan Cloud chooses the engine and says which one ran (the answer's model / X-Gusan-Model)
+        return "Hello there. Nice to meet you.", None, "gpt-transcribe"
 
     def runner(path, opts, recorder, on_progress, should_cancel, **kw):
         return file_jobs.run_file_job(path, opts, recorder, on_progress, should_cancel,
@@ -242,12 +243,12 @@ def test_controller_runs_a_gusan_cloud_job(qapp, audio_files, monkeypatch):
     item = items[0]
     assert item["state"] == "done", item.get("error")
     assert (item["model"], item["model_name"], item["engine"]) == \
-        ("gemini-2.5-flash", "Gemini 2.5 Flash", "gusan")
+        ("gpt-transcribe", "GPT Transcribe", "gusan")                  # what RAN, not the profile asked for
     assert sent and all(engine == "gusan" and worker for engine, worker in sent)
     assert loads == []
     assert all(e[1] for e in log), "every signal is delivered on the GUI thread"
     doc = transcript_store.load_transcript(item["transcript_id"])
-    assert doc["model"] == "gemini-2.5-flash" and doc["speaker_count"] == 2
+    assert doc["model"] == "gpt-transcribe" and doc["speaker_count"] == 2
     names = [c[0] for c in app.calls]
     assert "_note_local_wait" not in names and "_preload_speech_model" not in names
     tracked = {c[1]: c[2] for c in app.calls if c[0] == "track"}
@@ -260,9 +261,13 @@ def test_controller_runs_a_gusan_cloud_job(qapp, audio_files, monkeypatch):
 def test_transcript_view_names_the_cloud_model(qapp):
     import transcript_store
     import ui.pages.transcript_view as tv
-    assert tv.model_text("gemini-2.5-flash") == "Gemini 2.5 Flash"
-    assert tv.model_text("voxtral-mini-latest") == "Voxtral Mini"
-    assert tv.model_text("small") == "Whisper Small"
+    assert tv.model_text("gemini-2.5-flash") == "Gemini 2.5 Flash · Cloud"     # the same words as the pickers
+    assert tv.model_text("voxtral-mini-latest") == "Voxtral Mini · Cloud"
+    # what Gusan Cloud's server answers with (never read as Whisper), and the profile of a job it did not name
+    assert tv.model_text("gpt-transcribe") == "GPT Transcribe · Cloud"
+    assert tv.model_text("scribe_v2") == "ElevenLabs Scribe v2 · Cloud"
+    assert tv.model_text("best") == "Best accuracy · Cloud"
+    assert tv.model_text("small") == "Whisper Small · Local"
     assert tv.model_text("my-custom-model") == "my-custom-model"
     assert tv.model_text("") == ""
     folder = transcript_store.save_transcript({
@@ -272,6 +277,6 @@ def test_transcript_view_names_the_cloud_model(qapp):
         "language": "en", "language_setting": "auto"})
     view = tv.TranscriptView(make_stub_app("pro"))
     view.show_doc(transcript_store.load_transcript(os.path.basename(str(folder))))
-    assert "Gemini 2.5 Flash" in view.meta_texts()
+    assert "Gemini 2.5 Flash · Cloud" in view.meta_texts()
     assert "gemini-2.5-flash" not in view.meta_texts()
     view.deleteLater()

@@ -358,7 +358,8 @@ def list_meetings():
     root = meetings_dir()
     out = []
     try:
-        folders = [p for p in root.iterdir() if p.is_dir()]
+        # (".trash" is where a deleted meeting waits for its Undo: meeting_trash.py)
+        folders = [p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")]
     except Exception:
         return out
     for folder in sorted(folders, key=lambda p: p.name, reverse=True):
@@ -507,9 +508,13 @@ def _wav_seconds(parts):
 
 def delete_meeting(folder):
     """Permanently delete one meeting folder - notes, transcript, recording.
-    Refuses anything that isn't a folder inside the meetings library.
-    Returns True when it's gone."""
+    Refuses anything that isn't a folder inside the meetings library, and a link or junction
+    (never followed). Returns True when it's gone. (The lists use meeting_trash.py instead:
+    the same rules, plus a few seconds to undo.)"""
     try:
+        import meeting_trash
+        if meeting_trash.is_link(Path(folder)):
+            return False
         root = meetings_dir().resolve()
         target = Path(folder).resolve()
     except Exception:
@@ -525,10 +530,11 @@ def delete_meeting(folder):
 
 def delete_all_meetings(keep=None):
     """Delete every meeting folder (listed or aborted leftovers) except
-    ``keep`` - a meeting still being recorded or processed. Returns how many
-    folders were removed."""
+    ``keep`` - a meeting still being recorded or processed - and empty the trash
+    where deleted meetings wait for their Undo. Returns how many meeting folders
+    were removed."""
     try:
-        folders = [p for p in meetings_dir().iterdir() if p.is_dir()]
+        folders = [p for p in meetings_dir().iterdir() if p.is_dir() and not p.name.startswith(".")]
         keep_path = Path(keep).resolve() if keep else None
     except Exception:
         return 0
@@ -538,6 +544,11 @@ def delete_all_meetings(keep=None):
             continue
         if delete_meeting(folder):
             removed += 1
+    try:
+        import meeting_trash
+        meeting_trash.purge_all()
+    except Exception:
+        pass
     return removed
 
 
