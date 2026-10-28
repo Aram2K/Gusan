@@ -5829,7 +5829,12 @@ class AppController(QObject):
         self._session_ending = True
         logger.info("Session ending: saving work")
         try:
-            getattr(getattr(self, "meeting_session", None), "shutdown_speaker_followup", lambda: None)()
+            # The names after a meeting's notes stop (the queue is dropped; a running
+            # pass ends at its next look, its child process with it) - but not for good:
+            # the user can still cancel the log-off, and the app then goes on as it was.
+            # So neither shutdown_speaker_followup nor diarization_proc.cancel_all here:
+            # both refuse every later pass until the app restarts (quit_app only).
+            getattr(getattr(self, "meeting_session", None), "cancel_speaker_followup", lambda: None)()
         except Exception:
             logger.debug("Ending the speaker pass at log-off failed", exc_info=True)
         try:

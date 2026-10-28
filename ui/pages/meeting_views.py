@@ -2268,9 +2268,13 @@ def read_meeting(folder):
             duration = int(audio_export.duration_seconds(parts) or 0)
         except Exception:
             duration = 0
+    # The recording ends before the transcript does (a meeting past the ~2-hour cap):
+    # the Transcript tab never suggests Identify speakers then (meeting_speakers_ui).
+    cut_short = bool(parts) and meeting_store.recording_cut_short(meta, meeting_store.part_seconds(parts))
     return {"folder": str(folder), "meta": meta, "title": str(meta.get("title") or "Untitled Meeting"),
             "notes": notes, "transcript": transcript, "my_notes": my_notes, "parts": parts,
-            "people": list(people), "started": started, "duration_sec": duration}
+            "people": list(people), "started": started, "duration_sec": duration,
+            "recording_cut_short": cut_short}
 
 
 _SPK_RE = rich_text.SPEAKER_RE          # "Speaker 1: …", "You: …", "Anna: …"

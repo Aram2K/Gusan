@@ -795,6 +795,26 @@ class TestSafeQuit(unittest.TestCase):
         app._on_about_to_quit()                             # WM_ENDSESSION: nothing left but settings
         self.assertEqual(app.order, ["settings"])
 
+    def test_a_log_off_that_is_cancelled_leaves_the_speaker_names_working(self):
+        # Windows asks every app before a log-off / shutdown (commitDataRequest), and
+        # the user can still cancel it. The background speaker pass stops - but the next
+        # meeting's names must still come, without restarting the app.
+        import diarization_proc
+        import meeting_session
+        app = self._app()
+        session = meeting_session.MeetingEngine(None)
+        spawned = []
+        session._spawn = lambda target, *args: spawned.append(target)   # (no worker thread here)
+        app.meeting_session = session
+        self.assertTrue(session._followup.enqueue("C:/m/1"))           # queued after a meeting's notes
+        with mock.patch.object(diarization_proc, "_cancel_all", threading.Event()) as refuse_all:
+            app._on_session_ending(object())
+            self.assertEqual(session.speakers_state(), "")              # the queue was dropped...
+            self.assertTrue(session._followup.enqueue("C:/m/2"))       # ...yet a later meeting's names still start
+            self.assertEqual(session.speakers_state("C:/m/2"), "waiting")
+            self.assertFalse(refuse_all.is_set())                       # and so does their child process
+        self.assertEqual(app.order, ["settings"])
+
     def test_about_to_quit_alone_saves_a_meeting(self):
         app = self._app("recording", recording=True)
         app._on_about_to_quit()

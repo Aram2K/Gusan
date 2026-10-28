@@ -4,7 +4,8 @@ Three small pieces, kept out of meeting_views.py so that file stays as it was:
 
   * the "Identify speakers" entry in the ⋯ menu (install),
   * ONE calm line at the top of the Transcript tab when the meeting has a
-    recording but no speaker labels, with the same action as a link (after_render),
+    recording but no speaker labels, with the same action as a link (after_render)
+    - not when the recording ends before the transcript does (recording_cut_short),
   * the banner while it runs, with Cancel (busy_banner).
 
 The work itself is MeetingSession.identify_speakers (off the GUI thread, with
@@ -27,6 +28,7 @@ import re
 from PySide6.QtGui import QAction
 
 import meeting_speakers
+import meeting_store
 import speaker_labels
 from ui import theme
 from ui.components import icons
@@ -59,10 +61,20 @@ def call_untold(data):
     return not any(meeting_speakers.is_speaker_notice(n) for n in notices)
 
 
+def recording_cut_short(data):
+    """The saved recording ends before the transcript does (a meeting past the
+    ~2-hour cap): read_meeting works it out off the window's thread, meta alone
+    says it otherwise (meeting_store.recording_cut_short)."""
+    data = data or {}
+    return bool(data.get("recording_cut_short")) or meeting_store.recording_cut_short(data.get("meta"))
+
+
 def wants_hint(data):
     """Show the one-line suggestion in the Transcript tab: a recording that is
     long enough, a transcript without speaker labels (or none at all), or one where
-    the call is still just "Them"."""
+    the call is still just "Them" - never when the recording ends before the
+    transcript does (labels from it would cut the transcript; Identify speakers
+    refuses it)."""
     data = data or {}
     if not has_recording(data):
         return False
@@ -73,6 +85,8 @@ def wants_hint(data):
     if 0 < seconds < MIN_SECONDS:
         return False
     text = data.get("transcript") or ""
+    if text.strip() and recording_cut_short(data):
+        return False
     return (not speaker_labels.has_labels(text)) or call_untold(data)
 
 
