@@ -971,11 +971,15 @@ class TestDownload(_Base):
         self.h.routes["/model.zip"] = route
         result = []
 
+        seen = []
+
         def run():
             try:
-                self.download()
+                seen.append(("returned", self.download()))
             except speech_hy.SpeechHyError as e:
                 result.append(e)
+            except BaseException as e:                      # what else could end it (shown if the test fails)
+                seen.append(("raised", repr(e)[:200]))
         t = threading.Thread(target=run)
         t.start()
         # A slow machine (a CI runner) can take a while to start the request. A cancel asked for BEFORE
@@ -989,7 +993,7 @@ class TestDownload(_Base):
         speech_hy.cancel_download()
         t.join(20)
         self.assertFalse(t.is_alive(), "the download did not stop")
-        self.assertEqual(len(result), 1)
+        self.assertEqual(len(result), 1, "result=%r seen=%r calls=%d cancelflag=%r" % (result, seen, len(calls), speech_hy._cancel.is_set()))
         self.assertIsInstance(result[0], speech_hy.Cancelled)
         self.assertNothingInstalled()
 
