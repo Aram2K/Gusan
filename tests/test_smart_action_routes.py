@@ -158,8 +158,9 @@ for (let i = 0; i < scenarios.length; i++) {
   out[sc.id] = results;
 }
 Object.assign(console, realLog);
-process.stdout.write(JSON.stringify(out));
-process.exit(0);
+// Leave once the output has been handed over: on Linux a pipe is written asynchronously, so exiting
+// at once cuts the answer at 64 KiB (Windows pipes don't).
+process.stdout.write(JSON.stringify(out), () => process.exit(0));
 """
 
 MSG = [{"role": "system", "content": "You rewrite text."}, {"role": "user", "content": "hello there"}]

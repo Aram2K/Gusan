@@ -978,12 +978,17 @@ class TestDownload(_Base):
                 result.append(e)
         t = threading.Thread(target=run)
         t.start()
-        for _ in range(100):
+        # A slow machine (a CI runner) can take a while to start the request. A cancel asked for BEFORE
+        # the download has begun is wiped by its start (cancel stops a download that is running), so
+        # wait until the server has really been asked.
+        for _ in range(500):
             if calls:
                 break
             time.sleep(0.02)
+        self.assertTrue(calls, "the download never reached the server")
         speech_hy.cancel_download()
-        t.join(10)
+        t.join(20)
+        self.assertFalse(t.is_alive(), "the download did not stop")
         self.assertEqual(len(result), 1)
         self.assertIsInstance(result[0], speech_hy.Cancelled)
         self.assertNothingInstalled()
