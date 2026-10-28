@@ -86,6 +86,13 @@ jobs:
       - name: Run unit tests
         run: python -m pytest tests/ -v --tb=long 2>&1 | tee /tmp/pytest_output.txt; exit ${PIPESTATUS[0]}
 
+      # GitHub shows job logs only to signed-in people; annotations are public. Name what failed.
+      - name: Name the failing tests (annotations)
+        if: failure()
+        run: |
+          grep -E "^(FAILED|ERROR) " /tmp/pytest_output.txt | head -40 | while IFS= read -r line; do echo "::error title=pytest::${line:0:300}"; done || true
+          grep -E "^E   " /tmp/pytest_output.txt | head -15 | while IFS= read -r line; do echo "::warning title=pytest detail::${line:0:300}"; done || true
+
       - name: Upload test log
         if: always()
         uses: actions/upload-artifact@v4
@@ -152,10 +159,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m compileall -q ui
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pytest -q -n auto --maxprocesses 3 --dist loadfile tests_qt --ignore=tests_qt/test_gui_stall_budget.py
+          python -m pytest -q -n auto --maxprocesses 3 --dist loadfile tests_qt --ignore=tests_qt/test_gui_stall_budget.py 2>&1 | Tee-Object -FilePath qt_output.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pytest -q tests_qt/test_gui_stall_budget.py
+          python -m pytest -q tests_qt/test_gui_stall_budget.py 2>&1 | Tee-Object -FilePath qt_stall_output.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # (annotations are public, job logs are not)
+      - name: Name the failing Qt tests (annotations)
+        if: failure()
+        shell: pwsh
+        run: |
+          foreach ($f in 'qt_output.txt', 'qt_stall_output.txt') {
+            if (Test-Path $f) {
+              Select-String -Path $f -Pattern '^(FAILED|ERROR) ' | Select-Object -First 40 | ForEach-Object {
+                $t = $_.Line
+                if ($t.Length -gt 300) { $t = $t.Substring(0, 300) }
+                Write-Host "::error title=pytest::$t"
+              }
+            }
+          }
 
       - name: Generate app icon
         shell: pwsh
