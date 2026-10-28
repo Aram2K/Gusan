@@ -378,6 +378,8 @@ class TestResult(_HookCase):
                 ("auth", {"notion_auth_mode": "own"}, "Notion rejected the secret · Open"),
                 ("offline", {}, "Check your internet · Open"),
                 ("no_access", {}, "Pick another page in Meeting settings · Open"),
+                # (no page to pick and no "Reconnect" button for a token that works)
+                ("no_access", {"notion_auth_mode": "mcp"}, "Disconnect and connect it in Meeting settings · Open"),
                 # nothing useful to add: which meeting it was
                 ("rate", {}, "Weekly sync · Open"),
                 ("other", {}, "Weekly sync · Open")):
@@ -401,14 +403,30 @@ class TestResult(_HookCase):
         a = self._fail("other")
         self.assertEqual(set(a.tracked[0][1]), {"target", "ok", "auto", "mode", "reason"})
 
-    def test_a_refused_connection_asks_for_a_reconnect_once(self):
-        a = self._fail("auth")
-        self.assertEqual(a.applied, [("notion_reconnect", True)])
-        self.assertEqual(a.hints[0][0], "Couldn't send to Notion")
-        a = self._fail("auth", notion_auth_mode="own")               # a pasted secret: no reconnect
-        self.assertEqual(a.applied, [])
-        a = self._fail("rate")
-        self.assertEqual(a.applied, [])
+    def test_a_refused_connection_is_flagged_through_persist_never_by_main(self):
+        # notion_sync sets notion_reconnect through persist (it knows whether the connection the
+        # send used is still the one in use); main hops that to set_settings and sets nothing itself.
+        def refused(folder, cfg, *, auto=False, persist=None, **kw):
+            persist({"notion_reconnect": True})
+            return {"ok": False, "url": "", "code": "auth", "sentence": "x", "stale": False}
+        self.sync.send_meeting = refused
+        a = self.app()
+        self.finish(a)
+        self.assertEqual(a.applied, [{"notion_reconnect": True}])
+        self.assertEqual(a.hints[0][:2], ("Couldn't send to Notion", "Reconnect it in Meeting settings · Open"))
+        for code, cfg in (("auth", {}), ("auth", {"notion_auth_mode": "own"}), ("rate", {})):
+            self.assertEqual(self._fail(code, **cfg).applied, [], (code, cfg))
+
+    def test_a_connection_given_up_while_the_send_ran_is_neither_flagged_nor_asked_to_reconnect(self):
+        # Disconnect + Connect while this send was in flight: its old token was refused, but the
+        # connection in use now is fine - it must not read "Reconnect" and stop every automatic send.
+        self.sync.send_meeting = lambda *a, **k: {"ok": False, "url": "", "code": "auth",
+                                                  "sentence": "x", "stale": True}
+        for cfg in ({}, {"notion_auth_mode": "mcp"}):
+            a = self.app(**cfg)
+            self.finish(a)
+            self.assertEqual(a.applied, [], cfg)
+            self.assertEqual(a.hints[0][:2], ("Couldn't send to Notion", "Weekly sync · Open"), cfg)
 
     def test_a_connection_already_marked_for_reconnect_starts_no_send_at_all(self):
         # One hint when it broke; after that nothing is sent, no refresh is tried

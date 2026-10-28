@@ -557,7 +557,9 @@ class TestContract(_Case):
         ms.update_meta(self.folder, notion_url="https://www.notion.so/p")
         answers.append(Fakes().send(self.folder, OWN, auto=True))
         for res in answers:
-            self.assertEqual(set(res), {"ok", "url", "code", "sentence"})
+            # (+ "stale" on a refused token: was its connection given up while the send ran?)
+            self.assertEqual(set(res), {"ok", "url", "code", "sentence"} | ({"stale"} if res["code"] == "auth" else set()))
+            self.assertIs(type(res.get("stale", False)), bool)
             self.assertIs(type(res["ok"]), bool)
             self.assertIn(res["code"], notion_sync.CODES)
             self.assertTrue(res["ok"] or res["code"] == "sent" or res["sentence"])
@@ -640,8 +642,27 @@ class TestAutoSendThroughTheRealModule(_Case):
                 patch.object(notion_connect, "refresh", side_effect=ConnectError("expired")):
             a._auto_send_notion(self.folder, "Weekly sync", dict(a.cfg))
         self.assertEqual(self.meta()["notion_error"], "auth")
-        self.assertIn({"notion_reconnect": True}, a.applied)
-        self.assertEqual(a.hints[0][0], "Couldn't send to Notion")
+        self.assertEqual(a.applied, [{"notion_reconnect": True}])           # once, through persist
+        self.assertEqual(a.hints, [("Couldn't send to Notion", "Reconnect it in Meeting settings · Open")])
+        self.assertEqual(a.tracked[0][1]["reason"], "auth")
+
+    def test_a_send_from_a_connection_given_up_meanwhile_never_flags_the_new_one(self):
+        # Disconnect + Connect while an automatic send is in flight: the old token is refused. The flag
+        # (and a "Reconnect it" hint) would land on the fresh, valid connection and stop every auto-send.
+        import notion_mcp
+
+        def send_meeting_mcp(creds, *args, **kw):
+            notion_mcp.forget_tokens()                                       # Disconnect...
+            notion_mcp._adopt_chain({"access_token": "tok-new", "refresh_token": "ref-new", "expires_at": 0})
+            raise NotionAuthError("401")                                     # ...Connect; the old token is refused
+
+        self.addCleanup(notion_mcp.forget_tokens)
+        a = self.app(notion_auth_mode="mcp", notion_mcp_client_id="cid-1")
+        with patch.object(notion_mcp, "send_meeting_mcp", send_meeting_mcp):
+            a._auto_send_notion(self.folder, "Weekly sync", dict(a.cfg))
+        self.assertEqual(self.meta()["notion_error"], "auth")               # the meeting says what happened to it
+        self.assertEqual(a.applied, [])                                      # no "Reconnect" on the new connection
+        self.assertEqual(a.hints, [("Couldn't send to Notion", "Weekly sync · Open")])
         self.assertEqual(a.tracked[0][1]["reason"], "auth")
 
 
