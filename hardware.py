@@ -87,10 +87,10 @@ MORE_SPEECH_MODELS = tuple(m for m in SPEECH_MODEL_IDS if MODEL_INFO[m].more_siz
 # Local AI writer (Smart Actions, meeting notes, Live Assistant on this computer).
 # Ids are local_llm's; sizes and memory match local_llm.MODEL_CATALOG.
 LOCAL_AI_INFO = {
-    "qwen_tiny": ModelInfo("qwen_tiny", WRITER, "Small", "Qwen 1.5B", "1.12 GB", 1120, 8),
-    "qwen_3b": ModelInfo("qwen_3b", WRITER, "Medium", "Qwen 3B", "2.3 GB", 2300, 12),
-    "qwen_7b": ModelInfo("qwen_7b", WRITER, "Large", "Qwen 7B", "4.7 GB", 4700, 16),
-    "gemma_2b": ModelInfo("gemma_2b", WRITER, "Alternative", "Gemma 2 2B", "1.6 GB", 1600, 8),
+    "qwen_tiny": ModelInfo("qwen_tiny", WRITER, "Small", "Qwen 1.5B", "1.12 GB", 1117, 8),
+    "qwen_3b": ModelInfo("qwen_3b", WRITER, "Medium", "Qwen 3B", "2.1 GB", 2105, 12),
+    "qwen_7b": ModelInfo("qwen_7b", WRITER, "Large", "Qwen 7B", "4.68 GB", 4683, 16),
+    "gemma_2b": ModelInfo("gemma_2b", WRITER, "Alternative", "Gemma 2 2B", "1.71 GB", 1709, 8),
 }
 LOCAL_AI_MODEL_IDS = tuple(LOCAL_AI_INFO)
 # 1.9.x ids still found in old configs (local_llm.LEGACY_MODEL_IDS).

@@ -194,6 +194,8 @@ def _http_status(exc):
 def failure_message(exc):
     """(reason, message) for a failed download: reason is a short code safe for
     analytics, message one plain sentence for the card."""
+    if type(exc).__name__ == "DownloadIncomplete":      # local_llm: cut off, never installed
+        return "incomplete", MSG_INCOMPLETE
     text = str(exc or "").lower()
     if isinstance(exc, OSError) and (
             getattr(exc, "errno", None) == errno.ENOSPC
