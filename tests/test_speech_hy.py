@@ -961,11 +961,14 @@ class TestDownload(_Base):
             h.send_response(200)
             h.send_header("Content-Length", str(len(self.archive)))
             h.end_headers()
-            h.wfile.write(self.archive[:1000])
+            # Half of it, whatever its size: the zip zlib makes on Linux can be under 1000 bytes, and then
+            # the whole archive arrived at once and nothing was left to cancel.
+            half = max(1, len(self.archive) // 2)
+            h.wfile.write(self.archive[:half])
             h.wfile.flush()
             time.sleep(0.5)
             try:
-                h.wfile.write(self.archive[1000:])
+                h.wfile.write(self.archive[half:])
             except OSError:
                 pass
         self.h.routes["/model.zip"] = route
