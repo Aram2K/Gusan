@@ -882,13 +882,14 @@ def _engine_ids():
 @pytest.fixture
 def answer(monkeypatch):
     """answer(card, app, route, question=..., auto=...) runs a real worker thread with a fake
-    model and returns what the model was handed: {"context", "config", "text"}."""
+    model and returns what the model was handed: {"context", "config", "text"}. ``engine``
+    names another engine than the route's usual one."""
     import actions
     engines = _engine_ids()
 
     def run(c, app, route="managed", question="What is the payment term?", auto=False,
             live_text="So what are the payment terms for the supplier?", screen=False, extra_cfg=None,
-            image_status=None):
+            image_status=None, engine=None):
         seen = {}
 
         def fake_stream(context, mode, on_token, source_lang="auto", target_lang="en", model=None, config=None):
@@ -900,7 +901,7 @@ def answer(monkeypatch):
         monkeypatch.setattr(actions, "process_stream", fake_stream)
         cfg = dict(app.cfg)
         cfg.update(extra_cfg or {})
-        c._resolve_engine = lambda: (engines[route], dict(cfg))
+        c._resolve_engine = lambda: (engine or engines[route], dict(cfg))
         c._live_text = live_text
         c.btn_screen.setChecked(bool(screen))
         c.suggest(question, auto=auto)

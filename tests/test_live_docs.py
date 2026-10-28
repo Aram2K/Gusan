@@ -36,6 +36,11 @@ from tests import live_docs_fixtures as fx
 ROOT = Path(__file__).resolve().parent.parent
 HAVE_PYPDF = importlib.util.find_spec("pypdf") is not None
 needs_pypdf = unittest.skipUnless(HAVE_PYPDF, "pypdf is not installed")
+# pypdf's AES comes from another package (pycryptodome for the app; cryptography works too):
+# without one it only has RC4. CI installs pycryptodome, so these run there.
+HAVE_AES_PACKAGE = any(importlib.util.find_spec(m) is not None for m in ("Crypto", "cryptography"))
+needs_aes = unittest.skipUnless(HAVE_PYPDF and HAVE_AES_PACKAGE,
+                                "no AES package for pypdf (pycryptodome) is installed")
 FUZZ_N = int(os.environ.get("LIVE_DOCS_FUZZ_N", "300"))
 
 
@@ -211,6 +216,18 @@ class TestFormats(unittest.TestCase):
         for gone in ("steal", "hidden", "<p>", "x:y"):
             self.assertNotIn(gone, body)
 
+    def test_text_after_a_script_survives_letters_that_grow_when_lower_cased(self):
+        # Turkish "İ" lower-cases to two characters: a position found in a lower-cased copy of
+        # the page drifted, and the text after the script or style was lost.
+        page = ("İ" * 20 + " İstanbul<script>steal()</script><p>After the script</p>"
+                "<STYLE>p{x:y}</Style><p>Last words</p>")
+        for body in (doc_reader.html_to_text(page), text_of(read(page.encode("utf-8"), "tr.html"))):
+            self.assertIn("After the script", body)
+            self.assertIn("Last words", body)
+            self.assertIn("İstanbul", body)
+            for gone in ("steal", "x:y"):
+                self.assertNotIn(gone, body)
+
     def test_html_is_found_by_content_not_only_by_name(self):
         self.assertEqual(read(b"<!DOCTYPE html><html><body>Hi there</body></html>", "x.txt").fmt, "html")
 
@@ -270,6 +287,21 @@ class TestFormats(unittest.TestCase):
                 self.assertLessEqual(len(r.image), doc_reader.IMAGE_BYTES_MAX)
                 self.assertEqual(r.sections, ())
 
+    def test_a_phone_photo_with_pictures_inside_is_read_as_a_jpeg(self):
+        # A multi-picture segment (a preview, a depth or gain map) makes Pillow call a .jpg "MPO".
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (640, 480), (20, 120, 200)).save(
+            buf, "MPO", save_all=True, append_images=[Image.new("RGB", (160, 120), (200, 30, 30))])
+        with Image.open(io.BytesIO(buf.getvalue())) as im:
+            self.assertEqual(im.format, "MPO")                     # (what makes it one)
+        r = read(buf.getvalue(), "photo.jpg")
+        self.assertTrue(r.ok, r.message)
+        self.assertEqual((r.kind, r.fmt, r.type_class), ("image", "jpeg", "image"))
+        self.assertEqual((r.width, r.height), (640, 480))           # the photo, not the preview
+        px = Image.open(io.BytesIO(r.image)).convert("RGB").getpixel((5, 5))
+        self.assertTrue(px[2] > 150 and px[0] < 80, px)
+
     def test_a_transparent_picture_is_flattened_on_white(self):
         from PIL import Image
         buf = io.BytesIO()
@@ -312,6 +344,68 @@ class TestPdf(unittest.TestCase):
         r = read(fx.encrypt_pdf(fx.make_pdf(["Open to everyone text"]), user="", owner="own"), "o.pdf")
         self.assertTrue(r.ok, r.message)
         self.assertIn("Open to everyone", text_of(r))
+
+    @needs_aes
+    def test_a_pdf_locked_with_aes_that_needs_no_password_is_read(self):
+        # Bank, invoice and government PDFs: AES with an owner password only.
+        for algorithm in ("AES-128", "AES-256"):
+            with self.subTest(algorithm):
+                pdf = fx.encrypt_pdf(fx.make_pdf(["Statement for October", "Balance due 120"]),
+                                     user="", owner="own", algorithm=algorithm)
+                r = read(pdf, "statement.pdf")
+                self.assertTrue(r.ok, r.message)
+                self.assertEqual(labels_of(r), ["page 1", "page 2"])
+                self.assertIn("Balance due 120", text_of(r))
+                locked = read(fx.encrypt_pdf(fx.make_pdf(["Secret"]), algorithm=algorithm), "p.pdf")
+                self.assertEqual(locked.reason, "password")       # (and a password is still never tried)
+
+    @needs_aes
+    def test_without_an_aes_package_an_aes_pdf_says_so_honestly(self):
+        """The app before pycryptodome was bundled: pypdf had RC4 only, and an AES-128 file was
+        taken for "a scan", an AES-256 one for "damaged". A child process where pypdf can't
+        import an AES package reads them."""
+        code = (
+            "import sys\n"
+            "class NoAes:\n"
+            "    def find_spec(self, name, path=None, target=None):\n"
+            "        if name.split('.')[0] in ('Crypto', 'cryptography'):\n"
+            "            raise ImportError(name)\n"
+            "sys.meta_path.insert(0, NoAes())\n"
+            "import doc_reader\n"
+            "for p in sys.argv[1:]:\n"
+            "    with open(p, 'rb') as fh:\n"
+            "        r = doc_reader.read_bytes(fh.read(), 'a.pdf', time_budget=30)\n"
+            "    print(r.reason + '|' + r.message)\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            for algorithm in ("AES-128", "AES-256"):
+                p = Path(tmp) / (algorithm + ".pdf")
+                p.write_bytes(fx.encrypt_pdf(fx.make_pdf(["Statement text"] * 2), user="", owner="own",
+                                             algorithm=algorithm))
+                paths.append(str(p))
+            done = subprocess.run([sys.executable, "-c", code] + paths, cwd=str(ROOT), capture_output=True,
+                                  text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        expected = "unsupported|" + doc_reader.PDF_CIPHER_MESSAGE
+        self.assertEqual(done.stdout.splitlines(), [expected, expected])
+
+    def test_a_cipher_pypdf_cannot_run_is_named_not_taken_for_a_scan_or_damage(self):
+        import pypdf
+        from pypdf.errors import DependencyError
+        missing = DependencyError("cryptography>=3.1 is required for AES algorithm")
+        page = types.SimpleNamespace(extract_text=mock.Mock(side_effect=missing))
+        readers = {
+            "opening (AES-256)": dict(side_effect=missing),
+            "the empty password": dict(return_value=types.SimpleNamespace(
+                is_encrypted=True, decrypt=mock.Mock(side_effect=missing), pages=[page])),
+            "every page (AES-128)": dict(return_value=types.SimpleNamespace(
+                is_encrypted=True, decrypt=lambda password: 1, pages=[page, page, page])),
+        }
+        for label, how in readers.items():
+            with self.subTest(label), mock.patch.object(pypdf, "PdfReader", **how):
+                r = read(fx.make_pdf(["Statement text"]), "locked.pdf")
+                self.assertEqual((r.ok, r.reason, r.message),
+                                 (False, "unsupported", doc_reader.PDF_CIPHER_MESSAGE))
 
     def test_no_password_is_ever_tried_beyond_the_empty_one(self):
         import pypdf
@@ -484,6 +578,12 @@ class TestRefusals(unittest.TestCase):
 
     def test_picture_that_claims_a_gigantic_size(self):
         r = read(fx.make_big_header_png(30000, 30000), "huge.png")
+        self.assert_refused(r, "too_big")
+        self.assertIn("picture is too big", r.message)
+
+    def test_a_picture_between_pillows_warning_and_its_error_is_too_big_not_damaged(self):
+        # 95 M pixels: over Pillow's ~89 M warning (promoted to an error), under its ~179 M error.
+        r = read(fx.make_big_header_png(10000, 9500), "poster.png")
         self.assert_refused(r, "too_big")
         self.assertIn("picture is too big", r.message)
 
@@ -920,6 +1020,46 @@ class TestStore(unittest.TestCase):
         self.assertEqual(len(more), 1)
         self.assertEqual(self.store.add_files(None), [])
         self.assertEqual(self.store.add_files([good1], on_each=lambda r: 1 / 0)[0].reason, "duplicate")
+
+    def test_active_documents_are_not_read_again_for_every_answer(self):
+        """6.7 M characters of active documents (the store keeps up to 12 M): a cache emptied
+        past 6 M read and indexed them all again for every answer, 2-3 s each."""
+        para = ("word " * 198).strip() + ".\n\n"                 # about 990 characters
+        ids = []
+        for n in range(2):
+            res = self.store.add_result("d%d.txt" % n, doc_reader._result(
+                ok=True, kind="text", fmt="text", type_class="text", sha="s%d" % n,
+                sections=(("", "doc%d " % n + para * 3400),)))
+            self.assertTrue(res.ok, res.message)
+            ids.append(res.info.id)
+        fresh = live_docs.DocStore(self.root)                     # (the next start: nothing read yet)
+        with mock.patch.object(live_docs, "DocText", wraps=live_docs.DocText) as made:
+            first = fresh.active_docs()
+            again = fresh.active_docs()
+        self.assertGreater(sum(d.chars for d in first), 6_000_000)
+        self.assertEqual(made.call_count, 2)                      # each read once, not once per answer
+        self.assertEqual([d.id for d in again], ids)
+        self.assertTrue(all(a is b for a, b in zip(first, again)))
+        # a file that grew on disk past what the store holds is still used, just not kept
+        with mock.patch.object(live_docs, "MAX_STORE_CHARS", 10):
+            other = live_docs.DocStore(self.root)
+            self.assertEqual([d.id for d in other.active_docs()], ids)
+            self.assertEqual(other._cache, {})
+
+    def test_a_switched_off_document_is_not_kept_in_memory(self):
+        a = self.add(b"alpha document words here", "a.txt").info
+        b = self.add(b"beta document words here", "b.txt").info
+        self.assertEqual(set(self.store._cache), {a.id, b.id})
+        self.store.set_active(a.id, False)
+        self.assertEqual(set(self.store._cache), {b.id})
+        self.store.set_active(a.id, True)
+        self.assertEqual([d.id for d in self.store.active_docs()], [a.id, b.id])
+        # one switched off some other way is dropped when the next answer reads the list
+        fresh = live_docs.DocStore(self.root)
+        fresh.active_docs()
+        fresh._load()[0]["active"] = False
+        self.assertEqual([d.id for d in fresh.active_docs()], [b.id])
+        self.assertEqual(set(fresh._cache), {b.id})
 
     def test_warm_builds_the_search_index_of_the_active_documents(self):
         self.add(b"alpha words for the index", "a.txt")
@@ -1420,7 +1560,7 @@ class TestPrivacy(unittest.TestCase):
         self.assertRegex(src, r'"%s":\s*None' % live_docs.CLOUD_CHOICE_KEY)
 
     def test_no_limit_wording_anywhere_a_person_reads(self):
-        shown = list(doc_reader.MESSAGES.values()) + [
+        shown = list(doc_reader.MESSAGES.values()) + [doc_reader.PDF_CIPHER_MESSAGE] + [
             live_docs.MSG_DUPLICATE, live_docs.MSG_FULL, live_docs.MSG_SAVE,
             live_docs.PICTURES_NEED_CLOUD, live_docs.DECLINED_NOTE, live_docs.PRIVATE_NOTE,
             live_docs.EMPTY_LINE]
@@ -1570,6 +1710,26 @@ class TestBundling(unittest.TestCase):
                 self.assertNotIn('--exclude-module "%s' % lib, build)
         # the Windows and Mac builds install requirements.txt, which carries the pin
         self.assertGreaterEqual(yml.count("-r requirements.txt"), 2)
+
+    def test_an_aes_package_is_pinned_next_to_pypdf_and_installed_for_the_tests(self):
+        # Without one, pypdf has RC4 only: an AES PDF that opens without a password can't be read.
+        lines = (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
+        pins = [i for i, l in enumerate(lines) if l.strip().lower().startswith("pycryptodome")]
+        self.assertEqual(len(pins), 1)
+        pin = lines[pins[0]].strip()
+        self.assertRegex(pin, r"^pycryptodome==\d+\.\d+\.\d+$")
+        self.assertTrue(lines[pins[0] - 1].lstrip().startswith("#"))
+        yml = (ROOT / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
+        install = [l for l in yml.splitlines() if "pip install pytest" in l]
+        self.assertIn(pin, install[0])                             # CI reads AES PDFs too
+        for build in (yml, (ROOT / "build.ps1").read_text(encoding="utf-8")):
+            self.assertNotIn("--exclude-module Crypto", build.replace('"', ""))
+
+    def test_pypdf_has_aes_where_the_aes_package_is_installed(self):
+        if not (HAVE_PYPDF and importlib.util.find_spec("Crypto") is not None):
+            self.skipTest("pycryptodome is not installed")
+        from pypdf._crypt_providers import crypt_provider
+        self.assertNotEqual(crypt_provider[0], "local_crypt_fallback")     # (RC4 only)
 
     def test_the_pin_is_what_is_installed_where_the_tests_run(self):
         if not HAVE_PYPDF:

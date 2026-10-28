@@ -183,19 +183,58 @@ def test_a_yes_for_gusan_cloud_is_not_a_yes_for_an_own_key(card, answer, store, 
     assert app.cfg["live_docs_cloud_ok"] is False and app.cfg["live_docs_cloud_route"] == ""
 
 
-def test_a_yes_for_an_own_key_is_remembered_for_that_kind_only(card, answer, store, files, monkeypatch):
+def test_a_yes_for_an_own_key_is_remembered_for_that_service_only(card, answer, store, files, monkeypatch):
+    import actions
     import live_docs
     c, app = card(live_docs_cloud_ok=None)
     _contract(store, files)
     calls = _ask_spy(monkeypatch, [True, True])
     own = answer(c, app, "cloud")
-    assert live_docs.DOC_HEADER in own["context"] and app.cfg["live_docs_cloud_route"] == "cloud"
+    assert live_docs.DOC_HEADER in own["context"]
+    assert app.cfg["live_docs_cloud_route"] == "cloud:" + actions.API_CEREBRAS_ID
     answer(c, app, "cloud", question="Again?")
-    assert len(calls) == 1                                                 # not asked again for the same kind
+    assert len(calls) == 1                                                 # not asked again for the same service
     managed = answer(c, app, "managed", question="And the delivery?")
     assert len(calls) == 2 and calls[1]["title"] == "Use your documents with Gusan Cloud?"
     assert live_docs.DOC_HEADER in managed["context"]                      # (and it applies at once)
     assert app.cfg["live_docs_cloud_route"] == "managed"
+
+
+def test_a_yes_for_one_own_key_service_is_not_a_yes_for_another(card, answer, store, files, monkeypatch):
+    """The question says "the AI service you added a key for": a yes for Cerebras says nothing
+    about OpenAI, and an OpenAI-compatible key pointed at another address is another service."""
+    import actions
+    import live_docs
+    c, app = card(live_docs_cloud_ok=True, live_docs_cloud_route="cloud:" + actions.API_CEREBRAS_ID)
+    _contract(store, files)
+    calls = _ask_spy(monkeypatch, [False, True, False])
+    agreed = answer(c, app, "cloud")
+    assert calls == [] and live_docs.DOC_HEADER in agreed["context"]       # the service it was given for
+    other = answer(c, app, "cloud", engine=actions.API_OPENAI_ID, question="And the delivery?")
+    assert len(calls) == 1 and calls[0]["title"].startswith("Use your documents with the AI service")
+    assert live_docs.DOC_HEADER not in other["context"] and "45 days" not in other["context"]
+    assert app.cfg["live_docs_cloud_ok"] is False
+    openai = answer(c, app, "cloud", engine=actions.API_OPENAI_ID, question="Once more?")
+    assert len(calls) == 1 and live_docs.DOC_HEADER not in openai["context"]    # a no stays a no
+    app.cfg.update(live_docs_cloud_ok=None)
+    openai = answer(c, app, "cloud", engine=actions.API_OPENAI_ID, question="Now?")
+    assert len(calls) == 2 and live_docs.DOC_HEADER in openai["context"]
+    assert app.cfg["live_docs_cloud_route"] == "cloud:" + actions.API_OPENAI_ID
+    groq = answer(c, app, "cloud", engine=actions.API_OPENAI_ID, question="And on Groq?",
+                  extra_cfg={"action_api_base_url": "https://api.groq.com/openai/v1"})
+    assert len(calls) == 3 and live_docs.DOC_HEADER not in groq["context"]
+
+
+def test_a_yes_that_named_no_service_asks_again(card, answer, store, files, monkeypatch):
+    # A plain "cloud" (a dev build before a yes named its service) covers no service.
+    import actions
+    import live_docs
+    c, app = card(live_docs_cloud_ok=True, live_docs_cloud_route="cloud")
+    _contract(store, files)
+    calls = _ask_spy(monkeypatch, [True])
+    own = answer(c, app, "cloud")
+    assert len(calls) == 1 and live_docs.DOC_HEADER in own["context"]
+    assert app.cfg["live_docs_cloud_route"] == "cloud:" + actions.API_CEREBRAS_ID
 
 
 def test_start_asks_again_when_the_writer_changed_to_the_other_kind(card, store, files, monkeypatch):
@@ -250,6 +289,29 @@ def test_the_footer_asks_again_for_the_other_kind_of_route(build, files):
     app.cfg["live_docs_cloud_route"] = "cloud"                              # the yes was for an own key
     page.on_setting_changed("live_docs_cloud_route")
     assert sec.privacy_label.text() == ld.LINE_UNDECIDED and not sec.privacy_link.isVisibleTo(sec)
+
+
+def test_the_footer_names_the_own_key_service_the_yes_was_for(build, files, monkeypatch):
+    import actions
+    from ui.components import mini_prompt
+    from ui.pages import live_documents as ld
+    openai = actions.API_OPENAI_ID
+    page, app = build("free", action_model=openai, action_api_key="test-key-not-real")   # an own key writes
+    sec = page.documents
+    sec.add_paths([_pdf(files)])
+    _idle(sec)
+    app.cfg.update(live_docs_cloud_ok=True, live_docs_cloud_route="cloud:" + openai)
+    page.on_setting_changed("live_docs_cloud_ok")
+    assert sec.privacy_label.text() == ld.LINE_YES % "your AI service"
+    app.cfg["action_api_base_url"] = "https://api.groq.com/openai/v1"     # the same key, another service
+    page.on_setting_changed("action_api_base_url")
+    assert sec.privacy_label.text() == ld.LINE_UNDECIDED
+    app.cfg.update(live_docs_cloud_ok=False, live_docs_cloud_route="")
+    page.on_setting_changed("live_docs_cloud_ok")
+    monkeypatch.setattr(mini_prompt, "ask", lambda *a, **k: True)
+    sec.privacy_link.click()                                                # "Allow"
+    assert app.cfg["live_docs_cloud_route"] == "cloud:%s@api.groq.com" % openai
+    assert sec.privacy_label.text() == ld.LINE_YES % "your AI service"
 
 
 def test_allow_remembers_which_kind_it_was_given_for(build, files, monkeypatch):

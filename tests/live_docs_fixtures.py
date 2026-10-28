@@ -85,10 +85,12 @@ def make_pdf_with_bomb(zeros=150_000_000):
     return base.replace(obj4, new)
 
 
-def encrypt_pdf(pdf, user="secret", owner="owner"):
+def encrypt_pdf(pdf, user="secret", owner="owner", algorithm="RC4-128"):
+    """``pdf`` locked with ``algorithm`` ("RC4-128", "AES-128", "AES-256"; AES needs an AES
+    package for pypdf, as the reader does). user="" opens without a password (owner only)."""
     from pypdf import PdfReader, PdfWriter
     writer = PdfWriter(clone_from=PdfReader(io.BytesIO(pdf)))
-    writer.encrypt(user, owner, algorithm="RC4-128")
+    writer.encrypt(user, owner, algorithm=algorithm)
     out = io.BytesIO()
     writer.write(out)
     return out.getvalue()

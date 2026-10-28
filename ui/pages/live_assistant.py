@@ -285,13 +285,14 @@ def load_sessions():
 
 def writer_view(app):
     """What "Answers written by" shows: {"selected": "cloud" | "local",
-    "cloud_model", "local_name", "local_icon", "local_model", "kind"} - the
-    selection is what really answers (engine_choice.runs_on)."""
+    "cloud_model", "local_name", "local_icon", "local_model", "kind", "engine"} - the
+    selection is what really answers (engine_choice.runs_on); "engine" is the own-key
+    engine id ("" otherwise)."""
     cfg = getattr(app, "cfg", None) or {}
     pro = _is_pro(app)
     view = {"selected": "cloud" if pro and not cfg.get("privacy_mode") else "local",
             "cloud_model": CLOUD_LIVE_MODEL, "local_name": "This computer",
-            "local_icon": "laptop", "local_model": LOCAL_DEFAULT_MODEL, "kind": ""}
+            "local_icon": "laptop", "local_model": LOCAL_DEFAULT_MODEL, "kind": "", "engine": ""}
     try:
         import engine_choice as ec
     except Exception:
@@ -316,7 +317,8 @@ def writer_view(app):
         view["cloud_model"] = r.get("model_name") or view["cloud_model"]
     elif kind == "own_key":
         view.update(selected="local", local_name=ec.OWN_KEY, local_icon="key",
-                    local_model=" · ".join(x for x in (r.get("plain"), r.get("model_name")) if x))
+                    local_model=" · ".join(x for x in (r.get("plain"), r.get("model_name")) if x),
+                    engine=r.get("model_id") or "")
     elif kind == "local":
         name = r.get("model_name") or local_model
         if r.get("problem") == "needs_download":
@@ -2236,7 +2238,7 @@ class LiveAssistantPage(QWidget):
         if self.writer_hint.text() and not self._writer_hint_holds(self.writer_hint.text()):
             self._set_writer_hint("")       # the plan, Privacy mode or the engine changed
         # The Documents footer says where the words go: this computer, or the cloud AI.
-        self.documents.set_route(view.get("kind") or ("cloud" if cloud else "local"))
+        self.documents.set_route(view.get("kind") or ("cloud" if cloud else "local"), view.get("engine", ""))
 
     def _writer_hint_holds(self, hint):
         cfg = self._cfg_dict()

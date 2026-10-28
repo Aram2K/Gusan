@@ -492,19 +492,53 @@ class TestRouteKinds(unittest.TestCase):
 class TestConsentIsForTheRouteItWasGivenFor(unittest.TestCase):
     """The question names the route ("Use your documents with Gusan Cloud?" / "...the AI service
     you added a key for?") and says different things about each, so a yes is a yes for that
-    kind of cloud route only: switching to the other kind asks again."""
+    route only: Gusan Cloud, or ONE own-key service. Switching to another asks again."""
+
+    CEREBRAS = "cloud:api_cerebras"
 
     def test_the_decision_table_by_route(self):
         use = live_docs.doc_use
-        for agreed, here, send in (("managed", "managed", True), ("managed", "cloud", False),
-                                   ("cloud", "cloud", True), ("cloud", "managed", False),
-                                   ("", "managed", True), ("", "cloud", True)):
+        groq = "cloud:api_openai_compatible@api.groq.com"
+        for agreed, kind, route, send in (
+                ("managed", "managed", None, True), ("managed", "cloud", self.CEREBRAS, False),
+                (self.CEREBRAS, "cloud", self.CEREBRAS, True), (self.CEREBRAS, "managed", None, False),
+                (self.CEREBRAS, "cloud", "cloud:api_gemini", False),               # another provider
+                ("cloud:api_openai_compatible", "cloud", groq, False),              # another address
+                (groq, "cloud", groq, True),
+                (self.CEREBRAS, "cloud", None, False),                              # a service nobody named
+                ("cloud", "cloud", self.CEREBRAS, False), ("cloud", "cloud", None, False),  # (a dev build's)
+                ("cloud", "managed", None, False),
+                ("", "managed", None, True), ("", "cloud", self.CEREBRAS, True)):
             cfg = {"live_docs_cloud_ok": True, "live_docs_cloud_route": agreed}
-            got = use(cfg, here, 2)
-            self.assertEqual((got.send, got.ask), (send, not send), (agreed, here))
+            got = use(cfg, kind, 2, route)
+            self.assertEqual((got.send, got.ask), (send, not send), (agreed, kind, route))
             self.assertEqual(got.pictures, send)
         self.assertTrue(use({"live_docs_cloud_ok": True, "live_docs_cloud_route": "managed"}, "local_llm", 2).send)
         self.assertTrue(use({"live_docs_cloud_ok": True}, "cloud", 2).send)           # (no route recorded: either)
+
+    def test_a_route_is_one_service(self):
+        import actions
+        rid = live_docs.route_id
+        self.assertEqual(rid("managed", actions.API_MANAGED_ID, {"action_api_base_url": "https://x.test"}),
+                         "managed")                                                  # Gusan Cloud is one route
+        self.assertEqual(rid("local_llm", "qwen"), "")
+        self.assertEqual(rid(None), "")
+        self.assertEqual(rid("cloud"), "cloud")                                      # (no engine: no service)
+        self.assertEqual(rid("cloud", actions.API_CEREBRAS_ID, {}), self.CEREBRAS)
+        openai = actions.API_OPENAI_ID
+        self.assertEqual(rid("cloud", openai, {}), "cloud:" + openai)
+        self.assertEqual(rid("cloud", openai, {"action_api_base_url": "https://api.openai.com/v1"}),
+                         "cloud:" + openai)                                          # its own address
+        self.assertEqual(rid("cloud", openai, {"action_api_base_url": "https://API.groq.com/openai/v1"}),
+                         "cloud:%s@api.groq.com" % openai)
+        self.assertEqual(rid("cloud", openai, {"action_api_base_url": "http://localhost:1234/v1"}),
+                         "cloud:%s@localhost:1234" % openai)
+        self.assertEqual(rid("cloud", actions.API_MISTRAL_ID, {"action_api_base_url": "https://api.mistral.ai/v1"}),
+                         "cloud:" + actions.API_MISTRAL_ID)
+        odd = rid("cloud", openai, {"action_api_base_url": "https://me:hunter2@x.test:99999/v1"})
+        self.assertTrue(odd.startswith("cloud:%s@" % openai), odd)                  # (unreadable: still its own)
+        self.assertNotIn("hunter2", odd)                                             # never what the URL holds
+        self.assertNotEqual(rid("cloud", openai, {"action_api_base_url": "file:///v1"}), "cloud:" + openai)
 
     def test_a_no_stays_a_no_for_both(self):
         for here in ("managed", "cloud"):
@@ -512,20 +546,23 @@ class TestConsentIsForTheRouteItWasGivenFor(unittest.TestCase):
             self.assertEqual((got.send, got.ask, got.why), (False, False, "declined"))
 
     def test_privacy_mode_is_still_absolute(self):
-        for route in ("", "managed", "cloud"):
-            for here in ("managed", "cloud"):
+        for route in ("", "managed", "cloud", self.CEREBRAS):
+            for here, rid in (("managed", "managed"), ("cloud", self.CEREBRAS), ("cloud", None)):
                 cfg = {"privacy_mode": True, "live_docs_cloud_ok": True, "live_docs_cloud_route": route}
-                self.assertEqual(live_docs.doc_use(cfg, here, 2).why, "private")
+                self.assertEqual(live_docs.doc_use(cfg, here, 2, rid).why, "private")
 
     def test_with_choice_is_what_an_answer_in_flight_sees(self):
         base = {"live_docs_cloud_ok": True, "live_docs_cloud_route": "managed", "other": 1}
-        yes = live_docs.with_choice(base, True, "cloud")
-        self.assertEqual((yes["live_docs_cloud_ok"], yes["live_docs_cloud_route"], yes["other"]), (True, "cloud", 1))
-        self.assertTrue(live_docs.doc_use(yes, "cloud", 1).send)
-        no = live_docs.with_choice(base, False, "cloud")
+        yes = live_docs.with_choice(base, True, self.CEREBRAS)
+        self.assertEqual((yes["live_docs_cloud_ok"], yes["live_docs_cloud_route"], yes["other"]),
+                         (True, self.CEREBRAS, 1))
+        self.assertTrue(live_docs.doc_use(yes, "cloud", 1, self.CEREBRAS).send)
+        self.assertTrue(live_docs.doc_use(yes, "cloud", 1, "cloud:api_gemini").ask)      # one service
+        no = live_docs.with_choice(base, False, self.CEREBRAS)
         self.assertEqual((no["live_docs_cloud_ok"], no["live_docs_cloud_route"]), (False, ""))
         self.assertEqual(base["live_docs_cloud_route"], "managed")                        # (a copy)
         self.assertEqual(live_docs.with_choice(None, True, "local_llm")["live_docs_cloud_route"], "")
+        self.assertEqual(live_docs.with_choice(None, True, "managed")["live_docs_cloud_route"], "managed")
 
     def test_the_route_key_has_a_default_in_the_config(self):
         src = (Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")

@@ -18,13 +18,15 @@ The UI flow (see docs/redesign/live-documents-spec.md):
     store = live_docs.get_store()
     result = store.add_file(path, cancel=event.is_set)     # worker thread
     ...
-    use = live_docs.doc_use(app.cfg, engine_kind, store.active_count())
+    route = live_docs.route_id(engine_kind, engine, cfg)
+    use = live_docs.doc_use(app.cfg, engine_kind, store.active_count(), route)
     if use.send:
         ctx = rolling_context(..., documents=store.active_docs(),
                               doc_chars=live_docs.doc_chars_for(engine_kind),
                               pictures=[p.name for p in pictures])
 """
 import base64
+import hashlib
 import json
 import logging
 import math
@@ -37,6 +39,7 @@ import time
 import unicodedata
 from collections import Counter, namedtuple
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import doc_reader
 import storage
@@ -50,8 +53,9 @@ INDEX_NAME = "index.json"
 MAX_DOCS = 50
 MAX_STORE_CHARS = 12_000_000
 CLOUD_CHOICE_KEY = "live_docs_cloud_ok"      # config: None = not asked, True, False
-CLOUD_ROUTE_KEY = "live_docs_cloud_route"    # config: the kind of cloud route a True was given for
-#                                              ("managed" = Gusan Cloud, "cloud" = an own key; "" = any)
+CLOUD_ROUTE_KEY = "live_docs_cloud_route"    # config: the cloud route a True was given for (route_id:
+#                                              "managed" = Gusan Cloud, "cloud:<engine>[@host]" = one
+#                                              own-key service; "" = any)
 EVENT_ADDED = "live_document_added"          # telemetry: counts only, never a name or text
 EVENT_FAILED = "live_document_failed"
 
@@ -434,12 +438,58 @@ def doc_chars_for(kind):
 
 
 # ── privacy: may documents reach this route? ──
-def doc_use(cfg, kind, count):
+def _host(url):
+    """The host of a base URL ("api.groq.com", with ":port" when it has one); "" for none.
+    Never anything else the URL holds (a password in it)."""
+    url = str(url or "").strip()
+    if not url:
+        return ""
+    try:
+        parts = urlsplit(url if "://" in url else "//" + url)
+        host = (parts.hostname or "").lower()
+        port = parts.port
+    except ValueError:
+        host = ""
+    if not host:
+        # (unreadable: nothing can be sent there, and it is never taken for another address)
+        return "unreadable-" + hashlib.sha256(url.encode("utf-8", "replace")).hexdigest()[:12]
+    return host + (":%d" % port if port else "")
+
+
+def route_id(kind, engine="", cfg=None):
+    """What a yes to the documents question covers (config ``live_docs_cloud_route``):
+    "managed" for Gusan Cloud (one route), "cloud:<engine id>" for an own key - with
+    "@<host>" when its requests go somewhere else than that provider's own address (an
+    OpenAI-compatible key pointed at Groq is another service than OpenAI) - and "" for
+    any other kind. The question names the service ("the AI service you added a key for"),
+    so a yes is for that one service. A "cloud" engine nobody named is plain "cloud",
+    which no yes covers."""
+    if kind == "managed":
+        return "managed"
+    if kind != "cloud":
+        return ""
+    engine = str(engine or "").strip()
+    if not engine:
+        return "cloud"
+    host = _host((cfg or {}).get("action_api_base_url"))   # (where action_api sends it)
+    if host:
+        try:
+            import action_api
+            own = _host(action_api.defaults(engine).get("default_base_url"))
+        except Exception:
+            own = ""
+        if host != own:
+            return "cloud:%s@%s" % (engine, host)
+    return "cloud:" + engine
+
+
+def doc_use(cfg, kind, count, route=None):
     """The one decision. ``kind`` is actions.ACTION_MODELS[engine]["kind"] of the
     engine that WILL answer: "local_llm", "cloud" (own key) or "managed" (Gusan
-    Cloud); ``count`` the active documents. A cloud route needs the person's one-time
-    yes (config ``live_docs_cloud_ok``): until then ``ask`` is True and nothing is
-    sent. Privacy mode is absolute: never a cloud route."""
+    Cloud); ``count`` the active documents; ``route`` its route_id (an own key is one
+    service). A cloud route needs the person's one-time yes (config ``live_docs_cloud_ok``)
+    for that route: until then ``ask`` is True and nothing is sent. Privacy mode is
+    absolute: never a cloud route."""
     cfg = cfg or {}
     if not count or count <= 0 or kind not in ("local_llm", "cloud", "managed"):
         # (an engine of any other kind - "rules", or one added later - is never taken for a
@@ -452,9 +502,12 @@ def doc_use(cfg, kind, count):
     choice = cfg.get(CLOUD_CHOICE_KEY)
     if choice is True:
         agreed = str(cfg.get(CLOUD_ROUTE_KEY) or "")
-        if agreed and agreed != kind:
-            # The yes was given for the OTHER kind of cloud route (the question names it: Gusan
-            # Cloud, or "the AI service you added a key for"): not a yes for this one. Ask again.
+        here = "managed" if kind == "managed" else (
+            str(route) if str(route or "").startswith("cloud:") else "cloud")
+        if agreed and (agreed != here or agreed == "cloud"):
+            # The yes was given for ANOTHER route (the question names it: Gusan Cloud, or "the
+            # AI service you added a key for" - one service), or it named no service (a plain
+            # "cloud", from a build before that): not a yes for this one. Ask again.
             return DocUse(False, True, False, "ask", "")
         return DocUse(True, False, True, "cloud", "")
     if choice is False:
@@ -462,11 +515,12 @@ def doc_use(cfg, kind, count):
     return DocUse(False, True, False, "ask", "")
 
 
-def with_choice(cfg, yes, kind):
-    """``cfg`` as it is once the person has answered the question for the ``kind`` route:
-    what doc_use should see for the answer that is being written right now."""
-    return dict(cfg or {}, **{CLOUD_CHOICE_KEY: bool(yes),
-                               CLOUD_ROUTE_KEY: kind if yes and kind in ("cloud", "managed") else ""})
+def with_choice(cfg, yes, route):
+    """``cfg`` as it is once the person has answered the question for ``route`` (a
+    route_id): what doc_use should see for the answer that is being written right now."""
+    route = str(route or "")
+    agreed = route if yes and (route in ("managed", "cloud") or route.startswith("cloud:")) else ""
+    return dict(cfg or {}, **{CLOUD_CHOICE_KEY: bool(yes), CLOUD_ROUTE_KEY: agreed})
 
 
 def cloud_prompt(managed=True):
@@ -815,6 +869,8 @@ class DocStore:
                         except BaseException:
                             r["active"] = was          # not saved: not changed (what is shown is what is kept)
                             raise
+                    if not on:
+                        self._cache.pop(doc_id, None)  # (its text is read again if it is switched back on)
                     return True
         return False
 
@@ -872,21 +928,27 @@ class DocStore:
         except (OSError, ValueError, UnicodeError, KeyError, IndexError, TypeError):
             return None
         doc = DocText(row["id"], row["name"], row["fmt"], chunks)
-        if sum(d.chars for d in self._cache.values()) + doc.chars > 6_000_000:
-            self._cache.clear()
-        self._cache[row["id"]] = doc
+        # Only active documents are kept (active_docs drops the others first), and the store
+        # holds at most MAX_STORE_CHARS, so they all fit: emptying the cache when it grew would
+        # read and index everything again for every answer. (A file that grew on disk past
+        # that is used, not kept.)
+        if sum(d.chars for d in self._cache.values()) + doc.chars <= MAX_STORE_CHARS:
+            self._cache[row["id"]] = doc
         return doc
 
     def active_docs(self):
         """DocText of every active document that has text, in the order they were
         added - what rolling_context(documents=...) takes."""
         with self._lock:
+            rows = [r for r in self._rows_now() if r["active"] and r["chunks"]]
+            keep = {r["id"] for r in rows}
+            for doc_id in [i for i in self._cache if i not in keep]:
+                del self._cache[doc_id]         # switched off or gone: not kept in memory
             out = []
-            for r in self._rows_now():
-                if r["active"] and r["chunks"]:
-                    doc = self._text_of(r)
-                    if doc is not None:
-                        out.append(doc)
+            for r in rows:
+                doc = self._text_of(r)
+                if doc is not None:
+                    out.append(doc)
             return out
 
     def warm(self):
@@ -944,6 +1006,6 @@ __all__ = [
     "AddResult", "CLOUD_CHOICE_KEY", "CLOUD_ROUTE_KEY", "DocInfo", "DocStore", "DocText", "DocUse", "EVENT_ADDED",
     "EVENT_FAILED", "Passage", "Picture", "build_block", "chip_text", "chunk_sections",
     "chunk_text", "cloud_prompt", "describe", "doc_chars_for", "doc_use", "documents_context",
-    "event_for", "get_store", "icon_for", "neutralize", "safe_name", "select_passages",
+    "event_for", "get_store", "icon_for", "neutralize", "route_id", "safe_name", "select_passages",
     "size_text", "tokens",
 ]

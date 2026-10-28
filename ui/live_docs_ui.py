@@ -10,7 +10,8 @@ The logic is Qt-free (live_docs.py, doc_reader.py); this module is only glue:
                                 can be cancelled; it never raises
     dropped_paths(mime)         the local files of a drag (a pick or a drop), plain paths
     ask_cloud(parent, app, ...) the one-time "use your documents with the cloud?" question
-    set_choice(app, yes)        remember the answer (config ``live_docs_cloud_ok``)
+    set_choice(app, yes, route) remember the answer (config ``live_docs_cloud_ok``) and the
+                                route a yes is for (``live_docs_cloud_route``)
 
 Nothing here opens, runs or follows a file: a path is only handed to doc_reader, which
 reads it once through a size-capped stream.
@@ -210,13 +211,15 @@ def _shown_name(path):
 
 
 # ── the cloud question ──
-def set_choice(app, yes, kind=None):
-    """Remember the person's answer (config ``live_docs_cloud_ok``) and which kind of
-    cloud route a yes was given for (``live_docs_cloud_route``: "managed" = Gusan Cloud,
-    "cloud" = their own key; the question names it): through the controller's set_setting
-    (applies at once, saved a moment later, the page hears of it), else straight into cfg."""
+def set_choice(app, yes, route=None):
+    """Remember the person's answer (config ``live_docs_cloud_ok``) and which cloud route a
+    yes was given for (``live_docs_cloud_route``, a live_docs.route_id: "managed" = Gusan
+    Cloud, "cloud:<engine>[@host]" = that one own-key service; the question names it):
+    through the controller's set_setting (applies at once, saved a moment later, the page
+    hears of it), else straight into cfg."""
     yes = bool(yes)
-    route = kind if yes and kind in ("cloud", "managed") else ""
+    # (the rule of live_docs.with_choice: a yes keeps its route, a no keeps none)
+    route = live_docs.with_choice({}, yes, route)[live_docs.CLOUD_ROUTE_KEY]
     ok = False
     cfg = getattr(app, "cfg", None)
     setter = getattr(app, "set_setting", None)
@@ -246,11 +249,12 @@ def set_choice(app, yes, kind=None):
     return ok or (isinstance(cfg, dict) and cfg.get(live_docs.CLOUD_CHOICE_KEY) is yes)
 
 
-def ask_cloud(parent, app, managed=True, private=False):
+def ask_cloud(parent, app, managed=True, private=False, route=None):
     """Ask once - in plain words - whether the few parts of the documents that match a
     question may go to the cloud AI that writes the answer. True = yes. The answer is
-    remembered (set_choice); Esc is a no. ``private``: the question is shown from the
-    floating card while it is hidden from screen shares, so it is hidden from them too."""
+    remembered (set_choice) for ``route`` (live_docs.route_id of the own-key service that
+    answers; Gusan Cloud is one route); Esc is a no. ``private``: the question is shown from
+    the floating card while it is hidden from screen shares, so it is hidden from them too."""
     from ui.components import mini_prompt
     title, body, yes, no = live_docs.cloud_prompt(managed)
     try:
@@ -264,5 +268,5 @@ def ask_cloud(parent, app, managed=True, private=False):
     except Exception:
         logger.warning("the documents question failed", exc_info=True)
         return False                    # nothing is sent, and nothing is remembered
-    set_choice(app, answer, "managed" if managed else "cloud")
+    set_choice(app, answer, "managed" if managed else (route or "cloud"))
     return answer

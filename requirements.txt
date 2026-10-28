@@ -24,6 +24,11 @@ requests
 # Pure Python (no native code), imported with a plain import so PyInstaller bundles it.
 # Pinned: it parses untrusted files, so a new version is a decision, not an accident.
 pypdf==6.20.1
+# pycryptodome is pypdf's AES: without it pypdf only has RC4, and a PDF locked with AES that
+# opens without a password (bank, invoice and government PDFs) can't be read. pypdf imports
+# it itself; PyInstaller follows that import and its Crypto hook bundles the cipher libraries.
+# Pinned for the same reason as pypdf (3.24.x: the 3.x line, wheels for Windows and Mac).
+pycryptodome==3.24.1
 # llama-cpp-python powers the local Smart-action LLMs (Qwen/Gemma).
 # Pinned to 0.2.90 because the prebuilt CPU wheels from 0.3.x onward are
 # compiled with AVX-512, which crashes (STATUS_ILLEGAL_INSTRUCTION /
