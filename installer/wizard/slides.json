@@ -1,0 +1,166 @@
+{
+  "canvas": [
+    1000,
+    400
+  ],
+  "tick_ms": 100,
+  "note": "Show the frames of slide 1..5 in order and loop; each frame stays for ms.",
+  "slides": [
+    {
+      "n": 1,
+      "eyebrow": "Dictation",
+      "title": "Type with your voice",
+      "line": "Press a shortcut, talk, and it types anywhere.",
+      "frames": [
+        {
+          "file": "slide1_1.png",
+          "ms": 600
+        },
+        {
+          "file": "slide1_2.png",
+          "ms": 600
+        },
+        {
+          "file": "slide1_3.png",
+          "ms": 700
+        },
+        {
+          "file": "slide1_4.png",
+          "ms": 700
+        },
+        {
+          "file": "slide1_5.png",
+          "ms": 700
+        },
+        {
+          "file": "slide1_6.png",
+          "ms": 2700
+        }
+      ]
+    },
+    {
+      "n": 2,
+      "eyebrow": "Smart Actions",
+      "title": "Ask for finished text",
+      "line": "Say what you need. The finished text is pasted.",
+      "frames": [
+        {
+          "file": "slide2_1.png",
+          "ms": 600
+        },
+        {
+          "file": "slide2_2.png",
+          "ms": 600
+        },
+        {
+          "file": "slide2_3.png",
+          "ms": 900
+        },
+        {
+          "file": "slide2_4.png",
+          "ms": 900
+        },
+        {
+          "file": "slide2_5.png",
+          "ms": 900
+        },
+        {
+          "file": "slide2_6.png",
+          "ms": 2100
+        }
+      ]
+    },
+    {
+      "n": 3,
+      "eyebrow": "Meetings",
+      "title": "Meeting notes, no bot",
+      "line": "Record a call. Get the summary and action items.",
+      "frames": [
+        {
+          "file": "slide3_1.png",
+          "ms": 800
+        },
+        {
+          "file": "slide3_2.png",
+          "ms": 900
+        },
+        {
+          "file": "slide3_3.png",
+          "ms": 1000
+        },
+        {
+          "file": "slide3_4.png",
+          "ms": 900
+        },
+        {
+          "file": "slide3_5.png",
+          "ms": 1100
+        },
+        {
+          "file": "slide3_6.png",
+          "ms": 1300
+        }
+      ]
+    },
+    {
+      "n": 4,
+      "eyebrow": "Live Assistant",
+      "title": "Help during your calls",
+      "line": "Answers while you talk, hidden from most screen shares.",
+      "frames": [
+        {
+          "file": "slide4_1.png",
+          "ms": 700
+        },
+        {
+          "file": "slide4_2.png",
+          "ms": 800
+        },
+        {
+          "file": "slide4_3.png",
+          "ms": 1000
+        },
+        {
+          "file": "slide4_4.png",
+          "ms": 1500
+        },
+        {
+          "file": "slide4_5.png",
+          "ms": 2000
+        }
+      ]
+    },
+    {
+      "n": 5,
+      "eyebrow": "Audio to text",
+      "title": "Files become transcripts",
+      "line": "Drop a recording, get a transcript with speakers.",
+      "frames": [
+        {
+          "file": "slide5_1.png",
+          "ms": 800
+        },
+        {
+          "file": "slide5_2.png",
+          "ms": 700
+        },
+        {
+          "file": "slide5_3.png",
+          "ms": 1100
+        },
+        {
+          "file": "slide5_4.png",
+          "ms": 800
+        },
+        {
+          "file": "slide5_5.png",
+          "ms": 1500
+        },
+        {
+          "file": "slide5_6.png",
+          "ms": 1100
+        }
+      ]
+    }
+  ]
+}
