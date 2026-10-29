@@ -14,11 +14,15 @@ from PySide6.QtWidgets import QAbstractButton, QApplication
 from tests_qt.conftest import make_stub_app
 
 AGENDA = "Q3 numbers\nHiring plan\nLaunch checklist"
-BODY = ("Gusan reads your events' title, time, people, call link and description. Read-only.\n"
-        "It uses them to show Coming up, remind you to record and name your meeting.\n"
-        "They stay on this computer, except a meeting's title, names and agenda, which go to the AI "
-        "when you use Live Assistant or AI notes.\n"
-        "Disconnect any time. Details: gusan.aibuben.xyz/privacy")
+BODY = ("Gusan reads your calendar to show your next meetings and offer to record them. "
+        "It can only read: it never changes your calendar.")
+DETAIL = [
+    "•  Reads: title, time, guests, agenda and call link of each meeting.",
+    "•  Uses them to: show Coming up, remind you to record, and name your meeting.",
+    "•  Stays on this computer. Only if you use Live Assistant or AI notes, that meeting's "
+    "title, guest names and agenda go to the AI.",
+    "•  Disconnect any time in Meeting settings."]
+LINK = ("Privacy details: gusan.aibuben.xyz/privacy", "https://gusan.aibuben.xyz/privacy")
 
 
 @pytest.fixture(autouse=True)
@@ -201,8 +205,8 @@ def _patch_ask(monkeypatch, answer):
     from ui.components import mini_prompt
     asked = []
 
-    def ask(parent, title, body, yes, no, icon="info"):
-        asked.append((title, body, yes, no, icon))
+    def ask(parent, title, body, yes, no, icon="info", private=False, *, detail=None, link=None):
+        asked.append((title, body, yes, no, icon, detail, link))
         return answer
     monkeypatch.setattr(mini_prompt, "ask", ask)
     return asked
@@ -218,9 +222,10 @@ def test_connect_asks_disclosure_first(shell, monkeypatch):
     lv.connect_card.connect_btn.click()
     lv.rail.cal_connect.click()
     assert cal.calls == [] and len(asked) == 2
-    title, body, yes, no, icon = asked[0]
+    title, body, yes, no, icon, detail, link = asked[0]
     assert (title, yes, no, icon) == ("Connect Google Calendar", "Connect", "Not now", "calendar")
     assert body == BODY                                   # Google's prominent disclosure, word for word
+    assert detail == DETAIL and link == LINK
     assert not lv.connect_card.cancel_btn.isVisibleTo(page)
     # "Connect": the browser sign-in starts - from either button.
     asked2 = _patch_ask(monkeypatch, True)
@@ -803,3 +808,47 @@ def test_the_live_view_header_shows_a_hostile_title_as_text(shell, picture, meet
     assert h.title_label.textFormat() == Qt.PlainText and h.title_label.text() == HOSTILE
     assert h.sub_label.textFormat() == Qt.PlainText and HOSTILE_NAME in h.sub_label.text()
     assert QLabel.sizeHint(h.title_label).height() < 100 and QLabel.sizeHint(h.sub_label).height() < 100
+
+
+def test_the_connect_box_is_short_points_and_a_https_link():
+    # Simple and clear: one short sentence, four one-line points (no wall of text), one link.
+    assert "\n" not in BODY and len(BODY) < 160
+    assert len(DETAIL) == 4 and all(len(x) < 140 and x.startswith("•  ") for x in DETAIL)
+    text, url = LINK
+    assert url == "https://gusan.aibuben.xyz/privacy" and "gusan.aibuben.xyz/privacy" in text
+    # what Google must be told: what is read, what for, who else gets it, how to stop
+    joined = " ".join(DETAIL).lower()
+    for word in ("reads", "agenda", "call link", "remind you to record", "ai", "disconnect"):
+        assert word in joined, word
+
+
+def test_the_link_on_a_card_opens_the_browser_and_leaves_the_card(qapp, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+    from ui.components import mini_prompt as mp
+    opened = []
+    monkeypatch.setattr(mp, "_open_link", lambda url: opened.append(url) or True)
+    dlg = mp.MiniPrompt(None, "Connect Google Calendar", BODY, "Connect", "Not now", icon="calendar",
+                        detail=DETAIL, link=LINK)
+    dlg.show()
+    QApplication.processEvents()
+    assert dlg.link_button is not None and dlg.link_button.text() == LINK[0]
+    assert dlg.link_button.accessibleName() == "Open " + LINK[0]
+    dlg.link_button.click()
+    assert opened == [LINK[1]]
+    assert dlg.isVisible() and dlg.result() != QDialog.Accepted           # reading the page is not an answer
+    dlg.close()
+
+
+def test_only_a_plain_https_address_is_ever_linked_or_opened(qapp, monkeypatch):
+    from PySide6.QtGui import QDesktopServices
+    from ui.components import mini_prompt as mp
+    for bad in ("http://gusan.aibuben.xyz/privacy", "javascript:alert(1)", "file:///C:/Windows/notepad.exe",
+                "https://x.test/a b", "https://x.test/\nnext", "", None):
+        dlg = mp.MiniPrompt(None, "T", "B", "Yes", "No", link=("Privacy", bad))
+        assert dlg.link_button is None, bad                              # no link is drawn for it
+        dlg.deleteLater()
+    urls = []
+    monkeypatch.setattr(QDesktopServices, "openUrl", staticmethod(lambda url: urls.append(url.toString()) or True))
+    assert mp._open_link("http://x.test/") is False and mp._open_link("ftp://x.test/") is False and urls == []
+    assert mp._open_link("https://gusan.aibuben.xyz/privacy") is True
+    assert urls == ["https://gusan.aibuben.xyz/privacy"]

@@ -131,12 +131,16 @@ ASK_KEY = "calendar_ask_to_record"
 LINK_ONLY_KEY = "calendar_only_with_link"       # "Only meetings with other people" (the key keeps its old name)
 # The disclosure Google asks for, shown before the browser opens (every Connect button).
 CONNECT_TITLE = "Connect Google Calendar"
-CONNECT_BODY = (
-    "Gusan reads your events' title, time, people, call link and description. Read-only.\n"
-    "It uses them to show Coming up, remind you to record and name your meeting.\n"
-    "They stay on this computer, except a meeting's title, names and agenda, which go to the AI "
-    "when you use Live Assistant or AI notes.\n"
-    "Disconnect any time. Details: gusan.aibuben.xyz/privacy")
+CONNECT_BODY = ("Gusan reads your calendar to show your next meetings and offer to record them. "
+                "It can only read: it never changes your calendar.")
+# One short point per line (what it reads, what for, where it goes, how to stop), then a link.
+CONNECT_DETAIL = (
+    "•  Reads: title, time, guests, agenda and call link of each meeting.",
+    "•  Uses them to: show Coming up, remind you to record, and name your meeting.",
+    "•  Stays on this computer. Only if you use Live Assistant or AI notes, that meeting's "
+    "title, guest names and agenda go to the AI.",
+    "•  Disconnect any time in Meeting settings.")
+CONNECT_LINK = ("Privacy details: gusan.aibuben.xyz/privacy", "https://gusan.aibuben.xyz/privacy")
 # When the grant ran out (Google's 7-day limit while the app is in Testing, or revoked in the
 # Google account): shown on the Connect card and in the rail until the next connect.
 EXPIRED_NOTE = "Calendar access expired. Connect again."
@@ -424,7 +428,8 @@ class MeetingsPage(QWidget):
         if cal is None or getattr(cal, "is_connecting", False):
             return False
         if not self.cfg().get("privacy_mode") and not mini_prompt.ask(
-                self, CONNECT_TITLE, CONNECT_BODY, "Connect", "Not now", icon="calendar"):
+                self, CONNECT_TITLE, CONNECT_BODY, "Connect", "Not now", icon="calendar",
+                detail=list(CONNECT_DETAIL), link=CONNECT_LINK):
             return False
         try:
             return bool(cal.connect_calendar())

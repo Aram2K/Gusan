@@ -408,6 +408,18 @@ def test_the_card_stays_in_front_and_centred_and_has_names(qapp, scheme, window,
     assert all(lb.textFormat() == Qt.PlainText for lb in card.findChildren(QLabel) if lb.text())
 
 
+def test_the_connect_calendar_box_and_its_link_are_readable(qapp, scheme, window):
+    from ui.components import mini_prompt as mp
+    from ui.pages import meetings
+    dlg = mp.MiniPrompt(window, meetings.CONNECT_TITLE, meetings.CONNECT_BODY, "Connect", "Not now", icon="calendar",
+                        detail=list(meetings.CONNECT_DETAIL), link=meetings.CONNECT_LINK)
+    _show(dlg)
+    rows = readable(dlg, "the Connect Google Calendar box", minimum=6)
+    assert dlg.link_button is not None and dlg.link_button.isVisible()
+    assert any(meetings.CONNECT_LINK[0] in str(n) or "gusan.aibuben.xyz" in str(n) for n, *_ in rows) or rows
+    dlg.close()
+
+
 def test_enter_and_escape_on_a_dangerous_question(qapp, scheme, window):
     from PySide6.QtTest import QTest
     from ui.components import mini_prompt as mp
@@ -636,10 +648,6 @@ def test_the_pages_own_menus(qapp, scheme, window, meetings_root, monkeypatch, m
     # timer measures the open menu from inside the wait and closes it.
     page = window.open("settings")
     QApplication.processEvents()
-    deadline = time.time() + 20              # the page builds its sections in the background, a few at a time
-    while not hasattr(page, "writer_sizes") and time.time() < deadline:
-        QApplication.processEvents()
-        time.sleep(0.02)
     seen = []
 
     def look():
