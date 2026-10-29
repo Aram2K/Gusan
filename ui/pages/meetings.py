@@ -1545,7 +1545,7 @@ class ConnectCard(Card):
         col = QVBoxLayout()
         col.setSpacing(1)
         col.addWidget(tlabel("Connect Google Calendar", 14.5, 700, "ink", parent=self))
-        self.sub = tlabel("See your meetings and get a nudge to record.", 13, 400, "muted", parent=self, wrap=True)
+        self.sub = tlabel("See your meetings and get a reminder to record.", 13, 400, "muted", parent=self, wrap=True)
         col.addWidget(self.sub)
         row.addLayout(col, 1)
         self.connect_btn = Button("Connect", "secondary", "s", parent=self)
@@ -1587,7 +1587,7 @@ class ConnectCard(Card):
             self.sub.setText(self._error)
             views.set_tone(self.sub, self._error_tone)
         else:
-            self.sub.setText("See your meetings and get a nudge to record.")
+            self.sub.setText("See your meetings and get a reminder to record.")
             views.set_tone(self.sub, "muted")
 
     def _connect(self):
@@ -2658,8 +2658,8 @@ class NotesOption(QFrame):
 
 
 class MeetingRail(SettingsRail):
-    """'Meeting settings': Google Calendar, Meeting language, Notes
-    written by, Send notes to Notion, Remind me to tell people; the speech
+    """'Meeting settings': Google Calendar, Send notes to Notion (right below it),
+    Meeting language, Notes written by, Remind me to tell people; the speech
     model this runs on in the foot."""
 
     def __init__(self, page, parent=None):
@@ -2695,29 +2695,6 @@ class MeetingRail(SettingsRail):
         self.link_toggle = Toggle("Only meetings with other people", True)
         self.link_toggle.toggled.connect(lambda on: self.page.set_setting(LINK_ONLY_KEY, bool(on)))
         self.link_row = self.add_row(SettingRow("Only meetings with other people", self.link_toggle))
-        # Language (no "Record from" here: every meeting starts on Both sides of
-        # the call; the start card picks another for one meeting)
-        self.lang_combo = LangCombo(accessible="Meeting language")
-        self.lang_combo.setFixedWidth(278)
-        self.lang_combo.activated.connect(self._on_lang)
-        self.add_row(SettingRow("Meeting language", self.lang_combo, stacked=True))
-        # Notes written by
-        opts = QWidget()
-        ol = QVBoxLayout(opts)
-        ol.setContentsMargins(0, 0, 0, 0)
-        ol.setSpacing(6)
-        self.opt_cloud = NotesOption("Gusan Cloud", _cloud_writer_model(), "cloud", ProTag("s"), opts)
-        self.opt_local = NotesOption("This computer", "Qwen 1.5B", "laptop", None, opts)
-        ol.addWidget(self.opt_cloud)
-        ol.addWidget(self.opt_local)
-        opts.setAccessibleName("Notes written by")
-        self._group = QButtonGroup(self)
-        self._group.setExclusive(True)
-        self._group.addButton(self.opt_cloud.radio, 0)
-        self._group.addButton(self.opt_local.radio, 1)
-        self.opt_cloud.radio.clicked.connect(self._pick_cloud)
-        self.opt_local.radio.clicked.connect(self._pick_local)
-        self.add_row(SettingRow("Notes written by", opts, stacked=True))
         # Notion. The actions stack (Manage over Disconnect, Reconnect over Disconnect):
         # side by side they would not fit beside the label in this narrow rail.
         self.notion_control = QWidget()
@@ -2749,6 +2726,29 @@ class MeetingRail(SettingsRail):
         self.notion_auto_toggle.toggled.connect(lambda on: self.page.set_setting("notion_auto_send", bool(on)))
         self.notion_auto_row = self.add_row(SettingRow("Send automatically", self.notion_auto_toggle,
                                                        hint=notion_sheet.RAIL_AUTO_HINT))
+        # Language (no "Record from" here: every meeting starts on Both sides of
+        # the call; the start card picks another for one meeting)
+        self.lang_combo = LangCombo(accessible="Meeting language")
+        self.lang_combo.setFixedWidth(278)
+        self.lang_combo.activated.connect(self._on_lang)
+        self.add_row(SettingRow("Meeting language", self.lang_combo, stacked=True))
+        # Notes written by
+        opts = QWidget()
+        ol = QVBoxLayout(opts)
+        ol.setContentsMargins(0, 0, 0, 0)
+        ol.setSpacing(6)
+        self.opt_cloud = NotesOption("Gusan Cloud", _cloud_writer_model(), "cloud", ProTag("s"), opts)
+        self.opt_local = NotesOption("This computer", "Qwen 1.5B", "laptop", None, opts)
+        ol.addWidget(self.opt_cloud)
+        ol.addWidget(self.opt_local)
+        opts.setAccessibleName("Notes written by")
+        self._group = QButtonGroup(self)
+        self._group.setExclusive(True)
+        self._group.addButton(self.opt_cloud.radio, 0)
+        self._group.addButton(self.opt_local.radio, 1)
+        self.opt_cloud.radio.clicked.connect(self._pick_cloud)
+        self.opt_local.radio.clicked.connect(self._pick_local)
+        self.add_row(SettingRow("Notes written by", opts, stacked=True))
         # Consent
         self.consent_toggle = Toggle("Remind me to tell people", True)
         self.consent_toggle.toggled.connect(lambda on: self.page.set_setting(CONSENT_KEY, bool(on)))

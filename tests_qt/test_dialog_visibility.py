@@ -648,6 +648,8 @@ def test_the_pages_own_menus(qapp, scheme, window, meetings_root, monkeypatch, m
     # timer measures the open menu from inside the wait and closes it.
     page = window.open("settings")
     QApplication.processEvents()
+    page.ensure_built("speech")              # the page builds its sections lazily: this one, now, not "soon"
+    QApplication.processEvents()
     seen = []
 
     def look():
