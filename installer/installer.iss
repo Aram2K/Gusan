@@ -25,6 +25,12 @@
   #define MyAppVersion "0.0.0"
 #endif
 
+; The wizard pictures are PNG files and the slideshow loads PNG through
+; TBitmapImage.PngImage: both need Inno Setup 6.5.2 or newer (CI has 6.7).
+#if VER < EncodeVer(6,5,2)
+  #error Inno Setup 6.5.2 or newer is needed to compile this script (PNG wizard pictures)
+#endif
+
 [Setup]
 AppId={{8E3B7C8A-9D54-4F61-9F6C-2E8C7F0A1B23}
 AppName={#MyAppName}
@@ -61,9 +67,21 @@ RestartApplications=yes
 DisableReadyPage=yes
 DisableFinishedPage=no
 ShowLanguageDialog=no
+; Pictures (installer\wizard, drawn by installer\make_wizard_art.py). The large
+; one is on the finish page only: this installer has no welcome page. The small
+; one is at the top right of every other page. Setup picks the file that fits
+; the screen scale best, so there is one file per scale.
+WizardImageFile=wizard\finish_202x386.png,wizard\finish_269x515.png,wizard\finish_336x643.png,wizard\finish_403x772.png,wizard\finish_430x824.png,wizard\finish_498x953.png,wizard\finish_534x1022.png
+WizardSmallImageFile=wizard\small_58.png,wizard\small_70.png,wizard\small_77.png,wizard\small_97.png,wizard\small_116.png,wizard\small_124.png,wizard\small_143.png,wizard\small_159.png
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Messages]
+; The finish page. Setup adds "Click Finish to exit Setup." under the text.
+FinishedHeadingLabel={#MyAppName} is ready
+FinishedLabel=Press Alt + R in any app and talk.
+FinishedLabelNoIcons=Press Alt + R in any app and talk.
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
@@ -86,6 +104,42 @@ Type: files; Name: "{autodesktop}\{#MyOldAppName}.lnk"
 ; login off for those users. This installer never creates a startup shortcut.
 
 [Files]
+; The slideshow pictures: compiled into Setup but never installed (dontcopy).
+; [Code] extracts them to {tmp} while the Installing page shows; Setup deletes
+; them when it exits. They stay at the top of this section on purpose: with
+; solid compression Setup must unpack every file listed above the one it
+; extracts. A PNG is compressed already, so it is stored as it is
+; (nocompression); solidbreak starts their own block.
+; The list (and the frame times in [Code]) follows installer\wizard\slides.json.
+Source: "wizard\slide1_1.png"; Flags: dontcopy noencryption nocompression solidbreak
+Source: "wizard\slide1_2.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide1_3.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide1_4.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide1_5.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide1_6.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide2_1.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide2_2.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide2_3.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide2_4.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide2_5.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide2_6.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide3_1.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide3_2.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide3_3.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide3_4.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide3_5.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide3_6.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide4_1.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide4_2.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide4_3.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide4_4.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide4_5.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide5_1.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide5_2.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide5_3.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide5_4.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide5_5.png"; Flags: dontcopy noencryption nocompression
+Source: "wizard\slide5_6.png"; Flags: dontcopy noencryption nocompression
 Source: "..\dist\TranscribeApp\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 [Icons]
@@ -124,9 +178,27 @@ Type: filesandordirs; Name: "{%USERPROFILE}\.cache\huggingface\hub\models--Systr
 Type: filesandordirs; Name: "{%USERPROFILE}\.cache\huggingface\hub\models--mobiuslabsgmbh--faster-whisper-large-v3-turbo"
 
 [Code]
+// The slideshow below the progress bar of the Installing page is the only
+// thing here that is just for looks, so it is built to fail quietly: nothing
+// of it runs in /SILENT or /VERYSILENT, no error leaves the timer, and every
+// way out of Setup (the next page, the end of the install, Cancel) stops it.
+// There is no timer class in Pascal Script, so the Windows timer is used, the
+// way the Inno Setup example CodeDll.iss does it.
+function SetTimer(hWnd: HWND; nIDEvent: UINT_PTR; uElapse: UINT; lpTimerFunc: NativeInt): UINT_PTR;
+  external 'SetTimer@user32.dll stdcall';
+function KillTimer(hWnd: HWND; nIDEvent: UINT_PTR): BOOL;
+  external 'KillTimer@user32.dll stdcall';
+
 var
   AnalyticsPage: TInputOptionWizardPage;
   UpgradeInstall: Boolean;
+  SlideTimer: UINT_PTR;
+  SlideImage: TBitmapImage;
+  SlideFiles: array of String;
+  SlideTicks: array of Integer;
+  SlideCount: Integer;
+  SlideIndex: Integer;
+  SlideWait: Integer;
 
 // An earlier version is installed in this install mode: this run updates it.
 function IsUpgrade(): Boolean;
@@ -151,6 +223,156 @@ begin
   Result := Uninst <> '';
 end;
 
+// Stops the timer. Safe to call at any time, any number of times. The global
+// is cleared first, so a timer message that is still queued finds 0 and does
+// nothing (KillTimer does not remove messages that are already posted).
+procedure StopSlideTimer;
+var
+  TimerId: UINT_PTR;
+begin
+  TimerId := SlideTimer;
+  SlideTimer := 0;
+  if TimerId <> 0 then
+    KillTimer(0, TimerId);
+end;
+
+// Stops the timer and releases the picture control. Never raises.
+procedure StopSlides;
+var
+  OldImage: TBitmapImage;
+begin
+  StopSlideTimer;
+  OldImage := SlideImage;
+  SlideImage := nil;
+  if OldImage <> nil then
+  begin
+    try
+      OldImage.Free;
+    except
+      Log('Slideshow: ' + GetExceptionMessage);
+    end;
+  end;
+end;
+
+// One picture of the slideshow and how long it stays, in ticks of 100 ms.
+procedure AddSlide(Pic: String; Ticks: Integer);
+begin
+  SetArrayLength(SlideFiles, SlideCount + 1);
+  SetArrayLength(SlideTicks, SlideCount + 1);
+  SlideFiles[SlideCount] := Pic;
+  SlideTicks[SlideCount] := Ticks;
+  SlideCount := SlideCount + 1;
+end;
+
+// installer\wizard\slides.json: 5 slides (Dictation, Smart Actions, Meetings,
+// Live Assistant, Audio to text), each shown as a few pictures in a row,
+// 6 seconds a slide. The last picture of a slide stays the longest.
+procedure LoadSlideList;
+begin
+  SlideCount := 0;
+  AddSlide('slide1_1.png', 6);
+  AddSlide('slide1_2.png', 6);
+  AddSlide('slide1_3.png', 7);
+  AddSlide('slide1_4.png', 7);
+  AddSlide('slide1_5.png', 7);
+  AddSlide('slide1_6.png', 27);
+  AddSlide('slide2_1.png', 6);
+  AddSlide('slide2_2.png', 6);
+  AddSlide('slide2_3.png', 9);
+  AddSlide('slide2_4.png', 9);
+  AddSlide('slide2_5.png', 9);
+  AddSlide('slide2_6.png', 21);
+  AddSlide('slide3_1.png', 8);
+  AddSlide('slide3_2.png', 9);
+  AddSlide('slide3_3.png', 10);
+  AddSlide('slide3_4.png', 9);
+  AddSlide('slide3_5.png', 11);
+  AddSlide('slide3_6.png', 13);
+  AddSlide('slide4_1.png', 7);
+  AddSlide('slide4_2.png', 8);
+  AddSlide('slide4_3.png', 10);
+  AddSlide('slide4_4.png', 15);
+  AddSlide('slide4_5.png', 20);
+  AddSlide('slide5_1.png', 8);
+  AddSlide('slide5_2.png', 7);
+  AddSlide('slide5_3.png', 11);
+  AddSlide('slide5_4.png', 8);
+  AddSlide('slide5_5.png', 15);
+  AddSlide('slide5_6.png', 11);
+end;
+
+// Shows picture N (already extracted to {tmp}) and starts its time.
+procedure ShowSlide(N: Integer);
+begin
+  SlideImage.PngImage.LoadFromFile(ExpandConstant('{tmp}') + '\' + SlideFiles[N]);
+  SlideWait := SlideTicks[N];
+end;
+
+// Runs every 100 ms, but only while Setup handles its messages (between two
+// installed files), so a very large file just holds the picture for a moment.
+// An error here must never reach Windows: the slideshow stops and the last
+// picture stays.
+procedure SlideTimerProc(Arg1: HWND; Arg2: UINT; Arg3: UINT_PTR; Arg4: DWORD);
+begin
+  if (SlideTimer = 0) or (SlideImage = nil) or (WizardForm = nil) then
+    Exit;
+  try
+    SlideWait := SlideWait - 1;
+    if SlideWait <= 0 then
+    begin
+      SlideIndex := SlideIndex + 1;
+      if SlideIndex >= SlideCount then
+        SlideIndex := 0;
+      ShowSlide(SlideIndex);
+    end;
+  except
+    StopSlideTimer;
+  end;
+end;
+
+// Called when the Installing page appears, before the first file is copied.
+// Not in silent installs. Any error just means: no slideshow.
+procedure StartSlides;
+var
+  I, W, H, T, Room: Integer;
+begin
+  if WizardSilent then
+    Exit;
+  if SlideTimer <> 0 then
+    Exit;
+  try
+    // The pictures are 5:2. The size comes from the progress bar and the page
+    // (the wizard is bigger than its design size and the sizes change with
+    // the screen scale): as wide as the bar if there is room, else smaller.
+    W := WizardForm.ProgressGauge.Width;
+    T := WizardForm.ProgressGauge.Top + WizardForm.ProgressGauge.Height + ScaleY(10);
+    Room := WizardForm.InstallingPage.Height - T - ScaleY(4);
+    H := W * 2 div 5;
+    if H > Room then
+      H := Room;
+    W := H * 5 div 2;
+    if H >= ScaleY(100) then
+    begin
+      LoadSlideList;
+      for I := 0 to SlideCount - 1 do
+        ExtractTemporaryFile(SlideFiles[I]);
+      SlideImage := TBitmapImage.Create(WizardForm);
+      SlideImage.Stretch := True;
+      SlideImage.Left := WizardForm.ProgressGauge.Left + (WizardForm.ProgressGauge.Width - W) div 2;
+      SlideImage.Top := T;
+      SlideImage.Width := W;
+      SlideImage.Height := H;
+      SlideImage.Parent := WizardForm.InstallingPage;
+      SlideIndex := 0;
+      ShowSlide(0);
+      SlideTimer := SetTimer(0, 0, 100, CreateCallback(@SlideTimerProc));
+    end;
+  except
+    Log('Slideshow: ' + GetExceptionMessage);
+    StopSlides;
+  end;
+end;
+
 procedure InitializeWizard;
 begin
   AnalyticsPage := CreateInputOptionPage(
@@ -165,10 +387,28 @@ begin
   AnalyticsPage.Values[0] := True;
 end;
 
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if CurPageID = wpInstalling then
+    StartSlides
+  else
+  begin
+    // Any other page: the slideshow is over (no-op if it never started).
+    StopSlides;
+    // The finish page of an update says so. Both headings are one line, so
+    // the text under it keeps its place.
+    if (CurPageID = wpFinished) and IsUpgrade then
+      WizardForm.FinishedHeadingLabel.Caption := '{#MyAppName} is updated';
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ConsentDir, Choice: string;
 begin
+  // The install is done: the slideshow ends before anything else happens here.
+  if CurStep = ssPostInstall then
+    StopSlides;
   if (CurStep = ssPostInstall) and (not IsUpgrade) then
   begin
     // The start-at-login box, next to the exe (autostart.INSTALL_DEFAULT_NAME)
@@ -229,4 +469,11 @@ begin
   // install appears at the end of it).
   UpgradeInstall := FindPreviousInstall();
   Result := True;
+end;
+
+// Runs on every way out of Setup, also after Cancel (then neither ssPostInstall
+// nor the finish page is reached).
+procedure DeinitializeSetup;
+begin
+  StopSlides;
 end;
