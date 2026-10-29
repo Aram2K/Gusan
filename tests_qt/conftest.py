@@ -133,5 +133,19 @@ def stub_app():
     return make_stub_app
 
 
+@pytest.fixture(autouse=True)
+def _never_ask_the_website_for_the_model_list(monkeypatch):
+    """The Armenian model's list is a request to gusan.aibuben.xyz that a page makes when it opens.
+    A test must never make it: once the list names the model (it does, since it was published) every
+    later test in the same process would see the model in its lists, and their expectations break
+    (only on a machine with internet, so it first showed on GitHub). A test that needs the model
+    listed says so itself (tests_qt/test_hy_pickers.py)."""
+    try:
+        import speech_hy
+    except Exception:
+        return
+    monkeypatch.setattr(speech_hy, "fetch_manifest", lambda *a, **k: None)
+
+
 def pytest_sessionfinish(session, exitstatus):
     shutil.rmtree(_DATA, ignore_errors=True)

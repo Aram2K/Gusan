@@ -131,12 +131,16 @@ ASK_KEY = "calendar_ask_to_record"
 LINK_ONLY_KEY = "calendar_only_with_link"       # "Only meetings with other people" (the key keeps its old name)
 # The disclosure Google asks for, shown before the browser opens (every Connect button).
 CONNECT_TITLE = "Connect Google Calendar"
-CONNECT_BODY = (
-    "Gusan reads your events' title, time, people, call link and description. Read-only.\n"
-    "It uses them to show Coming up, remind you to record and name your meeting.\n"
-    "They stay on this computer, except a meeting's title, names and agenda, which go to the AI "
-    "when you use Live Assistant or AI notes.\n"
-    "Disconnect any time. Details: gusan.aibuben.xyz/privacy")
+CONNECT_BODY = ("Gusan reads your calendar to show your next meetings and offer to record them. "
+                "It can only read: it never changes your calendar.")
+# One short point per line (what it reads, what for, where it goes, how to stop), then a link.
+CONNECT_DETAIL = (
+    "•  Reads: title, time, guests, agenda and call link of each meeting.",
+    "•  Uses them to: show Coming up, remind you to record, and name your meeting.",
+    "•  Stays on this computer. Only if you use Live Assistant or AI notes, that meeting's "
+    "title, guest names and agenda go to the AI.",
+    "•  Disconnect any time in Meeting settings.")
+CONNECT_LINK = ("Privacy details: gusan.aibuben.xyz/privacy", "https://gusan.aibuben.xyz/privacy")
 # When the grant ran out (Google's 7-day limit while the app is in Testing, or revoked in the
 # Google account): shown on the Connect card and in the rail until the next connect.
 EXPIRED_NOTE = "Calendar access expired. Connect again."
@@ -424,7 +428,8 @@ class MeetingsPage(QWidget):
         if cal is None or getattr(cal, "is_connecting", False):
             return False
         if not self.cfg().get("privacy_mode") and not mini_prompt.ask(
-                self, CONNECT_TITLE, CONNECT_BODY, "Connect", "Not now", icon="calendar"):
+                self, CONNECT_TITLE, CONNECT_BODY, "Connect", "Not now", icon="calendar",
+                detail=list(CONNECT_DETAIL), link=CONNECT_LINK):
             return False
         try:
             return bool(cal.connect_calendar())
@@ -1540,7 +1545,7 @@ class ConnectCard(Card):
         col = QVBoxLayout()
         col.setSpacing(1)
         col.addWidget(tlabel("Connect Google Calendar", 14.5, 700, "ink", parent=self))
-        self.sub = tlabel("See your meetings and get a nudge to record.", 13, 400, "muted", parent=self, wrap=True)
+        self.sub = tlabel("See your meetings and get a reminder to record.", 13, 400, "muted", parent=self, wrap=True)
         col.addWidget(self.sub)
         row.addLayout(col, 1)
         self.connect_btn = Button("Connect", "secondary", "s", parent=self)
@@ -1582,7 +1587,7 @@ class ConnectCard(Card):
             self.sub.setText(self._error)
             views.set_tone(self.sub, self._error_tone)
         else:
-            self.sub.setText("See your meetings and get a nudge to record.")
+            self.sub.setText("See your meetings and get a reminder to record.")
             views.set_tone(self.sub, "muted")
 
     def _connect(self):
@@ -2653,8 +2658,8 @@ class NotesOption(QFrame):
 
 
 class MeetingRail(SettingsRail):
-    """'Meeting settings': Google Calendar, Meeting language, Notes
-    written by, Send notes to Notion, Remind me to tell people; the speech
+    """'Meeting settings': Google Calendar, Send notes to Notion (right below it),
+    Meeting language, Notes written by, Remind me to tell people; the speech
     model this runs on in the foot."""
 
     def __init__(self, page, parent=None):
@@ -2690,29 +2695,6 @@ class MeetingRail(SettingsRail):
         self.link_toggle = Toggle("Only meetings with other people", True)
         self.link_toggle.toggled.connect(lambda on: self.page.set_setting(LINK_ONLY_KEY, bool(on)))
         self.link_row = self.add_row(SettingRow("Only meetings with other people", self.link_toggle))
-        # Language (no "Record from" here: every meeting starts on Both sides of
-        # the call; the start card picks another for one meeting)
-        self.lang_combo = LangCombo(accessible="Meeting language")
-        self.lang_combo.setFixedWidth(278)
-        self.lang_combo.activated.connect(self._on_lang)
-        self.add_row(SettingRow("Meeting language", self.lang_combo, stacked=True))
-        # Notes written by
-        opts = QWidget()
-        ol = QVBoxLayout(opts)
-        ol.setContentsMargins(0, 0, 0, 0)
-        ol.setSpacing(6)
-        self.opt_cloud = NotesOption("Gusan Cloud", _cloud_writer_model(), "cloud", ProTag("s"), opts)
-        self.opt_local = NotesOption("This computer", "Qwen 1.5B", "laptop", None, opts)
-        ol.addWidget(self.opt_cloud)
-        ol.addWidget(self.opt_local)
-        opts.setAccessibleName("Notes written by")
-        self._group = QButtonGroup(self)
-        self._group.setExclusive(True)
-        self._group.addButton(self.opt_cloud.radio, 0)
-        self._group.addButton(self.opt_local.radio, 1)
-        self.opt_cloud.radio.clicked.connect(self._pick_cloud)
-        self.opt_local.radio.clicked.connect(self._pick_local)
-        self.add_row(SettingRow("Notes written by", opts, stacked=True))
         # Notion. The actions stack (Manage over Disconnect, Reconnect over Disconnect):
         # side by side they would not fit beside the label in this narrow rail.
         self.notion_control = QWidget()
@@ -2744,6 +2726,29 @@ class MeetingRail(SettingsRail):
         self.notion_auto_toggle.toggled.connect(lambda on: self.page.set_setting("notion_auto_send", bool(on)))
         self.notion_auto_row = self.add_row(SettingRow("Send automatically", self.notion_auto_toggle,
                                                        hint=notion_sheet.RAIL_AUTO_HINT))
+        # Language (no "Record from" here: every meeting starts on Both sides of
+        # the call; the start card picks another for one meeting)
+        self.lang_combo = LangCombo(accessible="Meeting language")
+        self.lang_combo.setFixedWidth(278)
+        self.lang_combo.activated.connect(self._on_lang)
+        self.add_row(SettingRow("Meeting language", self.lang_combo, stacked=True))
+        # Notes written by
+        opts = QWidget()
+        ol = QVBoxLayout(opts)
+        ol.setContentsMargins(0, 0, 0, 0)
+        ol.setSpacing(6)
+        self.opt_cloud = NotesOption("Gusan Cloud", _cloud_writer_model(), "cloud", ProTag("s"), opts)
+        self.opt_local = NotesOption("This computer", "Qwen 1.5B", "laptop", None, opts)
+        ol.addWidget(self.opt_cloud)
+        ol.addWidget(self.opt_local)
+        opts.setAccessibleName("Notes written by")
+        self._group = QButtonGroup(self)
+        self._group.setExclusive(True)
+        self._group.addButton(self.opt_cloud.radio, 0)
+        self._group.addButton(self.opt_local.radio, 1)
+        self.opt_cloud.radio.clicked.connect(self._pick_cloud)
+        self.opt_local.radio.clicked.connect(self._pick_local)
+        self.add_row(SettingRow("Notes written by", opts, stacked=True))
         # Consent
         self.consent_toggle = Toggle("Remind me to tell people", True)
         self.consent_toggle.toggled.connect(lambda on: self.page.set_setting(CONSENT_KEY, bool(on)))

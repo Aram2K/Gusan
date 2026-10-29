@@ -129,10 +129,11 @@ class MiniPrompt(QDialog):
     the no button the default. ``buttons`` [(key, text, kind)] replaces the two (``choice`` then holds
     the key pressed); ``field`` {"text", "placeholder", "max", "name"} adds a one-line field
     (``value()``); ``type_word`` keeps every red button off until that word is typed in the field;
-    ``detail`` is more words (a string, or a list of lines) under the body."""
+    ``detail`` is more words (a string, or a list of lines) under the body; ``link`` (text, https
+    address) adds one clickable line under them that opens the address in the browser."""
 
     def __init__(self, parent, title, body, yes_text, no_text, icon="info", *, tone="info", detail=None,
-                 buttons=None, default=None, field=None, type_word=None, safe=False):
+                 buttons=None, default=None, field=None, type_word=None, safe=False, link=None):
         super().__init__(parent.window() if parent is not None else None,
                          Qt.Dialog | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -198,6 +199,15 @@ class MiniPrompt(QDialog):
             lb.setAccessibleName(line)
             text.addWidget(lb)
             self.detail_labels.append(lb)
+        self.link_button = None
+        if link and len(link) == 2 and str(link[0]).strip() and _is_https(link[1]):
+            ltext, lurl = str(link[0]).strip(), str(link[1]).strip()
+            self.link_button = Button(ltext, "link", "s", parent=self.card)
+            self.link_button.setAccessibleName("Open " + ltext)
+            self.link_button.setToolTip(lurl)
+            self.link_button.setCursor(Qt.PointingHandCursor)
+            self.link_button.clicked.connect(lambda _=False, u=lurl: _open_link(u))
+            text.addWidget(self.link_button, 0, Qt.AlignLeft)
         if field is not None:
             text.addSpacing(6)
             self.field = QLineEdit(self.card)
@@ -348,25 +358,44 @@ def _run(dlg, private=False):
         dlg.deleteLater()
 
 
+def _is_https(url):
+    """Only a plain https address is ever opened from a card."""
+    url = str(url or "").strip()
+    return url.lower().startswith("https://") and " " not in url and "\n" not in url
+
+
+def _open_link(url):
+    """Open ``url`` (https only) in the browser; the card stays where it is."""
+    if not _is_https(url):
+        return False
+    try:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        return bool(QDesktopServices.openUrl(QUrl(str(url).strip())))
+    except Exception:
+        logger.debug("MiniPrompt could not open a link", exc_info=True)
+        return False
+
+
 @_on_gui
-def ask(parent, title, body, yes_text, no_text, icon="info", private=False):
+def ask(parent, title, body, yes_text, no_text, icon="info", private=False, *, detail=None, link=None):
     """Show the card; True when the first button (or Enter) was pressed. Tests replace this.
 
     ``private``: asked from a window that is hidden from screen shares (the Live Assistant
     card), so the question itself is kept out of a share and a recording too, where the OS
-    can do that."""
-    dlg = MiniPrompt(parent, title, body, yes_text, no_text, icon=icon)
+    can do that. ``detail`` and ``link``: see MiniPrompt."""
+    dlg = MiniPrompt(parent, title, body, yes_text, no_text, icon=icon, detail=detail, link=link)
     return _run(dlg, private) == QDialog.Accepted
 
 
 @_on_gui
 def confirm(parent, title, text, confirm_label="OK", cancel_label="Cancel", danger=True, *, detail=None,
-            icon=None, private=False, safe=None):
+            icon=None, private=False, safe=None, link=None):
     """Ask before something that cannot be taken back (``danger``: red icon, red button, and the
     Cancel button is the default so Enter never confirms) or a plain yes / no. True = confirmed."""
     dlg = MiniPrompt(parent, title, text, confirm_label, cancel_label, icon=icon,
                      tone="danger" if danger else "info", detail=detail,
-                     safe=bool(danger) if safe is None else bool(safe))
+                     safe=bool(danger) if safe is None else bool(safe), link=link)
     return _run(dlg, private) == QDialog.Accepted
 
 

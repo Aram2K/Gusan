@@ -243,6 +243,11 @@ def test_the_window_stays_alive_while_a_file_is_read_and_cancel_stops_it(build, 
 
 
 def test_a_quick_read_never_flashes_the_reading_strip(build, files, monkeypatch):
+    # The strip waits STRIP_DELAY_MS before it shows. A slow machine (a CI runner) can take longer than
+    # that to read even a tiny file, and then the strip is right to show: give this test a long wait so
+    # it checks what it is about - nothing is shown at once and the timer stops when the read ends.
+    from ui.pages import live_documents
+    monkeypatch.setattr(live_documents, "STRIP_DELAY_MS", 60_000)
     page, _ = build()
     sec = page.documents
     shown = []
