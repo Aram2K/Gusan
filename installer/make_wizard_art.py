@@ -10,8 +10,13 @@ Nothing here runs in CI and nothing at install time: run it by hand after a desi
     venv\\Scripts\\python.exe installer\\make_wizard_art.py            # everything
     venv\\Scripts\\python.exe installer\\make_wizard_art.py --only slides 3 5
 
-Screens are painted with the app's own helpers (ui.theme tokens and fonts, the dictation bar, the Live Assistant
-card, the icons), at 4x and then halved with Lanczos, so text stays crisp at 100% and at 200% screen scale.
+Screens are painted with the app's own helpers (ui.theme tokens and fonts, the dictation bar, the icons), at 4x and
+then halved with Lanczos, so text stays crisp at 100% and at 200% screen scale.
+
+The slides are 1000x400 and Setup stretches them to the width of the progress bar: about 513 px at 100% screen
+scale, so crisp up to about 175%; stretched about 1.1x at 200%, 1.27x at 225% and 1.36x at 250% (soft small text on
+4K laptops). That is accepted: a second picture set would break the size budget and the simple script. If it is
+ever wanted, draw all frames once at about 1360x544 and keep a single file list.
 """
 import argparse
 import json
@@ -50,7 +55,6 @@ theme.load_fonts()
 
 from ui.components import icons  # noqa: E402
 from ui.onboarding_v2 import PILL_DONE, PILL_HAIR, PILL_TINT, WAVE_HEIGHTS, ink, paint_pill  # noqa: E402
-from ui.pages import live_demo  # noqa: E402
 
 q = theme.qcolor
 SS = 4                       # painted at 4x of the logical size ...
@@ -70,8 +74,8 @@ SLIDES = {
     1: dict(eyebrow="Dictation", icon="mic", title="Type with\nyour voice",
             line="Press a shortcut, talk, and it types anywhere.",
             accent=("#2563eb", "#1d4ed8"), ms=(600, 600, 700, 700, 700, 2700)),
-    2: dict(eyebrow="Smart Actions", icon="wand", title="Ask for\nfinished text",
-            line="Say what you need. The finished text is pasted.",
+    2: dict(eyebrow="Smart Actions", icon="wand", title="Say it,\nget it written",
+            line="Say it roughly. Get it written properly.",
             accent=("#9333ea", "#7e22ce"), ms=(600, 600, 900, 900, 900, 2100)),
     3: dict(eyebrow="Meetings", icon="people", title="Meeting notes,\nno bot",
             line="Record a call. Get the summary and action items.",
@@ -371,6 +375,40 @@ def scene1(p, f):
 
 
 # ── slide 2: Smart Actions ───────────────────────────────────────────────────
+def chat_window(p, r, who, bubble, reply):
+    """A chat with ``who``: one incoming bubble and, at the bottom, the field the finished text lands in
+    (``reply`` is a list of lines; empty while nothing is pasted yet)."""
+    r = QRectF(r)
+    shadow(p, r, 9, 16, 8, 5)
+    path = QPainterPath()
+    path.addRoundedRect(r, 9, 9)
+    p.fillPath(path, QColor("#ffffff"))
+    p.save()
+    p.setClipPath(path)
+    p.fillRect(QRectF(r.left(), r.top(), r.width(), 22), q("bg"))
+    p.fillRect(QRectF(r.left(), r.top() + 22, r.width(), 1), q("line"))
+    avatar(p, r.left() + 19, r.top() + 11, 17, who[0], ring=False)
+    text(p, QRectF(r.left() + 31, r.top(), 120, 22), who, 11, 600, "text2")
+    # what they wrote: a grey bubble on the left
+    bw = text_w(bubble, 11, 400) + 20
+    b = QRectF(r.left() + 11, r.top() + 29, bw, 21)
+    pill(p, b, "bg2", radius=9)
+    text(p, b, bubble, 11, 400, "text", Qt.AlignCenter)
+    # the field, with the send button
+    field = QRectF(r.left() + 9, r.bottom() - 40, r.width() - 18, 34)
+    p.setPen(QPen(q("line2"), 1))
+    p.setBrush(QColor("#ffffff"))
+    p.drawRoundedRect(field.adjusted(.5, .5, -.5, -.5), 9, 9)
+    for i, ln in enumerate(reply):
+        text(p, QRectF(field.left() + 9, field.top() + 3 + i * 14, field.width() - 46, 14), ln, 11, 400, "text")
+    btn = QRectF(field.right() - 27, field.center().y() - 10, 20, 20)
+    p.setPen(Qt.NoPen)
+    p.setBrush(q("blue") if reply else q("line2"))
+    p.drawEllipse(btn)
+    icon(p, "send", btn.adjusted(4.5, 4.5, -4.5, -4.5), QColor("#ffffff"), 2.2)
+    p.restore()
+
+
 def scene2(p, f):
     # what you say (the page's own words until you speak)
     strip = QRectF(SX, 12, SW, 32)
@@ -382,29 +420,28 @@ def scene2(p, f):
     else:
         icon(p, "mic", QRectF(strip.left() + 11, strip.center().y() - 8, 16, 16), q("pro"), 1.8)
         text(p, QRectF(strip.left() + 34, strip.top() + 1, strip.width() - 44, strip.height() - 2),
-             "“Email Anna: the demo moves to Thursday. Ask if the deck is ready.”", 11, 400, "text2",
-             wrap=True, italic=True)
-    # the mail it writes
-    subject = "Demo moves to Thursday" if f >= 5 else ""
-    lines = []
+             "“Tell Sam it moved to Thursday. Be polite.”", 11.5, 400, "text2", italic=True)
+    # the reply it writes
+    reply = []
     if f == 5:
-        lines = ["Hi Anna,"]
+        reply = ["Hi Sam, the demo has moved to Thursday."]
     elif f == 6:
-        lines = ["Hi Anna,", "The demo moves to Thursday. Is the deck ready?", "Best,"]
-    mail_window(p, QRectF(SX, 48, SW, 100), "Anna", lines, subject=subject, header=None, body_px=11.5, line_h=14.5)
+        reply = ["Hi Sam, the demo has moved to Thursday.", "Sorry for the change, and thanks!"]
+    chat_window(p, QRectF(SX, 48, SW, 100), "Sam", "Is the demo still on Tuesday?", reply)
     cx, by = SX + SW / 2, 152
     if f in (1, 2):
         keys(p, cx, by + 18, "Alt", "S", lit=(f == 2))
     elif f == 3:
         bar(p, cx, by, "recording", t=0.6)
     elif f == 4:
-        bar(p, cx, by, "transcribing", "Writing your email", t=0.3)
+        bar(p, cx, by, "transcribing", "Writing your reply", t=0.3)
     else:
-        bar(p, cx, by, "pasted", "Email pasted")
+        bar(p, cx, by, "pasted", "Reply pasted")
 
 
 # ── slide 3: Meetings ────────────────────────────────────────────────────────
-FACES = {"A": ("#fce7f3", "#be185d"), "D": ("#e2e8f0", "#475569"), "M": ("#fef3c7", "#92400e")}
+FACES = {"A": ("#fce7f3", "#be185d"), "D": ("#e2e8f0", "#475569"), "M": ("#fef3c7", "#92400e"),
+         "S": ("#dbeafe", "#1d4ed8")}
 
 
 def avatar(p, cx, cy, d, letter, ring=True):
@@ -548,22 +585,35 @@ def label_chip(p, rect, s):
     text(p, r, s, 10, 600, "#ffffff", Qt.AlignCenter)
 
 
-def card_image(scale):
-    """The Live Assistant card (the page's own miniature painter) on a transparent picture of its own, so a
-    clip on the slide cuts it whole (the painter sets clips of its own, which would replace ours)."""
-    cs = live_demo.card_size(scale)
-    c = Canvas(cs.width(), cs.height(), SS, alpha=True)
-    live_demo.paint_card(c.p, 0, 0, "Hidden", "ok", "incognito", scale, None, "light")
-    c.p.end()
-    return c.img, cs
+def assistant_card(p, x, y, w, h, answered):
+    """A small Live Assistant card: its name and the green Hidden chip, the question and the answer. All text is
+    9.5 px or more (it is read at about half size). Before the answer, three dots show that it is being written."""
+    r = QRectF(x, y, w, h)
+    glass(p, r, 10, 250)
+    text(p, QRectF(r.left() + 10, r.top() + 5, 74, 18), "Live Assistant", 9.5, 700, "ink")
+    chip = QRectF(r.right() - 10 - 56, r.top() + 6, 56, 17)
+    pill(p, chip, "#dcfce7", "#86efac")
+    icon(p, "incognito", QRectF(chip.left() + 5, chip.top() + 3.5, 10, 10), q("ok-tx"), 1.8)
+    text(p, QRectF(chip.left() + 18, chip.top(), 36, chip.height()), "Hidden", 9.5, 700, "ok-tx")
+    inner_w = w - 20
+    ask = QRectF(r.left() + 10, r.top() + 28, inner_w, 30)
+    pill(p, ask, "bg2", radius=7)
+    text(p, ask.adjusted(7, 0, -7, 0), "When will the Q4 roadmap be ready?", 9.5, 400, "text", wrap=True)
+    ans = QRectF(r.left() + 10, ask.bottom() + 5, inner_w, r.bottom() - 8 - (ask.bottom() + 5))
+    pill(p, ans, "#eff6ff", "#bfdbfe", radius=7)
+    if answered:
+        text(p, ans.adjusted(7, 0, -7, 0), "Say: “It’s ready for 14 October if we freeze features on Friday.”", 9.5,
+             500, "ink", wrap=True)
+    else:
+        p.setPen(Qt.NoPen)
+        p.setBrush(q("faint"))
+        for i in range(3):
+            p.drawEllipse(QPointF(ans.left() + 13 + i * 9, ans.center().y()), 2.2, 2.2)
 
 
 def scene4(p, f):
     win = QRectF(SX, SY, SW, SH)
     inner = call_window(p, win)
-    scale = 0.34
-    img, cs = card_image(scale)
-    cx, cy = inner.right() - cs.width() - 9, inner.bottom() - cs.height() - 9
     if f == 1:
         # the question, as the call's own caption
         cap = QRectF(inner.left() + 12, inner.bottom() - 36, inner.width() - 24, 26)
@@ -571,21 +621,14 @@ def scene4(p, f):
         text(p, cap.adjusted(10, 0, -8, 0), "Mariam: When will the Q4 roadmap be ready?", 10.5, 500,
              "#ffffff")
         return
-    split = {2: None, 3: None, 4: 0.62, 5: 0.28}[f]
-    x_cut = cx + cs.width() if split is None else min(cx + cs.width(), win.left() + win.width() * split)
-    vis = x_cut - cx                                   # the part of the card that is on the left of the line
-    if vis > 0:
-        p.save()
-        p.setOpacity(0.5 if f == 2 else 1.0)
-        p.setClipRect(QRectF(win.left(), win.top(), x_cut - win.left(), win.height()))
-        shadow(p, QRectF(cx, cy, cs.width(), cs.height()), 8, 34, 8, 4)
-        p.restore()
-        p.save()
-        p.setOpacity(0.5 if f == 2 else 1.0)
-        p.drawImage(QRectF(cx, cy, vis, cs.height()), img, QRectF(0, 0, vis * SS, cs.height() * SS))
-        p.restore()
-    if split is None:
+    # The card sits in the left half of the call. From frame 4 the line splits the screen: the left side is what
+    # you see, the right side what the others see. The line stays in the gap between the "M" and "D" letters
+    # (and the "You" label), and the card ends before it, so nothing is cut.
+    card_h = 111.0
+    assistant_card(p, inner.left() + 9, inner.bottom() - card_h - 9, 150.0, card_h, f >= 3)
+    if f < 4:
         return
+    split = 0.64
     x = win.left() + win.width() * split
     mid = win.center().y()
     p.setPen(QPen(QColor("#0f172a"), 1.6))
@@ -600,15 +643,18 @@ def scene4(p, f):
     label_chip(p, QRectF(win.left() + 12, win.top() + 12, 54, 19), "You see")
     label_chip(p, QRectF(win.right() - 66, win.top() + 12, 54, 19), "They see")
     if f == 5:
-        chip = QRectF(win.left() + win.width() * 0.72 - 46, mid - 13, 92, 26)
+        # in the middle of the "They see" side (clear of the handle): the card is not there, only this note
+        cw = 9 + 16 + 5 + text_w("Hidden", 11.5, 700) + 10
+        mid_x = win.left() + win.width() * (split + 1) / 2
+        chip = QRectF(max(mid_x - cw / 2, x + 16), mid - 13, cw, 26)
         shadow(p, chip, 13, 24, 5, 3)
         pill(p, chip, "#dcfce7", "#86efac")
         icon(p, "incognito", QRectF(chip.left() + 9, chip.top() + 5, 16, 16), q("ok-tx"), 1.7)
-        text(p, QRectF(chip.left() + 29, chip.top(), 60, 26), "Hidden", 11.5, 700, "ok-tx")
+        text(p, QRectF(chip.left() + 30, chip.top(), cw - 30, 26), "Hidden", 11.5, 700, "ok-tx")
 
 
 # ── slide 5: Audio to text ───────────────────────────────────────────────────
-def file_chip(p, cx, cy, name="interview_mariam.m4a", angle=0.0, icon_name="mic", tile="#e8f0fe", tint="blue",
+def file_chip(p, cx, cy, name="team_call_mariam.m4a", angle=0.0, icon_name="mic", tile="#e8f0fe", tint="blue",
               check=False):
     w = text_w(name, 11, 600) + 50 + (18 if check else 0)
     r = QRectF(-w / 2, -15, w, 30)
@@ -678,7 +724,7 @@ def scene5(p, f):
         p.drawRoundedRect(tile, 10, 10)
         icon(p, "mic", tile.adjusted(8, 8, -8, -8), q("blue"), 1.9)
         x0 = card.left() + 58
-        text(p, QRectF(x0, card.top() + 12, 150, 20), "interview_mariam.m4a", 12, 700, "ink")
+        text(p, QRectF(x0, card.top() + 12, 150, 20), "team_call_mariam.m4a", 12, 700, "ink")
         if f == 4:
             p.setPen(Qt.NoPen)
             p.setBrush(PILL_DONE)
@@ -707,14 +753,16 @@ def scene5(p, f):
     L = paper.left() + 16
     p.save()
     if f == 6:
-        p.setOpacity(0.35)
-    text(p, QRectF(L, paper.top() + 12, 170, 18), "interview_mariam.m4a", 12.5, 700, "ink")
+        p.setOpacity(0.7)
+    text(p, QRectF(L, paper.top() + 12, 170, 18), "team_call_mariam.m4a", 12.5, 700, "ink")
     text(p, QRectF(L, paper.top() + 30, 190, 16), "English · 24 min · 2 speakers", 10.5, 400, "muted")
     p.fillRect(QRectF(L, paper.top() + 52, paper.width() - 32, 1), q("line"))
-    rows = (("00:00", "Speaker 1", "#1d4ed8", "Thanks for coming in, Mariam."),
-            ("00:04", "Speaker 2", "#15803d", "Easy, thanks. Traffic was kind today."),
-            ("00:09", "Speaker 1", "#1d4ed8", "Good. Tell me about the project."))
+    rows = (("00:00", "Speaker 1", "#1d4ed8", "Thanks for joining, Mariam."),
+            ("00:04", "Speaker 2", "#15803d", "Happy to. The Q4 roadmap is ready."),
+            ("00:09", "Speaker 1", "#1d4ed8", "Great. Walk me through it."))
     for i, (tm, who, c, line) in enumerate(rows):
+        if f == 6 and i == 2:
+            continue                                   # its place is taken by the file chip below
         y = paper.top() + 62 + i * 34
         text(p, QRectF(L, y, 40, 14), tm, 9.5, 400, "faint", tabular=True)
         text(p, QRectF(L + 38, y, 90, 14), who, 10, 700, c)
@@ -730,7 +778,7 @@ def scene5(p, f):
     text(p, QRectF(b.left() + 30, b.top(), bw - 30, b.height()), "Save Word", 11, 600,
          "#ffffff" if pressed else "text")
     if f == 6:
-        file_chip(p, paper.center().x(), paper.top() + 112, "interview_mariam.docx", 0.0, "file", "#dbeafe", "blue-h",
+        file_chip(p, paper.center().x(), paper.top() + 146, "team_call_mariam.docx", 0.0, "file", "#dbeafe", "blue-h",
                   check=True)
 
 
@@ -779,7 +827,15 @@ def finish_panel(w_px, h_px):
     # the shortcut and the bar, on one frosted card
     card = QRectF(14, 150, 174, 118)
     glass(p, card, 16, 205)
-    keys(p, 101, 150 + 36, "Alt", "R", lit=True, size=40)
+    # the microphone (no key name: people change the shortcut) and the bar
+    mx, my = 101.0, 150 + 36.0
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(59, 130, 246, 40))
+    p.drawEllipse(QPointF(mx, my), 25, 25)
+    shadow(p, QRectF(mx - 21, my - 21, 42, 42), 21, 34, 7, 4, (37, 99, 235))
+    p.setBrush(q("blue"))
+    p.drawEllipse(QPointF(mx, my), 21, 21)
+    icon(p, "mic", QRectF(mx - 11, my - 11, 22, 22), QColor("#ffffff"), 2.0)
     bar(p, 101, 150 + 70, "pasted")
     return c.pil().convert("RGB").resize((w_px, h_px), Image.LANCZOS)
 

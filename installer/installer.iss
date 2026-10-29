@@ -79,9 +79,11 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Messages]
 ; The finish page. Setup adds "Click Finish to exit Setup." under the text.
+; No key name on purpose: people change the shortcut (or use a mouse button),
+; so the text and the picture never promise a particular one.
 FinishedHeadingLabel={#MyAppName} is ready
-FinishedLabel=Press Alt + R in any app and talk.
-FinishedLabelNoIcons=Press Alt + R in any app and talk.
+FinishedLabel=Press your dictation shortcut in any app and talk.
+FinishedLabelNoIcons=Press your dictation shortcut in any app and talk.
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
@@ -184,15 +186,18 @@ Type: filesandordirs; Name: "{%USERPROFILE}\.cache\huggingface\hub\models--mobiu
 // way out of Setup (the next page, the end of the install, Cancel) stops it.
 // There is no timer class in Pascal Script, so the Windows timer is used, the
 // way the Inno Setup example CodeDll.iss does it.
-function SetTimer(hWnd: HWND; nIDEvent: UINT_PTR; uElapse: UINT; lpTimerFunc: NativeInt): UINT_PTR;
+// The types are the ones of the Inno Setup 6 example (plain LongWord): the
+// types HWND, UINT_PTR and NativeInt belong to Inno Setup 7 and are unknown to
+// the Inno Setup 6 compiler that builds this.
+function SetTimer(hWnd, nIDEvent, uElapse, lpTimerFunc: LongWord): LongWord;
   external 'SetTimer@user32.dll stdcall';
-function KillTimer(hWnd: HWND; nIDEvent: UINT_PTR): BOOL;
+function KillTimer(hWnd, nIDEvent: LongWord): BOOL;
   external 'KillTimer@user32.dll stdcall';
 
 var
   AnalyticsPage: TInputOptionWizardPage;
   UpgradeInstall: Boolean;
-  SlideTimer: UINT_PTR;
+  SlideTimer: LongWord;
   SlideImage: TBitmapImage;
   SlideFiles: array of String;
   SlideTicks: array of Integer;
@@ -228,7 +233,7 @@ end;
 // nothing (KillTimer does not remove messages that are already posted).
 procedure StopSlideTimer;
 var
-  TimerId: UINT_PTR;
+  TimerId: LongWord;
 begin
   TimerId := SlideTimer;
   SlideTimer := 0;
@@ -312,7 +317,7 @@ end;
 // installed files), so a very large file just holds the picture for a moment.
 // An error here must never reach Windows: the slideshow stops and the last
 // picture stays.
-procedure SlideTimerProc(Arg1: HWND; Arg2: UINT; Arg3: UINT_PTR; Arg4: DWORD);
+procedure SlideTimerProc(Arg1, Arg2, Arg3, Arg4: LongWord);
 begin
   if (SlideTimer = 0) or (SlideImage = nil) or (WizardForm = nil) then
     Exit;
@@ -344,6 +349,8 @@ begin
     // The pictures are 5:2. The size comes from the progress bar and the page
     // (the wizard is bigger than its design size and the sizes change with
     // the screen scale): as wide as the bar if there is room, else smaller.
+    // The pictures are 1000x400: crisp up to about 175% screen scale, then
+    // Stretch enlarges them (about 1.1x at 200%, 1.36x at 250%): slightly soft.
     W := WizardForm.ProgressGauge.Width;
     T := WizardForm.ProgressGauge.Top + WizardForm.ProgressGauge.Height + ScaleY(10);
     Room := WizardForm.InstallingPage.Height - T - ScaleY(4);

@@ -251,14 +251,20 @@ class TestSlideshowCode(unittest.TestCase):
                     self.assertLess(names.index(other), index,
                                     "%s uses %s, which is declared after it" % (name, other))
 
-    def test_the_timer_declarations_are_the_ones_from_the_inno_setup_example(self):
-        # Examples\CodeDll.iss of Inno Setup.
-        self.assertIn("function SetTimer(hWnd: HWND; nIDEvent: UINT_PTR; uElapse: UINT; "
-                      "lpTimerFunc: NativeInt): UINT_PTR;\n  external 'SetTimer@user32.dll stdcall';", self.text)
-        self.assertIn("function KillTimer(hWnd: HWND; nIDEvent: UINT_PTR): BOOL;\n"
+    def test_the_timer_declarations_are_the_ones_from_the_inno_setup_6_example(self):
+        # Examples\CodeDll.iss of Inno Setup 6.7: plain LongWord. HWND, UINT_PTR and NativeInt
+        # are types of Inno Setup 7; the Inno Setup 6 compiler (CI) does not know them.
+        self.assertIn("function SetTimer(hWnd, nIDEvent, uElapse, lpTimerFunc: LongWord): LongWord;\n"
+                      "  external 'SetTimer@user32.dll stdcall';", self.text)
+        self.assertIn("function KillTimer(hWnd, nIDEvent: LongWord): BOOL;\n"
                       "  external 'KillTimer@user32.dll stdcall';", self.text)
-        self.assertIn("procedure SlideTimerProc(Arg1: HWND; Arg2: UINT; Arg3: UINT_PTR; Arg4: DWORD);", self.text)
+        self.assertIn("procedure SlideTimerProc(Arg1, Arg2, Arg3, Arg4: LongWord);", self.text)
+        self.assertIn("  SlideTimer: LongWord;", self.text)
+        self.assertIn("  TimerId: LongWord;", self.text)
         self.assertEqual(self.text.count("CreateCallback(@SlideTimerProc)"), 1)
+        # self.code has no comments: the comment above the declarations names these types on purpose.
+        for seven_only in ("NativeInt", "NativeUInt", "UINT_PTR", "HWND"):
+            self.assertNotIn(seven_only, self.code)
 
     def test_nothing_of_the_slideshow_runs_in_a_silent_install(self):
         body = self._body("StartSlides")
@@ -357,11 +363,12 @@ class TestFinishPage(unittest.TestCase):
         self.assertEqual(sorted(msgs), ["FinishedHeadingLabel", "FinishedLabel", "FinishedLabelNoIcons"])
         self.assertEqual(msgs["FinishedHeadingLabel"], "{#MyAppName} is ready")
         self.assertEqual(msgs["FinishedLabel"], msgs["FinishedLabelNoIcons"])
-        self.assertEqual(msgs["FinishedLabel"], "Press Alt + R in any app and talk.")
+        self.assertEqual(msgs["FinishedLabel"], "Press your dictation shortcut in any app and talk.")
 
-    def test_the_default_shortcut_in_the_text_is_the_apps_default(self):
-        main = _read(ROOT / "main.py")
-        self.assertRegex(main, r'"hotkey":\s*"alt\+r"')
+    def test_the_finish_text_names_no_key(self):
+        # The shortcut can be changed in the app (or be a mouse button): never promise one.
+        for line in _section(self.text, "Messages"):
+            self.assertNotRegex(line, r"(?i)\b(alt|ctrl|shift|win)\b|\bF\d{1,2}\b", line)
 
     def test_an_update_says_updated_in_the_one_line_heading(self):
         page = _routines(_code(self.text))["CurPageChanged"]
@@ -375,6 +382,35 @@ class TestFinishPage(unittest.TestCase):
         self.assertIn('Description: "Launch {#MyAppName}"', run[0])
         self.assertIn("postinstall", run[0])
         self.assertIn("skipifsilent", run[0])
+
+
+class TestPictureCopy(unittest.TestCase):
+    """The words in the pictures are baked into PNG files, so they are checked in the script that draws them
+    (installer/make_wizard_art.py) and in the manifest it writes."""
+
+    def setUp(self):
+        self.art = _read(INSTALLER / "make_wizard_art.py")
+        self.manifest = _read(WIZARD / "slides.json")
+
+    def test_no_retired_wording_in_the_pictures(self):
+        # "interview" is a retired word (Live Assistant is not for interviews); sample files are team calls.
+        for name, body in (("make_wizard_art.py", self.art), ("slides.json", self.manifest)):
+            self.assertNotRegex(body, r"(?i)interview", name)
+
+    def test_the_finish_picture_names_no_key(self):
+        start = self.art.index("def finish_panel(")
+        body = self.art[start:self.art.index("def small_image(")]
+        self.assertNotIn('"Alt"', body)
+        self.assertNotIn("keys(", body)
+
+    def test_smart_actions_is_not_the_dictation_scene(self):
+        # Slide 1 is an email to Anna, slide 2 a chat with Sam: two different pictures of two different things.
+        slides = {s["n"]: s for s in json.loads(self.manifest)["slides"]}
+        self.assertEqual(slides[2]["title"], "Say it, get it written")
+        self.assertEqual(slides[2]["line"], "Say it roughly. Get it written properly.")
+        scene2 = self.art[self.art.index("def scene2("):self.art.index("# ── slide 3")]
+        self.assertNotIn("mail_window", scene2)
+        self.assertNotIn("Anna", scene2)
 
 
 class TestNamesExistingInstallsDependOn(unittest.TestCase):

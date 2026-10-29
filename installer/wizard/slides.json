@@ -41,8 +41,8 @@
     {
       "n": 2,
       "eyebrow": "Smart Actions",
-      "title": "Ask for finished text",
-      "line": "Say what you need. The finished text is pasted.",
+      "title": "Say it, get it written",
+      "line": "Say it roughly. Get it written properly.",
       "frames": [
         {
           "file": "slide2_1.png",
