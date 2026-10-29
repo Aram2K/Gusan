@@ -17,15 +17,24 @@ What it shows is ``calendar.meetings()`` - the very call the Meetings page's "Co
 "Only meetings with other people" rule, the dropped ended meetings, the order and the muted ones are the
 same by construction; Home filters nothing of its own. Nothing here touches the network: it re-reads the
 in-memory list when the service says something (changed / connected / disconnected / connecting / status /
-error), when Home opens or shows, when a related setting changes, and on Home's own 60 s tick (so "in 25
+error), when Home opens or shows, when a related setting changes, and on Home's own 30 s tick (so "in 25
 min" stays true and an ended meeting drops). Home never asks the service to refresh: "See all" opens
 Meetings, which does (once a minute at most).
 
+The section is a LAYOUT (``section.col``) and its header and cards belong to the page, like the hero and
+the tiles: a card's soft shadow is painted outside the card, and a parent widget that ends at the card's
+edge cuts it off (the first version had a flat card with square corners behind it). So the section is a
+QObject: ``head``, ``card`` and ``invite`` are the widgets, ``widgets()`` lists them, ``shown()`` says if
+any is up.
+
 The actions are the Meetings page's:
 
-    Record  opens Meetings with the start card filled in (title, people, event id, agenda) and does NOT
-            start recording: the Record button there does, with its Pro gate and consent notice
-            (invite_context.card_prefill is the one definition of that fill).
+    Record  opens Meetings on its list with the start card filled in (title, people, event id, agenda)
+            and does NOT start recording: the Record button there does, with its Pro gate and consent
+            notice (invite_context.card_prefill is the one definition of that fill). While a meeting is
+            being recorded or written up it fills nothing in and just opens Meetings, which shows that
+            meeting (one at a time: AppController.record_from_calendar does the same).
+    See all opens Meetings on its list (or on the running meeting).
     Join    opens the call link in the browser (https only; calendar_door.open_join).
     Connect ui/calendar_door.connect_calendar: the disclosure box first, "Not now" does nothing.
 
@@ -38,7 +47,7 @@ import logging
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
 import calendar_sync
@@ -63,6 +72,7 @@ INVITE_SUB = "Connect Google Calendar to get a reminder to record."
 RECORD_TIP = "Opens Meetings, ready to record"
 
 ROW_H = 58                  # a row's height (59 with the hairline above it)
+HEAD_H = 36                 # the header's height: Recent's (its search box), so the two titles keep one rhythm
 TIME_W = 68                 # the time column
 
 
@@ -74,13 +84,15 @@ def _utcnow():
 def row_key(m):
     """What a row draws from a meeting (not the time-dependent words, not the bell)."""
     return (m.get("id"), str(m.get("start")), str(m.get("end")), m.get("title"), m.get("people"),
-            m.get("call_type"), m.get("link"), len(m.get("others") or []))
+            m.get("call_type"), m.get("link"), tuple(str(x) for x in (m.get("others") or [])))
 
 
 def _button(text, kind, px, weight, parent):
     b = Button(text, kind, "s", parent=parent)
     b.setFont(theme.font(px, weight))
     b.setAutoDefault(True)              # Enter presses it as well as Space (a Button outside a dialog ignores Enter)
+    if kind == "link":
+        b.setProperty("room", True)     # theme.py: a little padding, so the keyboard ring does not touch the word
     return b
 
 
@@ -144,6 +156,7 @@ class UpcomingRow(_Hairline):
         self.record_button = _button(RECORD, "ghost", 13, 600, self)
         self.record_button.setAccessibleName("%s %s" % (RECORD, short))
         self.record_button.setToolTip(RECORD_TIP)
+        self.record_button.setAccessibleDescription(RECORD_TIP)         # a screen reader hears it too
         self.record_button.clicked.connect(self._record)
         lay.addWidget(self.record_button, 0, Qt.AlignVCenter)
         # Everyone on it, when the line says "+2" (as text: a guest's name can hold markup).
@@ -169,11 +182,11 @@ class UpcomingRow(_Hairline):
         calendar_door.open_join(self.facts["join"])
 
 
-class UpcomingSection(QWidget):
+class UpcomingSection(QObject):
     """The "Coming up" block on Home. See the module notes."""
 
-    def __init__(self, page, parent=None):
-        super().__init__(parent or page)
+    def __init__(self, page):
+        super().__init__(page)
         self.page = page
         self.app = page.app
         self.rows = []
@@ -183,16 +196,17 @@ class UpcomingSection(QWidget):
         self._tone = "red"
         self._line_shown = None                 # (text, tone) the invitation card says now
         self._failed = False
-        self.setAccessibleName(TITLE)
-        col = QVBoxLayout(self)
+        col = self.col = QVBoxLayout()          # what HomePage puts above Recent (an empty one adds no gap)
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(12)
         # ── the header: Coming up · G ········ See all
-        self.head = QWidget(self)
+        self.head = QWidget(page)
+        self.head.setFixedHeight(HEAD_H)
         head = QHBoxLayout(self.head)
         head.setContentsMargins(0, 0, 0, 0)
         head.setSpacing(8)
         self.title_label = label(TITLE, "h2", self.head)
+        self.title_label.setTextFormat(Qt.PlainText)        # every label here is plain text, the fixed ones too
         head.addWidget(self.title_label, 0, Qt.AlignVCenter)
         head.addWidget(google_label(16, self.head), 0, Qt.AlignVCenter)
         head.addStretch(1)
@@ -202,7 +216,7 @@ class UpcomingSection(QWidget):
         head.addWidget(self.see_all, 0, Qt.AlignVCenter)
         col.addWidget(self.head)
         # ── the list card (the look of Recent's)
-        self.card = Card(self, pad=(0, 0), gap=0)
+        self.card = Card(page, pad=(0, 0), gap=0)
         self.card.layout().setContentsMargins(0, 6, 0, 6)
         self.card.setAccessibleName(TITLE)
         self.box = QWidget(self.card)
@@ -212,7 +226,7 @@ class UpcomingSection(QWidget):
         self.card.add(self.box)
         col.addWidget(self.card)
         # ── the invitation card (the Meetings page's Connect card, shorter)
-        self.invite = Card(self, pad=(14, 14), gap=0)
+        self.invite = Card(page, pad=(14, 14), gap=0)
         self.invite.layout().setContentsMargins(14, 14, 16, 14)
         self.invite.setAccessibleName(calendar_door.CONNECT_TITLE)
         irow = QHBoxLayout()
@@ -221,6 +235,7 @@ class UpcomingSection(QWidget):
         icol = QVBoxLayout()
         icol.setSpacing(1)
         self.invite_title = text_label(INVITE_TITLE, 14.5, 700, "ink", parent=self.invite)
+        self.invite_title.setTextFormat(Qt.PlainText)
         icol.addWidget(self.invite_title)
         self.invite_sub = text_label(INVITE_SUB, 13, 400, "muted", parent=self.invite)
         self.invite_sub.setWordWrap(True)
@@ -357,10 +372,20 @@ class UpcomingSection(QWidget):
                 break
         return out
 
+    def widgets(self):
+        """The widgets this section puts on the page: the header, the list card, the invitation card."""
+        return [self.head, self.card, self.invite]
+
+    def shown(self):
+        """True when any of it is up (False: no calendar service, or one this build can't use)."""
+        return self._state != "hidden"
+
+    def _on_screen(self):
+        return self.page.isVisible() and any(w.isVisibleTo(self.page) for w in (self.head, self.invite))
+
     def _apply_state(self, state):
         self._state = state
         listing = state in ("list", "empty", "checking")
-        self.setVisible(state != "hidden")
         self.head.setVisible(listing)
         self.card.setVisible(listing)
         self.invite.setVisible(state in ("invite", "connecting"))
@@ -429,7 +454,7 @@ class UpcomingSection(QWidget):
         out = [self.see_all, self.connect_button, self.cancel_button]
         for row in self.rows:
             out += [row.join_button, row.record_button]
-        return [w for w in out if w is not None and w.isVisibleTo(self)]
+        return [w for w in out if w is not None and w.isVisibleTo(self.page)]
 
     def _tab_order(self):
         """Tab goes tiles -> See all -> Join / Record of each row -> Search -> Recent. Qt's own order is the
@@ -446,13 +471,13 @@ class UpcomingSection(QWidget):
 
     # ── keyboard focus survives a rebuild ──
     def _focus_token(self):
-        if not self.isVisible():
+        if not self._on_screen():
             return None
         try:
-            fw = self.window().focusWidget()
+            fw = self.page.window().focusWidget()
         except Exception:
             return None
-        if fw is None or not self.isAncestorOf(fw):
+        if fw is None or not any(w.isAncestorOf(fw) for w in self.widgets()):
             return None
         if fw is self.see_all:
             return ("", "see_all")
@@ -466,34 +491,49 @@ class UpcomingSection(QWidget):
         return None
 
     def _restore_focus(self, token):
-        if token is None or not self.isVisible():
+        if token is None or not self._on_screen():
             return
         who, what = token
         target = None
         if what == "see_all":
             target = self.see_all
         elif what == "connect":
-            target = next((b for b in (self.cancel_button, self.connect_button) if b.isVisibleTo(self)), None)
+            target = next((b for b in (self.cancel_button, self.connect_button) if b.isVisibleTo(self.page)), None)
         else:
             for row in self.rows:
                 if row.facts["id"] == who:
                     target = row.join_button if what == "join" and row.join_button is not None else row.record_button
-        if target is None and self.see_all.isVisibleTo(self):
+        if target is None and self.see_all.isVisibleTo(self.page):
             target = self.see_all                   # what had focus is gone: stay in the section
         if target is not None:
             target.setFocus(Qt.TabFocusReason)
 
     # ── the doors ──
+    def _busy(self):
+        """A meeting is being recorded or written up (the session owns the recorder: one at a time)."""
+        session = getattr(self.app, "meeting_session", None)
+        try:
+            return bool(session is not None and getattr(session, "is_busy", False))
+        except Exception:
+            return False
+
     def record(self, m):
-        """Record on a row: Meetings, with the start card filled in with this meeting (it does not start
-        recording; the Record button there does, after the Pro gate and the consent notice)."""
-        go(self, self.app, "meetings", **invite_context.card_prefill(m))
+        """Record on a row: Meetings' list, with the start card filled in with this meeting (it does not
+        start recording; the Record button there does, after the Pro gate and the consent notice).
+        ``view="list"``: Meetings may have been left on an old meeting's notes, which is not where the card is.
+        While a meeting is being recorded or written up nothing is filled in (a pick would wait on the hidden
+        card and name the NEXT recording): Meetings just opens on that meeting, as the reminder's Record does."""
+        if self._busy():
+            go(self.page, self.app, "meetings")
+            return
+        go(self.page, self.app, "meetings", view="list", **invite_context.card_prefill(m))
 
     def _see_all(self):
-        self.page.app_call_open("meetings")
+        """The Meetings list (the running meeting while there is one, like the rail's Meetings)."""
+        self.page.app_call_open("meetings", **({} if self._busy() else {"view": "list"}))
 
     def _connect(self):
-        calendar_door.connect_calendar(self, self.calendar(), cfg_of(self.app).get("privacy_mode"))
+        calendar_door.connect_calendar(self.page, self.calendar(), cfg_of(self.app).get("privacy_mode"))
 
     def _cancel(self):
         calendar_door.cancel_connect(self.calendar())

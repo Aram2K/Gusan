@@ -447,19 +447,28 @@ def test_home_coming_up_is_readable_in_every_state_on_a_light_and_a_dark_windows
     sec = page.upcoming
     assert sec is not None and sec.state() == "list"
 
+    def section_pieces():
+        """The section's text, in the page's pixels (its widgets belong to the page, like the tiles)."""
+        out = []
+        for w in sec.widgets():
+            if w.isVisibleTo(page):
+                at = w.mapTo(page, QPoint(0, 0))
+                out += [(n, r.translated(at), need) for n, r, need in widget_pieces(w) + _painted_pieces(w)]
+        return out
+
     def check(where, minimum):
         for _ in range(3):
             QApplication.processEvents()
-        return readable(sec, "Home > Coming up > " + where, widget_pieces(sec) + _painted_pieces(sec), minimum=minimum)
+        return readable(page, "Home > Coming up > " + where, section_pieces(), minimum=minimum)
 
     rows = check("three meetings and the paused line", 14)
     names = " ".join(n for n, *_ in rows)
     for word in ("Weekly product sync", "in 25 min", "Join", "Record", "See all", "Paused in Privacy mode."):
         assert word in names, word
     # The card is light glass, the same picture in both schemes (the sample is between the title and Join).
-    img = render(sec)
+    img = render(page)
     row = sec.rows[1]
-    x = row.mapTo(sec, QPoint(row.join_button.x() - 24, row.height() // 2))
+    x = row.mapTo(page, QPoint(row.join_button.x() - 24, row.height() // 2))
     assert _lum(img.pixelColor(x.x() * SCALE, x.y() * SCALE)) > 0.8
     cal._status = ""
     cal.rows = []

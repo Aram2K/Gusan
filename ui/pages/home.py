@@ -28,7 +28,7 @@ error card):
   Meetings with the start card filled in), a quiet See all, or - when Google Calendar
   is set up but not connected - one invitation card; nothing at all when this build
   has no calendar service. It reads the service's in-memory list on its signals, when
-  the page opens or shows and on the page's 60 s tick; no network from Home.
+  the page opens or shows and on the page's 30 s tick; no network from Home.
 - app.downloads (model_manager.ModelDownloads): "Getting ready · 42%" while
   the speech model downloads.
 - app.rename_note_due() / dismiss_rename_note(): the one-time "Transcribe is
@@ -85,6 +85,7 @@ _now = datetime.now
 HOME_LIMIT = 6          # Recent rows without a search (the mockup's six)
 SEARCH_LIMIT = 40       # with a search
 POLL_MS = 3000
+TICK_MS = 30_000                # "in 25 min" on Coming up stays true to within half a minute (Meetings ticks as often)
 
 LANG_NAMES = {
     "auto": "Detect language", "multi": "Mixed languages", "en": "English", "ar": "Arabic",
@@ -1252,9 +1253,9 @@ class HomePage(QWidget):
         self._poll = QTimer(self)
         self._poll.setInterval(POLL_MS)
         self._poll.timeout.connect(self._poll_stores)
-        self._minute = QTimer(self)             # while the page is on screen: "in 25 min" stays true
-        self._minute.setInterval(60_000)
-        self._minute.timeout.connect(self._on_minute)
+        self._tick = QTimer(self)               # while the page is on screen: "in 25 min" stays true
+        self._tick.setInterval(TICK_MS)
+        self._tick.timeout.connect(self._on_tick)
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(150)
@@ -1464,7 +1465,7 @@ class HomePage(QWidget):
             except Exception:
                 logger.warning("Coming up couldn't be built", exc_info=True)
                 return None
-            self._body.insertWidget(self.UPCOMING_SLOT, section)
+            self._body.insertLayout(self.UPCOMING_SLOT, section.col)     # a layout, not a widget: the cards' shadows paint onto the page
             self.upcoming = section
         self.upcoming.connect_service(cal)
         self.upcoming.sync()
@@ -1476,8 +1477,8 @@ class HomePage(QWidget):
     def _on_calendar_changed(self, *_):
         self._update_next()
 
-    def _on_minute(self):
-        """Every minute while shown: the chip and Coming up re-read the service's list (memory only)."""
+    def _on_tick(self):
+        """Every 30 s while shown: the chip and Coming up re-read the service's list (memory only)."""
         self._update_next()
         if self.upcoming is not None:
             self.upcoming.sync()
@@ -1748,16 +1749,16 @@ class HomePage(QWidget):
         super().showEvent(e)
         if not self._poll.isActive():
             self._poll.start()
-        if not self._minute.isActive():
-            self._minute.start()
-            self._on_minute()                   # back from the tray after a while: the times are current
+        if not self._tick.isActive():
+            self._tick.start()
+            self._on_tick()                     # back from the tray after a while: the times are current
         if self._rename_note_live:
             self._mark_rename_note()            # seen once: not shown at the next launch
 
     def hideEvent(self, e):
         super().hideEvent(e)
         self._poll.stop()
-        self._minute.stop()
+        self._tick.stop()
 
 
 def create(main_app):

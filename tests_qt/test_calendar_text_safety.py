@@ -275,11 +275,11 @@ def test_home_coming_up_shows_a_hostile_title_and_names_as_text(qapp, picture, m
     assert rows[0]["title"] in row.record_button.accessibleName() or \
         row.record_button.accessibleName().startswith("Record <img")
     # What is on screen is words: the 150 px red picture is not in the section's pixels.
-    img = sec.grab().toImage().convertToFormat(QImage.Format_RGB32)
+    img = sec.card.grab().toImage().convertToFormat(QImage.Format_RGB32)
     arr = np.frombuffer(img.constBits(), dtype=np.uint8).reshape(img.height(), img.bytesPerLine() // 4, 4)
     red = (arr[:, :img.width(), 2] > 240) & (arr[:, :img.width(), 1] < 20) & (arr[:, :img.width(), 0] < 20)
     assert int(red.sum()) == 0
-    assert sec.height() < 400
+    assert sec.card.height() < 400
     page.hide()
     page.deleteLater()
     QApplication.processEvents()

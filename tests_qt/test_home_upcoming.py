@@ -8,7 +8,7 @@ is that Home shows the SAME meetings, so that is tested, not assumed.
 What is covered: every state (not configured / unavailable, invitation, connecting, errors, list, empty,
 checking, paused or retrying), the rows (labels, people, call badge, Join, Record, See all, Connect and
 its disclosure), live updates (changed / connected / disconnected / connecting / status / error, the
-page opening, a setting, the page shown again, the minute tick), keyboard (Tab order, Enter and Space,
+page opening, a setting, the page shown again, the 30 s tick), keyboard (Tab order, Enter and Space,
 names), text from outside, long titles and a narrow window, 100 and 150 percent, and the weight it adds
 to Home (no polling, no network, no Meetings page code).
 """
@@ -17,7 +17,6 @@ import logging
 import os
 import subprocess
 import sys
-import tempfile
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -130,10 +129,14 @@ def meeting(i, title, start, mins=30, call="Google Meet", others=("Anna", "David
             "link": link, "agenda": agenda, "muted": muted, "private": private, "has_others": bool(names)}
 
 
+BASE_DAY = datetime(2026, 10, 7)        # "today" for every test: no clock change is near it in Europe, the US or Armenia
+
+
 def local(days=0, h=10, m=0):
-    """h:m local time, ``days`` from today (aware, in UTC)."""
-    base = datetime.now().astimezone().replace(hour=h, minute=m, second=0, microsecond=0)
-    return (base + timedelta(days=days)).astimezone(timezone.utc)
+    """h:m local time, ``days`` after BASE_DAY (aware, in UTC). Built from a fixed day and converted with the
+    zone's own rules, so no test depends on today's date or on a daylight saving change (a fixed UTC offset
+    from the real today shows another hour on the days before a change)."""
+    return (BASE_DAY + timedelta(days=days)).replace(hour=h, minute=m).astimezone(timezone.utc)
 
 
 def five():
@@ -252,7 +255,7 @@ def test_no_calendar_service_means_no_section(build):
     page, app = build(None)
     assert not hasattr(app, "calendar")                  # main.py builds app.calendar only with a Google client
     assert page.upcoming is None
-    assert not [w for w in page.findChildren(QWidget) if type(w).__name__ == "UpcomingSection"]
+    assert not [w for w in page.findChildren(QObject) if type(w).__name__ == "UpcomingSection"]
     assert page.recent_title.isVisible()
     # a stray later open changes nothing either
     page.on_open()
@@ -268,12 +271,13 @@ def test_a_service_that_is_not_available_shows_nothing_and_moves_nothing(build, 
     cal.available = False
     page, _app = build(cal)
     sec = _section_of(page)
-    assert sec.state() == "hidden" and not sec.isVisibleTo(page)
+    assert sec.state() == "hidden" and not sec.shown()
+    assert not [w for w in sec.widgets() if w.isVisibleTo(page)]
     assert recent_y(page) == y0                         # a hidden section adds no space (not even its gap)
     # Switched on (a Google client appears): the section is there and Recent moves down.
     cal.available = True
     cal.changed.emit(cal.meetings())
-    assert sec.state() == "list" and sec.isVisibleTo(page)
+    assert sec.state() == "list" and sec.shown() and sec.head.isVisibleTo(page)
     assert recent_y(page) > y0
 
 
@@ -284,7 +288,7 @@ def test_a_service_made_after_the_page_is_picked_up_when_home_opens(build, now):
     page.on_open()
     assert page.upcoming is not None and page.upcoming.state() == "list"
     page.on_open()                                        # opening again builds no second one
-    assert len([w for w in page.findChildren(QWidget) if type(w).__name__ == "UpcomingSection"]) == 1
+    assert len([w for w in page.findChildren(QObject) if type(w).__name__ == "UpcomingSection"]) == 1
 
 
 # ═══════════════════ where it sits ═══════════════════
@@ -293,26 +297,25 @@ def test_the_section_sits_directly_above_recent(build, now):
     sec = _section_of(page)
     settle(page)
     body = page._body
-    assert body.indexOf(sec) == 2                         # hero, tiles, Coming up, Recent
+    assert body.itemAt(2).layout() is sec.col             # hero, tiles, Coming up, Recent
     assert body.itemAt(3).layout() is not None and body.itemAt(3).layout().indexOf(page.recent_card) >= 0
     tiles_bottom = max(t.mapTo(page, QPoint(0, 0)).y() + t.height() for t in page.tiles)
-    sec_top = sec.mapTo(page, QPoint(0, 0)).y()
-    sec_bottom = sec_top + sec.height()
+    sec_top = sec.head.mapTo(page, QPoint(0, 0)).y()
+    sec_bottom = sec.card.mapTo(page, QPoint(0, 0)).y() + sec.card.height()
     assert tiles_bottom < sec_top <= tiles_bottom + 40            # the page's 32 px gap
     assert sec_bottom < page.recent_title.mapTo(page, QPoint(0, 0)).y()
     assert recent_y(page) - sec_bottom <= 40                      # ... and 32 px to Recent's title
     # The same width and left edge as Recent's card: one column.
-    assert sec.mapTo(page, QPoint(0, 0)).x() == page.recent_card.mapTo(page, QPoint(0, 0)).x()
-    assert sec.width() == page.recent_card.width()
-    assert sec.card.width() == page.recent_card.width()
+    assert sec.card.mapTo(page, QPoint(0, 0)).x() == page.recent_card.mapTo(page, QPoint(0, 0)).x()
+    assert sec.head.width() == sec.card.width() == page.recent_card.width()
 
 
 def test_how_far_each_state_pushes_recent_down(build, now):
     baseline, _ = build(None)
     y0 = recent_y(baseline)
     for rows, connected, has_read, expect in (
-            (five(), True, True, (258, 270)),                 # three rows: header + card + the 32 px gap
-            ([], True, True, (119, 131)),                     # one calm line
+            (five(), True, True, (262, 274)),                 # three rows: header (36) + card + the 32 px gap
+            ([], True, True, (129, 141)),                     # one calm line
             ([], False, True, (98, 110))):                    # the invitation card
         page, _app = build(FakeCalendar(rows, connected=connected, has_read=has_read))
         push = recent_y(page) - y0
@@ -496,7 +499,7 @@ def test_connected_with_meetings_shows_the_first_three_soonest_first(build, now)
     assert sec.head.isVisibleTo(page) and sec.card.isVisibleTo(page) and not sec.invite.isVisibleTo(page)
     assert sec.see_all.isVisibleTo(page) and sec.see_all.text() == "See all"
     assert sec.see_all.accessibleName() == "See all meetings"
-    assert sec.accessibleName() == "Coming up" and sec.card.accessibleName() == "Coming up"
+    assert sec.card.accessibleName() == "Coming up"
     assert "No meetings coming up." not in lines(sec)
 
 
@@ -564,7 +567,7 @@ def test_a_failure_hides_the_section_and_logs_once(build, now, monkeypatch, capl
         sec.sync()
         sec.sync()
         sec.sync()
-    assert sec.state() == "hidden" and not sec.isVisibleTo(page)               # never an error card
+    assert sec.state() == "hidden" and not [w for w in sec.widgets() if w.isVisibleTo(page)]     # never an error card
     assert len([r for r in caplog.records if "Coming up failed" in r.getMessage()]) == 1
     sec.sync()                                                                 # it works again once the fault is gone
     assert sec.state() == "list"
@@ -588,7 +591,7 @@ def test_a_row_says_when_who_and_how(build, now):
 def test_a_later_day_says_its_weekday(build, now):
     page, _app = build(FakeCalendar(five()[4:]))
     row = _section_of(page).rows[0]
-    assert row.when_label.text() == (datetime.now().astimezone() + timedelta(days=3)).strftime("%A")
+    assert row.when_label.text() == (BASE_DAY + timedelta(days=3)).strftime("%A")
 
 
 def test_now_and_the_next_one_are_blue_the_rest_quiet(build, now):
@@ -646,7 +649,7 @@ def test_record_opens_meetings_with_the_card_filled_in_and_does_not_record(build
     sec = _section_of(page)
     sec.rows[1].record_button.click()
     assert app.calls[-1] == ("show_main", "meetings", {
-        "title": "Customer call - Nova", "attendees": ["Sona", "Hasmik", "Lilit"],
+        "view": "list", "title": "Customer call - Nova", "attendees": ["Sona", "Hasmik", "Lilit"],
         "calendar_event_id": "e2", "agenda": AGENDA})
     assert "record" not in app.calls[-1][2]                                     # opening Meetings is all it does
     assert not [c for c in app.calls if c[0] in ("_pro_upsell", "set_setting")]
@@ -659,7 +662,7 @@ def test_record_sends_the_same_fill_as_a_meetings_row(build, now):
     sec = _section_of(page)
     for row, m in zip(sec.rows, rows):
         row.record_button.click()
-        assert app.calls[-1] == ("show_main", "meetings", card_prefill(m))
+        assert app.calls[-1] == ("show_main", "meetings", dict(card_prefill(m), view="list"))
 
 
 def test_record_on_a_private_event_sends_no_agenda_and_no_title_says_meeting(build, now):
@@ -700,7 +703,7 @@ def test_record_uses_the_newest_copy_of_the_meeting(build, now):
 def test_see_all_opens_meetings(build, now):
     page, app = build(FakeCalendar(five()))
     _section_of(page).see_all.click()
-    assert app.calls[-1] == ("show_main", "meetings", {})
+    assert app.calls[-1] == ("show_main", "meetings", {"view": "list"})
 
 
 def test_people_tooltip_has_everyone_when_the_label_says_plus_n(build, now):
@@ -878,34 +881,47 @@ def test_showing_home_again_reads_the_list_again(build, now):
     assert PAUSED in lines(sec)
 
 
-def test_a_minute_tick_keeps_the_rows_and_refreshes_the_words(build, now):
+def test_a_tick_keeps_the_rows_and_refreshes_the_words(build, now):
     cal = FakeCalendar(five())
     page, _app = build(cal)
     sec = _section_of(page)
     rows = list(sec.rows)
     assert rows[0].when_label.text() == "in 25 min"
     now.now = local(0, 10, 1)
-    page._on_minute()
+    page._on_tick()
     assert sec.rows == rows and all(a is b for a, b in zip(sec.rows, rows))      # the same widgets
     assert rows[0].when_label.text() == "in 24 min"
     assert rows[0].accessibleName().startswith("Weekly product sync, 10:25, in 24 min")
     now.now = local(0, 10, 25)
-    page._on_minute()
+    page._on_tick()
     assert rows[0].when_label.text() == "Now"
     assert all(a is b for a, b in zip(sec.rows, rows))
     # Time moves on past the first meeting's end: it drops, the rest stays.
     now.now = local(0, 10, 56)
-    page._on_minute()
+    page._on_tick()
     assert [r.facts["id"] for r in sec.rows] == ["e2", "e3", "e4"]
 
 
-def test_a_minute_tick_is_the_pages_own_timer_while_it_is_shown(build, now):
+def test_the_tick_is_the_pages_own_timer_while_it_is_shown(build, now):
     page, _app = build(FakeCalendar(five()))
-    assert page._minute.isActive() and page._minute.interval() == 60_000
+    assert page._tick.isActive() and page._tick.interval() == 30_000      # as often as the Meetings page's own
     page.hide()
-    assert not page._minute.isActive()
+    assert not page._tick.isActive()
     page.show()
-    assert page._minute.isActive()
+    assert page._tick.isActive()
+
+
+def test_the_words_are_never_more_than_half_a_minute_old(build, now):
+    """The service says changed only when the list changes, not when the clock moves, so "in 1 min" and "Now"
+    come from Home's tick: it runs every 30 s (a 60 s tick left "in 1 min" up for up to a minute after the
+    meeting began)."""
+    page, _app = build(FakeCalendar([meeting(1, "Soon", now.now + timedelta(seconds=25))]))
+    assert page._tick.interval() <= 30_000
+    row = _section_of(page).rows[0]
+    assert row.when_label.text() == "in 1 min"
+    now.now += timedelta(seconds=page._tick.interval() // 1000)               # one tick later: it has begun
+    page._on_tick()
+    assert row.when_label.text() == "Now"
 
 
 def test_the_chip_follows_the_same_tick(build, now):
@@ -916,7 +932,7 @@ def test_the_chip_follows_the_same_tick(build, now):
     page, _app = build(cal)
     assert not page.next_chip.isHidden()
     nxt["v"] = ("", None)
-    page._on_minute()
+    page._on_tick()
     assert page.next_chip.isHidden()
 
 
@@ -973,9 +989,9 @@ def test_home_never_asks_the_service_to_refresh_and_has_no_timer_of_its_own(buil
     cal = FakeCalendar(five())
     page, app = build(cal)
     sec = _section_of(page)
-    assert sec.findChildren(QTimer) == []
+    assert sec.findChildren(QTimer) == [] and [t for w in sec.widgets() for t in w.findChildren(QTimer)] == []
     page.on_open()
-    page._on_minute()
+    page._on_tick()
     page.on_setting_changed("calendar_only_with_link")
     cal.changed.emit(cal.meetings())
     cal.status.emit(PAUSED)
@@ -1080,13 +1096,13 @@ def test_narrow_and_wide_pages_follow_the_column(build, now):
         page, _app = build(FakeCalendar(five()), width=width)
         sec = _section_of(page)
         settle(page)
-        assert sec.width() == page.width() - 64                                   # the body's 32 px margins
-        assert sec.card.width() == sec.width()
+        assert sec.head.width() == page.width() - 64                              # the body's 32 px margins
+        assert sec.card.width() == sec.head.width()
         for row in sec.rows:
             assert row.width() <= sec.card.width()
             assert row.record_button.geometry().right() <= row.width()
             assert row.height() in (58, 59)
-        assert sec.mapTo(page, QPoint(0, 0)).x() == 32
+        assert sec.head.mapTo(page, QPoint(0, 0)).x() == sec.card.mapTo(page, QPoint(0, 0)).x() == 32
 
 
 def test_the_invitation_card_fits_a_narrow_page(build, now):
@@ -1095,7 +1111,7 @@ def test_the_invitation_card_fits_a_narrow_page(build, now):
     page, _app = build(cal, width=718)
     sec = _section_of(page)
     settle(page)
-    assert sec.invite.width() == sec.width() == 654
+    assert sec.invite.width() == 654 == page.width() - 64
     assert sec.cancel_button.geometry().right() <= sec.invite.width()
     assert sec.invite_sub.sizeHint().height() < 80
 
@@ -1183,7 +1199,7 @@ def test_space_and_enter_press_every_button(build, now, monkeypatch, key):
     page, app = build(FakeCalendar(five()))
     sec = _section_of(page)
     QTest.keyClick(sec.see_all, key)
-    assert app.calls[-1] == ("show_main", "meetings", {})
+    assert app.calls[-1] == ("show_main", "meetings", {"view": "list"})
     QTest.keyClick(sec.rows[0].record_button, key)
     assert app.calls[-1][2]["calendar_event_id"] == "e1"
     QTest.keyClick(sec.rows[0].join_button, key)
@@ -1236,12 +1252,17 @@ os.chdir(ROOT)
 from datetime import datetime, timedelta, timezone
 from PySide6.QtCore import QObject, QPoint, Signal
 from PySide6.QtWidgets import QApplication
+import shutil
+import tests_qt.conftest as qt_conftest
 from tests_qt.conftest import make_stub_app
 app_q = QApplication.instance() or QApplication([])
 from ui import theme
 theme.install_light_scheme(app_q)
 theme.load_fonts()
-from ui.pages import home
+from ui.pages import home, home_upcoming
+BASE = datetime(2026, 10, 7, 10, 0)                         # the clock is pinned (no real date, no clock change in it)
+NOW = BASE.astimezone(timezone.utc)
+home_upcoming._utcnow = lambda: NOW
 
 class Cal(QObject):
     changed = Signal(object); connected = Signal(str); disconnected = Signal(str); error = Signal(str)
@@ -1254,8 +1275,7 @@ class Cal(QObject):
     def status_text(self): return ""
 
 def at(days, h, m=0):
-    base = datetime.now().astimezone().replace(hour=h, minute=m, second=0, microsecond=0)
-    return (base + timedelta(days=days)).astimezone(timezone.utc)
+    return (BASE + timedelta(days=days)).replace(hour=h, minute=m).astimezone(timezone.utc)
 
 def mt(i, title, start, link="", call="Google Meet"):
     return {"id": "e%d" % i, "title": title, "start": start, "end": start + timedelta(minutes=30), "call_type": call,
@@ -1263,7 +1283,7 @@ def mt(i, title, start, link="", call="Google Meet"):
             "muted": False, "private": False, "has_others": True}
 
 out = {"dpr": app_q.primaryScreen().devicePixelRatio()}
-soon = datetime.now(timezone.utc) + timedelta(minutes=25)
+soon = NOW + timedelta(minutes=25)
 for name, cal, width in (("list", Cal([mt(1, "Weekly product sync", soon, "https://meet.google.com/abc"),
                                        mt(2, "A very long title " * 12, at(1, 10, 0), "https://zoom.us/j/1", "Zoom"),
                                        mt(3, "Retro", at(2, 10, 0), "", "")]), 718),
@@ -1280,7 +1300,9 @@ for name, cal, width in (("list", Cal([mt(1, "Weekly product sync", soon, "https
         QApplication.processEvents()
     page.layout().activate()
     sec = page.upcoming
-    info = {"state": sec.state(), "w": sec.width(), "h": sec.height(), "dpr_widget": page.devicePixelRatioF(),
+    shown = [w for w in sec.widgets() if w.isVisible()]
+    info = {"state": sec.state(), "w": max([w.width() for w in shown] or [0]), "h": sum(w.height() for w in shown),
+            "dpr_widget": page.devicePixelRatioF(),
             "recent_y": page.recent_title.mapTo(page, QPoint(0, 0)).y(),
             "rows": [[r.height(), r.width(), r.record_button.geometry().right(), r.record_button.width(),
                       r.title.width(), r.time_label.width(), r.when_label.text(), r.call_badge.width() if r.call_badge else 0,
@@ -1289,17 +1311,17 @@ for name, cal, width in (("list", Cal([mt(1, "Weekly product sync", soon, "https
     img = page.grab().toImage()
     info["img"] = [img.width(), img.height(), img.devicePixelRatio()]
     out[name] = info
+shutil.rmtree(qt_conftest._DATA, ignore_errors=True)       # importing the conftest made a data folder: not left behind
 print("PROBE" + json.dumps(out))
 """
 
 
 def _run_probe(scale):
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    with tempfile.TemporaryDirectory(prefix="gusan-scale-") as data:
-        env = dict(os.environ, QT_SCALE_FACTOR=str(scale), PYTHONDONTWRITEBYTECODE="1", QT_QPA_PLATFORM="offscreen",
-                   TRANSCRIBE_APP_DATA_DIR=data, TRANSCRIBE_DISABLE_KEYRING="1", TRANSCRIBE_SKIP_MIGRATION="1")
-        res = subprocess.run([sys.executable, "-c", PROBE.replace("__ROOT__", repr(root))], capture_output=True,
-                             text=True, timeout=300, env=env, cwd=root)
+    env = dict(os.environ, QT_SCALE_FACTOR=str(scale), PYTHONDONTWRITEBYTECODE="1", QT_QPA_PLATFORM="offscreen",
+               TRANSCRIBE_DISABLE_KEYRING="1", TRANSCRIBE_SKIP_MIGRATION="1")
+    res = subprocess.run([sys.executable, "-c", PROBE.replace("__ROOT__", repr(root))], capture_output=True,
+                         text=True, timeout=300, env=env, cwd=root)       # (the probe makes its own data folder and removes it)
     assert res.returncode == 0, res.stderr[-1500:]
     line = next(ln for ln in res.stdout.splitlines() if ln.startswith("PROBE"))
     return json.loads(line[5:])
@@ -1510,7 +1532,7 @@ def test_the_words_are_short_plain_and_never_about_limits(build, now, monkeypatc
     def collect(page):
         sec = _section_of(page)
         QApplication.processEvents()
-        for w in sec.findChildren(QWidget) + [sec]:
+        for w in [x for root in sec.widgets() for x in [root] + root.findChildren(QWidget)]:
             if w.isHidden():
                 continue
             texts = [w.accessibleName(), w.toolTip()]
@@ -1540,3 +1562,238 @@ def test_the_words_are_short_plain_and_never_about_limits(build, now, monkeypatc
         low = text.lower()
         assert "limit" not in low and "armenia" not in low and "transcribe" not in low, text
         assert "{" not in text and "%s" not in text, text
+
+
+# ═══════════════════ where Record and See all land ═══════════════════
+def _leave_meetings_on_old_notes(win, meetings_root):
+    """Meetings, left on a finished meeting's notes (what it shows when it is opened without a hint)."""
+    folder = meetings_root / "20261001_090000"
+    folder.mkdir()
+    (folder / "meta.json").write_text(json.dumps({
+        "title": "Old standup", "attendees": "Aram, Anna", "attendees_list": ["Aram", "Anna"],
+        "started": "2026-10-01 09:00:00", "duration_sec": 600, "language": "en"}), encoding="utf-8")
+    (folder / "notes.md").write_text("## Summary\nx", encoding="utf-8")
+    (folder / "transcript.txt").write_text("Speaker 1: hi", encoding="utf-8")
+    page = win.open("meetings")
+    page.open_notes(str(folder))
+    QApplication.processEvents()
+    assert page.current_view() == "notes"
+    return page
+
+
+@pytest.mark.parametrize("door", ["record", "see_all"])
+def test_record_and_see_all_leave_an_old_meetings_notes_for_the_list(shell, real_service, meetings_root, door):
+    """Meetings opens where it was left: on a past meeting's notes, the start card (filled in or not) is not on
+    screen, so Record looked broken and See all did not show the list. Home asks for the list."""
+    m = real_service.meeting
+    svc, _api, _clock = real_service.build([m("a", 30, title="Design review", others=("Sona", "Hasmik"))])
+    win, _app = shell("pro", calendar=svc, meeting_session=FakeSession())
+    svc.start()
+    meetings_page = _leave_meetings_on_old_notes(win, meetings_root)
+    home_page = win.open("home")
+    QApplication.processEvents()
+    sec = home_page.upcoming
+    assert sec.state() == "list"
+    (sec.rows[0].record_button if door == "record" else sec.see_all).click()
+    QApplication.processEvents()
+    assert win.current_route() == "meetings"
+    assert meetings_page.current_view() == "list"
+    if door == "record":
+        card = meetings_page.list_view.start_card
+        assert card.title_edit.text() == "Design review" and card.calendar_event_id == "a"
+        assert card.people.names() == ["Sona", "Hasmik"]
+
+
+@pytest.mark.parametrize("phase", ["recording", "paused", "processing"])
+def test_record_and_see_all_while_a_meeting_runs_fill_nothing_in(build, now, phase):
+    """One meeting at a time (AppController.record_from_calendar says the same for the reminder's Record):
+    a pick made now would sit on the hidden start card and name the NEXT recording."""
+    page, app = build(FakeCalendar(five()))
+    sec = _section_of(page)
+    session = app.meeting_session = FakeSession()
+    session.phase = phase
+    sec.rows[0].record_button.click()
+    assert app.calls[-1] == ("show_main", "meetings", {})
+    sec.see_all.click()
+    assert app.calls[-1] == ("show_main", "meetings", {})                          # the running meeting, as the rail does
+    session.phase = "done"                                                         # over: the picks work again
+    sec.rows[0].record_button.click()
+    assert app.calls[-1][2]["view"] == "list" and app.calls[-1][2]["calendar_event_id"] == "e1"
+    sec.see_all.click()
+    assert app.calls[-1] == ("show_main", "meetings", {"view": "list"})
+
+
+def test_a_pick_is_not_left_on_the_start_card_after_a_recording(shell, real_service):
+    m = real_service.meeting
+    svc, _api, _clock = real_service.build([m("a", 30, title="Design review")])
+    session = FakeSession()
+    session.phase = "recording"
+    win, _app = shell("pro", calendar=svc, meeting_session=session)
+    svc.start()
+    home_page = win.open("home")
+    QApplication.processEvents()
+    home_page.upcoming.rows[0].record_button.click()
+    QApplication.processEvents()
+    meetings_page = win.page("meetings")
+    assert win.current_route() == "meetings" and meetings_page.current_view() == "live"
+    card = meetings_page.list_view.start_card
+    assert card.title_edit.text() != "Design review" and card.calendar_event_id == "" and not card._picked
+    session.phase = "idle"                                                          # it ended: the card is the way it was
+    meetings_page.show_list()
+    assert card.title_edit.text() != "Design review" and card.calendar_event_id == "" and not card._picked
+
+
+# ═══════════════════ the review's smaller fixes ═══════════════════
+def test_a_guest_swapped_for_another_is_a_new_row_with_the_right_tooltip(build, now):
+    """Same number of guests, same first two names, so the line reads the same: the row is still rebuilt."""
+    cal = FakeCalendar(five())
+    page, _app = build(cal)
+    sec = _section_of(page)
+    old = sec.rows[1]
+    assert _tip_text(old) == "Sona, Hasmik, Lilit"
+    cal.rows[1]["others"] = ["Sona", "Hasmik", "Zed"]
+    cal.changed.emit(cal.meetings())
+    row = sec.rows[1]
+    assert row is not old and _tip_text(row) == "Sona, Hasmik, Zed"
+    assert row.meeting["others"] == ["Sona", "Hasmik", "Zed"]
+    cal.changed.emit(cal.meetings())
+    assert sec.rows[1] is row                                                       # unchanged again: kept
+
+
+def test_the_header_keeps_the_height_of_recents_in_every_state(build, now):
+    cal = FakeCalendar(five())
+    page, _app = build(cal)
+    sec = _section_of(page)
+    tops = set()
+    for rows, has_read in ((five(), True), ([], True), ([], False), (five(), True)):
+        cal.rows, cal.has_read = rows, has_read
+        cal.changed.emit(cal.meetings())
+        settle(page)
+        assert sec.head.height() == page.search.height() == 36                      # Recent's header row
+        tops.add(sec.title_label.mapTo(page, QPoint(0, 0)).y())
+    assert len(tops) == 1                                                           # the title never moves
+
+
+def test_the_link_buttons_leave_air_around_the_word_for_the_keyboard_ring(build, now):
+    from ui import theme
+    page, _app = build(FakeCalendar(five()))
+    sec = _section_of(page)
+    theme.apply(page)                                                               # the size comes from the app's stylesheet
+    settle(page)
+    for b in (sec.see_all, sec.rows[0].join_button):
+        word = QFontMetricsF(b.font()).horizontalAdvance(b.text())
+        assert b.width() - word >= 13, (b.text(), b.width(), word)                  # the ring is 2 px + 6 px of padding each side
+
+
+def test_the_record_button_says_where_it_goes_to_a_screen_reader_too(build, now):
+    page, _app = build(FakeCalendar(five()))
+    row = _section_of(page).rows[0]
+    assert row.record_button.accessibleDescription() == row.record_button.toolTip() == "Opens Meetings, ready to record"
+
+
+# ═══════════════════ the card's shadow ═══════════════════
+def _grey(img, x, y):
+    c = img.pixelColor(int(x), int(y))
+    return (c.red() + c.green() + c.blue()) / 3.0
+
+
+def test_the_cards_have_the_soft_shadow_recents_card_has(build, now):
+    """The cards were children of a widget that ended at their edge: the shadow was cut there, leaving a flat card
+    with square corners behind it. Like Recent's card and the tiles, they belong to the page now."""
+    from ui import theme
+    cal = FakeCalendar(five())
+    page, _app = build(cal, width=1100, height=1100)
+    sec = _section_of(page)
+    theme.apply(page)                                                               # the app's stylesheet paints the cards (a shadow is the card's outline)
+    settle(page)
+    assert all(w.parentWidget() is page for w in sec.widgets()) and page.recent_card.parentWidget() is page
+    img = page.grab().toImage()
+
+    def below(card):
+        """How much darker the page is 2 px under the card than 30 px under it (the shadow fades out by then)."""
+        at = card.mapTo(page, QPoint(0, 0))
+        x, y = at.x() + 330, at.y() + card.height()
+        return _grey(img, x, y + 30) - _grey(img, x, y + 2)
+
+    reference = below(page.recent_card)
+    assert reference > 2                                                            # the measure sees Recent's shadow
+    assert below(sec.card) > 2 and below(sec.card) > reference * 0.5
+    cal.disconnect_calendar("user")
+    settle(page)
+    img = page.grab().toImage()
+    assert below(sec.invite) > 2 and sec.invite.parentWidget() is page              # the invitation card too
+
+
+# ═══════════════════ no words from the invite in a log or on disk ═══════════════════
+def _files_under(folder):
+    out = {}
+    for base, _dirs, files in os.walk(folder):
+        for name in files:
+            path = os.path.join(base, name)
+            try:
+                out[path] = (os.path.getsize(path), open(path, "rb").read())
+            except OSError:
+                continue
+    return out
+
+
+def test_a_title_or_a_guest_name_is_never_logged_or_written_down(build, now, caplog, monkeypatch):
+    secret, guest = "ZZ-SECRET-TITLE", "ZZ-GUEST-NAME"
+    unreadable = meeting(7, secret, local(0, 11, 0), others=(guest, "Anna"))
+    del unreadable["start"]                                                         # upcoming_facts raises on it
+    naive = meeting(8, secret + " naive", datetime(2026, 1, 1, 10, 0), others=(guest,))
+    naive["end"] = datetime(2026, 1, 1, 11, 0)
+    fine = meeting(9, secret + " fine", local(0, 12, 0), others=(guest, "Anna", "David"), agenda="agenda " + secret)
+    cal = FakeCalendar([unreadable, naive, fine] + five(), status_text="Paused in Privacy mode.")
+    page, app = build(cal)
+    sec = _section_of(page)
+    data = os.environ["TRANSCRIBE_APP_DATA_DIR"]
+    before = _files_under(data)
+    with caplog.at_level(logging.DEBUG):
+        caplog.set_level(logging.DEBUG, logger="transcribe")
+        sec.sync()
+        cal.changed.emit(cal.meetings())
+        page._on_tick()
+        sec.rows[0].record_button.click()
+        sec.see_all.click()
+
+        def boom(*a, **k):
+            raise RuntimeError("boom")
+        with monkeypatch.context() as mp:                                           # a failure of the section itself
+            mp.setattr(type(sec), "_read", staticmethod(boom))
+            sec.sync()
+        sec.sync()
+    assert [r.facts["id"] for r in sec.rows][:1] == ["e9"]                          # (the rows with the words were read)
+    assert caplog.records
+    for rec in caplog.records:
+        text = " ".join([rec.getMessage(), rec.exc_text or "", repr(rec.args), "".join(map(str, rec.exc_info or ()))])
+        assert secret not in text and guest not in text, text
+    after = _files_under(data)
+    assert after == before                                                          # not a byte written
+    assert not [p for p, (_n, body) in after.items() if secret.encode() in body or guest.encode() in body]
+
+
+def test_every_label_of_the_section_is_plain_text_in_every_state(build, now, picture):
+    status = "<img src=p.png> <b>Paused</b>"
+    cal = FakeCalendar([meeting(1, HOSTILE, local(0, 10, 30), others=(HOSTILE_NAME, "Anna", "David"))], status_text=status)
+    page, _app = build(cal)
+    sec = _section_of(page)
+
+    def check():
+        QApplication.processEvents()
+        labels = [lb for w in sec.widgets() for lb in w.findChildren(QLabel) if lb.text()]
+        assert labels
+        assert [lb.text() for lb in labels if lb.textFormat() != Qt.PlainText] == []
+        assert all(QLabel.sizeHint(lb).height() < 100 for lb in labels)             # no picture opened a tall line
+    check()                                                                         # the list and the status line under it
+    cal.rows, cal.has_read = [], False
+    cal.changed.emit([])
+    check()                                                                         # checking, with the status
+    cal.has_read = True
+    cal.changed.emit([])
+    check()                                                                         # empty, with the status
+    cal.disconnect_calendar("user")
+    cal.error.emit(status)
+    check()                                                                         # the invitation card with an error
+    cal.connect_calendar()
+    check()                                                                         # waiting for the browser
