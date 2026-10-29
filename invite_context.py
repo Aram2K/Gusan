@@ -16,7 +16,8 @@ Privacy rules (docs/redesign/google-calendar-spec.md, decisions 5-7, 12, 13):
 
 Entry points: :func:`from_meeting` (a meeting dict from calendar_sync ->
 the start context), :func:`context_text` (a meeting dict -> the text for the AI
-notes or the Live Assistant), and the parts they are built from:
+notes or the Live Assistant), :func:`card_prefill` (a meeting dict -> what its
+row fills the Meetings start card with), and the parts they are built from:
 :func:`notes_header`, :func:`invite_block`, :func:`people_line`,
 :func:`clip_agenda`, :func:`is_generic_title`.
 """
@@ -230,6 +231,16 @@ def from_meeting(meeting, with_agenda=True):
         agenda = clip_agenda(m.get("agenda"))
     return {"title": one_line(m.get("title"), MAX_TITLE_CHARS), "attendees": attendees,
             "others": others, "agenda": agenda, "event_id": str(m.get("id") or "")}
+
+
+def card_prefill(meeting):
+    """What pressing a "Coming up" meeting fills the Meetings start card with, as the
+    options the page opens with: {"title" ("Meeting" when it has none), "attendees"
+    (the others on it, no emails), "calendar_event_id", "agenda" ("" for a private
+    event)}. One definition for the Meetings row and the Home row."""
+    ctx = from_meeting(meeting)
+    return {"title": ctx["title"] or "Meeting", "attendees": ctx["others"],
+            "calendar_event_id": ctx["event_id"], "agenda": ctx["agenda"]}
 
 
 def context_text(meeting, purpose="notes", with_agenda=True):

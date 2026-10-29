@@ -68,12 +68,15 @@ Integration notes for Wave 4
   (It also opens here, with the start card filled in, when a calendar recording
   could not start, and when a "Coming up" row is pressed.)
 * Google Calendar (docs/redesign/google-calendar-spec.md, decisions 11, 14, 16, 17):
-  every Connect button goes through ``MeetingsPage.connect_calendar()``, which asks
+  every Connect button goes through ``MeetingsPage.connect_calendar()`` (the code is
+  ui/calendar_door.py's, which Home's invitation card calls too), which asks
   with the disclosure Google requires BEFORE the browser opens ("Not now" does
   nothing). "Coming up" shows today and tomorrow in day groups (a weekday name
   later), five meetings and "Show more" (up to 20); a row shows the time ("in 5 min"
   / "Now"), the title, the call type, who is on it, a Join link (https only) and the
-  bell, and pressing it fills the start card (``start_from_meeting``). The start card
+  bell, and pressing it fills the start card (``start_from_meeting``; Home's "Coming up"
+  rows fill it through the same ``invite_context.card_prefill``, by opening this page with
+  those options). The start card
   shows the invite's agenda - plain text the user can edit or clear - and passes it
   to ``session.start(agenda=...)`` with the title and names; Record then tells the
   controller (``note_calendar_start``) so that meeting is not asked about again. The
@@ -104,21 +107,25 @@ Integration notes for Wave 4
 import logging
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
-from PySide6.QtCore import QEvent, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import (QColor, QDesktopServices, QGuiApplication, QIcon, QKeySequence, QPainter, QPen,
-                           QPixmap, QRadialGradient, QShortcut)
+from PySide6.QtCore import QEvent, QPropertyAnimation, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import (QColor, QDesktopServices, QGuiApplication, QIcon, QKeySequence, QPainter, QPen,  # noqa: F401
+                           QPixmap, QRadialGradient, QShortcut)    # (QDesktopServices: tests patch openUrl through it)
 from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QComboBox, QFrame, QGraphicsOpacityEffect,
                                QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QRadioButton,
                                QScrollArea, QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
+import calendar_sync
 import invite_context
 import live_context
 import notion_export
-from ui import notion_sheet, theme
+from ui import calendar_door, notion_sheet, theme
+# The Connect box's words moved to ui/calendar_door.py (Home's card asks the same); the names stay here.
+from ui.calendar_door import (CONNECT_BODY, CONNECT_DETAIL, CONNECT_LINK, CONNECT_TITLE,  # noqa: F401
+                              EXPIRED_NOTE)
 from ui.components import (Button, Card, Chip, Divider, IconButton, PageHeader, ProTag, SettingRow,
-                           SettingsRail, Toggle, icons, label, mini_prompt, row_actions)
+                           SettingsRail, Toggle, icons, label, row_actions)
 from ui.pages import meeting_delete
 from ui.pages import meeting_views as views
 from ui.pages.meeting_views import (AUDIO_MODES, LANGS, NOTICE_TEXT, UPSELL_RECORD, BgRunner, ElidedLabel,
@@ -129,21 +136,6 @@ logger = logging.getLogger("transcribe")
 
 ASK_KEY = "calendar_ask_to_record"
 LINK_ONLY_KEY = "calendar_only_with_link"       # "Only meetings with other people" (the key keeps its old name)
-# The disclosure Google asks for, shown before the browser opens (every Connect button).
-CONNECT_TITLE = "Connect Google Calendar"
-CONNECT_BODY = ("Gusan reads your calendar to show your next meetings and offer to record them. "
-                "It can only read: it never changes your calendar.")
-# One short point per line (what it reads, what for, where it goes, how to stop), then a link.
-CONNECT_DETAIL = (
-    "•  Reads: title, time, guests, agenda and call link of each meeting.",
-    "•  Uses them to: show Coming up, remind you to record, and name your meeting.",
-    "•  Stays on this computer. Only if you use Live Assistant or AI notes, that meeting's "
-    "title, guest names and agenda go to the AI.",
-    "•  Disconnect any time in Meeting settings.")
-CONNECT_LINK = ("Privacy details: gusan.aibuben.xyz/privacy", "https://gusan.aibuben.xyz/privacy")
-# When the grant ran out (Google's 7-day limit while the app is in Testing, or revoked in the
-# Google account): shown on the Connect card and in the rail until the next connect.
-EXPIRED_NOTE = "Calendar access expired. Connect again."
 COMING_FIRST = 5                # "Coming up" rows before "Show more"
 COMING_MAX = 20
 # Coming up's own style (the page's shared sheet is views.page_qss): a meeting row you can press.
@@ -173,22 +165,8 @@ def _utcnow():
     return datetime.now(timezone.utc)
 
 
-def _service_status(cal):
-    """The calendar service's muted line ("Paused in Privacy mode." ...), "" when it has none."""
-    fn = getattr(cal, "status_text", None)
-    try:
-        return str(fn() or "") if callable(fn) else ""
-    except Exception:
-        return ""
-
-
-def _paused_text():
-    """calendar_service.STATUS_PAUSED_TEXT ("Paused in Privacy mode.")."""
-    try:
-        from calendar_service import STATUS_PAUSED_TEXT
-        return STATUS_PAUSED_TEXT
-    except Exception:
-        return "Paused in Privacy mode."
+_service_status = calendar_door.service_status       # the service's muted line ("" when it has none)
+_paused_text = calendar_door.paused_text             # "Paused in Privacy mode."
 
 
 def _ensure_consent(parent, app):
@@ -423,27 +401,19 @@ class MeetingsPage(QWidget):
         """Every Connect button's one door. Google asks that the app says what it reads
         and why BEFORE the sign-in opens, so a card says it first; "Not now" does
         nothing. (In Privacy mode there is nothing to ask - the service says it is
-        paused.) True when the browser sign-in started."""
-        cal = self.calendar()
-        if cal is None or getattr(cal, "is_connecting", False):
-            return False
-        if not self.cfg().get("privacy_mode") and not mini_prompt.ask(
-                self, CONNECT_TITLE, CONNECT_BODY, "Connect", "Not now", icon="calendar",
-                detail=list(CONNECT_DETAIL), link=CONNECT_LINK):
-            return False
-        try:
-            return bool(cal.connect_calendar())
-        except Exception:
-            logger.warning("connect_calendar failed", exc_info=True)
-            return False
+        paused.) True when the browser sign-in started. The code is ui/calendar_door.py's: Home's
+        "Coming up" card goes through the same door."""
+        return calendar_door.connect_calendar(self, self.calendar(), self.cfg().get("privacy_mode"))
 
     def start_from_meeting(self, m):
         """A "Coming up" row was pressed: the start card, filled with that meeting
         (title, people, agenda) and in view, so Record names it."""
-        ctx = invite_context.from_meeting(m)
-        self.list_view.start_card.prefill(title=ctx["title"] or "Meeting", attendees=ctx["others"],
-                                          calendar_event_id=ctx["event_id"], agenda=ctx["agenda"])
+        self.list_view.start_card.prefill(**invite_context.card_prefill(m))
         self.show_list()
+        self._scroll_list_to_top()
+
+    def _scroll_list_to_top(self):
+        """The start card is at the top of the list: bring it into view."""
         holder = self._holders.get("list")
         if holder is not None:
             holder.verticalScrollBar().setValue(0)
@@ -582,6 +552,8 @@ class MeetingsPage(QWidget):
             except Exception:
                 logger.debug("calendar refresh failed", exc_info=True)
         self.list_view.sync_calendar()
+        if prefill and self._view == "list":
+            self._scroll_list_to_top()          # a meeting was picked elsewhere (Home): its card is in view
         if opts.get("record"):
             if self._view != "list" and phase not in ("recording", "paused"):
                 self._show("list")
@@ -1545,7 +1517,7 @@ class ConnectCard(Card):
         col = QVBoxLayout()
         col.setSpacing(1)
         col.addWidget(tlabel("Connect Google Calendar", 14.5, 700, "ink", parent=self))
-        self.sub = tlabel("See your meetings and get a reminder to record.", 13, 400, "muted", parent=self, wrap=True)
+        self.sub = tlabel(calendar_door.INVITE_SUB, 13, 400, "muted", parent=self, wrap=True)
         col.addWidget(self.sub)
         row.addLayout(col, 1)
         self.connect_btn = Button("Connect", "secondary", "s", parent=self)
@@ -1580,26 +1552,15 @@ class ConnectCard(Card):
         self._show_line()
 
     def _show_line(self):
-        if self._connecting and not self._error:
-            self.sub.setText("Waiting for Google… Finish in your browser.")
-            views.set_tone(self.sub, "muted")
-        elif self._error:
-            self.sub.setText(self._error)
-            views.set_tone(self.sub, self._error_tone)
-        else:
-            self.sub.setText("See your meetings and get a reminder to record.")
-            views.set_tone(self.sub, "muted")
+        text, tone = calendar_door.line_for(self._connecting, self._error, self._error_tone)
+        self.sub.setText(text)
+        views.set_tone(self.sub, tone)
 
     def _connect(self):
         self.page.connect_calendar()            # the disclosure first, then the browser
 
     def _cancel(self):
-        cal = self.page.calendar()
-        if cal is not None:
-            try:
-                cal.cancel_connect()
-            except Exception:
-                pass
+        calendar_door.cancel_connect(self.page.calendar())
 
 
 class TimelineDot(QWidget):
@@ -1659,19 +1620,7 @@ class BellButton(QToolButton):
                                  1.9 if on else 1.7)))
 
 
-def _day_word(m, now):
-    """"Today", "Tomorrow" or "Thursday": the day a meeting is on, in local time (one
-    that began yesterday and still runs counts as today)."""
-    try:
-        start = m["start"].astimezone()
-        today = now.astimezone().date()
-    except Exception:
-        return "Today"
-    if start.date() <= today:
-        return "Today"
-    if start.date() == today + timedelta(days=1):
-        return "Tomorrow"
-    return start.strftime("%A")
+_day_word = calendar_sync.day_word       # "Today", "Tomorrow" or "Thursday" (Home's rows say it too)
 
 
 class UpcomingRow(QFrame):
@@ -1746,10 +1695,10 @@ class UpcomingRow(QFrame):
         lay.addLayout(body, 1)
         names = [str(n) for n in (m.get("others") or []) if n]
         self.setToolTip(theme.plain_tip(", ".join(names)))      # everyone, when the label says "+2"
-        link = str(m.get("link") or "").strip()
+        link = calendar_sync.join_url(m)                   # https only: the only kind a Join opens
         self.join_button = None
         self.join_link = ""
-        if link.lower().startswith("https://"):            # the only kind a Join opens
+        if link:
             self.join_link = link
             self.join_button = Button("Join", "link", "s", parent=self)
             self.join_button.setFont(theme.font(12.5, 600))
@@ -1779,10 +1728,7 @@ class UpcomingRow(QFrame):
             logger.warning("set_muted failed", exc_info=True)
 
     def _join(self):
-        try:
-            QDesktopServices.openUrl(QUrl(self.join_link))
-        except Exception:
-            logger.warning("Couldn't open the call link", exc_info=True)
+        calendar_door.open_join(self.join_link)
 
     def mousePressEvent(self, e):
         e.accept()                                          # so the release comes here

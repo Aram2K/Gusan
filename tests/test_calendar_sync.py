@@ -680,6 +680,141 @@ class TestLabels(unittest.TestCase):
         self.assertEqual(rt(m, T + timedelta(minutes=2, seconds=10)), "Started 2 min ago")
 
 
+class TestDayWord(unittest.TestCase):
+    UTC = timezone.utc
+
+    def test_today_tomorrow_and_a_weekday_name(self):
+        dw = calendar_sync.day_word
+        self.assertEqual(dw(_meeting(start_min=30), T, tz=self.UTC), "Today")
+        self.assertEqual(dw(_meeting(start_min=24 * 60), T, tz=self.UTC), "Tomorrow")
+        later = _meeting(start_min=3 * 24 * 60)                       # Sat 10 Oct 2026
+        self.assertEqual(dw(later, T, tz=self.UTC), "Saturday")
+        self.assertEqual(dw(_meeting(start_min=2 * 24 * 60), T, tz=self.UTC), "Friday")
+
+    def test_one_that_began_yesterday_and_still_runs_is_today(self):
+        started = _meeting(start_min=-15 * 60, length_min=20 * 60)    # 23:30 yesterday, runs into today
+        self.assertEqual(calendar_sync.day_word(started, T, tz=self.UTC), "Today")
+
+    def test_the_day_follows_the_zone(self):
+        new_york = timezone(timedelta(hours=-5))
+        late = datetime(2026, 10, 7, 21, 0, tzinfo=timezone.utc)      # 16:00 in New York
+        tomorrow_utc = _meeting(start_min=0)
+        tomorrow_utc["start"] = late + timedelta(hours=3, minutes=30)   # 00:30 UTC tomorrow = 19:30 today there
+        tomorrow_utc["end"] = tomorrow_utc["start"] + timedelta(hours=1)
+        self.assertEqual(calendar_sync.day_word(tomorrow_utc, late, tz=self.UTC), "Tomorrow")
+        self.assertEqual(calendar_sync.day_word(tomorrow_utc, late, tz=new_york), "Today")
+
+    def test_what_cannot_be_read_says_today(self):
+        for junk in (None, {}, {"start": "noon"}, "x"):
+            self.assertEqual(calendar_sync.day_word(junk, T), "Today")
+
+
+class TestCallLabelAndJoinUrl(unittest.TestCase):
+    def test_call_label(self):
+        cl = calendar_sync.call_label
+        self.assertEqual(cl(""), "")
+        self.assertEqual(cl(None), "")
+        self.assertEqual(cl(calendar_sync.CALL_OTHER), "Video call")
+        for kind in calendar_sync.CALL_TYPES:
+            self.assertEqual(cl(kind), kind)
+        self.assertEqual(cl("Zoom"), "Zoom")
+
+    def test_only_an_https_link_can_be_joined(self):
+        ju = calendar_sync.join_url
+        self.assertEqual(ju("https://meet.google.com/abc-defg-hij"), "https://meet.google.com/abc-defg-hij")
+        self.assertEqual(ju("  https://zoom.us/j/9  "), "https://zoom.us/j/9")
+        self.assertEqual(ju("HTTPS://zoom.us/j/9"), "HTTPS://zoom.us/j/9")      # the scheme in any case
+        for bad in ("http://zoom.us/j/1", "javascript:alert(1)", "file:///C:/Windows/notepad.exe",
+                    "ftp://x.test/a", "meet.google.com/abc", "", "   ", None, 0, "https://", "https:///path",
+                    "https://x.test/a b", "https://x.test/\nnext", "https://x.test/\u2028next", "https://x.test/\x00"):
+            self.assertEqual(ju(bad), "", repr(bad))
+
+    def test_it_takes_a_meeting_too(self):
+        ju = calendar_sync.join_url
+        self.assertEqual(ju({"link": "https://zoom.us/j/9"}), "https://zoom.us/j/9")
+        self.assertEqual(ju({"link": "http://zoom.us/j/9"}), "")
+        self.assertEqual(ju({}), "")
+        self.assertEqual(ju({"link": None}), "")
+
+
+class TestUpcomingFacts(unittest.TestCase):
+    UTC = timezone.utc
+
+    def _m(self, start_min=25, length_min=60, others=("Anna", "David", "Sona", "Lilit"), **kw):
+        m = _meeting(start_min=start_min, length_min=length_min, title="Weekly product sync", others=others)
+        m.update({"people": "Anna, David +2", "call_type": "Google Meet", "muted": False})
+        m.update(kw)
+        return m
+
+    def facts(self, m, now=T):
+        return calendar_sync.upcoming_facts(m, now, tz=self.UTC)
+
+    def test_a_row_says_it_all(self):
+        f = self.facts(self._m(link="https://meet.google.com/abc-defg-hij"))
+        self.assertEqual(f, {
+            "id": "m1", "title": "Weekly product sync", "time": "14:55", "rel": "in 25 min", "label": "in 25 min",
+            "hot": False, "people": "Anna, David +2", "names": ["Anna", "David", "Sona", "Lilit"],
+            "call_type": "Google Meet", "call": "Google Meet", "meta": "Google Meet · Anna, David +2",
+            "join": "https://meet.google.com/abc-defg-hij",
+            "name": "Weekly product sync, 14:55, in 25 min, with Anna, David +2"})
+
+    def test_now_in_n_min_today_tomorrow_and_a_weekday(self):
+        running = self.facts(self._m(start_min=-10, length_min=40))
+        self.assertEqual((running["rel"], running["label"], running["hot"]), ("Now", "Now", True))
+        self.assertEqual(self.facts(self._m(start_min=1))["label"], "in 1 min")
+        self.assertEqual(self.facts(self._m(start_min=59))["label"], "in 59 min")
+        self.assertEqual((self.facts(self._m(start_min=120))["rel"], self.facts(self._m(start_min=120))["label"]),
+                         ("", "Today"))                      # beyond the hour: the day word, not "in 120 min"
+        self.assertEqual(self.facts(self._m(start_min=24 * 60))["label"], "Tomorrow")
+        self.assertEqual(self.facts(self._m(start_min=3 * 24 * 60))["label"], "Saturday")
+        self.assertFalse(self.facts(self._m(start_min=24 * 60))["hot"])
+
+    def test_people_fall_back_to_the_names(self):
+        m = self._m()
+        del m["people"]
+        self.assertEqual(self.facts(m)["people"], "Anna, David +2")
+        m["others"] = []
+        f = self.facts(m)
+        self.assertEqual((f["people"], f["names"]), ("", []))
+        self.assertEqual(f["name"], "Weekly product sync, 14:55, in 25 min")        # no "with" for nobody
+
+    def test_the_meta_line_with_and_without_a_call(self):
+        self.assertEqual(self.facts(self._m(call_type=""))["meta"], "Anna, David +2")
+        self.assertEqual(self.facts(self._m(call_type="other"))["meta"], "Video call · Anna, David +2")
+        solo = self.facts(self._m(call_type="", people="", others=[]))
+        self.assertEqual((solo["meta"], solo["call"], solo["call_type"]), ("", "", ""))
+        only_call = self.facts(self._m(people="", others=[]))
+        self.assertEqual(only_call["meta"], "Google Meet")
+
+    def test_an_untitled_meeting(self):
+        for title in ("", "   ", None):
+            self.assertEqual(self.facts(self._m(title=title))["title"], "Untitled meeting")
+
+    def test_the_join_link_is_https_only(self):
+        self.assertEqual(self.facts(self._m(link="http://zoom.us/j/1"))["join"], "")
+        self.assertEqual(self.facts(self._m(link=""))["join"], "")
+        self.assertEqual(self.facts(self._m(link="https://zoom.us/j/1"))["join"], "https://zoom.us/j/1")
+
+    def test_text_from_outside_comes_back_as_it_is(self):
+        # Never markup: nothing is escaped, cut or rewritten here - the widgets paint it as plain text.
+        f = self.facts(self._m(title="<img src=x> <b>Review</b>", others=["J. <img src=p.png>", "Anna"],
+                               people="J. <img src=p.png>, Anna"))
+        self.assertEqual(f["title"], "<img src=x> <b>Review</b>")
+        self.assertEqual(f["names"], ["J. <img src=p.png>", "Anna"])
+        self.assertIn("J. <img src=p.png>, Anna", f["meta"])
+        self.assertTrue(f["name"].startswith("<img src=x> <b>Review</b>, 14:55, in 25 min, with J. <img"))
+
+    def test_junk_in_gives_a_usable_row_or_a_clear_error(self):
+        self.assertEqual(self.facts({"start": T, "end": T + timedelta(minutes=5)})["title"], "Untitled meeting")
+        with self.assertRaises(Exception):
+            self.facts({"title": "no start"})            # the caller skips a meeting it cannot place in time
+
+    def test_the_ids_and_names_are_strings(self):
+        f = self.facts(self._m(others=["Anna", None, "", 7]))
+        self.assertEqual(f["names"], ["Anna", "7"])
+        self.assertIsInstance(f["id"], str)
+
+
 class TestUpcoming(unittest.TestCase):
     CFG = {"google_oauth_client_id": "cid"}
 
