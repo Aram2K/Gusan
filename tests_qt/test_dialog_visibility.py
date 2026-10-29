@@ -1074,6 +1074,12 @@ def test_the_update_window_looks_the_same_on_a_dark_windows(qapp):
         for name, go in _update_window_stages(w):
             go()
             _show(w)
+            if w.bar.maximum() == 0:
+                # A busy bar is animated: two grabs (the light one and the dark one) are taken at different
+                # moments and differ by where its chunk is - on a loaded computer that failed this test at
+                # random. The test is about colours, so the bar holds still.
+                w.bar.setRange(0, 100)
+                w.bar.setValue(50)
             out[name] = w.grab().toImage()
         w.close()
         w.deleteLater()

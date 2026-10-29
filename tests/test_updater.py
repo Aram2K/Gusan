@@ -12,6 +12,7 @@ import tempfile
 import time
 import unittest
 import urllib.error
+import urllib.request
 from unittest import mock
 from unittest.mock import MagicMock
 
@@ -163,11 +164,32 @@ class TestInstall(unittest.TestCase):
         self.assertEqual(started, [])
         self.assertEqual(os.listdir(self.dir), [])
 
-    def test_release_without_a_checksum_still_installs(self):
+    def test_a_release_without_a_checksum_is_never_installed(self):
+        # The installer is started quietly (an all-users copy with administrator rights): nobody looks at it,
+        # so what could not be checked is not run - and not even downloaded.
         started = []
-        ok, _ = updater.install(self.tag, urlopen=self._opener(None), startfile=started.append, dest_dir=self.dir)
-        self.assertTrue(ok)
-        self.assertEqual(len(started), 1)
+        opener = self._opener(urllib.error.HTTPError(updater.checksum_url(self.tag), 404, "Not Found", {}, None))
+        ok, msg = updater.install(self.tag, urlopen=opener, startfile=started.append, dest_dir=self.dir)
+        self.assertEqual((ok, msg), (False, updater.MSG_UNCHECKED))
+        self.assertEqual(started, [])
+        self.assertEqual(os.listdir(self.dir), [])
+        self.assertNotIn(updater.installer_url(self.tag), opener.urls)
+
+    def test_a_checksum_that_cannot_be_read_is_never_a_reason_to_install_unchecked(self):
+        not_found = urllib.error.HTTPError(updater.checksum_url(self.tag), 404, "Not Found", {}, None)
+        for answer, words in ((OSError("timed out"), updater.MSG_NETWORK),            # a glitch: try again
+                              (urllib.error.HTTPError(updater.checksum_url(self.tag), 503, "Unavailable", {}, None),
+                               updater.MSG_NETWORK),
+                              (not_found, updater.MSG_UNCHECKED),                       # none published
+                              (b"<html>Sign in to the Wi-Fi</html>", updater.MSG_UNCHECKED),   # a captive portal
+                              (b"", updater.MSG_UNCHECKED)):
+            started = []
+            files = {updater.installer_url(self.tag): self.exe, updater.checksum_url(self.tag): answer}
+            ok, msg = updater.install(self.tag, urlopen=FakeOpener(files), startfile=started.append,
+                                      dest_dir=self.dir)
+            self.assertEqual((ok, msg), (False, words), answer)
+            self.assertEqual(started, [], answer)
+            self.assertEqual(os.listdir(self.dir), [], answer)
 
     def test_download_failure_and_bad_tag(self):
         opener = FakeOpener({})
@@ -181,8 +203,19 @@ class TestInstall(unittest.TestCase):
     def test_installer_that_wont_start(self):
         def boom(path):
             raise OSError("blocked")
-        ok, msg = updater.install(self.tag, urlopen=self._opener(None), startfile=boom, dest_dir=self.dir)
+        opener = self._opener(f"{self.sha}  TranscribeApp-Windows-Setup.exe\n".encode())
+        ok, msg = updater.install(self.tag, urlopen=opener, startfile=boom, dest_dir=self.dir)
         self.assertEqual((ok, msg), (False, "Couldn't start the installer."))
+
+    def test_without_a_folder_it_downloads_into_the_releases_own_not_the_temp_root(self):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        started = []
+        opener = self._opener(f"{self.sha}  TranscribeApp-Windows-Setup.exe\n".encode())
+        with mock.patch.object(updater, "cache_root", return_value=root):
+            ok, path = updater.install(self.tag, urlopen=opener, startfile=started.append)
+        self.assertTrue(ok)
+        self.assertEqual(path, os.path.join(root, self.tag, updater.INSTALLER_NAME))   # never a fixed name in %TEMP%
 
     def test_release_page(self):
         self.assertEqual(updater.release_page("v2.0.1"),
@@ -219,7 +252,10 @@ class TestKeptAcrossRuns(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(path, os.path.join(self.root, self.tag, updater.INSTALLER_NAME))
         self.assertIn(updater.installer_url(self.tag), first.urls)
-        self.assertEqual(updater._read_record(path + ".sha256"), self.sha)
+        # Checked once, noted in memory: no note next to the file (a folder any program of the user can
+        # write would make the note worth nothing).
+        self.assertEqual(updater.verified_sha256(path), self.sha)
+        self.assertEqual(os.listdir(os.path.dirname(path)), [updater.INSTALLER_NAME])
         second = self._opener()                                    # the next launch
         self.assertEqual(self._get(second), (True, path))
         self.assertNotIn(updater.installer_url(self.tag), second.urls)   # not 100 MB again
@@ -235,15 +271,33 @@ class TestKeptAcrossRuns(unittest.TestCase):
         with open(path, "rb") as f:
             self.assertEqual(f.read(), self.exe)
 
-    def test_offline_it_trusts_only_the_checksum_noted_at_download(self):
+    def test_a_kept_file_is_only_reused_against_the_checksum_read_now(self):
         ok, path = self._get(self._opener())
-        offline = FakeOpener({})
-        self.assertEqual(self._get(offline), (True, path))           # the noted checksum matches
+        # Offline (or the checksum can't be read): nothing is vouching for the file, so it is not used - a
+        # note written next to it by an earlier run is as writable as the file itself.
+        ok, msg = self._get(FakeOpener({}))
+        self.assertEqual((ok, msg), (False, updater.MSG_NETWORK))
+        # ...and nothing is installed from a release that publishes no checksum at all.
+        ok, msg = self._get(self._opener(checksum=False))
+        self.assertEqual((ok, msg), (False, updater.MSG_NETWORK))
+        self.assertTrue(os.path.exists(path))                         # (left alone; pruned when up to date)
+        # A file a program swapped in meanwhile fails the published checksum: downloaded again.
         with open(path, "ab") as f:
             f.write(b"x")
-        ok, msg = self._get(FakeOpener({}))
-        self.assertFalse(ok)                                          # changed and can't re-fetch
-        self.assertFalse(os.path.exists(path))
+        again = self._opener()
+        self.assertEqual(self._get(again), (True, path))
+        self.assertIn(updater.installer_url(self.tag), again.urls)
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), self.exe)
+
+    def test_a_checksum_file_nobody_can_read_stops_before_any_download(self):
+        for files in ({updater.installer_url(self.tag): self.exe},
+                      {updater.installer_url(self.tag): self.exe, updater.checksum_url(self.tag): b"not a hash"}):
+            opener = FakeOpener(files)
+            ok, msg = self._get(opener)
+            self.assertFalse(ok)
+            self.assertNotIn(updater.installer_url(self.tag), opener.urls)
+        self.assertFalse(os.path.exists(os.path.join(self.root, self.tag, updater.INSTALLER_NAME)))
 
     def test_other_releases_are_removed(self):
         old = os.path.join(self.root, "v2.0.0")
@@ -313,7 +367,7 @@ class TestKeptAcrossRuns(unittest.TestCase):
         self.assertRegex(os.path.basename(path), r"^TranscribeApp-Windows-Setup-[0-9a-f]{8}\.exe$")
         with open(path, "rb") as f:
             self.assertEqual(f.read(), self.exe)
-        self.assertEqual(updater._read_record(path + ".sha256"), self.sha)
+        self.assertEqual(updater.verified_sha256(path), self.sha)
 
     def test_an_earlier_download_of_the_same_release_is_cleaned_up(self):
         folder = os.path.join(self.root, self.tag)
@@ -321,10 +375,13 @@ class TestKeptAcrossRuns(unittest.TestCase):
         stale = os.path.join(folder, "TranscribeApp-Windows-Setup-0123abcd.exe")
         with open(stale, "wb") as f:
             f.write(b"x")
+        note = os.path.join(folder, updater.INSTALLER_NAME + ".sha256")     # what an earlier 2.0 build left next to it
+        with open(note, "w") as f:
+            f.write(self.sha)
         ok, path = self._get(self._opener())
         self.assertTrue(ok)
         self.assertFalse(os.path.exists(stale))
-        self.assertEqual(sorted(os.listdir(folder)), sorted([updater.INSTALLER_NAME, updater.INSTALLER_NAME + ".sha256"]))
+        self.assertEqual(os.listdir(folder), [updater.INSTALLER_NAME])
 
     def test_pruning_keeps_the_logs_of_an_install_that_stopped(self):
         self._get(self._opener())
@@ -428,18 +485,18 @@ class TestDownload(unittest.TestCase):
 
     def test_a_body_that_stops_early_is_never_installed(self):
         cut = self.exe[:len(self.exe) // 2]               # announces the whole file, delivers half
-        ok, msg = self._download(self._opener(body=cut, checksum=None, announce=len(self.exe)))
+        ok, msg = self._download(self._opener(body=cut, announce=len(self.exe)))
         self.assertEqual((ok, msg), (False, "Couldn't download the update. Check your connection and try again."))
         self.assertEqual(self._left(), [])
 
     def test_an_error_page_is_not_an_installer(self):
         self.assertEqual(updater.MIN_INSTALLER_BYTES, 1024 * 1024)
-        ok, msg = self._download(self._opener(body=b"<html>Not found</html>", checksum=None))
+        ok, msg = self._download(self._opener(body=b"<html>Not found</html>"))
         self.assertFalse(ok)
         self.assertIn("Couldn't download", msg)
         self.assertEqual(self._left(), [])
         # an explicit floor, as the caller's own choice
-        ok, _ = self._download(self._opener(body=b"tiny", checksum=None), min_bytes=0)
+        ok, _ = self._download(self._opener(body=b"tiny", checksum=None), min_bytes=0, verify=False)
         self.assertTrue(ok)
 
     def test_a_missing_installer_says_so(self):
@@ -447,7 +504,89 @@ class TestDownload(unittest.TestCase):
         opener.files[updater.installer_url(self.tag)] = urllib.error.HTTPError(
             updater.installer_url(self.tag), 404, "Not Found", {}, None)
         ok, msg = self._download(opener)
-        self.assertEqual((ok, msg), (False, "This version's installer isn't on GitHub yet - try again in a few minutes."))
+        self.assertEqual((ok, msg), (False, "This update isn't ready to download yet. Try again in a few minutes."))
+
+    def test_an_installer_nobody_can_check_is_not_even_downloaded(self):
+        # (the old behaviour: no checksum, installed anyway - for a silent, sometimes elevated Setup)
+        for checksum, words in ((None, updater.MSG_NETWORK),                 # the answer never came
+                                ("<html>captive portal</html>", updater.MSG_UNCHECKED),
+                                ("", updater.MSG_UNCHECKED)):
+            opener = self._opener(checksum=checksum)
+            if checksum == "":
+                opener.files[updater.checksum_url(self.tag)] = b""
+            ok, msg = self._download(opener)
+            self.assertEqual((ok, msg), (False, words), checksum)
+            self.assertNotIn(updater.installer_url(self.tag), opener.urls, checksum)
+            self.assertEqual(self._left(), [], checksum)
+        # a caller that read the checksum itself and found none passes "": the same refusal
+        ok, msg = self._download(self._opener(), expected="")
+        self.assertEqual((ok, msg), (False, updater.MSG_UNCHECKED))
+
+    def test_a_checked_download_is_noted_so_the_launch_can_tell_it_is_the_same_file(self):
+        ok, path = self._download(self._opener())
+        self.assertEqual(updater.verified_sha256(path), self.sha)
+        ok, path = self._download(self._opener(checksum=None), verify=False,
+                                  name="TranscribeApp-Windows-Setup-unchecked.exe")
+        self.assertTrue(ok)
+        self.assertEqual(updater.verified_sha256(path), "")                  # never checked: never vouched for
+
+    def test_a_body_with_no_announced_size_stops_at_the_cap_instead_of_filling_the_disk(self):
+        with mock.patch.object(updater, "MAX_INSTALLER_BYTES", updater.CHUNK * 2):
+            ok, msg = self._download(self._opener(announce=False), verify=False)
+        self.assertEqual((ok, msg), (False, updater.MSG_NETWORK))
+        self.assertEqual(self._left(), [])
+        self.assertGreater(updater.MAX_INSTALLER_BYTES, 300 * 1024 * 1024)    # the real installer is ~100 MB: room to grow
+
+    def test_a_redirect_goes_only_to_https_on_github(self):
+        for url in ("https://github.com/Aram2K/Gusan/releases/download/v2.0.1/x.exe",
+                    "https://objects.githubusercontent.com/github-production-release-asset/1",
+                    "https://release-assets.githubusercontent.com/x"):
+            self.assertTrue(updater.trusted_redirect(url), url)
+        for url in ("http://github.com/x", "http://objects.githubusercontent.com/x", "ftp://github.com/x",
+                    "https://example.com/x", "https://github.com.evil.example/x", "https://evilgithub.com/x",
+                    "https://githubusercontent.com.evil.example/x", "https://user@evil.example/github.com", "", "x"):
+            self.assertFalse(updater.trusted_redirect(url), url)
+        handler = updater._GitHubRedirects()
+        request = urllib.request.Request("https://github.com/Aram2K/Gusan/releases/download/v2.0.1/x.exe")
+        good = handler.redirect_request(request, None, 302, "Found", {}, "https://objects.githubusercontent.com/x")
+        self.assertEqual(good.full_url, "https://objects.githubusercontent.com/x")
+        for newurl in ("http://objects.githubusercontent.com/x", "https://example.com/x", "file:///C:/x"):
+            self.assertIsNone(handler.redirect_request(request, None, 302, "Found", {}, newurl), newurl)
+
+    def test_a_real_redirect_to_somewhere_else_is_not_followed(self):
+        # The real opener (no stand-in), two local servers: the first answers 302 to the second.
+        import http.server
+        import threading
+
+        class Target(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"MZ the wrong bytes")
+
+            def log_message(self, *a):
+                pass
+
+        target = http.server.HTTPServer(("127.0.0.1", 0), Target)
+
+        class Redirect(Target):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", "http://127.0.0.1:%d/x" % target.server_address[1])
+                self.end_headers()
+
+        first = http.server.HTTPServer(("127.0.0.1", 0), Redirect)
+        for server in (target, first):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+        no_proxy = {"NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost"}     # (the local servers, direct)
+        with mock.patch.dict(os.environ, no_proxy):
+            opener = updater._urlopen(None)
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                opener("http://127.0.0.1:%d/y" % first.server_address[1], timeout=10)
+        self.assertEqual(caught.exception.code, 302)
+        caught.exception.close()
 
     def test_a_full_disk_says_so(self):
         for error in (OSError(28, "No space left on device"), _winerror(OSError(22, "disk full"), 112),
@@ -477,6 +616,26 @@ class TestDownload(unittest.TestCase):
 def _winerror(err, code):
     err.winerror = code
     return err
+
+
+def _what_happens_when_changed(path):
+    """What a program that wants to change the file at ``path`` right now would get: (appending to it,
+    replacing it, deleting it) - the exception class of each, None when it worked."""
+    other = path + ".other"
+    with open(other, "wb") as f:
+        f.write(b"x")
+    results = []
+    try:
+        for change in (lambda: open(path, "ab").close(), lambda: os.replace(other, path), lambda: os.remove(path)):
+            try:
+                change()
+                results.append(None)
+            except OSError as e:
+                results.append(type(e))
+    finally:
+        if os.path.exists(other):
+            os.remove(other)
+    return tuple(results)
 
 
 class TestInstallKind(unittest.TestCase):
@@ -567,6 +726,7 @@ class TestLaunch(unittest.TestCase):
 
     def _start(self, **kw):
         started = []
+        kw.setdefault("verify", False)          # (these look at the command line; the check has its own tests below)
         ok, info = updater.launch_installer(self.setup, log_path=self.log,
                                             start=lambda *a, **k: started.append((a, k)), environ={}, **kw)
         return ok, info, started
@@ -617,7 +777,8 @@ class TestLaunch(unittest.TestCase):
     def test_saying_no_to_the_permission_prompt_is_worded_for_people(self):
         def refuse(*a, **k):
             raise _winerror(OSError(22, "The operation was canceled by the user"), 1223)
-        self.assertEqual(updater.launch_installer("C:/t/setup.exe", all_users=True, start=refuse, environ={}),
+        self.assertEqual(updater.launch_installer("C:/t/setup.exe", all_users=True, start=refuse, environ={},
+                                                  verify=False),
                          (False, "Windows asked for permission, and it wasn't given."))
 
     def test_an_antivirus_that_blocks_it_is_named(self):
@@ -643,6 +804,82 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(cmd[:2], ("C:/t/setup.exe", "open"))
         self.assertTrue(cmd[2].startswith("/SILENT /SP- /SUPPRESSMSGBOXES /NOCANCEL /NORESTART /NORESTARTAPPLICATIONS"))
         self.assertTrue(cmd[2].endswith("/CURRENTUSER /relaunch=1"))
+
+    # ── an all-users start runs only the file that was checked ──
+    def _checked_installer(self, body=b"MZ the installer"):
+        path = os.path.join(self.tmp, "TranscribeApp-Windows-Setup.exe")
+        with open(path, "wb") as f:
+            f.write(body)
+        updater.note_verified(path, hashlib.sha256(body).hexdigest())
+        return path
+
+    def _all_users(self, path, answer=None, seen=None):
+        started = []
+
+        def start(*a, **k):
+            started.append(a)
+            if seen is not None:
+                seen.append(_what_happens_when_changed(path))
+            if answer is not None:
+                raise answer
+        result = updater.launch_installer(path, all_users=True, log_path=self.log, start=start, environ={})
+        return result, started
+
+    def test_an_all_users_start_runs_the_checked_file(self):
+        path = self._checked_installer()
+        result, started = self._all_users(path)
+        self.assertEqual(result, (True, path))
+        self.assertEqual(started[0][1], "runas")
+
+    def test_an_all_users_start_refuses_a_file_that_changed_after_it_was_checked(self):
+        # %TEMP%\gusan-update is the user's own folder: a program of the same user could swap the file
+        # between the download and the (possibly much later) answer to Windows' permission question.
+        path = self._checked_installer()
+        with open(path, "wb") as f:
+            f.write(b"MZ something else")
+        result, started = self._all_users(path)
+        self.assertEqual(result, (False, updater.MSG_DAMAGED))
+        self.assertEqual(started, [])                                  # nothing ran, nothing was asked
+        os.remove(path)                                                # (and the file is not left held)
+
+    def test_an_all_users_start_refuses_a_file_this_run_never_checked(self):
+        path = os.path.join(self.tmp, "TranscribeApp-Windows-Setup.exe")
+        with open(path, "wb") as f:
+            f.write(b"MZ the installer")
+        result, started = self._all_users(path)
+        self.assertEqual(result, (False, updater.MSG_DAMAGED))
+        self.assertEqual(started, [])
+        gone = self._checked_installer()
+        os.remove(gone)
+        result, started = self._all_users(gone)
+        self.assertEqual(result, (False, updater.MSG_FILE_MISSING))
+        self.assertEqual(started, [])
+
+    def test_a_per_user_start_does_not_need_the_check(self):
+        path = os.path.join(self.tmp, "never-checked.exe")
+        with open(path, "wb") as f:
+            f.write(b"MZ")
+        started = []
+        result = updater.launch_installer(path, all_users=False, log_path=self.log,
+                                          start=lambda *a, **k: started.append(a), environ={})
+        self.assertEqual(result, (True, path))
+        self.assertEqual(len(started), 1)                              # (no privilege to gain: same user either way)
+
+    def test_the_file_is_released_after_the_start_whatever_happens(self):
+        for answer in (None, _winerror(OSError(22, "canceled"), 1223), RuntimeError("odd")):
+            path = self._checked_installer()
+            self._all_users(path, answer=answer)
+            os.remove(path)                                            # would fail on Windows if it were still held
+
+    @unittest.skipUnless(os.name == "nt", "a share mode is a Windows thing")
+    def test_the_file_cannot_be_changed_while_windows_starts_it(self):
+        path = self._checked_installer()
+        seen = []
+        result, _started = self._all_users(path, seen=seen)
+        self.assertEqual(result[0], True)
+        self.assertEqual(seen, [(PermissionError, PermissionError, PermissionError)])      # write, replace, delete
+        with open(path, "ab") as f:                                    # after the start it is the user's again
+            f.write(b"x")
 
 
 @unittest.skipUnless(os.name == "nt", "needs Windows (ShellExecute)")
@@ -670,6 +907,41 @@ class TestLaunchForReal(unittest.TestCase):
         self.assertEqual(got, " ".join(updater.INSTALL_ARGS) + ' /LOG="%s" /CURRENTUSER /relaunch=1' % log)
         with open(cwd, "r", encoding="ascii", errors="ignore") as f:
             self.assertEqual(os.path.normcase(f.read().strip()), os.path.normcase(folder))   # the installer's folder
+
+
+@unittest.skipUnless(os.name == "nt", "needs Windows (file sharing)")
+class TestHoldForReal(unittest.TestCase):
+    """The file lock behind an all-users start, on the real file system, with a stand-in program (a renamed
+    copy of ping.exe - never a Setup): while it is held nothing can change the file, Windows can still run
+    it (an elevated Setup has to start from it), and it is the user's again afterwards."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="gusan hold ")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.path = os.path.join(self.dir, "TranscribeApp-Windows-Setup.exe")
+        shutil.copy(os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "PING.EXE"), self.path)
+        updater.note_verified(self.path, updater.file_sha256(self.path))
+
+    def test_nothing_can_change_it_while_it_is_held_and_it_runs_all_the_same(self):
+        held, problem = updater._hold_checked_installer(self.path)
+        self.assertEqual(problem, "")
+        try:
+            self.assertEqual(_what_happens_when_changed(self.path), (PermissionError, PermissionError, PermissionError))
+            with open(self.path, "rb") as f:                           # reading is fine (antivirus, Setup itself)
+                self.assertEqual(f.read(2), b"MZ")
+            done = subprocess.run([self.path, "-n", "1", "127.0.0.1"], creationflags=0x08000000, timeout=60,
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.assertEqual(done.returncode, 0)                       # Windows can start a program held like this
+        finally:
+            held.close()
+        self.assertEqual(_what_happens_when_changed(self.path)[0], None)   # released: the user's again
+
+    def test_a_file_that_changed_is_refused_and_released(self):
+        with open(self.path, "ab") as f:
+            f.write(b"tampered")
+        held, problem = updater._hold_checked_installer(self.path)
+        self.assertEqual((held, problem), (None, updater.MSG_DAMAGED))
+        os.remove(self.path)                                           # not left locked
 
 
 class TestLogs(unittest.TestCase):
@@ -785,8 +1057,9 @@ class TestRelauncher(unittest.TestCase):
         self.assertEqual(env["GUSAN_RELAUNCH_LOG"], log)
         self.assertEqual(env["GUSAN_RELAUNCH_MINUTES"], str(updater.RELAUNCH_TIMEOUT_MIN))
         self.assertEqual(env["GUSAN_RELAUNCH_SETUP"], "TranscribeApp-Windows-Setup*")
+        self.assertEqual(env["GUSAN_RELAUNCH_PID"], str(os.getpid()))   # the Gusan that quits: it is waited for
         for name in ("$env:GUSAN_RELAUNCH_EXE", "$env:GUSAN_RELAUNCH_LOG", "$env:GUSAN_RELAUNCH_MINUTES",
-                     "$env:GUSAN_RELAUNCH_SETUP"):
+                     "$env:GUSAN_RELAUNCH_SETUP", "$env:GUSAN_RELAUNCH_PID"):
             self.assertIn(name, script)
         self.assertNotIn("TRANSCRIBE_RELAUNCH", script)
         # A NEW Gusan, not a child of this bundle.
@@ -801,12 +1074,21 @@ class TestRelauncher(unittest.TestCase):
         self.assertIn("GetFileNameWithoutExtension($exe)", script)
         self.assertLess(script.index("Get-Process -Name $name"), script.index("Start-Process"))
 
+    def test_it_waits_for_the_gusan_that_started_it_before_asking_whether_gusan_runs(self):
+        # A Setup that fails at once closes its log before the old Gusan has finished quitting: "a Gusan
+        # runs" must not then mean "nothing to reopen".
+        script = updater.RELAUNCH_SCRIPT
+        self.assertIn("[int]$env:GUSAN_RELAUNCH_PID", script)
+        self.assertIn("Get-Process -Id $oldpid", script)
+        self.assertLess(script.index("Get-Process -Id $oldpid"), script.index("Get-Process -Name $name"))
+        self.assertIn("AddSeconds(90)", script)                      # but never for ever
+
     def test_the_script_knows_when_setup_is_done(self):
         script = updater.RELAUNCH_SCRIPT
         self.assertIn("'Log closed.'", script)                       # Setup's last line
         self.assertIn("Get-Process -Name $setup", script)            # a killed Setup never writes it
         self.assertIn("$gone -ge 3", script)                         # 3 polls without Setup, in a row
-        self.assertIn("Min(3.0, $minutes)", script)                  # a log that never appears: 3 minutes
+        self.assertNotIn("$appear", script)                          # (no log yet is no reason to wait 3 minutes)
         self.assertIn("UtcNow", script)                              # a clock change can't cut it short
         self.assertIn("'--show-settings'", script)
         self.assertIn("Start-Process -FilePath $exe", script)
@@ -824,6 +1106,17 @@ class TestRelauncher(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows")
     def test_powershell_by_full_path(self):
         self.assertTrue(os.path.isabs(updater._powershell()))
+
+    def test_powershell_is_never_looked_up_by_a_bare_name(self):
+        # CreateProcess tries the application's own folder first, which a per-user install lets the person
+        # write to: a missing PowerShell means no watcher, not "powershell.exe" from wherever.
+        with mock.patch.dict(os.environ, {"SystemRoot": os.path.join(tempfile.gettempdir(), "nowhere"), "windir": ""}):
+            path = updater._powershell()
+        self.assertNotEqual(path, "powershell.exe")
+        self.assertEqual(os.path.basename(path), "powershell.exe")
+        self.assertIn("nowhere", path)
+        self.assertIsNone(updater.spawn_relauncher("C:/a.exe", "C:/l.log",
+                                                   popen=mock.Mock(side_effect=FileNotFoundError(2, path))))
 
     def test_without_job_breakaway_it_still_starts(self):
         flags = []
@@ -874,22 +1167,24 @@ class TestWatcherForReal(unittest.TestCase):
         except subprocess.TimeoutExpired:
             pass
 
-    def _watch(self, setup_pattern, minutes="20"):
+    def _watch(self, setup_pattern, minutes="20", old_pid=None):
         env = updater.reset_child_env(dict(os.environ))
         env.update(GUSAN_RELAUNCH_EXE=self.exe, GUSAN_RELAUNCH_LOG=self.log,
                    GUSAN_RELAUNCH_MINUTES=minutes, GUSAN_RELAUNCH_SETUP=setup_pattern)
+        if old_pid is not None:
+            env["GUSAN_RELAUNCH_PID"] = str(old_pid)
         proc = subprocess.Popen([updater._powershell(), "-NoProfile", "-NonInteractive", "-Command",
                                  updater.RELAUNCH_SCRIPT], env=env, creationflags=self.NO_WINDOW,
                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(self._end, proc)
         return proc
 
-    def _idle_program(self, name):
-        """A program that just sits there under the name ``name`` (a renamed copy of ping.exe, which this
-        test started and ends itself): stands in for a running Setup, or for Gusan."""
+    def _idle_program(self, name, seconds=89):
+        """A program that just sits there for ``seconds`` under the name ``name`` (a renamed copy of
+        ping.exe, which this test started and ends itself): stands in for a running Setup, or for Gusan."""
         path = os.path.join(self.dir, name + ".exe")
         shutil.copy(os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "PING.EXE"), path)
-        proc = subprocess.Popen([path, "-n", "90", "127.0.0.1"], creationflags=self.NO_WINDOW,
+        proc = subprocess.Popen([path, "-n", str(seconds + 1), "127.0.0.1"], creationflags=self.NO_WINDOW,
                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(self._end, proc)
         time.sleep(0.5)
@@ -930,9 +1225,23 @@ class TestWatcherForReal(unittest.TestCase):
         self._write_log("2026-10-29 Log closed.\n")
         self.assertEqual(self._started(60), "--show-settings")
 
-    def test_a_log_that_never_appears_does_not_keep_gusan_away_for_ever(self):
-        # (the real limits are 3 and 20 minutes; the minutes come in through the environment)
-        self._watch("gusannosuchsetup_" + os.urandom(4).hex() + "*", minutes="0.05")
+    def test_a_setup_that_was_blocked_at_birth_does_not_keep_gusan_away_for_minutes(self):
+        # No log (it never got to write one) and no Setup process: the old rule waited 3 minutes for a log.
+        self._watch("gusannosuchsetup_" + os.urandom(4).hex() + "*")
+        self.assertEqual(self._started(45), "--show-settings")            # 3 polls, not 3 minutes
+
+    def test_a_setup_that_is_alive_but_has_no_log_yet_is_waited_for_then_reopens_when_it_ends(self):
+        setup = "gusansetup_" + os.urandom(4).hex()
+        program = self._idle_program(setup)
+        self._watch(setup + "*")
+        self.assertIsNone(self._started(9))                            # alive: not reopened under it
+        program.kill()                                                 # it ends without ever writing a log
+        self.assertEqual(self._started(45), "--show-settings")
+
+    def test_the_limit_in_minutes_still_ends_the_wait_whatever_happens(self):
+        setup = "gusansetup_" + os.urandom(4).hex()
+        self._idle_program(setup)                                      # alive for good, and no log
+        self._watch(setup + "*", minutes="0.1")                        # (the real limit is 20 minutes)
         self.assertEqual(self._started(60), "--show-settings")
 
     def test_gusan_that_already_runs_again_is_left_alone(self):
@@ -942,6 +1251,23 @@ class TestWatcherForReal(unittest.TestCase):
         proc.wait(60)                                                  # the watcher ended...
         time.sleep(1)
         self.assertFalse(os.path.exists(self.marker))                  # ...and started nothing
+
+    def test_it_waits_for_the_old_gusan_to_be_gone_before_reopening(self):
+        # A Setup that fails at once: its log is closed at the first look, while the Gusan that started the
+        # watcher is still quitting. That Gusan (named like the app) used to count as "Gusan runs again".
+        old = self._idle_program(self.tag, seconds=14)
+        self._write_log("2026-10-29 Setup started\n2026-10-29 Log closed.\n")
+        self._watch("gusannosuchsetup_" + os.urandom(4).hex() + "*", old_pid=old.pid)
+        self.assertEqual(self._started(90), "--show-settings")
+        self.assertIsNotNone(old.poll(), "it reopened Gusan while the old one was still running")
+
+    def test_the_old_gusan_that_never_quits_does_not_keep_the_watcher_for_ever(self):
+        # (the real wait is 90 s; here only that a pid that is not Gusan at all - a reused number - is no wait)
+        other = self._idle_program("gusanother_" + os.urandom(4).hex(), seconds=60)
+        self._write_log("2026-10-29 Log closed.\n")
+        self._watch("gusannosuchsetup_" + os.urandom(4).hex() + "*", old_pid=other.pid)
+        self.assertEqual(self._started(30), "--show-settings")
+        self.assertIsNone(other.poll())                                # (still running: it was not waited for)
 
 
 def _stubbed_main():

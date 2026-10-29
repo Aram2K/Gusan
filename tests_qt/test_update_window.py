@@ -150,7 +150,7 @@ def test_at_100_percent_it_says_it_is_checking_the_download(build):
     w.show_progress(100 * MB, 100 * MB)
     assert w.stage == "downloading"                              # still Cancel-able
     assert w.lbl_status.text() == "Checking the download"
-    assert w.lbl_detail.isHidden() and w.bar.maximum() == 0
+    assert not w.lbl_detail.text().strip() and w.bar.maximum() == 0        # (the line stays: nothing jumps)
     assert buttons_of(w) == only("cancel")
     w.show_progress(40 * MB, 100 * MB)                           # a late, older report changes nothing
     assert w.lbl_status.text() == "Checking the download"
@@ -182,7 +182,7 @@ def test_waiting_for_a_typed_key_offers_install_now(build):
     w.show_waiting(can_install=True)
     assert w.lbl_status.text() == "Ready to install. Save the key you typed first, or choose Install now."
     assert buttons_of(w) == only("cancel", "install")
-    assert w.btn_install.isDefault()
+    assert not w.btn_install.isDefault()          # Enter must not be a way to lose the typed key
     QTest.mouseClick(w.btn_install, Qt.LeftButton)
     assert hits == ["install_requested"]
 
@@ -208,7 +208,8 @@ def test_installing_has_no_buttons_and_says_gusan_reopens(build):
     w, _ = build()
     w.show_installing()
     assert w.stage == "installing"
-    assert w.lbl_status.text() == "Installing. Gusan closes now and opens again by itself in about a minute."
+    assert w.lbl_status.text() == "Installing. Gusan closes now and opens again by itself when the installer is done."
+    assert "minute" not in w.lbl_status.text()      # a silent Setup can take longer on a slow disk: no promise
     assert w.lbl_detail.text() == "The installer shows its own small window while it works."
     assert buttons_of(w) == only()
     assert w.bar.maximum() == 0
@@ -261,7 +262,7 @@ def test_a_new_attempt_in_the_same_window_starts_clean(build):
     w.show_failed("It broke.", "Details: x")
     w.show_downloading()
     assert w.stage == "downloading" and w.lbl_status.text() == "Downloading the update"
-    assert w.lbl_note.isHidden() and w.lbl_detail.isHidden() and not w.bar.isHidden()
+    assert w.lbl_note.isHidden() and not w.lbl_detail.text().strip() and not w.bar.isHidden()
     assert buttons_of(w) == only("cancel")
     w.show_waiting()
     w.show_downloading()                                           # Cancel, then Install again: the same window
@@ -275,6 +276,130 @@ def test_the_version_line_follows_the_release(build):
     assert (w.tag, w.lbl_version.text()) == ("v2.1.0", "Version 2.1.0")
     w.set_tag("")
     assert w.lbl_version.isHidden()
+
+
+def test_nothing_moves_while_the_download_goes_on(build):
+    """Cancel stays where it was at the first look: the window has the same height from the first moment
+    to the last report (the progress line used to appear later and push everything down by 31 px)."""
+    w, _ = build()
+    spots = set()
+    for stage in ("downloading", "progress", "unknown size", "checking", "progress"):
+        go_to(w, stage)
+        spots.add((w.height(), w.btn_cancel.mapTo(w, w.btn_cancel.rect().topLeft()).y()))
+    assert len(spots) == 1
+
+
+def test_the_window_can_be_put_away_while_a_download_goes_on(build):
+    w, _ = build()
+    assert w.windowFlags() & Qt.WindowMinimizeButtonHint
+
+
+def test_a_screen_reader_hears_a_change_not_every_report(build):
+    w, _ = build()
+    names = []
+    real = w.lbl_detail.setAccessibleName
+    w.lbl_detail.setAccessibleName = lambda text: (names.append(text), real(text))
+    for _ in range(5):
+        w.show_progress(45 * MB, 100 * MB)               # (up to ten reports a second, mostly the same words)
+    w.show_progress(46 * MB, 100 * MB)
+    assert names == ["45 of 100 MB", "46 of 100 MB"]
+
+
+# ═════════════════════════ the keyboard ═════════════════════════
+def _active(w):
+    w.show()
+    w.activateWindow()
+    QTest.qWaitForWindowActive(w, 3000)
+    QApplication.processEvents()
+
+
+def _focused():
+    fw = QApplication.focusWidget()
+    assert fw is not None, "the window did not get the keyboard"
+    return fw.text()
+
+
+def _press(key):
+    QTest.keyClick(QApplication.focusWidget(), key)
+
+
+def test_enter_presses_the_button_that_has_the_keyboard(build):
+    """Every button is an auto-default one (like the question cards): Enter presses what is focused. With
+    autoDefault off Enter did nothing on Cancel, and fired the default (Try again) from any other button."""
+    w, hits = build()
+    _active(w)
+    assert _focused() == "Cancel"                                  # the only button of the download
+    _press(Qt.Key_Return)
+    assert hits == ["cancel_requested"]
+    hits.clear()
+    _active(w)
+    w.show_failed("It broke.")
+    assert _focused() == "Try again"                               # the keyboard starts on the default
+    _press(Qt.Key_Return)
+    assert hits == ["retry_requested"]
+    hits.clear()
+    _press(Qt.Key_Tab)                                             # on to Close, then the download page
+    _press(Qt.Key_Tab)
+    assert _focused() == "Open the download page"
+    _press(Qt.Key_Return)
+    assert hits == ["website_requested"]                           # not Try again: that is not what was focused
+    assert w.isVisible()
+
+
+def test_enter_never_installs_while_a_typed_key_waits_to_be_saved(build):
+    w, hits = build()
+    _active(w)
+    w.show_waiting(can_install=True)
+    assert _focused() == "Cancel"                                  # not Install now: it would lose the key
+    _press(Qt.Key_Return)
+    assert hits == ["cancel_requested"]
+    hits.clear()
+    _active(w)
+    w.show_downloading()
+    w.show_waiting(can_install=True)
+    _press(Qt.Key_Tab)
+    assert _focused() == "Install now"                             # a deliberate Tab and Enter still gets there
+    _press(Qt.Key_Return)
+    assert hits == ["install_requested"]
+
+
+def test_space_presses_the_focused_button_too(build):
+    w, hits = build()
+    _active(w)
+    _press(Qt.Key_Space)
+    assert hits == ["cancel_requested"]
+
+
+# ═════════════════════════ the log path ═════════════════════════
+def test_a_copied_log_path_has_no_invisible_characters(build):
+    """The path wraps through invisible break characters (a label breaks at spaces only), which a copy used
+    to take along: pasted into Explorer's address bar it was "not found"."""
+    w, _ = build()
+    path = ("Details: C:\\Users\\Someone With A Long Name\\AppData\\Local\\Temp\\gusan-update\\logs\\"
+            "gusan-update-0a1b2c3d.log")
+    w.show_failed("The installer stopped before it finished.", path)
+    assert "\u200b" in w.lbl_note.text()                           # (it does wrap)
+    clipboard = QApplication.clipboard()
+    clipboard.clear()
+    assert w.lbl_note.copy_text() == path                          # nothing selected: the whole line
+    assert clipboard.text() == path
+    clipboard.clear()
+    QTest.keyClick(w.lbl_note, Qt.Key_C, Qt.ControlModifier)       # Ctrl+C
+    assert clipboard.text() == path
+    assert "\u200b" not in clipboard.text()
+
+
+def test_a_selected_part_of_the_path_is_copied_clean_too(build):
+    w, _ = build()
+    w.show_failed("It stopped.", "Details: C:\\" + "a" * 60 + ".log")
+    note = w.lbl_note
+    if not hasattr(note, "setSelection"):
+        pytest.skip("this Qt cannot select programmatically")
+    note.setSelection(0, len(note.text()))
+    assert "\u200b" in note.selectedText()                         # what Qt itself would have copied
+    QApplication.clipboard().clear()
+    assert note.copy_text() == "Details: C:\\" + "a" * 60 + ".log"
+    assert "\u200b" not in QApplication.clipboard().text()
 
 
 # ═════════════════════════ closing ═════════════════════════
@@ -345,6 +470,24 @@ def test_the_window_never_vetoes_the_apps_quit(build):
         {"downloading": w2.show_downloading, "waiting": w2.show_waiting,
          "failed": lambda: w2.show_failed("x")}[stage]()
         assert w2.close() and not w2.isVisible() and hits2 == []
+
+
+def test_a_log_off_in_the_moment_before_the_quit_is_not_vetoed_either(build):
+    """Windows asks every window to close at a log-off or shutdown (Qt's commitData) and stops if one
+    refuses: the 1.5 s between the hand-over and the quit are enough for that to happen."""
+    from types import SimpleNamespace
+    w, hits = build(app=SimpleNamespace(_quitting=False, _session_ending=False))
+    w.show_installing()
+    ev = QCloseEvent()
+    ev.ignore()
+    w.closeEvent(ev)
+    assert not ev.isAccepted()
+    w.app._session_ending = True
+    ev = QCloseEvent()
+    ev.ignore()
+    w.closeEvent(ev)
+    assert ev.isAccepted()
+    assert hits == []
 
 
 def test_a_controller_without_the_flag_is_treated_as_not_quitting(build):
@@ -420,7 +563,10 @@ def test_the_height_follows_the_words_and_the_width_never_changes(build):
         heights[stage] = w.height()
         for lbl in (w.lbl_status, w.lbl_detail, w.lbl_note):               # one stage after another: never a stale, cut-off label
             assert lbl.isHidden() or lbl.height() >= lbl.heightForWidth(lbl.width()), (stage, lbl.text()[:30])
-    assert heights["failed with a log"] > heights["failed"] > heights["downloading"]
+    assert heights["failed with a log"] > heights["failed"]
+    # The whole download is one height: the progress line was hidden until the first report and the window
+    # grew under the pointer (Cancel moved down) half a second after opening.
+    assert len({heights[s] for s in ("downloading", "progress", "unknown size", "checking")}) == 1
     assert heights["waiting for a key"] >= heights["waiting"]
     assert max(heights.values()) <= SCREEN[1]
 

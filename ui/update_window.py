@@ -28,9 +28,15 @@ How it behaves, and why:
   mini_prompt card that must sit over it. The controller brings it to the front at every stage.
 * Esc or the X while downloading or waiting is Cancel (never a hidden download that later closes the
   app out of nowhere); while installing it is ignored (Gusan closes in a moment anyway); after a
-  failure it is a plain close. EXCEPT while the app quits (main_app._quitting): then it always
-  closes - Qt's quit asks every window to close and one that refuses cancels the quit, so the app
-  would stay open and Setup would have to force it shut.
+  failure it is a plain close. EXCEPT while the app quits (main_app._quitting) or Windows logs off
+  (main_app._session_ending): then it always closes - Qt's quit and a log-off ask every window to
+  close and one that refuses cancels them, so the app would stay open and Setup would have to
+  force it shut.
+* Keyboard: Enter presses the focused button (every button is an auto-default one, like the question
+  cards); the keyboard starts on the default button, else the first. While a typed key waits to be
+  saved nothing is the default - Enter must never be the way to lose it.
+* The controller shows it WITHOUT taking the keyboard whenever nobody just asked (a failure, the
+  hand-over, after a restart): a dictation or a sentence typed elsewhere never lands in it.
 * Fixed content width, height follows the (wrapped) text of each stage; a long log path wraps
   (mini_prompt.breakable) instead of running out of the card; it fits a 1366x768 screen at 150 percent.
 * Asked every 2 s, the same "waiting" text does nothing (no flicker).
@@ -39,7 +45,9 @@ How it behaves, and why:
 import logging
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QLayout, QProgressBar, QVBoxLayout
+from PySide6.QtGui import QKeySequence
+from PySide6.QtWidgets import (QApplication, QDialog, QHBoxLayout, QLabel, QLayout, QMenu, QProgressBar,
+                               QVBoxLayout)
 
 from app_info import APP_NAME, APP_VERSION
 from ui import theme, winfit
@@ -58,12 +66,14 @@ DOWNLOADING = "Downloading the update"
 CHECKING = "Checking the download"
 WAIT_WORK = "Ready to install. It starts when your recording or file is done."
 WAIT_KEY = "Ready to install. Save the key you typed first, or choose Install now."
-INSTALLING = "Installing. %s closes now and opens again by itself in about a minute." % APP_NAME
+INSTALLING = "Installing. %s closes now and opens again by itself when the installer is done." % APP_NAME
 INSTALLING_NO_REOPEN = ("Installing. %s closes now. Open it from the Start menu when the installer is done."
                         % APP_NAME)
 INSTALLER_WINDOW = "The installer shows its own small window while it works."
 ASKS_PERMISSION = "Windows asks for permission first."
 FAILED = "The update didn't install."
+STARTING = "\u00a0"                    # the progress line is always there: the window never grows when it first speaks
+BREAK = "\u200b"                       # mini_prompt.breakable's invisible place for a line to end
 
 # stage -> (icon, icon colour, tile background)
 _TILES = {"download": ("download", "blue-tx", "blue-sub"), "install": ("refresh", "blue-tx", "blue-sub"),
@@ -72,6 +82,30 @@ _TILES = {"download": ("download", "blue-tx", "blue-sub"), "install": ("refresh"
 
 def _mb(n):
     return "%.0f" % (n / 2 ** 20)
+
+
+class _PlainCopyLabel(QLabel):
+    """A selectable label whose copy is exactly what the person reads: the invisible break characters that
+    let a long path wrap (mini_prompt.breakable) are left out - pasted into Explorer they would make the
+    path "not exist". Copy (Ctrl+C or the menu) takes the selection, or the whole line when nothing is
+    selected."""
+
+    def copy_text(self):
+        text = (self.selectedText() if self.hasSelectedText() else self.text()).replace(BREAK, "")
+        QApplication.clipboard().setText(text)
+        return text
+
+    def keyPressEvent(self, event):
+        if event.matches(QKeySequence.Copy):
+            self.copy_text()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def contextMenuEvent(self, event):
+        menu = QMenu(self)
+        menu.addAction("Copy", self.copy_text)
+        menu.exec(event.globalPos())
 
 
 class UpdateWindow(QDialog):
@@ -90,6 +124,7 @@ class UpdateWindow(QDialog):
         theme.apply(self)
         self.setModal(False)
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+        self.setWindowFlag(Qt.WindowMinimizeButtonHint, True)     # a download can take minutes: it can be put away
         self.setWindowTitle(TITLE)
         self.setAccessibleName(TITLE)
 
@@ -137,7 +172,10 @@ class UpdateWindow(QDialog):
         self.lbl_detail.setTextFormat(Qt.PlainText)
         self.card.add(self.lbl_detail)
         # A failure names its log file: selectable, so it can be copied.
-        self.lbl_note = label("", "muted", self.card, wrap=True, selectable=True)
+        self.lbl_note = _PlainCopyLabel(self.card)
+        theme.set_role(self.lbl_note, "muted")
+        self.lbl_note.setWordWrap(True)
+        self.lbl_note.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.lbl_note.setTextFormat(Qt.PlainText)
         self.card.add(self.lbl_note)
 
@@ -155,8 +193,10 @@ class UpdateWindow(QDialog):
         self.btn_install.clicked.connect(self.install_requested)
         self.btn_retry = Button("Try again", "primary", "m", icon="refresh", parent=self.card)
         self.btn_retry.clicked.connect(self.retry_requested)
-        for b in (self.btn_close, self.btn_website, self.btn_cancel, self.btn_install, self.btn_retry):
-            b.setAutoDefault(False)
+        self._buttons = {"close": self.btn_close, "website": self.btn_website, "cancel": self.btn_cancel,
+                         "install": self.btn_install, "retry": self.btn_retry}
+        for b in self._buttons.values():
+            b.setAutoDefault(True)          # Enter presses the button that has the keyboard (like the question cards)
             b.setDefault(False)
             row.addWidget(b)
         self.card.add(row)
@@ -177,8 +217,10 @@ class UpdateWindow(QDialog):
     @staticmethod
     def _say(lbl, text):
         text = str(text or "")
-        lbl.setText(breakable(text))
-        lbl.setAccessibleName(text)
+        shown = breakable(text)
+        if lbl.text() != shown:             # (progress asks up to 10 times a second: a screen reader hears changes only)
+            lbl.setText(shown)
+            lbl.setAccessibleName(text.strip())
         lbl.setVisible(bool(text))
 
     def _show(self, tile, status, detail="", note="", buttons=(), default=None):
@@ -189,11 +231,14 @@ class UpdateWindow(QDialog):
         self._say(self.lbl_detail, detail)
         self._say(self.lbl_note, note)
         wanted = set(buttons)
-        for name, b in (("close", self.btn_close), ("website", self.btn_website), ("cancel", self.btn_cancel),
-                        ("install", self.btn_install), ("retry", self.btn_retry)):
+        for name, b in self._buttons.items():
             b.setVisible(name in wanted)
             b.setDefault(name == default)
-        self.setAccessibleDescription(" ".join(x for x in (status, detail, note) if x))
+        # The keyboard starts on the default button, else on the first one shown.
+        first = default if default in wanted else next((n for n in self._buttons if n in wanted), None)
+        if first is not None:
+            self._buttons[first].setFocus()
+        self.setAccessibleDescription(" ".join(x for x in (status, detail.strip(), note) if x))
         # The wrapped words of this stage decide the height NOW (not a frame later): no cut-off line.
         self.layout().invalidate()
         self.layout().activate()
@@ -213,7 +258,7 @@ class UpdateWindow(QDialog):
         self._checking = False
         self._waiting_key = None
         self._busy()
-        self._show("download", DOWNLOADING, buttons=("cancel",))
+        self._show("download", DOWNLOADING, detail=STARTING, buttons=("cancel",))
 
     def show_progress(self, done, total):
         """The download's progress. ``total`` 0 = the size is not known (a busy bar and the MB so far)."""
@@ -223,7 +268,7 @@ class UpdateWindow(QDialog):
         if total > 0 and done >= total:
             self._checking = True
             self._busy()
-            self._show("download", CHECKING, buttons=("cancel",))
+            self._show("download", CHECKING, detail=STARTING, buttons=("cancel",))
             return
         if total > 0:
             self.bar.setRange(0, 100)
@@ -242,8 +287,8 @@ class UpdateWindow(QDialog):
         self.stage = "waiting"
         self._waiting_key = key
         self._full()
-        self._show("download", key[0], buttons=("cancel", "install") if can_install else ("cancel",),
-                   default="install" if can_install else None)
+        # (nothing is the default while a key waits: Enter must not be a way to lose it)
+        self._show("download", key[0], buttons=("cancel", "install") if can_install else ("cancel",))
 
     def show_installing(self, reopens=True, admin=False):
         """The installer is starting and Gusan closes in a moment: no buttons. ``reopens`` False: nothing
@@ -280,7 +325,7 @@ class UpdateWindow(QDialog):
     def closeEvent(self, event):
         # The app quits through Qt, which asks every window to close and stops at the first that refuses:
         # this one never does then (Gusan is closing for the installer, and the quit must go through).
-        if getattr(self.app, "_quitting", False) is True:
+        if getattr(self.app, "_quitting", False) is True or getattr(self.app, "_session_ending", False) is True:
             event.accept()
             return
         super().closeEvent(event)

@@ -407,7 +407,7 @@ class TestInstallUpdate(unittest.TestCase):
         app.track = lambda e, p=None: app.tracked.append((e, p))
         app.flush_config_save = lambda: setattr(app, "flushed", app.flushed + 1)
         app.quit_app = lambda: None
-        app._bring_to_front = lambda w: None
+        app._bring_to_front = lambda w, activate=True: None
         app._is_newer = main.AppController._is_newer
         bind(app, *_UPDATE_METHODS)
         return app

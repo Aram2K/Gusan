@@ -751,7 +751,7 @@ def test_install_update_goes_to_the_controller_and_the_row_follows_it(env):
     page.update_button.click()
     assert asked[0][:2] == ("v9.9.9", True)
     assert ("track", "update_install_started", {"manual": True, "to": "v9.9.9"}) in app.calls
-    assert page.update_status.text() == "Installing v9.9.9…"
+    assert page.update_status.text() == "Updating v9.9.9…"
     assert not page.update_button.isEnabled()
     on_done = asked[0][2]
     on_done(False, "")                                            # Cancel: no red text, back to Install update

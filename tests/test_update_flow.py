@@ -88,8 +88,9 @@ class _Window:
     def set_tag(self, tag):
         self.tag = tag
 
-    def front(self):
-        self.calls.append(("front", (), {}))
+    def front(self, activate=True):
+        # "front": it came up AND took the keyboard (they just asked); "front_quiet": on top, keyboard untouched
+        self.calls.append(("front" if activate else "front_quiet", (), {}))
         self.visible = True
 
     def hide(self):
@@ -116,7 +117,7 @@ class _Window:
         self._stage("show_failed", "failed", message, detail=detail)
 
     def names(self):
-        return [c[0] for c in self.calls if c[0] != "front"]
+        return [c[0] for c in self.calls if c[0] not in ("front", "front_quiet")]
 
     def last(self, name):
         found = [c for c in self.calls if c[0] == name]
@@ -220,7 +221,7 @@ class Harness(unittest.TestCase):
         app.flush_config_save = lambda: setattr(app, "flushed", app.flushed + 1)
         app.schedule_config_save = lambda: setattr(app, "saves", app.saves + 1)
         app.quit_app = MagicMock()
-        app._bring_to_front = lambda w: w.front()
+        app._bring_to_front = lambda w, activate=True: w.front(activate)
         app._is_newer = main.AppController._is_newer
         app._is_meeting_busy = lambda: bool(app.meeting_session.is_busy)
         bind(app, *METHODS)
@@ -290,7 +291,10 @@ class TestInstalling(Harness):
     def test_when_nothing_can_reopen_it_the_window_says_so_and_waits_longer(self):
         self.all_users, self.watcher = True, None                   # PowerShell blocked by policy
         self.app.install_update(TAG)
-        self.assertEqual(self.window.last("show_installing")[2], {"reopens": False, "admin": True})
+        # The permission question comes first (said before it); once it is answered the window does not
+        # claim it is still to come.
+        self.assertEqual([c[2] for c in self.window.calls if c[0] == "show_installing"],
+                         [{"reopens": True, "admin": True}, {"reopens": False, "admin": False}])
         self.assertEqual([ms for ms, _fn in self.timers], [5000])
 
     def test_a_per_user_install_still_reopens_when_the_watcher_is_blocked(self):
@@ -320,7 +324,10 @@ class TestInstalling(Harness):
         self.assertFalse(self.app.install_update(TAG))               # once it runs
         self.assertEqual(len(self.fetches), 1)
         self.launch.assert_called_once()
-        self.assertEqual(self.window.calls.count(("front", (), {})) >= 3, True)       # each click brings it forward
+        # Each click brings it forward (the keyboard too: they just asked); the hand-over, which comes by
+        # itself, only puts it on top.
+        self.assertEqual(self.window.calls.count(("front", (), {})), 2)
+        self.assertEqual(self.window.calls.count(("front_quiet", (), {})), 1)
 
     def test_saying_no_to_the_permission_prompt_keeps_the_app_open(self):
         calls, done = self.done_calls()
@@ -340,6 +347,29 @@ class TestInstalling(Harness):
         self.assertTrue(self.app.install_update(TAG))
         self.assertEqual(len(self.fetches), 1)
         self.assertEqual(self.launch.call_count, 2)
+
+    def test_a_second_setup_never_starts_while_one_is_still_running(self):
+        # A hand-started installer, or an earlier install that is still going: two Setups would copy files
+        # over each other.
+        self.setup_alive = True
+        calls, done = self.done_calls()
+        self.app.install_update(TAG, on_done=done)
+        self.launch.assert_not_called()
+        self.spawn.assert_not_called()
+        self.assertEqual(self.window.last("show_failed")[1], (updater.MSG_SETUP_RUNNING,))
+        self.assertEqual(calls, [(False, updater.MSG_SETUP_RUNNING)])
+        self.assertEqual(self.timers, [])                            # no quit: Gusan stays
+        self.assertFalse(self.app._update_closing)                   # (dictation, meetings and files work again)
+        self.assertEqual(self.app.cfg["update_attempt"], {})
+        self.setup_alive = False                                     # it ended: Try again goes through
+        self.window.retry_requested.emit()
+        self.launch.assert_called_once()
+        self.assertEqual(self.window.stage, "installing")
+
+    def test_a_setup_that_cannot_be_looked_at_does_not_stop_the_update(self):
+        self.setup_alive = None                                      # no psutil, no access: unknown is not "running"
+        self.app.install_update(TAG)
+        self.launch.assert_called_once()
 
     def test_windows_or_an_antivirus_refusing_the_installer_is_a_failure_with_a_way_forward(self):
         self.launch.return_value = (False, updater.MSG_BLOCKED)
@@ -421,6 +451,60 @@ class TestFailures(Harness):
             self.assertEqual(calls, [(False, updater.MSG_NOT_A_RELEASE)])
         self.assertEqual(self.fetches, [])
         self.assertIsNone(self.window)
+
+
+class TestTheWindowNeverTakesTheKeyboard(Harness):
+    """Only a click brings the update window forward AND gives it the keyboard. What comes by itself - a
+    failure while they dictate or type somewhere else, the hand-over after a wait, the report after a
+    restart - only puts it on top: a dictation's paste, or a sentence, never lands in it, and a stray Enter
+    never starts a second install."""
+
+    def test_the_click_brings_it_forward_with_the_keyboard(self):
+        self.app.install_update(TAG)
+        self.assertEqual(self.window.calls.count(("front", (), {})), 1)
+
+    def test_a_download_that_fails_while_they_dictate_elsewhere_only_comes_on_top(self):
+        self.fetch_result = (False, updater.MSG_NETWORK)
+        self.on_fetch = lambda kw: setattr(self.app, "is_rec", True)          # Alt+R in Word, meanwhile
+        self.app.install_update(TAG)
+        self.assertEqual(self.window.stage, "failed")
+        self.assertEqual(self.window.calls[-1], ("front_quiet", (), {}))
+        self.assertEqual(self.window.calls.count(("front", (), {})), 1)       # (only the click's own)
+
+    def test_the_hand_over_that_comes_after_a_wait_only_comes_on_top(self):
+        self.on_fetch = lambda kw: setattr(self.app, "is_rec", True)
+        self.app.install_update(TAG)
+        self.app.is_rec = False
+        self.run_next_timer()
+        self.assertEqual(self.window.stage, "installing")
+        self.assertEqual(self.window.calls[-1], ("front_quiet", (), {}))
+
+    def test_a_stopped_install_found_after_a_restart_only_comes_on_top(self):
+        app = TestAfterRestart._start(self, TestAfterRestart._attempt(self), log_text="Log closed.\n")
+        TestAfterRestart.run_all_timers(self)
+        self.assertEqual(app._update_window.calls[-1], ("front_quiet", (), {}))
+
+    def test_a_stopped_install_found_while_they_dictate_is_a_notice_not_a_window(self):
+        app = TestAfterRestart._start(self, TestAfterRestart._attempt(self), log_text="Log closed.\n", is_rec=True)
+        TestAfterRestart.run_all_timers(self)
+        self.assertIsNone(app._update_window)
+        self.assertEqual(app.hints[0][:2], ("Gusan didn't update",
+                                            "The update to v2.0.1 stopped before it finished. Click to try again."))
+        self.assertEqual(app.cfg["update_attempt"], {})                       # said once
+
+    def test_try_again_while_a_recording_runs_says_so_in_the_window(self):
+        self.fetch_result = (False, updater.MSG_NETWORK)
+        self.app.install_update(TAG)
+        self.fetch_result = (True, self.installer)
+        self.app.is_rec = True
+        self.window.retry_requested.emit()
+        self.assertEqual(self.window.last("show_failed")[1], ("Finish the recording first, then install the update.",))
+        self.assertEqual(len(self.fetches), 1)                                # nothing started
+        self.assertEqual(self.app.hints, [])                                  # the answer is in the window itself
+        self.launch.assert_not_called()
+        self.app.is_rec = False                                               # recording over: it goes through
+        self.window.retry_requested.emit()
+        self.launch.assert_called_once()
 
 
 class TestNeverInterrupting(Harness):
@@ -972,6 +1056,31 @@ class TestInstallOnQuit(Harness):
         self.app._run_update_on_quit()
         self.launch.assert_not_called()
 
+    def test_quit_never_starts_an_install_while_a_setup_is_still_running(self):
+        self._ready()
+        self.setup_alive = True
+        self.app._run_update_on_quit()
+        self.launch.assert_not_called()
+        self.assertEqual(self.app.tracked, [])
+
+    def test_a_release_whose_install_at_quit_stopped_is_not_installed_at_quit_again(self):
+        # Setup failing for good (a disk problem, an antivirus) must not mean: a silent attempt at every
+        # Quit and a "didn't update" notice at every start. The Install update button is theirs to press.
+        self.app.cfg["update_attempt"] = {"to": TAG, "from": OLD, "quit": True, "failed": True}
+        self._ready()
+        self.app._run_update_on_quit()
+        self.launch.assert_not_called()
+        self._ready()
+        self.app.cfg["update_attempt"] = {"to": "v2.0.0-old", "from": OLD, "quit": True, "failed": True}   # another release's
+        self.app._run_update_on_quit()
+        self.launch.assert_called_once()
+
+    def test_install_update_still_works_for_that_release_and_forgets_the_failure(self):
+        self.app.cfg["update_attempt"] = {"to": TAG, "from": OLD, "quit": True, "failed": True}
+        self.assertTrue(self.app.install_update(TAG))
+        self.launch.assert_called_once()
+        self.assertEqual(self.app.cfg["update_attempt"], {"to": TAG, "log": LOG, "from": OLD})
+
     def test_the_fetch_ahead_keeps_its_gates(self):
         self.app._prepare_update_on_quit(TAG)
         self.assertEqual(len(self.fetches), 1)
@@ -1065,7 +1174,7 @@ class TestAfterRestart(Harness):
         self.assertEqual(detail, "Details: " + self._attempt()["log"])
         self.assertEqual(win.tag, "v2.0.1")                           # Try again = that version
         self.assertEqual(app._update_tag, "v2.0.1")
-        self.assertEqual(win.calls[-1], ("front", (), {}))
+        self.assertEqual(win.calls[-1], ("front_quiet", (), {}))       # it comes by itself: never takes the keyboard
         self.assertEqual(app.cfg["update_attempt"], {})               # said once
         self.assertFalse(app._update_failed_notice)
 
@@ -1133,6 +1242,29 @@ class TestAfterRestart(Harness):
         app.install_update = lambda tag, manual=True, on_done=None: again.append((tag, manual))
         on_click()
         self.assertEqual(again, [("v2.0.1", True)])
+        # Said once - and remembered, so Quit does not start the same install again behind their back.
+        self.assertEqual(app.cfg["update_attempt"], {"to": "v2.0.1", "from": OLD, "quit": True, "failed": True})
+        self.assertTrue(self.save_config.called)
+
+    def test_a_failure_that_was_said_stays_quiet_at_the_next_starts_until_it_is_installed(self):
+        record = {"to": "v2.0.1", "from": OLD, "quit": True, "failed": True}
+        app = self._start(dict(record))
+        self.assertEqual((self.timers, app.hints, app._update_failed_notice), ([], [], False))
+        self.assertEqual(app.cfg["update_attempt"], record)               # kept: it is what stops the quit install
+        self.save_config.assert_not_called()
+        app = self._start(dict(record), version="2.0.1")                  # installed some way meanwhile
+        self.assertEqual(app.cfg["update_attempt"], {})
+
+    def test_the_tidying_after_an_update_keeps_a_release_fetched_in_the_meantime(self):
+        # The new version may already have found the next release 30 seconds in; its ~100 MB must stay.
+        for ready, fetching, keep in ((("v2.0.3", "x.exe"), None, "v2.0.3"), (None, "v2.0.3", "v2.0.3"),
+                                      (None, None, None)):
+            self.prune.reset_mock()
+            app = self._start(self._attempt(), version="2.0.1", _update_ready=ready, _update_fetching=fetching)
+            self.run_all_timers("2.0.1")
+            self.assertIn(mock.call(keep=keep), self.prune.call_args_list, (ready, fetching))
+            self.assertEqual(self.prune.call_count, 2)                      # (and the logs)
+            self.assertIsNotNone(app)
 
     def test_a_garbled_record_is_dropped(self):
         for bad in ({"to": ""}, {"to": "v2/../x"}, {"log": "x"}):
@@ -1167,6 +1299,92 @@ class TestNoSecondPopup(Harness):
         self.app._prompt_update("v2.0.2")
         self.app._prompt_update("v2.0.2")
         self.assertEqual(len(self.app.hints), 1)
+
+
+class TestStartedByHandWhileSetupRuns(Harness):
+    """Gusan started by hand while an in-app Setup is still replacing its files (Install updates when I
+    quit runs Setup for a minute or so, and people quit and reopen quickly): the old version would lock the
+    files Setup copies. It steps aside before anything is loaded; a watcher reopens it once Setup is done."""
+
+    def _cfg(self, **over):
+        self.log = os.path.join(self.tmp, "gusan-update-run.log")
+        attempt = {"to": TAG, "log": self.log, "from": OLD, **over}
+        with open(self.log, "w", encoding="utf-8") as f:
+            f.write("Setup started\nExtracting files\n")
+        return {"update_attempt": attempt}
+
+    def test_it_is_recognised_while_setup_runs(self):
+        self.setup_alive = True
+        config = self._cfg()
+        self.assertEqual(main._running_update_install(config), config["update_attempt"])
+
+    def test_not_once_setup_ended_one_way_or_another(self):
+        config = self._cfg()
+        self.setup_alive = False                                      # killed: its log never closes
+        self.assertIsNone(main._running_update_install(config))
+        self.setup_alive = True
+        with open(self.log, "a", encoding="utf-8") as f:
+            f.write("Log closed.\n")
+        self.assertIsNone(main._running_update_install(config))      # finished (a failed one too)
+
+    def test_never_for_the_updated_app_that_setup_itself_started_while_it_is_still_exiting(self):
+        self.setup_alive = True
+        config = self._cfg()
+        with mock.patch.object(main, "APP_VERSION", "2.0.1"):         # this version has caught up with the attempt
+            self.assertIsNone(main._running_update_install(config))
+        with mock.patch.object(main, "APP_VERSION", "2.0.5"):
+            self.assertIsNone(main._running_update_install(config))
+
+    def test_never_for_a_setup_that_went_quiet_or_a_record_that_is_not_one(self):
+        self.setup_alive = True
+        config = self._cfg()
+        os.utime(self.log, (1_000_000_000, 1_000_000_000))             # nothing written for years: stuck, not working
+        self.assertIsNone(main._running_update_install(config))
+        os.remove(self.log)                                           # no log: Setup never started
+        self.assertIsNone(main._running_update_install(config))
+        config = self._cfg(failed=True)
+        self.assertIsNone(main._running_update_install(config))      # a failure said already
+        for bad in ({}, None, "x", {"to": "v2/../x", "log": self.log}, {"to": TAG}, {"log": self.log}):
+            self.assertIsNone(main._running_update_install({"update_attempt": bad}))
+        self.assertIsNone(main._running_update_install({}))
+
+    def _start(self, config):
+        lock = MagicMock()
+        constructed = MagicMock(side_effect=RuntimeError("it went on to start the app"))
+        with mock.patch.object(main, "acquire_single_instance_lock", return_value=lock), \
+                mock.patch.object(main, "GusanApplication", constructed), \
+                mock.patch.object(main, "cfg", config), \
+                mock.patch.object(main.sys, "argv", ["TranscribeApp.exe"]):
+            try:
+                main.main()
+            except SystemExit as e:
+                return e.code, lock, constructed
+            except RuntimeError:
+                return "started", lock, constructed
+        return "returned", lock, constructed
+
+    def test_main_steps_aside_for_an_install_at_quit_and_starts_a_watcher(self):
+        self.setup_alive = True
+        code, lock, constructed = self._start(self._cfg(quit=True))
+        self.assertEqual(code, 0)
+        constructed.assert_not_called()                               # nothing was loaded or locked
+        lock.close.assert_called_once()
+        self.spawn.assert_called_once_with(EXE, self.log)             # nobody else reopens it after a Quit install
+
+    def test_main_steps_aside_for_the_window_installs_too_without_a_second_watcher(self):
+        self.setup_alive = True
+        code, _lock, constructed = self._start(self._cfg())
+        self.assertEqual(code, 0)
+        constructed.assert_not_called()
+        self.spawn.assert_not_called()                                # Setup (per user) and its own watcher reopen it
+
+    def test_main_starts_as_usual_when_nothing_is_installing(self):
+        for config in ({"update_attempt": {}}, {}, self._cfg()):
+            self.setup_alive = False
+            code, _lock, constructed = self._start(config)
+            self.assertEqual(code, "started")
+            constructed.assert_called_once()
+        self.spawn.assert_not_called()
 
 
 class TestAttemptRecord(unittest.TestCase):

@@ -15,7 +15,7 @@ Do not publish a release manually unless you intentionally want to bypass the te
 - Let GitHub Actions create the release and upload assets.
 - Do not delete the installer asset from a published release.
 
-Installed copies find updates through GitHub's latest release API and download `releases/download/<tag>/TranscribeApp-Windows-Setup.exe`. That exact name in the latest release is the hard contract. Newer versions also check the `.sha256` file and `update-manifest.json` when present, but older copies only need the installer name.
+Installed copies find updates through GitHub's latest release API and download `releases/download/<tag>/TranscribeApp-Windows-Setup.exe`. That exact name in the latest release is the hard contract. Newer versions also check the `.sha256` file and `update-manifest.json` when present, but older copies only need the installer name. The in-app update (the update window) needs the `.sha256` next to the installer: with no readable checksum it installs nothing (the person gets Try again and the download page), so never publish an installer without it.
 
 ## What Needs a Release
 
@@ -69,3 +69,9 @@ The version lives in one place: `APP_VERSION` in `app_info.py` (with `APP_NAME =
 7. Test these latest-download URLs:
    - `https://github.com/Aram2K/Gusan/releases/latest/download/TranscribeApp-Windows-Setup.exe`
    - `https://github.com/Aram2K/Gusan/releases/latest/download/update-manifest.json`
+
+8. On a real Windows machine, update an installed copy from the previous release (CI never runs a real Setup, UAC or Inno Setup):
+   - Per user: Install update shows the window, Gusan closes, the quiet Setup runs, Gusan reopens by itself.
+   - Per user, "Install updates when I quit": quit, the quiet Setup runs, then start Gusan by hand while Setup still works: it must stay closed and open by itself once Setup is done.
+   - All users (Program Files): Windows asks for permission, a No keeps Gusan open, a Yes updates it and Gusan reopens. Also try `/ALLUSERS /relaunch=1` by hand: if Setup's own reopen works for an elevated install, the watcher is no longer the only way back.
+   - Kill the installer while it runs: Gusan comes back and says the install stopped, with Try again.

@@ -3548,7 +3548,7 @@ class SettingsPage(QWidget):
                  updater.DISMISSED: ("blue", "blue-tx"), updater.ERROR: ("amber", "amber-tx"),
                  "checking": ("faint", "muted"), "installing": ("blue", "blue-tx")}.get(status, ("faint", "muted"))
         if status == "installing":
-            self.update_status.setText("Installing %s…" % tag)
+            self.update_status.setText("Updating %s…" % tag)
         self.update_dot.set_color(color[0])
         tint(self.update_status, color[1])
         self.update_status.setAccessibleDescription(self.update_status.text())
@@ -3562,7 +3562,7 @@ class SettingsPage(QWidget):
             b.setText("Checking…")
             b.setEnabled(False)
         elif status == "installing":
-            b.setText("Installing…")
+            b.setText("Updating…")
             b.setEnabled(False)
         else:
             b.setText("Check now")

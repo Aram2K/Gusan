@@ -1048,7 +1048,7 @@ def update_env(ctl, monkeypatch, tmp_path):
     installer.write_bytes(b"MZ" + b"0" * 64)
     env = SimpleNamespace(path=str(installer), log=str(tmp_path / "gusan-update-test.log"), hold=None,
                           fetch_result=None, fetches=0, launched=[], watchers=[], quits=[], all_users=False,
-                          launch_result=None)
+                          launch_result=None, setup_alive=False)
 
     def fake_download(tag, on_progress=None, should_cancel=None, **kw):
         env.fetches += 1
@@ -1074,6 +1074,7 @@ def update_env(ctl, monkeypatch, tmp_path):
     monkeypatch.setattr(updater, "can_self_install", lambda exe=None: True)
     monkeypatch.setattr(updater, "is_all_users_install", lambda *a, **k: env.all_users)
     monkeypatch.setattr(updater, "launch_installer", fake_launch)
+    monkeypatch.setattr(updater, "setup_running", lambda: env.setup_alive)       # (not a scan of this computer's processes)
     monkeypatch.setattr(updater, "spawn_relauncher",
                         lambda exe, log, popen=None: env.watchers.append((exe, log)) or object())
     monkeypatch.setattr(updater, "new_log_path", lambda root=None: env.log)
@@ -1098,7 +1099,9 @@ def update_env(ctl, monkeypatch, tmp_path):
 
 def test_install_update_shows_the_window_from_the_click_to_the_restart(ctl, update_env):
     import sys
+    import threading
     env = update_env
+    env.hold = threading.Event()              # the download waits half way: nothing here depends on a timing guess
     results = []
     assert ctl.install_update("v99.0.0", on_done=lambda ok, info: results.append((ok, info))) is True
     win = ctl._update_window
@@ -1106,6 +1109,8 @@ def test_install_update_shows_the_window_from_the_click_to_the_restart(ctl, upda
     assert win.lbl_version.accessibleName() == "Version 99.0.0"
     assert _wait(lambda: win.lbl_detail.accessibleName() == "50 of 100 MB")       # it moves, with its size
     assert win.btn_cancel.isVisible() and not win.btn_retry.isVisible()
+    assert env.quits == [] and ctl._update_closing is False
+    env.hold.set()
     assert _wait(lambda: win.stage == "installing")
     assert "opens again by itself" in win.lbl_status.accessibleName()
     assert not win.btn_cancel.isVisible()                                          # nothing to press now
@@ -1119,11 +1124,49 @@ def test_install_update_shows_the_window_from_the_click_to_the_restart(ctl, upda
     ctl.hints.clear()
     ctl._start()
     assert ctl.hints and ctl.hints[-1][0] == "Gusan is updating" and ctl.is_rec is False
-    # Gusan closes through quit_app (services shut down, a meeting is saved), after a moment.
-    assert env.quits == []
+    # Gusan closes through quit_app (services shut down, a meeting is saved), after a moment (the 1.5 s
+    # itself is asserted in tests/test_update_flow.py: here no clock decides whether this test passes).
     assert _wait(lambda: env.quits, 4000)
     assert results == []                    # a hand-over to the installer is not a "did not install"
     assert env.fetches == 1
+
+
+def test_a_failure_nobody_asked_for_comes_on_top_without_taking_the_keyboard(ctl, update_env):
+    """Install update, then dictate somewhere else: when the download fails the window must not take the
+    focus (the dictation's paste would land in it), and only a click gets it the keyboard."""
+    from PySide6.QtCore import Qt
+    import updater
+    env = update_env
+    env.fetch_result = (False, updater.MSG_NETWORK)
+    assert ctl.install_update("v99.0.0") is True
+    win = ctl._update_window
+    assert win.testAttribute(Qt.WA_ShowWithoutActivating) is False        # the click: it takes the keyboard
+    assert _wait(lambda: win.stage == "failed")
+    assert win.isVisible()
+    assert win.testAttribute(Qt.WA_ShowWithoutActivating) is True          # the failure: on top, keyboard untouched
+    env.fetch_result = None
+    ctl.install_update("v99.0.0")                                          # their click (Try again, Settings, the notice)
+    assert win.testAttribute(Qt.WA_ShowWithoutActivating) is False
+
+
+def test_a_window_they_put_away_is_not_pulled_back_by_what_comes_by_itself(qapp):
+    import main
+    from ui.update_window import UpdateWindow
+    w = UpdateWindow("v99.0.0")
+    try:
+        w.show()
+        w.showMinimized()
+        QApplication.processEvents()
+        if not w.isMinimized():
+            pytest.skip("this platform cannot minimise a window")
+        main.AppController._bring_to_front(w, activate=False)
+        assert w.isMinimized()                                             # a failure does not restore it
+        main.AppController._bring_to_front(w)                             # a click does
+        QApplication.processEvents()
+        assert not w.isMinimized()
+    finally:
+        w.hide()
+        w.deleteLater()
 
 
 def test_cancel_in_the_window_stops_the_download_at_once_and_installs_nothing(ctl, update_env):
@@ -1144,8 +1187,8 @@ def test_cancel_in_the_window_stops_the_download_at_once_and_installs_nothing(ct
     # Install update again: a clean new attempt.
     env.hold.set()
     assert ctl.install_update("v99.0.0") is True
-    assert _wait(lambda: ctl._update_window.stage == "installing")
-    assert len(env.launched) == 1 and env.fetches == 2
+    assert _wait(lambda: len(env.launched) == 1)                    # (a worker starts it, after the window says so)
+    assert ctl._update_window.stage == "installing" and env.fetches == 2
 
 
 def test_a_failed_download_says_why_and_try_again_goes_on(ctl, update_env):
@@ -1162,8 +1205,8 @@ def test_a_failed_download_says_why_and_try_again_goes_on(ctl, update_env):
     assert ctl._update_installing is False and env.launched == []   # Gusan carries on, nothing was started
     env.fetch_result = None
     win.btn_retry.click()
-    assert _wait(lambda: win.stage == "installing")
-    assert len(env.launched) == 1 and env.fetches == 2
+    assert _wait(lambda: len(env.launched) == 1)
+    assert win.stage == "installing" and env.fetches == 2
 
 
 def test_saying_no_to_windows_permission_keeps_gusan_open_and_fully_working(ctl, update_env):
@@ -1197,8 +1240,8 @@ def test_a_job_that_starts_during_the_download_is_waited_for_then_the_install_go
     _spin(300)
     assert env.launched == [] and ctl._update_closing is False
     ctl._file_job_running = False
-    assert _wait(lambda: win.stage == "installing", 6000)           # picked up by the 2 s poll
-    assert len(env.launched) == 1
+    assert _wait(lambda: len(env.launched) == 1, 6000)              # picked up by the 2 s poll
+    assert win.stage == "installing"
 
 
 def test_the_update_window_never_keeps_gusan_from_quitting(ctl, update_env):

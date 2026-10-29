@@ -167,6 +167,17 @@ jobs:
           python -m pytest -q tests_qt/test_gui_stall_budget.py 2>&1 | Tee-Object -FilePath qt_stall_output.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # The in-app update's riskiest pieces need a real Windows: the PowerShell watcher that reopens
+      # Gusan after Setup, the ShellExecute command line (quotes, spaces), the file lock held across an
+      # administrator start. The ubuntu test job skips them; only a stand-in program is ever run
+      # (never a real Setup, never the app). ~1 minute.
+      - name: Updater on real Windows (watcher, command line, file lock)
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          python -m pytest -q tests/test_updater.py -k ForReal 2>&1 | Tee-Object -FilePath updater_output.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       # (annotations are public, job logs are not)
       - name: Name the failing Qt tests (annotations)
         if: failure()
@@ -174,7 +185,7 @@ jobs:
         run: |
           # ONE annotation (GitHub shows at most 10 per step), one failing test per line.
           $lines = @()
-          foreach ($f in 'qt_output.txt', 'qt_stall_output.txt') {
+          foreach ($f in 'qt_output.txt', 'qt_stall_output.txt', 'updater_output.txt') {
             if (Test-Path $f) {
               $lines += Select-String -Path $f -Pattern '^(FAILED|ERROR) ' | ForEach-Object {
                 if ($_.Line.Length -gt 260) { $_.Line.Substring(0, 260) } else { $_.Line }

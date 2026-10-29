@@ -439,6 +439,10 @@ class TestInstaller(unittest.TestCase):
         self.assertEqual(len(post), 1)
         self.assertIn("skipifsilent", post[0]["Flags"].split())
 
+    def test_two_setups_never_run_at_once(self):
+        # An installer started by hand while an in-app update is still copying files would copy over it.
+        self.assertEqual(_setup(self.text).get("SetupMutex"), "GusanSetupMutex")
+
     def test_an_update_never_applies_the_start_at_login_task_again(self):
         import updater
         tasks = {e["Name"]: e for e in _entries(self.text, "Tasks")}
@@ -481,6 +485,21 @@ class TestBuild(unittest.TestCase):
         self.assertLess(steps.index("Check the version"), steps.index("Build .exe"))
         self.assertIn("${{ steps.version.outputs.version }}", _step(self.jobs["build-windows"],
                                                                     "Build Inno Setup installer"))
+
+    def test_the_updater_is_tested_on_a_real_windows_before_anything_is_built(self):
+        """The PowerShell watcher, the ShellExecute command line and the file lock behind an all-users start
+        only run on Windows; tests/ runs on ubuntu, where they are skipped."""
+        job = self.jobs["build-windows"]
+        steps = [n for n, _ in _steps(job)]
+        name = "Updater on real Windows (watcher, command line, file lock)"
+        self.assertIn(name, steps)
+        self.assertLess(steps.index(name), steps.index("Build .exe"))
+        body = _step(job, name)
+        self.assertIn("tests/test_updater.py -k ForReal", body)
+        self.assertIn("exit $LASTEXITCODE", body)                  # a failing test fails the job
+        text = _read(ROOT / "tests" / "test_updater.py")           # (and the selection really selects them)
+        for cls in ("TestLaunchForReal", "TestWatcherForReal", "TestHoldForReal"):
+            self.assertIn("class %s(" % cls, text)
 
     def test_version_info_script_is_the_same_in_ci_and_build_ps1(self):
         self.assertEqual(_version_info_script(self.yml), _version_info_script(self.ps1))

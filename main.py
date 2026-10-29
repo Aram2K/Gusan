@@ -5100,7 +5100,9 @@ class AppController(QObject):
         win = self._update_window
         if win is not None:
             win.show_failed(message, detail)
-            self._bring_to_front(win)
+            # Nobody asked for THIS: it may have failed while they dictate or type somewhere else. It comes
+            # up on top, but never takes the keyboard (and its Enter is not theirs).
+            self._bring_to_front(win, activate=False)
         else:
             self.show_tray_hint("Update not installed", message)
         self._update_done(False, message)
@@ -5135,7 +5137,13 @@ class AppController(QObject):
         self._update_handover(self._update_gen)
 
     def _update_retry(self):
-        """The window's Try again."""
+        """The window's Try again. While a recording, a dictation or a file job runs the install can't
+        start: the window says so itself (a tray notice alone looked like a button that did nothing)."""
+        blocked = self._update_blocker()
+        win = self._update_window
+        if blocked and win is not None and not self._update_installing and not self._update_closing:
+            win.show_failed(blocked)
+            return
         self.install_update(self._update_tag, manual=True, on_done=self._update_on_done)
 
     def _update_open_page(self):
@@ -5218,20 +5226,26 @@ class AppController(QObject):
         self._update_closing = True
         win = self._update_window
         win.show_installing(admin=all_users)
-        self._bring_to_front(win)
+        # Not activated: the handover may come minutes after the click (it waited for a recording), and
+        # whatever they are typing in meanwhile must not land in this window.
+        self._bring_to_front(win, activate=False)
         log = updater.new_log_path()
 
         def _run():
             watcher = None
             try:
-                # An all-users install asks Windows for permission here: blocks until it is answered.
-                # A per-user Setup reopens Gusan itself when it succeeds.
-                ok, info = updater.launch_installer(path, all_users=all_users, log_path=log,
-                                                    relaunch=not all_users)
-                if ok:
-                    # ...and this watcher, as THIS user, reopens it whatever happens to Setup: a failed
-                    # install, an all-users one (an elevated Setup cannot start anything as the person).
-                    watcher = updater.spawn_relauncher(sys.executable, log)
+                if updater.setup_running() is True:
+                    # Never two Setups at once (a hand-started installer, an earlier install still going).
+                    ok, info = False, updater.MSG_SETUP_RUNNING
+                else:
+                    # An all-users install asks Windows for permission here: blocks until it is answered.
+                    # A per-user Setup reopens Gusan itself when it succeeds.
+                    ok, info = updater.launch_installer(path, all_users=all_users, log_path=log,
+                                                        relaunch=not all_users)
+                    if ok:
+                        # ...and this watcher, as THIS user, reopens it whatever happens to Setup: a failed
+                        # install, an all-users one (an elevated Setup cannot start anything as the person).
+                        watcher = updater.spawn_relauncher(sys.executable, log)
             except Exception:
                 logger.warning("Starting the installer failed", exc_info=True)
                 ok, info = False, updater.MSG_NO_START
@@ -5257,7 +5271,7 @@ class AppController(QObject):
             # Nothing can reopen it as this user: say so, and long enough to be read.
             win = self._update_window
             if win is not None:
-                win.show_installing(reopens=False, admin=True)
+                win.show_installing(reopens=False)         # (the permission question is answered by now)
             delay = 5000
         # quit_app: services shut down and a meeting is saved; the update window never vetoes it.
         QTimer.singleShot(delay, self.quit_app)
@@ -5369,6 +5383,15 @@ class AppController(QObject):
             return
         if not updater.can_self_install() or updater.is_all_users_install():
             return
+        last = self.cfg.get("update_attempt")
+        if isinstance(last, dict) and last.get("failed") and last.get("to") == tag:
+            # This release's install at Quit stopped last time (said at the start after it): quitting does
+            # not try it again - and again - behind their back. Install update is theirs to press.
+            logger.info("Update on quit skipped: the install of %s stopped before", tag)
+            return
+        if updater.setup_running() is True:
+            logger.info("Update on quit skipped: a Gusan installer is still running")
+            return
         self.track("update_install_started", {"manual": False, "to": tag})
         log = updater.new_log_path()
         ok, info = updater.launch_installer(path, all_users=False, log_path=log, relaunch=False)
@@ -5406,6 +5429,8 @@ class AppController(QObject):
                     f"{APP_NAME} is up to date", f"Updated to version {APP_VERSION}."))
                 QTimer.singleShot(30_000, self._tidy_update_files)      # once Setup has surely exited
                 return
+            if attempt.get("failed"):
+                return          # an install at Quit that stopped: said once already, kept only so Quit won't retry it
             log = str(attempt.get("log") or "")
             if log and os.path.exists(log) and updater.install_running(log):
                 return
@@ -5419,12 +5444,20 @@ class AppController(QObject):
         """The install stopped before it finished. Said once, and never over an update started since."""
         self._update_failed_notice = False
         tag = str(attempt.get("to") or "")
-        self._clear_update_attempt()
+        if tag and attempt.get("quit"):
+            # An install at Quit that stopped: remembered (until the person installs it themself or the
+            # release is installed some other way), so that the next Quit doesn't start the same install again.
+            self.cfg["update_attempt"] = {"to": tag, "from": str(attempt.get("from") or ""), "quit": True,
+                                          "failed": True}
+            save_config(self.cfg)
+        else:
+            self._clear_update_attempt()
         if not tag or self._update_installing or self._update_closing:
             return
         log = str(attempt.get("log") or "")
-        if attempt.get("quit"):
-            # The install at Quit: no window was open then; one notice, whose click tries again.
+        if attempt.get("quit") or self._update_blocker():
+            # The install at Quit: no window was open then; one notice, whose click tries again. The same
+            # when they are dictating or recording right now - a window popping up then would be in their way.
             self.show_tray_hint(f"{APP_NAME} didn't update",
                                 f"The update to {tag} stopped before it finished. Click to try again.",
                                 on_click=lambda t=tag: self.install_update(t, manual=True))
@@ -5433,16 +5466,21 @@ class AppController(QObject):
         win = self._update_window_for(tag)
         win.show_failed("The installer stopped before it finished.",
                         f"Details: {log}" if log and os.path.exists(log) else "")
-        self._bring_to_front(win)
+        # It opens by itself, seconds after Gusan started: never over what they are typing.
+        self._bring_to_front(win, activate=False)
 
     def _tidy_update_files(self):
-        """Gusan runs the new version: the installer and the logs it left in %TEMP% are not needed."""
+        """Gusan runs the new version: the installer and the logs it left in %TEMP% are not needed - except
+        the installer of a release fetched in the 30 seconds since (the new version may already have found
+        the next one, and a second download costs ~100 MB)."""
         if sys.platform != "win32":
             return
+        ready = self._update_ready
+        keep = (ready[0] if ready else "") or self._update_fetching or None
 
         def _run():
             try:
-                updater.prune_cache()
+                updater.prune_cache(keep=keep)
                 updater.prune_logs()
             except Exception:
                 logger.debug("tidying the update files failed", exc_info=True)
@@ -5450,15 +5488,24 @@ class AppController(QObject):
 
     # ── Modular Window Surface Triggers (Main thread-safe wrappers) ──
     @staticmethod
-    def _bring_to_front(w):
+    def _bring_to_front(w, activate=True):
         """Reliably surface a window. A minimized window ignores plain show() on
         Windows - which made tray clicks look like they did nothing - and a
-        window behind others needs the raise+activate pair."""
+        window behind others needs the raise+activate pair. ``activate`` False
+        (a window nobody just asked for - an update that failed on its own, say):
+        it comes up on top but the keyboard stays where it was, so a dictation
+        or a sentence being typed never lands in it."""
+        set_attribute = getattr(w, "setAttribute", None)
+        if callable(set_attribute):
+            set_attribute(Qt.WA_ShowWithoutActivating, not activate)
         if w.isMinimized():
+            if not activate:
+                return                  # they put it away: showing it again would take the keyboard
             w.showNormal()
         w.show()
         w.raise_()
-        w.activateWindow()
+        if activate:
+            w.activateWindow()
 
     def _ensure_main_window(self):
         """The Gusan window (ui/shell.py), built the first time it opens -
@@ -7696,6 +7743,27 @@ def _bucket_count(value):
     return "> 2500"
 
 
+def _running_update_install(config=None):
+    """The in-app install (cfg["update_attempt"]) that is still replacing this copy's files while THIS
+    version starts, else None. Starting then would lock the very files Setup copies - it stops halfway,
+    or closes this copy again and nothing reopens it. Not when this version has already caught up with
+    the attempt (it IS the updated app, started by Setup while Setup is still exiting), and not for a
+    Setup that has been silent for ten minutes (a stuck installer must never keep Gusan from opening)."""
+    try:
+        attempt = (cfg if config is None else config).get("update_attempt")
+        if not isinstance(attempt, dict) or attempt.get("failed"):
+            return None
+        tag, log = str(attempt.get("to") or ""), str(attempt.get("log") or "")
+        if not log or not updater.valid_tag(tag) or _parse_version(tag) <= _parse_version(APP_VERSION):
+            return None
+        if not os.path.exists(log) or time.time() - os.path.getmtime(log) > 600:
+            return None
+        return attempt if updater.install_running(log) else None
+    except Exception:
+        logger.debug("could not tell whether an install is still running", exc_info=True)
+        return None
+
+
 # ── Main Entrypoint ───────────────────────────────────────────────────────────
 def main():
     # 1. IPC Single-Instance check
@@ -7705,6 +7773,18 @@ def main():
         action = launch_action(sys.argv)
         if action:
             signal_running_instance(action)
+        sys.exit(0)
+
+    # 1b. Setup is still replacing this copy's files (an in-app update that is still going, and Gusan was
+    # started by hand meanwhile): step aside before anything is loaded or locked. What reopens Gusan once
+    # Setup ends: for the update window's install Setup itself (per user) and its watcher; for the install
+    # at Quit nobody - a watcher is started here (it also waits for this process to be gone).
+    running = _running_update_install()
+    if running is not None:
+        logger.info("An update install is still running - not starting now")
+        if running.get("quit"):
+            updater.spawn_relauncher(sys.executable, str(running.get("log") or ""))
+        lock_sock.close()
         sys.exit(0)
 
     # A GPU-acceleration removal scheduled last run (its DLLs were loaded):
