@@ -14,7 +14,21 @@ if __name__ == "__main__" and sys.argv[1:2] == ["--diarize-worker"]:
     # run, which froze the window for minutes. Before anything heavy loads.
     import diarization_proc
     sys.exit(diarization_proc.worker_main(sys.argv[1:]))
+if __name__ == "__main__" and sys.argv[1:2] == ["--splash-worker"]:
+    # The loading card (startup_splash.py, splash_window.py) is this program started
+    # again as its own process, so it keeps moving while the app's window thread is
+    # busy. It needs only the Qt basics: before anything heavy loads, too.
+    import startup_splash
+    sys.exit(startup_splash.worker_main(sys.argv[2:]))
+import startup_splash                    # standard library only: loads in a few milliseconds
 if __name__ == "__main__":
+    # The loading card, first thing - the next imports take seconds. A launch that
+    # finds Gusan already running hands its request over and ends here: that copy
+    # opens its own window (no card for it, no wait for these imports). Quiet
+    # launches (--background), source runs and tests get no card.
+    if startup_splash.another_is_running(sys.argv):
+        sys.exit(0)
+    startup_splash.start(sys.argv)
     # The app runs this file as __main__. Services do `import main` /
     # `from main import ...` (file jobs, model checks): they
     # must get THIS module - a second copy would load its own config.
@@ -5065,11 +5079,17 @@ class AppController(QObject):
         """Reliably surface a window. A minimized window ignores plain show() on
         Windows - which made tray clicks look like they did nothing - and a
         window behind others needs the raise+activate pair."""
-        if w.isMinimized():
-            w.showNormal()
-        w.show()
-        w.raise_()
-        w.activateWindow()
+        try:
+            if w.isMinimized():
+                w.showNormal()
+            w.show()
+            w.raise_()
+            w.activateWindow()
+        finally:
+            # A Gusan window of any kind is on screen (the app window, the first-run
+            # wizard): the loading card has done its job. show() is where a slow
+            # machine waits for seconds, so this is after it.
+            startup_splash.dismiss()
 
     def _ensure_main_window(self):
         """The Gusan window (ui/shell.py), built the first time it opens -
@@ -5085,6 +5105,12 @@ class AppController(QObject):
         """Open the app: the Gusan window on ``page`` (a ui.shell route such as
         "home" or "settings"; None keeps the page it was on, home the first
         time). ``opts`` go to the page (e.g. section="speech")."""
+        if getattr(self, "main_win", None) is None:
+            # The window is built now and shows only after a few seconds on a slow
+            # machine (a click on the tray icon after a quiet start, the end of the
+            # first-run wizard): the loading card covers that wait too. One that is
+            # already up from the launch is kept.
+            startup_splash.start_for_window()
         try:
             win = self._ensure_main_window()
             win.open(page or win.current_route() or "home", **opts)
@@ -5092,6 +5118,7 @@ class AppController(QObject):
             # The window itself couldn't be built (a page that fails shows its
             # own error card instead). Say so rather than doing nothing.
             logger.error("The Gusan window failed to open", exc_info=True)
+            startup_splash.dismiss()           # nothing will appear: the card must not wait for it
             try:
                 self.show_tray_hint(f"{APP_NAME} couldn't open its window",
                                     "Try again from the tray. If it keeps happening, restart the app.")
@@ -5150,8 +5177,12 @@ class AppController(QObject):
                     dl.probe_hardware()
                 except Exception:
                     logger.debug("hardware probe failed to start", exc_info=True)
-            from ui.onboarding_v2 import OnboardingWizard
-            wiz = OnboardingWizard(self)
+            try:
+                from ui.onboarding_v2 import OnboardingWizard
+                wiz = OnboardingWizard(self)
+            except Exception:
+                startup_splash.dismiss()       # no wizard will appear: the loading card must not wait for it
+                raise
             # Land in the app, not silently in the tray: first-run users
             # otherwise think it closed.
             wiz.accepted.connect(lambda: self.show_main("home"))
@@ -6634,6 +6665,7 @@ class AppController(QObject):
         if not go:
             return False
         self._quitting = True
+        startup_splash.dismiss()            # a quit while the loading card is still up
         # Services first: a queued file job is cancelled (its worker stops at
         # the next check), the calendar's timers and a waiting sign-in end,
         # the mic check closes - on this thread, before PortAudio goes below.
@@ -7306,7 +7338,9 @@ def main():
     # 1. IPC Single-Instance check
     lock_sock = acquire_single_instance_lock()
     if not lock_sock:
-        # Another instance is running, wake it and exit
+        # Another instance is running, wake it and exit. (Two launches in the same
+        # second both started a loading card: this one is not the app - no card.)
+        startup_splash.kill()
         action = launch_action(sys.argv)
         if action:
             signal_running_instance(action)
