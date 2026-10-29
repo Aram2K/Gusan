@@ -733,8 +733,23 @@ class TestSafeQuit(unittest.TestCase):
                      "_release_smart_hotkey"):
             setattr(app, name, lambda: None)
         bind(app, "quit_app", "_stop_recording_for_quit", "_stop_mic_monitor_for_quit",
-             "_on_quit_event", "_on_session_ending", "_on_about_to_quit")
+             "_on_quit_event", "_on_session_ending", "_on_about_to_quit", "_release_single_instance_lock")
         return app
+
+    def test_a_quit_lets_go_of_the_single_instance_port_a_cancelled_one_does_not(self):
+        # Otherwise a relaunch during the seconds the shutdown takes is handed to a copy that is
+        # ending, and nothing opens.
+        app = self._app("recording", recording=True, confirm=False)
+        sock = SimpleNamespace(closed=0)
+        sock.close = lambda: setattr(sock, "closed", sock.closed + 1)
+        app.lock_sock = sock
+        self.assertFalse(app.quit_app())
+        self.assertEqual(sock.closed, 0)
+        self.assertIs(app.lock_sock, sock)
+        app._confirm_quit = lambda: True
+        self.assertTrue(app.quit_app())
+        self.assertEqual(sock.closed, 1)
+        self.assertIsNone(app.lock_sock)
 
     def test_what_quitting_would_end(self):
         q = main.AppController._quit_question
@@ -966,6 +981,29 @@ class TestFirstRunWizardForward(unittest.TestCase):
             c.show_main = lambda *a, c=c: c.opened.append(a)
             main.dispatch_ipc_action(c, "show_settings")
             self.assertEqual(c.opened, opened)
+
+    def test_a_second_launch_on_a_first_run_whose_wizard_is_not_built_yet_opens_the_wizard(self):
+        # The wizard is built by a 500 ms timer after the loop starts; a second launch is handed
+        # over at once now (the port is claimed before the imports) and can arrive first.
+        for wiz, done, opens in ((None, False, "wizard"),
+                                 (object(), False, "main"),        # closed with X: it keeps its reference
+                                 (None, True, "main")):            # an onboarded user
+            c = SimpleNamespace(onboarding_win=wiz, cfg={"onboarding_done": done}, opened=[])
+            c.front_first_run_wizard = lambda: False
+            c.show_onboarding = lambda c=c: c.opened.append("wizard")
+            c.show_main = lambda *a, c=c: c.opened.append("main")
+            main.dispatch_ipc_action(c, "show_settings")
+            self.assertEqual(c.opened, [opens], (wiz, done))
+
+    def test_a_wizard_that_cannot_be_built_falls_back_to_the_app(self):
+        def broken():
+            raise RuntimeError("no wizard")
+        c = SimpleNamespace(onboarding_win=None, cfg={"onboarding_done": False}, opened=[])
+        c.front_first_run_wizard = lambda: False
+        c.show_onboarding = broken
+        c.show_main = lambda *a: c.opened.append("main")
+        main.dispatch_ipc_action(c, "show_settings")
+        self.assertEqual(c.opened, ["main"])
 
     def test_only_a_wizard_on_screen_before_onboarding_is_done(self):
         class Wiz:

@@ -12,18 +12,27 @@ Rules this file keeps - read them before changing anything:
   Windows ghosts a window that does not answer as "Not responding"), and an
   in-process card could show nothing during the import seconds. The card runs as
   "TranscribeApp.exe --splash-worker" (the same program; main.py dispatches the
-  flag before anything heavy is imported). Its priority is below normal, so it
-  yields to the app's own start, and it is created on a thread (CreateProcess
-  takes ~50 ms), so the app does not wait for it either.
+  flag before anything heavy is imported). It is created on a thread
+  (CreateProcess takes ~50 ms), so the app does not wait for it. It has no
+  priority class of its own on purpose: a below-normal card starves when the CPU
+  is busy, which is exactly when it is needed.
 * This module is Qt-free and imports only the standard library, so main.py can
   load it first thing (and tests can run it without Qt). The Qt part is
   splash_window.py, imported only by the card process.
-* Never in the way: no taskbar button, no focus, mouse clicks fall through it.
+* Never in the way: no taskbar button, no focus, mouse clicks fall through it, and
+  after splash_window.TOPMOST_S it no longer sits above the app's own dialogs.
 * Quiet launches get none. The start-at-login launch (--background) stays
-  silent, tests and source runs get none, and a launch that finds Gusan already
-  running (a second double-click, a click on the shortcut while it sits in the
-  tray) hands its request over and exits before importing anything - that
-  running copy opens its own window.
+  silent, tests and source runs get none.
+* One Gusan, from the first line of main.py. Every launch (the quiet one too)
+  claims the single-instance port (claim_or_hand_over) before anything is
+  imported, and main() later uses that very socket as its lock. A launch that
+  finds the port taken (a second double-click, a click on the shortcut while the
+  app sits in the tray, a click while the first copy is still importing) hands
+  its request over and exits at once: no card, no imports. The request waits in
+  the claimed socket's backlog until the first copy starts listening, and that
+  copy opens its own window. A copy that is quitting lets go of the port when
+  its quit begins (main.AppController.quit_app), so a relaunch right after
+  "Quit" starts a new app instead of handing over to a copy that is ending.
 * Never outlives the app. The card ends by itself when (1) the app says the
   window is up (one byte on its input pipe), (2) the pipe closes, (3) the app's
   process is gone - checked on every animation tick, so a crash, "End task" or a
@@ -33,6 +42,7 @@ Rules this file keeps - read them before changing anything:
   many seconds while starting, and that is the very time the card is for.
 * A failure to start the card means no card: nothing here may raise into the app.
 """
+import logging
 import os
 import socket
 import sys
@@ -50,14 +60,16 @@ HANDSHAKE = b"transcribe-ok"
 
 CLOSE = b"c"                  # the app -> the card, over its input pipe: "the window is up"
 HARD_TIMEOUT_S = 60.0         # the longest the card ever stays up
-SHOW_DELAY_S = 0.25           # a launch that ends at once (a duplicate) shows nothing
+SHOW_DELAY_S = 0.25           # the card does not show before the launch is this old (its own start, 1.4-2.4 s,
+                              # always passes it; a card that is closed at once is kept from flashing by
+                              # splash_window.MIN_SHOWN_S)
 FADE_S = 0.16                 # the card's way out
 PLATFORMS = ("win32",)        # macOS: a second copy of the bundle would add a second Dock icon
 
-# CreateProcess flags: no console window, below-normal priority (the app's own
-# imports come first; diarization_proc starts its worker the same way).
+# CreateProcess flags: no console window. No priority flag, on purpose: a below-normal
+# card starves when the CPU is busy, which is when it is needed (the card then takes the
+# app's own class, so a deliberately low-priority launch is respected).
 _CREATE_NO_WINDOW = 0x08000000
-_BELOW_NORMAL_PRIORITY = 0x00004000
 
 RUN, FADE, QUIT = "run", "fade", "quit"
 
@@ -97,25 +109,12 @@ def second_launch_action(argv):
     return "show_settings"
 
 
-def port_is_free(port=SINGLE_INSTANCE_PORT):
-    """Nobody owns the single-instance port. A bind test, not a connect test: on
-    Windows a connection to a closed local port is retried for about two seconds
-    before it fails, which would delay every first launch. The socket is closed
-    at once; main() still takes the real lock (acquire_single_instance_lock)."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        s.bind(("127.0.0.1", port))
-        return True
-    except OSError:
-        return False
-    finally:
-        s.close()
-
-
 def deliver(action, port=SINGLE_INSTANCE_PORT, timeout=0.6):
     """Hand ``action`` to the Gusan that owns the port, as signal_running_instance
-    does. The reply is not required: a copy that has bound the port but is still
-    starting cannot answer yet, and its backlog keeps the request until it can."""
+    does. True once the request is sent. The reply is not required: a copy that has
+    claimed the port but is still importing cannot answer yet, and its backlog keeps
+    the request until it can. False when nobody listens (the connection or the send
+    failed): the owner is gone or is not a Gusan."""
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=timeout) as s:
             s.settimeout(timeout)
@@ -124,25 +123,53 @@ def deliver(action, port=SINGLE_INSTANCE_PORT, timeout=0.6):
                 s.recv(len(HANDSHAKE))
             except OSError:
                 pass
+            return True
     except OSError:
-        pass
+        return False
 
 
-def another_is_running(argv, port=None, **kw):
-    """True when another Gusan owns the single-instance port: the request is
-    handed over and the caller exits (main.py), before any heavy import and
-    without a card. False otherwise (and always for a launch that gets no card,
-    which keeps the old path through main())."""
+_claim = None                 # the single-instance socket this launch holds, until main() takes it over
+
+
+def claim_or_hand_over(argv, port=None):
+    """First thing in main.py, for every launch (--background too): take the
+    single-instance port before anything is imported.
+
+    True: this launch owns the port (main() keeps the socket as its lock:
+    claimed_socket), or the claim could not be tried (main() then binds the old
+    way). False: another Gusan owns it and the request is handed over (a launch
+    that asks for nothing, --background, hands over nothing): the caller exits at
+    once - no card, no imports. A port whose owner does not listen falls through
+    to True: the old path (the imports, then main()'s own bind) arbitrates.
+
+    The owner may still be importing: the request then waits in the listen backlog
+    until its IPC thread starts. An owner that is quitting has let go of the port
+    already (AppController.quit_app)."""
+    global _claim
     try:
         port = SINGLE_INSTANCE_PORT if port is None else port
-        if not launch_wants_splash(argv, **kw) or port_is_free(port):
-            return False
-        action = second_launch_action(argv)
-        if action:
-            deliver(action, port)
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(("127.0.0.1", port))
+            s.listen(5)                               # the backlog holds a request until main() starts the IPC thread
+        except OSError:
+            s.close()
+            action = second_launch_action(argv)
+            if action is None:
+                return False
+            return not deliver(action, port)
+        except BaseException:
+            s.close()
+            raise
+        _claim = s
         return True
     except Exception:
-        return False
+        return True
+
+
+def claimed_socket():
+    """The socket claim_or_hand_over() took, or None (main()'s lock)."""
+    return _claim
 
 
 # ── The app's side: start the card, dismiss it ────────────────────────────────
@@ -150,6 +177,7 @@ _active = None                # the running Card
 _starter = None               # the thread that is starting it
 _generation = 0               # counts dismiss() / kill() calls
 _lock = threading.Lock()
+_problem = None               # why the card could not start, for the log (see _report)
 
 
 class Card:
@@ -198,7 +226,7 @@ def _spawn(popen=None, now=time.time, getpid=os.getpid, platform=None, generatio
     """Start the card process. Nothing raises: a card that cannot start is no card.
     A dismiss() or kill() that came while the process was being created ends the
     new card at once (``generation`` is the count when this start began)."""
-    global _active
+    global _active, _problem
     with _lock:
         if _active is not None:
             return _active
@@ -208,10 +236,11 @@ def _spawn(popen=None, now=time.time, getpid=os.getpid, platform=None, generatio
         args = dict(stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     close_fds=True)
         if platform == "win32":
-            args["creationflags"] = _CREATE_NO_WINDOW | _BELOW_NORMAL_PRIORITY
+            args["creationflags"] = _CREATE_NO_WINDOW
         cmd = _command(**kw) + [str(getpid()), repr(now())]
         card = Card((popen or subprocess.Popen)(cmd, **args))
-    except Exception:
+    except Exception as exc:
+        _problem = "could not start: %r" % (exc,)     # logged later (dismiss/kill): logging is not set up yet
         return None
     with _lock:
         late = _active is not None or (generation is not None and generation != _generation)
@@ -270,6 +299,28 @@ def start_for_window(gate=None, **spawn):
     return False
 
 
+def _report(card):
+    """One line in the log when the card did not work (nothing else would ever say:
+    its output goes nowhere): it could not be started, or it ended on its own with
+    an error. Called before the card is closed, so poll() only sees a card that
+    died by itself (one that is still fading reads None). Never raises."""
+    global _problem
+    try:
+        log = logging.getLogger("transcribe.splash")      # the root has its level and the file handler by now
+        if _problem:
+            problem, _problem = _problem, None
+            log.info("Loading card: %s", problem)
+        if card is not None:
+            try:
+                code = card.proc.poll()
+            except Exception:
+                code = None
+            if isinstance(code, int) and code != 0:
+                log.info("Loading card ended early with exit code %s", code)
+    except Exception:
+        pass
+
+
 def dismiss():
     """A Gusan window is on screen: the card fades out. Cheap and safe to call
     from anywhere, any number of times - it never waits for anything."""
@@ -277,6 +328,7 @@ def dismiss():
     with _lock:
         card, _active = _active, None
         _generation += 1
+    _report(card)
     if card is not None:
         try:
             card.close()
@@ -291,6 +343,7 @@ def kill():
     with _lock:
         card, _active = _active, None
         _generation += 1
+    _report(card)
     if card is not None:
         try:
             card.kill()
@@ -438,6 +491,14 @@ def worker_main(args, ui=None, hard_timeout=HARD_TIMEOUT_S, platform=None):
     watch_pipe(life)
     try:
         if ui is None:
+            if (sys.platform if platform is None else platform) == "win32":
+                try:
+                    # A crashed card ends at once: no "stopped working" box, no frozen window, for
+                    # what is only a loading card. SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX
+                    import ctypes
+                    ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002 | 0x8000)
+                except Exception:
+                    pass
             from splash_window import run as ui
         return ui(life, show_at=launched + SHOW_DELAY_S, motion=animations_enabled(platform)) or 0
     except Exception:

@@ -35,6 +35,14 @@ def _read(name):
         return f.read()
 
 
+def _free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
 class FakePipe:
     def __init__(self, broken=False):
         self.data, self.closed, self.broken = b"", False, broken
@@ -60,6 +68,17 @@ class FakeProc:
         self.killed = True
 
 
+class DeadProc(FakeProc):
+    """A card that ended on its own before the app said anything."""
+
+    def __init__(self, code):
+        super().__init__()
+        self.code = code
+
+    def poll(self):
+        return self.code
+
+
 class Popens:
     """A Popen stand-in that records how the card was started."""
 
@@ -81,6 +100,7 @@ class CardState(unittest.TestCase):
         ss._settle()
         ss._active = None
         ss._starter = None
+        ss._problem = None
 
     tearDown = setUp
 
@@ -149,70 +169,141 @@ class TestASecondLaunch(unittest.TestCase):
         t.start()
         return srv, srv.getsockname()[1], got, t
 
-    def test_a_free_port_is_free_and_stays_bindable_afterwards(self):
-        s = socket.socket()
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-        s.close()
-        self.assertTrue(ss.port_is_free(port))
-        again = socket.socket()
-        again.bind(("127.0.0.1", port))          # the probe did not keep the port
-        again.close()
+    def setUp(self):
+        self._held = ss._claim
+        ss._claim = None
+        self.addCleanup(self._let_go)
 
-    def test_an_owned_port_is_not_free(self):
-        srv, port, _, _ = self._listener()
-        try:
-            self.assertFalse(ss.port_is_free(port))
-        finally:
-            srv.close()
+    def _let_go(self):
+        if ss._claim is not None:
+            ss._claim.close()
+        ss._claim = self._held
 
-    def test_a_running_gusan_gets_the_request_and_this_launch_ends(self):
-        srv, port, got, t = self._listener()
+    # -- the first launch owns the port from its first line --------------------
+    def test_the_first_launch_claims_the_port_and_goes_on(self):
+        port = _free_port()
+        self.assertTrue(ss.claim_or_hand_over(["Gusan.exe"], port=port))
+        claimed = ss.claimed_socket()
+        self.assertIsNotNone(claimed)
+        self.assertEqual(claimed.getsockname(), ("127.0.0.1", port))
+        with self.assertRaises(OSError):
+            other = socket.socket()
+            try:
+                other.bind(("127.0.0.1", port))          # nobody else can take it now
+            finally:
+                other.close()
+
+    def test_a_second_launch_gets_the_port_taken_hands_over_and_ends_without_a_card(self):
+        port = _free_port()
+        self.assertTrue(ss.claim_or_hand_over(["Gusan.exe"], port=port))
+        first = ss._claim
+        self.assertFalse(ss.claim_or_hand_over(["Gusan.exe", "show_meeting"], port=port))   # main.py exits: no card
+        self.assertIs(ss._claim, first, "the loser does not replace the winner's socket")
+        first.settimeout(3)
+        conn, _ = first.accept()                         # the first copy starts listening seconds later
         try:
-            self.assertTrue(ss.another_is_running(["Gusan.exe", "show_meeting"], port=port, **FROZEN_WIN))
-            t.join(3)
+            self.assertEqual(conn.recv(64), b"show_meeting")   # ...and the request is waiting for it
         finally:
-            srv.close()
-        self.assertEqual(got, [b"show_meeting"])
+            conn.close()
 
     def test_a_plain_second_launch_asks_to_open_the_app(self):
         srv, port, got, t = self._listener()
         try:
-            self.assertTrue(ss.another_is_running(["Gusan.exe"], port=port, **FROZEN_WIN))
+            self.assertFalse(ss.claim_or_hand_over(["Gusan.exe"], port=port))
             t.join(3)
         finally:
             srv.close()
         self.assertEqual(got, [b"show_settings"])
 
-    def test_a_copy_that_has_not_started_accepting_still_ends_this_launch(self):
-        # Bound and listening (the backlog keeps the request) but its accept thread is not
-        # running yet, so no reply comes: the launch ends all the same, without a long wait.
-        srv = socket.socket()
-        srv.bind(("127.0.0.1", 0))
-        srv.listen(5)
+    def test_a_copy_that_is_still_importing_gets_the_request_without_a_long_wait(self):
+        # Claimed and listening (the backlog keeps the request) but no accept thread yet, so no
+        # reply comes: the launch ends all the same - this is the whole point of the early claim.
+        port = _free_port()
+        self.assertTrue(ss.claim_or_hand_over(["Gusan.exe"], port=port))
+        t0 = time.time()
+        self.assertFalse(ss.claim_or_hand_over(["Gusan.exe"], port=port))
+        self.assertLess(time.time() - t0, 3.0)
+
+    def test_every_launch_claims_the_port_the_quiet_one_too(self):
+        port = _free_port()
+        with mock.patch.object(ss, "deliver") as deliver:
+            self.assertTrue(ss.claim_or_hand_over(["Gusan.exe", "--background"], port=port))
+            self.assertIsNotNone(ss.claimed_socket())
+            # ...and a later --background launch asks for nothing, so it hands nothing over
+            self.assertFalse(ss.claim_or_hand_over(["Gusan.exe", "--background"], port=port))
+        deliver.assert_not_called()
+
+    def test_a_launch_that_needs_no_card_still_hands_over_and_ends(self):
+        # A source run or a test environment: no card, but the same one-Gusan rule.
+        srv, port, got, t = self._listener()
         try:
-            t0 = time.time()
-            self.assertTrue(ss.another_is_running(["Gusan.exe"], port=srv.getsockname()[1], **FROZEN_WIN))
-            self.assertLess(time.time() - t0, 3.0)
-            conn, _ = srv.accept()                # when it does accept, the request is waiting
-            self.assertEqual(conn.recv(64), b"show_settings")
-            conn.close()
+            self.assertFalse(ss.claim_or_hand_over(["main.py"], port=port))
+            t.join(3)
         finally:
             srv.close()
+        self.assertEqual(got, [b"show_settings"])
 
-    def test_a_free_port_means_this_launch_is_the_app(self):
-        s = socket.socket()
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-        s.close()
-        self.assertFalse(ss.another_is_running(["Gusan.exe"], port=port, **FROZEN_WIN))
+    # -- a port nobody answers on falls through to the old path ----------------
+    def test_an_owner_that_does_not_listen_does_not_end_this_launch(self):
+        port = _free_port()
+        dead = socket.socket()
+        dead.bind(("127.0.0.1", port))                   # bound, never listening: nothing can be handed to it
+        try:
+            t0 = time.time()
+            self.assertTrue(ss.claim_or_hand_over(["Gusan.exe"], port=port))
+            self.assertLess(time.time() - t0, 3.0)
+            self.assertIsNone(ss.claimed_socket(), "main() binds the old way and arbitrates")
+        finally:
+            dead.close()
 
-    def test_a_launch_without_a_card_never_looks_at_the_port(self):
-        with mock.patch.object(ss, "port_is_free") as free, mock.patch.object(ss, "deliver") as deliver:
-            self.assertFalse(ss.another_is_running(["Gusan.exe", "--background"], **FROZEN_WIN))
-            self.assertFalse(ss.another_is_running(["Gusan.exe"], env={}, frozen=False, platform="win32"))
-        free.assert_not_called()
-        deliver.assert_not_called()
+    def test_a_claim_that_cannot_be_tried_does_not_end_this_launch(self):
+        port = _free_port()
+        with mock.patch.object(ss.socket, "socket", side_effect=RuntimeError("no sockets")):
+            self.assertTrue(ss.claim_or_hand_over(["Gusan.exe"], port=port))
+        self.assertIsNone(ss.claimed_socket())
+
+    def test_deliver_says_whether_anybody_took_the_request(self):
+        srv, port, got, t = self._listener()
+        try:
+            self.assertTrue(ss.deliver("show_settings", port))
+            t.join(3)
+        finally:
+            srv.close()
+        self.assertEqual(got, [b"show_settings"])
+        self.assertFalse(ss.deliver("show_settings", _free_port()), "a closed port takes nothing")
+
+    # -- main() uses the claimed socket as its lock ------------------------------
+    def test_main_s_lock_is_the_claimed_socket(self):
+        sentinel = mock.MagicMock()
+        ss._claim = sentinel
+        self.assertIs(main.acquire_single_instance_lock(), sentinel)
+
+    def test_main_still_binds_the_port_when_nothing_was_claimed(self):
+        port = _free_port()
+        with mock.patch.object(main, "SINGLE_INSTANCE_PORT", port):
+            first = main.acquire_single_instance_lock()
+            try:
+                self.assertEqual(first.getsockname(), ("127.0.0.1", port))
+                self.assertIsNone(main.acquire_single_instance_lock())      # taken
+            finally:
+                first.close()
+
+    # -- a copy that is quitting lets go of the port ------------------------------
+    def test_a_quitting_copy_frees_the_port_for_a_relaunch(self):
+        port = _free_port()
+        self.assertTrue(ss.claim_or_hand_over(["Gusan.exe"], port=port))
+        old = SimpleNamespace(lock_sock=ss.claimed_socket())
+        main.AppController._release_single_instance_lock(old)
+        self.assertIsNone(old.lock_sock)
+        again = socket.socket()
+        try:
+            again.bind(("127.0.0.1", port))                  # the relaunch can take it at once
+        finally:
+            again.close()
+        ss._claim = None
+        self.assertTrue(ss.claim_or_hand_over(["Gusan.exe"], port=port), "a relaunch during the shutdown starts a new app")
+        main.AppController._release_single_instance_lock(old)    # twice, or with no socket: nothing to do
+        main.AppController._release_single_instance_lock(SimpleNamespace())
 
 
 class TestStarting(CardState):
@@ -229,13 +320,17 @@ class TestStarting(CardState):
         self.assertEqual(kw["stderr"], subprocess.DEVNULL)
         self.assertTrue(kw["close_fds"])
 
-    def test_it_has_no_console_and_never_competes_with_the_app_for_the_cpu(self):
+    def test_it_has_no_console_and_is_not_started_at_a_low_priority(self):
         popen = Popens()
         ss.start(["Gusan.exe"], gate=FROZEN_WIN, popen=popen, platform="win32", frozen=True)
         ss._settle()
         flags = popen.calls[0][1]["creationflags"]
         self.assertTrue(flags & 0x08000000, "CREATE_NO_WINDOW")
-        self.assertTrue(flags & 0x00004000, "BELOW_NORMAL_PRIORITY_CLASS")
+        # BELOW_NORMAL / IDLE_PRIORITY_CLASS: a card at a low priority starves exactly when the
+        # machine is busy (the app's own start, Defender scanning a fresh install)
+        self.assertFalse(flags & 0x00004000 or flags & 0x00000040,
+                         "no BELOW_NORMAL / IDLE priority class: a low-priority card starves exactly when the machine is busy")
+        self.assertFalse(flags & 0x00000080 or flags & 0x00000100, "and no HIGH / REALTIME class either")
 
     def test_a_source_run_starts_main_py(self):
         popen = Popens()
@@ -319,6 +414,45 @@ class TestStarting(CardState):
         ss._settle()
         self.assertEqual(len(popen.calls), 1)
         self.assertFalse(ss.start_for_window(gate={"env": {}, "frozen": False, "platform": "win32"}))
+
+
+class TestACardThatFailsLeavesATrace(CardState):
+    """Nothing else would ever say that the card did not appear on some machine."""
+
+    def test_a_card_that_could_not_start_is_logged_when_the_window_is_up(self):
+        popen = Popens(fail=True)
+        ss.start(["Gusan.exe"], gate=FROZEN_WIN, popen=popen, platform="win32", frozen=True)
+        ss._settle()
+        self.assertIsNone(ss._active)
+        with self.assertLogs("transcribe.splash", level="INFO") as logs:
+            ss.dismiss()
+        self.assertIn("could not start", logs.output[0])
+        self.assertIn("no such file", logs.output[0])
+        self.assertIsNone(ss._problem, "said once")
+
+    def test_a_card_that_ended_on_its_own_with_an_error_is_logged(self):
+        proc = DeadProc(3)
+        ss._active = ss.Card(proc)
+        with self.assertLogs("transcribe.splash", level="INFO") as logs:
+            ss.dismiss()
+        self.assertIn("exit code 3", logs.output[0])
+        self.assertEqual(proc.stdin.data, b"c", "the close is sent all the same")
+
+    def test_a_card_that_is_still_up_or_ended_well_says_nothing(self):
+        for code in (None, 0):
+            ss._active = ss.Card(DeadProc(code))
+            with self.assertNoLogs("transcribe.splash", level="INFO"):
+                ss.dismiss()
+
+    def test_a_card_that_cannot_be_asked_cannot_break_the_app(self):
+        proc = FakeProc()                                # no poll() at all
+        ss._active = ss.Card(proc)
+        ss.kill()
+        self.assertTrue(proc.killed)
+        ss._active = ss.Card(DeadProc(7))
+        with self.assertLogs("transcribe.splash", level="INFO") as logs:
+            ss.kill()
+        self.assertIn("exit code 7", logs.output[0])
 
 
 class TestEnding(CardState):
@@ -455,6 +589,20 @@ class TestMotion(unittest.TestCase):
             windll.user32.SystemParametersInfoW.side_effect = None
             windll.user32.SystemParametersInfoW.return_value = 0
             self.assertTrue(ss.animations_enabled())
+
+    def test_a_crashed_card_shows_no_error_box_on_windows(self):
+        import ctypes
+        run = SimpleNamespace(run=lambda life, show_at=None, motion=True: 0)
+        with mock.patch.object(ss, "watch_pipe"), mock.patch.object(ctypes, "windll", create=True) as windll, \
+                mock.patch.dict(sys.modules, {"splash_window": run}):
+            self.assertEqual(ss.worker_main([], platform="win32"), 0)
+            windll.kernel32.SetErrorMode.assert_called_once_with(0x0001 | 0x0002 | 0x8000)
+            windll.kernel32.SetErrorMode.reset_mock()
+            self.assertEqual(ss.worker_main([], platform="linux"), 0)          # not Windows: untouched
+            self.assertEqual(ss.worker_main([], ui=lambda *a, **k: 0, platform="win32"), 0)   # a fake window: untouched
+            windll.kernel32.SetErrorMode.assert_not_called()
+            windll.kernel32.SetErrorMode.side_effect = OSError("no")           # and a failing call changes nothing
+            self.assertEqual(ss.worker_main([], platform="win32"), 0)
 
     def test_the_card_is_told(self):
         seen = {}
@@ -631,11 +779,15 @@ class TestMainWiring(CardState):
     def test_the_card_starts_before_anything_heavy_is_imported(self):
         src = _read("main.py")
         heavy = src.index("import numpy as np")
-        for marker in ("import startup_splash", "startup_splash.another_is_running(sys.argv)",
+        for marker in ("import startup_splash", "startup_splash.claim_or_hand_over(sys.argv)",
                        "startup_splash.start(sys.argv)", '["--splash-worker"]'):
             self.assertLess(src.index(marker), heavy, marker)
-        self.assertLess(src.index("startup_splash.another_is_running(sys.argv)"),
+        self.assertLess(src.index("startup_splash.claim_or_hand_over(sys.argv)"),
                         src.index("startup_splash.start(sys.argv)"))
+        # the port is claimed after the two helper processes were dispatched (they are not an app)
+        self.assertLess(src.index('sys.argv[1:2] == ["--splash-worker"]'), src.index("startup_splash.claim_or_hand_over"))
+        self.assertLess(src.index('sys.argv[1:2] == ["--diarize-worker"]'), src.index("startup_splash.claim_or_hand_over"))
+        self.assertIn("if not startup_splash.claim_or_hand_over(sys.argv):\n        sys.exit(0)", src)
 
     def test_the_card_process_is_dispatched_before_anything_else_loads(self):
         src = _read("main.py")
@@ -649,9 +801,11 @@ class TestMainWiring(CardState):
         body = src[src.index("def main():"):]
         branch = body[body.index("if not lock_sock:"):body.index("sys.exit(0)")]
         self.assertIn("startup_splash.kill()", branch)
-        # the single-instance lock is still taken inside main(), after the imports
+        # main() still asks for its lock first (the claimed socket is handed to it there)
         self.assertEqual(body.count("acquire_single_instance_lock()"), 1)
         self.assertNotIn("acquire_single_instance_lock", src[:src.index("def acquire_single_instance_lock")])
+        lock = src[src.index("def acquire_single_instance_lock"):src.index("IPC_ACTIONS = (")]
+        self.assertLess(lock.index("startup_splash.claimed_socket()"), lock.index("sock.bind("))
 
     def test_the_ipc_port_and_its_handshake_are_untouched(self):
         src = _read("main.py")
@@ -664,6 +818,20 @@ class TestMainWiring(CardState):
         quit_src = next(ast.get_source_segment(_read("main.py"), n) for n in ast.walk(tree)
                         if isinstance(n, ast.FunctionDef) and n.name == "quit_app")
         self.assertLess(quit_src.index("startup_splash.dismiss()"), quit_src.index("for stop in ("))
+
+    def test_the_quit_lets_go_of_the_port_as_soon_as_it_cannot_be_refused(self):
+        # Not before (a quit the user cancels keeps the app, and its lock), not after the
+        # seconds the shutdown takes (a relaunch in that time would be handed to a dying copy).
+        src = _read("main.py")
+        tree = ast.parse(src)
+        quit_src = next(ast.get_source_segment(src, n) for n in ast.walk(tree)
+                        if isinstance(n, ast.FunctionDef) and n.name == "quit_app")
+        release = quit_src.index("self._release_single_instance_lock()")
+        self.assertGreater(release, quit_src.index("self._quitting = True"))
+        self.assertLess(release, quit_src.index("for stop in ("))
+        self.assertLess(quit_src.index("go = self._confirm_quit()"), release)
+        body = src[src.index("def main():"):]
+        self.assertLess(body.index("controller.lock_sock = lock_sock"), body.index("start_ipc_server(lock_sock"))
 
     # -- the three ways a window can (not) appear: each ends the card ------------
     def _recording(self):
@@ -775,8 +943,13 @@ class TestNothingHeavyAndBundled(unittest.TestCase):
                 mods.add(n.module)
             elif isinstance(n, ast.Import):
                 mods.update(a.name for a in n.names)
-        # no widgets, no ctypes, no theme or other app module: the card process starts fast
-        self.assertEqual(mods, {"math", "sys", "time", "PySide6.QtCore", "PySide6.QtGui", "app_info", "startup_splash"})
+        # no widgets, no theme or other app module: the card process starts fast (ctypes is
+        # imported inside step_down only, after 15 s, and the card process loads it for its
+        # app watch anyway)
+        self.assertEqual(mods, {"ctypes", "math", "sys", "time", "PySide6.QtCore", "PySide6.QtGui", "app_info",
+                                "startup_splash"})
+        step_down = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "step_down")
+        self.assertTrue(any(isinstance(n, ast.Import) and n.names[0].name == "ctypes" for n in ast.walk(step_down)))
 
 
 if __name__ == "__main__":

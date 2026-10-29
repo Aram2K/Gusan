@@ -22,12 +22,16 @@ if __name__ == "__main__" and sys.argv[1:2] == ["--splash-worker"]:
     sys.exit(startup_splash.worker_main(sys.argv[2:]))
 import startup_splash                    # standard library only: loads in a few milliseconds
 if __name__ == "__main__":
-    # The loading card, first thing - the next imports take seconds. A launch that
-    # finds Gusan already running hands its request over and ends here: that copy
-    # opens its own window (no card for it, no wait for these imports). Quiet
-    # launches (--background), source runs and tests get no card.
-    if startup_splash.another_is_running(sys.argv):
+    # The single-instance port is taken first thing, for every launch: the imports
+    # below take seconds, and a second launch in that time (a double-click, the
+    # installer's Launch, a click while the start-at-login copy is still loading)
+    # must see this one. It hands its request over and ends here - that copy opens
+    # its own window, no second card, no second set of imports. The socket is kept as
+    # the app's lock (see the lock function below, called by main()).
+    if not startup_splash.claim_or_hand_over(sys.argv):
         sys.exit(0)
+    # The loading card, before the imports too. Quiet launches (--background),
+    # source runs and tests get no card.
     startup_splash.start(sys.argv)
     # The app runs this file as __main__. Services do `import main` /
     # `from main import ...` (file jobs, model checks): they
@@ -604,6 +608,11 @@ cfg = load_config()
 
 # ── Single-instance IPC ──────────────────────────────────────────────────────
 def acquire_single_instance_lock():
+    # The port was claimed before the first import (startup_splash.claim_or_hand_over):
+    # that socket is the lock. The bind below is for a launch that could not claim it.
+    sock = startup_splash.claimed_socket()
+    if sock is not None:
+        return sock
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         sock.bind(("127.0.0.1", SINGLE_INSTANCE_PORT))
@@ -657,6 +666,17 @@ def dispatch_ipc_action(controller, action):
         front = getattr(controller, "front_first_run_wizard", None)
         if callable(front) and front() is True:
             return
+        # First run, and the wizard was never built (its 500 ms start-up timer has not
+        # fired: a second launch is now handed over while the app is still starting):
+        # the wizard opens, never the app. onboarding_win is None only until then - a
+        # wizard closed with X keeps its reference and still gets the app.
+        if (getattr(controller, "onboarding_win", False) is None
+                and not controller.cfg.get("onboarding_done", False)):
+            try:
+                controller.show_onboarding()
+                return
+            except Exception:
+                logger.warning("The first-run wizard failed to open from a second launch", exc_info=True)
         controller.show_main()
 
 
@@ -6647,6 +6667,21 @@ class AppController(QObject):
         except Exception:
             logger.debug("stopping the recording at quit failed", exc_info=True)
 
+    def _release_single_instance_lock(self):
+        """Let go of the single-instance port. A quit takes seconds (a recording is
+        stopped, the engines and PortAudio shut down, the interpreter ends), and
+        until the process is gone the port stays taken: a launch in that time would
+        hand its request over to a copy that is ending, and nothing would open.
+        Called once the quit can no longer be refused. A second launch that lands in
+        the milliseconds before this is the only one that can still be lost."""
+        sock = getattr(self, "lock_sock", None)
+        self.lock_sock = None
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
     def quit_app(self):
         """Tray Quit (and the end of an update install, Cmd+Q on a Mac, the
         updater's sig_quit). Asks first when it would end a meeting, its notes
@@ -6666,6 +6701,7 @@ class AppController(QObject):
             return False
         self._quitting = True
         startup_splash.dismiss()            # a quit while the loading card is still up
+        self._release_single_instance_lock()    # a relaunch during the shutdown below starts a new app
         # Services first: a queued file job is cancelled (its worker stops at
         # the next check), the calendar's timers and a waiting sign-in end,
         # the mic check closes - on this thread, before PortAudio goes below.
@@ -7338,8 +7374,9 @@ def main():
     # 1. IPC Single-Instance check
     lock_sock = acquire_single_instance_lock()
     if not lock_sock:
-        # Another instance is running, wake it and exit. (Two launches in the same
-        # second both started a loading card: this one is not the app - no card.)
+        # Another instance is running, wake it and exit. (The port is normally claimed
+        # before the first import, so this is the rare launch that could not claim it
+        # there. It is not the app: no card.)
         startup_splash.kill()
         action = launch_action(sys.argv)
         if action:
@@ -7409,6 +7446,7 @@ def main():
     # started there never fired and a second launch did nothing: hop to the GUI
     # thread through a queued signal instead.
     controller.sig_ipc_action.connect(_ipc_dispatch, Qt.QueuedConnection)
+    controller.lock_sock = lock_sock            # the quit lets go of the port (_release_single_instance_lock)
     start_ipc_server(lock_sock, controller.sig_ipc_action.emit)
 
     # Open the app on every launch. The only quiet launch is the Windows-startup

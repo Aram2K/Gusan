@@ -10,10 +10,11 @@ It follows the app's one light look from FIXED tokens and a QPainter - no
 widgets, no palette, no style - so a dark Windows cannot change it. It sits on
 the primary screen (where the app's window opens) and needs nothing from DPI
 handling beyond Qt's own per-monitor scaling. Never in the way: no taskbar
-button, no focus, clicks fall through it.
+button, no focus, clicks fall through it, and after TOPMOST_S it leaves the
+always-on-top band, so a dialog of a start that failed is never covered by it.
 
-Only PySide6.QtCore / QtGui and app_info (the logo's path) are used, so the card
-process starts fast. The drawing is a plain function of time (SplashArt.paint),
+Only PySide6.QtCore / QtGui and app_info (the logo's path) are used (ctypes only
+for that step down, after TOPMOST_S), so the card process starts fast. The drawing is a plain function of time (SplashArt.paint),
 which is what the tests and the preview sheet render.
 """
 import math
@@ -47,6 +48,10 @@ WORD_CY = 219.0
 BARS_CY = 255.0
 RING_FROM, RING_TO = 52.0, 88.0     # the rings' radius range: inside the card (its top edge is 91 above the logo)
 SHADOW_LAYERS, SHADOW_DY, SHADOW_A = 26, 10, 3
+MIN_SHOWN_S = 0.6                   # a card that appeared is seen for a whole beat (intro 0.30 s, logo 0.55 s,
+                                    # name 0.65 s), never as a half-formed blink: an early "window is up" waits
+TOPMOST_S = 15.0                    # after this long the card leaves the always-on-top band (see step_down)
+FRAME_MS = 33                       # 30 fps: the motion is slow, and this halves the card's CPU
 STILL_BARS = (0.30, 0.65, 1.0, 0.65, 0.30)   # the bars' heights when nothing moves
 
 
@@ -62,8 +67,9 @@ def ease_out_quad(x):
     return 1.0 - (1.0 - x) ** 2
 
 
-def ease_in_quad(x):
-    return x * x
+def smoothstep(x):
+    """0 -> 1 with no slope at either end: the way out dissolves, it never ends in a step."""
+    return x * x * (3.0 - 2.0 * x)
 
 
 def ease_out_back(x):
@@ -94,6 +100,7 @@ class SplashArt:
     PERIOD_S = 2.4                  # one breath, and the time a ring takes to leave
     RING_EVERY_S = 0.8
     FIRST_RING_S = 0.45
+    STILL_IN_S = 0.18               # the card that does not move: its fade in, after which the picture never changes
 
     def __init__(self, motion=True):
         # motion=False: Windows' "Animation effects" is off (Settings > Accessibility > Visual
@@ -123,6 +130,14 @@ class SplashArt:
         font.setWeight(QFont.Weight.DemiBold)
         font.setLetterSpacing(QFont.AbsoluteSpacing, 0.5)
         self._font = font
+        # The first text a process draws sets up the font database, the font engine and the glyphs
+        # (hundreds of ms): paid here, before the clock starts, not in the middle of the intro.
+        warm = QImage(8, 8, QImage.Format_ARGB32_Premultiplied)
+        warm.setDevicePixelRatio(dpr)
+        q = QPainter(warm)
+        q.setRenderHint(QPainter.TextAntialiasing, True)
+        self._draw_name(q, 0.0)
+        q.end()
 
     @staticmethod
     def _glass(dpr):
@@ -169,11 +184,11 @@ class SplashArt:
         far its way out has gone. ``p`` paints in window pixels (0..WIN)."""
         self.prepare(dpr)
         if self.motion:
-            shown = ease_out_cubic(clamp(t / self.INTRO_S)) * (1.0 - ease_in_quad(clamp(out)))
+            shown = ease_out_cubic(clamp(t / self.INTRO_S)) * (1.0 - smoothstep(clamp(out)))
             pop = ease_out_back(clamp(t / self.POP_S))
             scale = (1.0 - 0.06 * (1.0 - pop)) * (1.0 + 0.03 * ease_out_cubic(clamp(out)))
         else:                                   # a plain fade in and out
-            shown = clamp(t / 0.18) * (1.0 - clamp(out))
+            shown = clamp(t / self.STILL_IN_S) * (1.0 - smoothstep(clamp(out)))
             scale = 1.0
         if shown <= 0.002:
             return
@@ -190,6 +205,11 @@ class SplashArt:
         p.drawImage(QPointF(0.0, 0.0), self._static)
         self._content(p, t, shown)
         p.restore()
+
+    def _draw_name(self, p, top):
+        p.setFont(self._font)
+        p.setPen(_color(INK))
+        p.drawText(QRectF(0.0, top, WIN, 40.0), Qt.AlignCenter, APP_NAME)
 
     def _content(self, p, t, shown):
         cx = WIN / 2.0
@@ -213,7 +233,7 @@ class SplashArt:
             if not 0.0 <= age < 1.0:
                 continue
             r = RING_FROM + (RING_TO - RING_FROM) * ease_out_quad(age)
-            a = 0.30 * (1.0 - age) ** 1.4
+            a = 0.30 * (1.0 - age) ** 1.4 * ease_out_cubic(clamp(age / 0.18))     # born from nothing, not in one frame
             ring = QRadialGradient(QPointF(cx, LOGO_CY), r)
             ring.setColorAt(max(0.0, (r - 20.0) / r), _color(BLUE_L, 0.0))
             ring.setColorAt(max(0.0, (r - 3.0) / r), _color(BLUE_L, a))
@@ -243,10 +263,7 @@ class SplashArt:
         if word_in > 0.0:
             p.save()
             p.setOpacity(p.opacity() * ease_out_cubic(word_in))
-            p.setFont(self._font)
-            p.setPen(_color(INK))
-            p.drawText(QRectF(0.0, WORD_CY - 20.0 + 6.0 * (1.0 - ease_out_cubic(word_in)), WIN, 40.0),
-                       Qt.AlignCenter, APP_NAME)
+            self._draw_name(p, WORD_CY - 20.0 + 6.0 * (1.0 - ease_out_cubic(word_in)))
             p.restore()
         # five bars: a wave that travels along them
         bars_in = 1.0 if still else clamp((t - 0.45) / 0.35)
@@ -285,6 +302,7 @@ class SplashWindow(QRasterWindow):
         self.clock = clock
         self.t0 = None              # when it appeared
         self.out0 = None            # when its way out began
+        self._painted = False
         fmt = QSurfaceFormat()
         fmt.setAlphaBufferSize(8)
         self.setFormat(fmt)
@@ -306,9 +324,25 @@ class SplashWindow(QRasterWindow):
 
     def appear(self):
         self.place()
-        self.art.prepare(self.devicePixelRatio())      # built before the clock starts: the intro never stutters
-        self.t0 = self.clock()
+        self.art.prepare(self.devicePixelRatio())      # layers and text engine built before the clock starts: the intro never stutters
+        self.t0 = self.clock()                         # re-stamped when the first frame is really painted
         self.show()
+
+    def step_down(self):
+        """Leave the always-on-top band (to the bottom of the z-order, still visible on a bare
+        desktop) so a dialog of the app - e.g. the bootloader's "Unhandled exception" box - is
+        never covered. HWND_BOTTOM takes the topmost style away; HWND_NOTOPMOST would leave the
+        card above every window that is not topmost, such a box included."""
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            u = ctypes.windll.user32
+            u.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                                       ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+            u.SetWindowPos(int(self.winId()), 1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)   # NOSIZE | NOMOVE | NOACTIVATE
+        except Exception:
+            pass
 
     def begin_fade(self):
         if self.out0 is None:
@@ -322,6 +356,9 @@ class SplashWindow(QRasterWindow):
         return self.out0 is not None and self.clock() - self.out0 >= FADE_S
 
     def paintEvent(self, event):
+        if self.t0 is not None and not self._painted:
+            self._painted = True
+            self.t0 = self.clock()          # the intro starts when the first frame is really drawn (show() takes time)
         p = QPainter(self)
         p.setCompositionMode(QPainter.CompositionMode_Source)      # a translucent window starts from nothing
         p.fillRect(QRect(0, 0, self.width(), self.height()), QColor(0, 0, 0, 0))
@@ -333,15 +370,9 @@ class SplashWindow(QRasterWindow):
         p.end()
 
 
-def run(life, show_at=None, motion=True):
-    """The card process's event loop. ``life`` (startup_splash.Lifecycle) says when
-    to stop; ``show_at`` is the earliest wall-clock time to appear (a launch that
-    ends at once shows nothing); ``motion`` False draws the card without movement."""
-    app = QGuiApplication([sys.argv[0] if sys.argv else "gusan-splash"])
-    win = SplashWindow(SplashArt(motion))
-    timer = QTimer()
-    timer.setTimerType(Qt.PreciseTimer)
-    timer.setInterval(16)
+def make_step(app, win, life, show_at=None, motion=True):
+    """The card's tick: what to do now, from the lifecycle's verdict and the window's own clock."""
+    flags = {"stepped": False, "settled": False}
 
     def step():
         verdict = life.poll()
@@ -353,7 +384,8 @@ def run(life, show_at=None, motion=True):
             if not shown:
                 app.quit()                  # the app was ready before the card showed: no flash
                 return
-            win.begin_fade()
+            if win.clock() - win.t0 >= MIN_SHOWN_S:
+                win.begin_fade()            # younger than that it keeps painting: the verdict is sticky, so the fade starts on a later tick
         if win.faded_out():
             app.quit()
             return
@@ -361,7 +393,27 @@ def run(life, show_at=None, motion=True):
             if show_at is not None and time.time() < show_at:
                 return
             win.appear()
-        win.update()
+        age = win.clock() - win.t0
+        if not flags["stepped"] and age >= TOPMOST_S:
+            flags["stepped"] = True
+            win.step_down()
+        if motion or win.fading or not flags["settled"]:
+            win.update()
+            if not motion and not win.fading and age >= SplashArt.STILL_IN_S:
+                flags["settled"] = True     # this paint is at full opacity: the still card is final until its way out
+    return step
+
+
+def run(life, show_at=None, motion=True):
+    """The card process's event loop. ``life`` (startup_splash.Lifecycle) says when
+    to stop; ``show_at`` is the earliest wall-clock time to appear (a launch that
+    ends at once shows nothing); ``motion`` False draws the card without movement."""
+    app = QGuiApplication([sys.argv[0] if sys.argv else "gusan-splash"])
+    win = SplashWindow(SplashArt(motion))
+    timer = QTimer()
+    timer.setTimerType(Qt.PreciseTimer)
+    timer.setInterval(FRAME_MS)
+    step = make_step(app, win, life, show_at, motion)
 
     def tick():
         try:
