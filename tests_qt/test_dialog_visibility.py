@@ -943,6 +943,8 @@ def test_what_the_live_card_opens_is_readable_in_both_card_looks(qapp, scheme, l
 
     def fake_exec(dlg):                       # measured while it is open (the card deletes it when it closes)
         seen.append(readable(dlg, "the file picker over the %s card" % look, minimum=5))
+        dlg.close()                               # a later test file on this worker must not find it still open
+        dlg.deleteLater()
         return 0
     monkeypatch.setattr(QFileDialog, "exec", fake_exec)
     assert c._private and c._exclusion_ok
