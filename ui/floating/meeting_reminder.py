@@ -196,9 +196,7 @@ def glyph(name, size=16, color="muted", sw=1.8):
 
 def call_name(kind):
     """What the meta line calls the service ("" without a link; "other" has no brand)."""
-    if not kind:
-        return ""
-    return "Video call" if kind == calendar_sync.CALL_OTHER else str(kind)
+    return calendar_sync.call_label(kind)
 
 
 def call_mark_pixmap(kind, size=18):

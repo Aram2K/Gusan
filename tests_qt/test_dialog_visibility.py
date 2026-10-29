@@ -420,6 +420,68 @@ def test_the_connect_calendar_box_and_its_link_are_readable(qapp, scheme, window
     dlg.close()
 
 
+def _painted_pieces(root):
+    """The text Home paints itself (ui.pages.home.Runs is a widget, not a label): measured like the rest."""
+    from ui.pages import home
+    out = []
+    for w in root.findChildren(home.Runs):
+        clip = _clip(w, root) if w.isVisibleTo(root) and w.text() else None
+        if clip is not None:
+            out.append(("painted %r" % w.text()[:40], clip, BAR))
+    return out
+
+
+def test_home_coming_up_is_readable_in_every_state_on_a_light_and_a_dark_windows(qapp, scheme, window, monkeypatch):
+    """The section's rows are painted text and QSS buttons: on a dark Windows nothing may turn dark-on-dark,
+    and the card stays the app's light glass."""
+    from PySide6.QtCore import QPoint
+    from tests_qt.test_home_upcoming import FakeCalendar, five, local
+    from ui.pages import home_upcoming
+    now = local(0, 10, 0)
+    monkeypatch.setattr(home_upcoming, "_utcnow", lambda: now)
+    cal = FakeCalendar(five(), status_text="Paused in Privacy mode.")
+    window.app.calendar = cal
+    page = window.open("home")
+    for _ in range(3):
+        QApplication.processEvents()
+    sec = page.upcoming
+    assert sec is not None and sec.state() == "list"
+
+    def check(where, minimum):
+        for _ in range(3):
+            QApplication.processEvents()
+        return readable(sec, "Home > Coming up > " + where, widget_pieces(sec) + _painted_pieces(sec), minimum=minimum)
+
+    rows = check("three meetings and the paused line", 14)
+    names = " ".join(n for n, *_ in rows)
+    for word in ("Weekly product sync", "in 25 min", "Join", "Record", "See all", "Paused in Privacy mode."):
+        assert word in names, word
+    # The card is light glass, the same picture in both schemes (the sample is between the title and Join).
+    img = render(sec)
+    row = sec.rows[1]
+    x = row.mapTo(sec, QPoint(row.join_button.x() - 24, row.height() // 2))
+    assert _lum(img.pixelColor(x.x() * SCALE, x.y() * SCALE)) > 0.8
+    cal._status = ""
+    cal.rows = []
+    cal.changed.emit([])
+    check("nothing ahead", 2)
+    cal.has_read = False
+    cal.changed.emit([])
+    check("checking", 2)
+    cal.disconnect_calendar("expired")
+    check("the invitation and an expired grant", 3)
+    cal.error.emit("Couldn't connect Google Calendar - try again.")
+    rows = check("the invitation and an error", 3)
+    assert any("Couldn't connect" in n for n, *_ in rows)
+    cal.connect_calendar()
+    rows = check("waiting for the browser", 3)
+    assert any("Cancel" in n for n, *_ in rows)
+    cal.cancel_connect()
+    cal.rows = five()
+    cal.sign_in_done()
+    check("connected again", 8)
+
+
 def test_enter_and_escape_on_a_dangerous_question(qapp, scheme, window):
     from PySide6.QtTest import QTest
     from ui.components import mini_prompt as mp

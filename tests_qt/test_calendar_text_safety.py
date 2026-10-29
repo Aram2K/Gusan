@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication, QLabel
 
@@ -216,3 +216,70 @@ def test_the_page_header_shows_a_live_meetings_title_and_people_as_text(qapp, pi
     assert h.title_label.text() == TITLE
     assert QLabel.sizeHint(h.sub_label).height() < 100
     h.deleteLater()
+
+
+# ── Home: "Coming up" ────────────────────────────────────────────────────────
+def test_home_coming_up_shows_a_hostile_title_and_names_as_text(qapp, picture, monkeypatch):
+    """Home's section sits on the first page people see, so an invite alone reaches it: the title and the
+    guests are painted as text (Runs), tooltips are escaped, no label reads markup."""
+    import numpy as np
+    from tests_qt.conftest import make_stub_app
+    from ui.pages import home, home_upcoming
+
+    class Cal(QObject):
+        changed = Signal(object)
+        connected = Signal(str)
+        disconnected = Signal(str)
+        connecting = Signal(bool)
+        status = Signal(str)
+        error = Signal(str)
+
+        def __init__(self, rows):
+            super().__init__()
+            self.available, self.is_connected, self.is_connecting, self.has_read = True, True, False, True
+            self.rows = rows
+
+        def meetings(self):
+            return [dict(m, people=calendar_sync.people_label(m["others"])) for m in self.rows]
+
+        def status_text(self):
+            return ""
+
+    monkeypatch.setattr(home_upcoming, "_utcnow", lambda: NOW)
+    long_title = (TITLE + " ") * 4
+    rows = [calendar_sync.parse_event(_event(long_title.strip(), [GUEST, BOLD, "Anna"]))]
+    assert rows[0] is not None and "<img" in rows[0]["title"]                     # nothing removed it on the way in
+    rows[0]["link"] = "https://<b>x</b>.example/j/1"
+    app = make_stub_app("pro")
+    app.show_main = lambda *a, **k: None
+    app.calendar = Cal(rows)
+    page = home.create(app)
+    page.sync_io = True
+    page.resize(900, 900)
+    page.show()
+    for _ in range(3):
+        QApplication.processEvents()
+    sec = page.upcoming
+    row = sec.rows[0]
+    assert row.title.text() == rows[0]["title"]                                    # whole, as text
+    assert "<img" in row.meta.text()                                               # the guest's name, as text
+    for lb in row.findChildren(QLabel):
+        if lb.text():
+            assert lb.textFormat() == Qt.PlainText
+            assert QLabel.sizeHint(lb).height() < 100
+    assert row.height() == 58
+    _tip_is_text(row.toolTip(), GUEST)                                             # "everyone", escaped
+    _tip_is_text(row.title.toolTip(), "<img src=p.png>")                           # an elided title's full text
+    jt = row.join_button.toolTip()
+    assert "<b>" not in jt and (not jt or jt.startswith("<p"))
+    assert rows[0]["title"] in row.record_button.accessibleName() or \
+        row.record_button.accessibleName().startswith("Record <img")
+    # What is on screen is words: the 150 px red picture is not in the section's pixels.
+    img = sec.grab().toImage().convertToFormat(QImage.Format_RGB32)
+    arr = np.frombuffer(img.constBits(), dtype=np.uint8).reshape(img.height(), img.bytesPerLine() // 4, 4)
+    red = (arr[:, :img.width(), 2] > 240) & (arr[:, :img.width(), 1] < 20) & (arr[:, :img.width(), 0] < 20)
+    assert int(red.sum()) == 0
+    assert sec.height() < 400
+    page.hide()
+    page.deleteLater()
+    QApplication.processEvents()

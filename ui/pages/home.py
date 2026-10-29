@@ -22,7 +22,13 @@ error card):
   its state_changed re-reads Recent (Recording -> Writing notes… -> Notes ready).
 - app.calendar (calendar_service.CalendarService): the "Next:" chip from
   now_or_next() when available and connected ("Now: ..." while that meeting is
-  running; next_meeting() for a service without it), updated on changed(list).
+  running; next_meeting() for a service without it), updated on changed(list);
+  and the "Coming up" section above Recent (ui/pages/home_upcoming.py): the next
+  three meetings of the Meetings page's list, each with Join and Record (Record opens
+  Meetings with the start card filled in), a quiet See all, or - when Google Calendar
+  is set up but not connected - one invitation card; nothing at all when this build
+  has no calendar service. It reads the service's in-memory list on its signals, when
+  the page opens or shows and on the page's 60 s tick; no network from Home.
 - app.downloads (model_manager.ModelDownloads): "Getting ready · 42%" while
   the speech model downloads.
 - app.rename_note_due() / dismiss_rename_note(): the one-time "Transcribe is
@@ -52,7 +58,9 @@ Integration notes for Wave 4
   "write_email" | "make_todo_list" | "translate" | "summarize" | "smart_auto"``);
   this page then shows "Smart Action · Email" with the wand icon and opens
   Smart Actions.
-* Calendar: connect is done here (changed -> chip); nothing else needed.
+* Calendar: the chip and the Coming up section follow the service's signals (changed,
+  connected, disconnected, connecting, status, error); Connect goes through the one door
+  (ui/calendar_door.py: the disclosure box first); nothing else needed.
 """
 
 import logging
@@ -1199,6 +1207,8 @@ class RecentRow(_Hairline):
 class HomePage(QWidget):
     """The Home page. See the module notes."""
 
+    UPCOMING_SLOT = 2                           # the body column: hero 0, tiles 1, then Coming up, then Recent
+
     def __init__(self, main_app, parent=None):
         super().__init__(parent)
         self.app = main_app
@@ -1208,6 +1218,7 @@ class HomePage(QWidget):
         self._gen = 0
         self._sig = None
         self._query = ""
+        self.upcoming = None                    # the Coming up section, once there is a calendar service
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1232,17 +1243,18 @@ class HomePage(QWidget):
         body.setContentsMargins(32, 4, 32, 32)
         body.setSpacing(32)
         root.addLayout(body)
+        self._body = body
         body.addLayout(self._build_hero())
         body.addLayout(self._build_tiles())
-        body.addLayout(self._build_recent())
+        body.addLayout(self._build_recent())    # (Coming up goes in front of it: _ensure_upcoming)
         root.addStretch(1)
 
         self._poll = QTimer(self)
         self._poll.setInterval(POLL_MS)
         self._poll.timeout.connect(self._poll_stores)
-        self._minute = QTimer(self)
+        self._minute = QTimer(self)             # while the page is on screen: "in 25 min" stays true
         self._minute.setInterval(60_000)
-        self._minute.timeout.connect(self._update_next)
+        self._minute.timeout.connect(self._on_minute)
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(150)
@@ -1437,12 +1449,38 @@ class HomePage(QWidget):
             (getattr(self.app, "downloads", None), "progress", self._on_download_event),
             (getattr(self.app, "downloads", None), "finished", self._on_download_event),
         ))
+        self._ensure_upcoming()
+
+    def _ensure_upcoming(self):
+        """The Coming up section, built the first time there is a calendar service (public builds
+        have none: nothing is built or imported then) and listening to it."""
+        cal = getattr(self.app, "calendar", None)
+        if cal is None:
+            return None
+        if self.upcoming is None:
+            try:
+                from ui.pages.home_upcoming import UpcomingSection
+                section = UpcomingSection(self)
+            except Exception:
+                logger.warning("Coming up couldn't be built", exc_info=True)
+                return None
+            self._body.insertWidget(self.UPCOMING_SLOT, section)
+            self.upcoming = section
+        self.upcoming.connect_service(cal)
+        self.upcoming.sync()
+        return self.upcoming
 
     def _on_history_changed(self, *_):
         self.refresh()
 
     def _on_calendar_changed(self, *_):
         self._update_next()
+
+    def _on_minute(self):
+        """Every minute while shown: the chip and Coming up re-read the service's list (memory only)."""
+        self._update_next()
+        if self.upcoming is not None:
+            self.upcoming.sync()
 
     def _on_download_event(self, *_):
         self._update_status()               # progress comes ~10 times a second: the status line only
@@ -1535,7 +1573,6 @@ class HomePage(QWidget):
             kind, m = "", None
         if not m:
             self.next_chip.hide()
-            self._minute.stop()
             return
         running = kind == "now"
         when = ""
@@ -1556,8 +1593,6 @@ class HomePage(QWidget):
         self.next_chip.setToolTip("Gusan asks to record 1 min before" if asks and not running
                                   else "Opens Meetings")
         self.next_chip.show()
-        if not self._minute.isActive():
-            self._minute.start()
 
     # ── Recent ──
     def _first_load(self):
@@ -1684,6 +1719,8 @@ class HomePage(QWidget):
         self._update_hero()
         self._update_live_tile()
         self._update_next()
+        if self.upcoming is not None:
+            self.upcoming.sync()
         self.refresh()
         if "search" in opts:
             self.search.setText(str(opts.get("search") or ""))
@@ -1700,6 +1737,8 @@ class HomePage(QWidget):
             self.refresh()
         if key.startswith("calendar"):
             self._update_next()
+        if (key == "privacy_mode" or key.startswith("calendar")) and self.upcoming is not None:
+            self.upcoming.sync()
 
     def refresh_account(self):
         self.header.set_title(self._title())
@@ -1709,12 +1748,16 @@ class HomePage(QWidget):
         super().showEvent(e)
         if not self._poll.isActive():
             self._poll.start()
+        if not self._minute.isActive():
+            self._minute.start()
+            self._on_minute()                   # back from the tray after a while: the times are current
         if self._rename_note_live:
             self._mark_rename_note()            # seen once: not shown at the next launch
 
     def hideEvent(self, e):
         super().hideEvent(e)
         self._poll.stop()
+        self._minute.stop()
 
 
 def create(main_app):

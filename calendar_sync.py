@@ -1179,6 +1179,73 @@ def when_parts(meeting, now, tz=None):
     return {"time": start.strftime("%H:%M"), "rel": rel, "day": day}
 
 
+def day_word(meeting, now, tz=None):
+    """"Today", "Tomorrow" or "Thursday": the day a meeting is on, in local time (or
+    ``tz``). One that began yesterday and still runs counts as today. Anything that
+    can't be read says "Today"."""
+    try:
+        start = meeting["start"].astimezone(tz)
+        today = now.astimezone(tz).date()
+    except Exception:
+        return "Today"
+    if start.date() <= today:
+        return "Today"
+    if start.date() == today + timedelta(days=1):
+        return "Tomorrow"
+    return start.strftime("%A")
+
+
+def call_label(kind):
+    """What the meta line calls the call service: "" without a link, "Video call"
+    for a link of no known service (``CALL_OTHER``), else the service's own name."""
+    if not kind:
+        return ""
+    return "Video call" if kind == CALL_OTHER else str(kind)
+
+
+def join_url(meeting_or_link):
+    """The link a Join button may open: an ``https://`` address (any case of the
+    scheme, spaces around it dropped) with a host and no spaces inside; "" for
+    anything else (http, javascript:, file:, empty, missing). Takes a meeting
+    dict (its ``link``) or the link itself."""
+    link = meeting_or_link.get("link") if isinstance(meeting_or_link, dict) else meeting_or_link
+    link = str(link or "").strip()
+    if not link.lower().startswith("https://"):
+        return ""
+    if any(ch.isspace() or ord(ch) < 32 for ch in link):
+        return ""
+    try:
+        return link if urllib.parse.urlsplit(link).hostname else ""
+    except ValueError:
+        return ""
+
+
+def upcoming_facts(meeting, now, tz=None):
+    """Everything a one-line "Coming up" row says about a meeting, as plain strings
+    (never markup): {"id", "title" ("Untitled meeting" when it has none), "time"
+    "14:30", "rel" ("Now" | "in 25 min" | ""), "label" (rel, else the day word:
+    Today / Tomorrow / Thursday), "hot" (it is on now), "people" ("Anna, David
+    +2"), "names" (everyone else on it), "call_type", "call" ("Google Meet" /
+    "Video call" / ""), "meta" ("Google Meet · Anna, David +2"), "join" (see
+    :func:`join_url`), "name" (the row for a screen reader: "Sync, 14:30, in 25
+    min, with Anna, David")}."""
+    m = meeting if isinstance(meeting, dict) else {}
+    parts = when_parts(m, now, tz)
+    rel = parts["rel"]
+    title = str(m.get("title") or "").strip() or "Untitled meeting"
+    names = [str(n) for n in (m.get("others") or []) if n]
+    people = str(m.get("people") or "") or people_label(m.get("others"))
+    call_type = str(m.get("call_type") or "")
+    call = call_label(call_type)
+    label = rel or day_word(m, now, tz)
+    return {
+        "id": str(m.get("id") or ""), "title": title, "time": parts["time"], "rel": rel, "label": label,
+        "hot": rel == "Now", "people": people, "names": names, "call_type": call_type, "call": call,
+        "meta": " · ".join(x for x in (call, people) if x), "join": join_url(m),
+        "name": "%s, %s, %s%s" % (title, parts["time"], label, (", with " + people) if people else ""),
+    }
+
+
 def reminder_text(meeting, now):
     """The reminder's timing line: "Starts in 1 min", "Starting now" or
     "Started 2 min ago"."""
