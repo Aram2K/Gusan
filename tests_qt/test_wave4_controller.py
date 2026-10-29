@@ -1020,3 +1020,196 @@ def test_a_real_session_started_with_an_invite_shows_its_agenda_on_a_card_opened
         s.abort()
         s.deleteLater()
         QApplication.processEvents()
+
+
+# ── Install update: the REAL controller drives the REAL update window ──
+# (tests/test_update_flow.py has the many cases with stand-ins; this is the same machine on real Qt:
+# real signals, buttons, timers and worker threads. Only the network, the installer and the quit are
+# replaced - nothing is downloaded or started.)
+def _wait(predicate, ms=5000):
+    import time
+    end = time.monotonic() + ms / 1000.0
+    while time.monotonic() < end:
+        QApplication.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    QApplication.processEvents()
+    return bool(predicate())
+
+
+@pytest.fixture
+def update_env(ctl, monkeypatch, tmp_path):
+    import time
+    from types import SimpleNamespace
+    import main
+    import updater
+    installer = tmp_path / "TranscribeApp-Windows-Setup.exe"
+    installer.write_bytes(b"MZ" + b"0" * 64)
+    env = SimpleNamespace(path=str(installer), log=str(tmp_path / "gusan-update-test.log"), hold=None,
+                          fetch_result=None, fetches=0, launched=[], watchers=[], quits=[], all_users=False,
+                          launch_result=None)
+
+    def fake_download(tag, on_progress=None, should_cancel=None, **kw):
+        env.fetches += 1
+        total = 100 * 2 ** 20
+        for step in range(5):
+            if should_cancel is not None and should_cancel():
+                return False, updater.CANCELLED
+            if on_progress is not None:
+                on_progress(total * step // 4, total)
+            time.sleep(0.12)                          # past the window's 100 ms progress throttle
+            while env.hold is not None and not env.hold.is_set() and step == 2:
+                if should_cancel is not None and should_cancel():
+                    return False, updater.CANCELLED
+                time.sleep(0.01)
+        return env.fetch_result or (True, env.path)
+
+    def fake_launch(path, **kw):
+        env.launched.append(dict(kw, path=path))
+        return env.launch_result or (True, path)
+
+    monkeypatch.setattr(main, "APP_VERSION", "1.0.0")
+    monkeypatch.setattr(updater, "cached_download", fake_download)
+    monkeypatch.setattr(updater, "can_self_install", lambda exe=None: True)
+    monkeypatch.setattr(updater, "is_all_users_install", lambda *a, **k: env.all_users)
+    monkeypatch.setattr(updater, "launch_installer", fake_launch)
+    monkeypatch.setattr(updater, "spawn_relauncher",
+                        lambda exe, log, popen=None: env.watchers.append((exe, log)) or object())
+    monkeypatch.setattr(updater, "new_log_path", lambda root=None: env.log)
+    monkeypatch.setattr(ctl, "quit_app", lambda: env.quits.append(True))
+    monkeypatch.setitem(ctl.cfg, "update_attempt", {})
+    ctl.hints.clear()
+    yield env
+    if env.hold is not None:
+        env.hold.set()
+    _wait(lambda: ctl._update_fetching is None, 3000)
+    win = ctl._update_window
+    if win is not None:
+        win.hide()
+        win.deleteLater()
+    ctl._update_window = None
+    for name, value in (("_update_installing", False), ("_update_closing", False), ("_update_cancel", False),
+                        ("_update_ready", None), ("_update_queued", None), ("_update_on_done", None),
+                        ("_update_asking", False), ("_update_failed_notice", False), ("_file_job_running", False)):
+        setattr(ctl, name, value)
+    _spin(50)
+
+
+def test_install_update_shows_the_window_from_the_click_to_the_restart(ctl, update_env):
+    import sys
+    env = update_env
+    results = []
+    assert ctl.install_update("v99.0.0", on_done=lambda ok, info: results.append((ok, info))) is True
+    win = ctl._update_window
+    assert win is not None and win.isVisible() and win.stage == "downloading"
+    assert win.lbl_version.accessibleName() == "Version 99.0.0"
+    assert _wait(lambda: win.lbl_detail.accessibleName() == "50 of 100 MB")       # it moves, with its size
+    assert win.btn_cancel.isVisible() and not win.btn_retry.isVisible()
+    assert _wait(lambda: win.stage == "installing")
+    assert "opens again by itself" in win.lbl_status.accessibleName()
+    assert not win.btn_cancel.isVisible()                                          # nothing to press now
+    assert _wait(lambda: ctl.cfg["update_attempt"])                                # handed over (the worker answered)
+    # Quiet, for exactly this copy, with its own log; a per-user Setup reopens Gusan itself, and so does the watcher.
+    assert env.launched == [{"all_users": False, "log_path": env.log, "relaunch": True, "path": env.path}]
+    assert env.watchers == [(sys.executable, env.log)]
+    assert ctl.cfg["update_attempt"] == {"to": "v99.0.0", "log": env.log, "from": "1.0.0"}
+    assert ctl._update_closing is True
+    # Nothing new starts while it installs.
+    ctl.hints.clear()
+    ctl._start()
+    assert ctl.hints and ctl.hints[-1][0] == "Gusan is updating" and ctl.is_rec is False
+    # Gusan closes through quit_app (services shut down, a meeting is saved), after a moment.
+    assert env.quits == []
+    assert _wait(lambda: env.quits, 4000)
+    assert results == []                    # a hand-over to the installer is not a "did not install"
+    assert env.fetches == 1
+
+
+def test_cancel_in_the_window_stops_the_download_at_once_and_installs_nothing(ctl, update_env):
+    import threading
+    env = update_env
+    env.hold = threading.Event()
+    results = []
+    assert ctl.install_update("v99.0.0", on_done=lambda ok, info: results.append((ok, info))) is True
+    win = ctl._update_window
+    assert _wait(lambda: win.lbl_detail.accessibleName() == "50 of 100 MB")
+    win.btn_cancel.click()
+    assert not win.isVisible()                                      # gone at once, the download is still winding down
+    assert results == [(False, "")]                                 # a plain Cancel: the Settings row says nothing
+    assert _wait(lambda: ctl._update_fetching is None)
+    assert ctl._update_installing is False and ctl._update_closing is False
+    assert env.launched == [] and env.watchers == [] and env.quits == []
+    assert ctl.cfg["update_attempt"] == {}
+    # Install update again: a clean new attempt.
+    env.hold.set()
+    assert ctl.install_update("v99.0.0") is True
+    assert _wait(lambda: ctl._update_window.stage == "installing")
+    assert len(env.launched) == 1 and env.fetches == 2
+
+
+def test_a_failed_download_says_why_and_try_again_goes_on(ctl, update_env):
+    import updater
+    env = update_env
+    env.fetch_result = (False, updater.MSG_NETWORK)
+    results = []
+    assert ctl.install_update("v99.0.0", on_done=lambda ok, info: results.append((ok, info))) is True
+    win = ctl._update_window
+    assert _wait(lambda: win.stage == "failed")
+    assert win.lbl_status.accessibleName() == "The update didn't install. " + updater.MSG_NETWORK
+    assert results == [(False, updater.MSG_NETWORK)]                # the Settings row says why, too
+    assert win.btn_retry.isVisible() and win.btn_website.isVisible() and win.btn_close.isVisible()
+    assert ctl._update_installing is False and env.launched == []   # Gusan carries on, nothing was started
+    env.fetch_result = None
+    win.btn_retry.click()
+    assert _wait(lambda: win.stage == "installing")
+    assert len(env.launched) == 1 and env.fetches == 2
+
+
+def test_saying_no_to_windows_permission_keeps_gusan_open_and_fully_working(ctl, update_env):
+    import updater
+    env = update_env
+    env.all_users = True
+    env.launch_result = (False, updater.MSG_NO_PERMISSION)
+    results = []
+    assert ctl.install_update("v99.0.0", on_done=lambda ok, info: results.append((ok, info))) is True
+    win = ctl._update_window
+    assert _wait(lambda: win.stage == "failed")
+    assert env.launched[0]["all_users"] is True and env.launched[0]["relaunch"] is False
+    assert updater.MSG_NO_PERMISSION in win.lbl_status.accessibleName()
+    assert results == [(False, updater.MSG_NO_PERMISSION)]
+    assert env.watchers == [] and env.quits == []                   # no watcher, no quit
+    assert ctl._update_closing is False and ctl._update_installing is False
+    assert ctl.cfg["update_attempt"] == {}
+
+
+def test_a_job_that_starts_during_the_download_is_waited_for_then_the_install_goes_on(ctl, update_env):
+    import threading
+    env = update_env
+    env.hold = threading.Event()
+    assert ctl.install_update("v99.0.0") is True
+    win = ctl._update_window
+    assert _wait(lambda: win.lbl_detail.accessibleName() == "50 of 100 MB")
+    ctl._file_job_running = True                                    # a file starts converting meanwhile
+    env.hold.set()
+    assert _wait(lambda: win.stage == "waiting")
+    assert "when your recording or file is done" in win.lbl_status.accessibleName()
+    _spin(300)
+    assert env.launched == [] and ctl._update_closing is False
+    ctl._file_job_running = False
+    assert _wait(lambda: win.stage == "installing", 6000)           # picked up by the 2 s poll
+    assert len(env.launched) == 1
+
+
+def test_the_update_window_never_keeps_gusan_from_quitting(ctl, update_env):
+    assert ctl.install_update("v99.0.0") is True
+    win = ctl._update_window
+    assert _wait(lambda: win.stage == "installing")
+    win.close()
+    assert win.isVisible()                                          # Esc / X while installing do nothing...
+    ctl._quitting = True
+    try:
+        win.close()
+        assert not win.isVisible()                                  # ...but never veto the quit
+    finally:
+        ctl._quitting = False

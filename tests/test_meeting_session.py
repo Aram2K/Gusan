@@ -281,6 +281,22 @@ class TestStart(_Base):
         self.assertEqual((ok, code), (False, "busy"))
         self.assertEqual(s.title, "one")
 
+    def test_no_meeting_starts_once_the_update_installer_runs(self):
+        # The in-app update has handed over to Setup: Gusan closes in a moment, so nothing new may
+        # start (a recording begun now would be cut off by the installer closing the app).
+        app = _App()
+        app._update_closing = True
+        s = self.session(app)
+        errors = []
+        s.error.connect(lambda *a: errors.append(a))
+        ok, code, msg = s.start("Q4 roadmap")
+        self.assertEqual((ok, code), (False, "busy"))
+        self.assertEqual(msg, "Gusan is updating. It closes and opens again in a moment.")
+        self.assertEqual((s.phase, app.recorder.started), ("idle", None))
+        self.assertEqual(errors, [("busy", msg)])
+        app._update_closing = False                               # the permission prompt said No: back to normal
+        self.assertTrue(self.session(app).start("Q4 roadmap")[0])
+
     def test_a_device_that_will_not_open_is_not_a_recording(self):
         rec = _Rec(fail_start=OSError("device busy"))
         saved_cb = rec.on_chunk_complete = lambda *a: None

@@ -82,7 +82,7 @@ LIVE_ASSIST_PRIVATE = "live_assist_private"
 PROTECTED_KEYS = frozenset({
     "secrets_owner", "user_secrets", "last_known_pro", "known_emails", "last_signin_email",
     "pending_update_version", "pending_update_body", "config_schema_version",
-    "notion_owner",
+    "notion_owner", "update_attempt",
 })
 
 

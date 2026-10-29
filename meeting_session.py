@@ -790,6 +790,10 @@ class MeetingCore:
         rec = getattr(app, "recorder", None) if app is not None else None
         if rec is None:
             return self._refuse(ERR_NO_RECORDER, "The recorder isn't ready yet.")
+        # An in-app update has handed over to the installer: Gusan closes in a moment.
+        if getattr(app, "_update_closing", False) is True:
+            import updater
+            return self._refuse(ERR_BUSY, "%s. %s" % (updater.UPDATING_TITLE, updater.UPDATING_TEXT))
         # The previous meeting may still be saving/transcribing on its worker:
         # restarting the shared recorder now would hand it this session's audio
         # (the old recording is lost) and leave the new one unstoppable.

@@ -740,6 +740,57 @@ def test_pending_update_from_the_startup_check(env):
     assert page.update_status.text() == "Update available · v9.9.9"
 
 
+def test_install_update_goes_to_the_controller_and_the_row_follows_it(env):
+    """The controller (main.AppController.install_update) opens the update window; it calls back only when it
+    did NOT install: a message goes on the row in red, a plain Cancel ("") leaves it as it was."""
+    from ui.pages import settings as S
+    win, app = env.build("free", pending_update_version="v9.9.9")
+    asked = []
+    app.install_update = lambda tag, manual=True, on_done=None: asked.append((tag, manual, on_done)) or True
+    page = _settings(win)
+    page.update_button.click()
+    assert asked[0][:2] == ("v9.9.9", True)
+    assert ("track", "update_install_started", {"manual": True, "to": "v9.9.9"}) in app.calls
+    assert page.update_status.text() == "Installing v9.9.9…"
+    assert not page.update_button.isEnabled()
+    on_done = asked[0][2]
+    on_done(False, "")                                            # Cancel: no red text, back to Install update
+    assert page.update_status.text() == "Update available · v9.9.9"
+    assert page.update_button.text() == "Install update" and page.update_button.isEnabled()
+    page.update_button.click()
+    asked[1][2](False, "The download was damaged. Try again.")    # a failure: the reason, on the row
+    assert page.update_status.text() == "The download was damaged. Try again."
+    assert page.update_button.text() == "Install update"
+    page.update_button.click()
+    asked[2][2](False, S.updater.UNSUPPORTED)                     # (the old wording of "the browser took over")
+    assert page.update_status.text() == "Update available · v9.9.9"
+
+
+def test_the_page_says_when_a_typed_key_is_not_saved(env):
+    """AppController._update_unsaved_edits asks the pages: installing closes Gusan and a key typed into an open
+    editor (and not saved) would be lost."""
+    win, _app = env.build("free")
+    page = _settings(win, section="speech")
+    assert page.unsaved_edits() is False
+    row = page.key_rows["google_api_key"]
+    row.open_editor()
+    assert page.unsaved_edits() is False                          # open, nothing typed
+    row.input.setText("   ")
+    assert page.unsaved_edits() is False
+    row.input.setText("AIzaSyExampleKey")
+    assert page.unsaved_edits() is True
+    row.close_editor()                                            # Cancel: nothing to lose
+    assert page.unsaved_edits() is False
+    page._toggle_more_options(True)
+    writer = page.writer_panel.key_row
+    writer.open_editor()
+    writer.input.setText("sk-example")
+    assert page.unsaved_edits() is True                           # the AI writer's key too
+    writer.close_editor()
+    assert page.unsaved_edits() is False
+    assert win.pages()["settings"] is page                        # where the controller finds it
+
+
 def test_about_rows(env):
     from ui.components import Chip
     win, app = env.build("free")

@@ -381,71 +381,126 @@ class TestCalmUpdates(unittest.TestCase):
         self.assertEqual(scheduled, [2500])
 
 
+def _update_state():
+    """The controller's in-app update state (main.AppController.__init__), at rest."""
+    return dict(_update_ready=None, _update_fetching=None, _update_fetch_user=False, _update_installing=False,
+                _update_closing=False, _update_window=None, _update_cancel=False, _update_gen=0,
+                _update_queued=None, _update_tag="", _update_manual=True, _update_on_done=None,
+                _update_key_asked=False, _update_force=False, _update_asking=False,
+                _update_failed_notice=False, _update_progress_at=0.0)
+
+
+_UPDATE_METHODS = ("install_update", "_update_blocker", "_update_stale", "_update_window_for", "_update_done",
+                   "_update_failed", "_update_handover", "_update_start_installer", "_on_update_launched",
+                   "_start_update_fetch", "_on_update_fetched", "_update_poll", "_update_unsaved_edits",
+                   "_cancel_update", "_update_install_now", "_update_retry", "_update_open_page", "_run_on_gui")
+
+
 class TestInstallUpdate(unittest.TestCase):
+    """install_update's contract with its callers (Settings' row, the tray notice); the whole flow, its
+    window and every edge are in tests/test_update_flow.py."""
+
     def _app(self, **cfg):
         app = SimpleNamespace(cfg={"pending_update_version": "v2.0.1", **cfg}, hints=[], tracked=[],
-                              flushed=0, _update_installing=False, _update_ready=None)
+                              flushed=0, is_rec=False, _file_job_running=False, **_update_state())
         app.show_tray_hint = lambda t, m, on_click=None: app.hints.append((t, m))
         app.track = lambda e, p=None: app.tracked.append((e, p))
         app.flush_config_save = lambda: setattr(app, "flushed", app.flushed + 1)
         app.quit_app = lambda: None
-        bind(app, "install_update", "_on_update_installed", "_run_on_gui")
+        app._bring_to_front = lambda w: None
+        app._is_newer = main.AppController._is_newer
+        bind(app, *_UPDATE_METHODS)
         return app
 
-    def _install(self, app, result, **kw):
-        timers = []
-        with mock.patch.object(main.threading, "Thread", _Inline), \
-                mock.patch.object(main.updater, "install", return_value=result), \
+    def _install(self, app, fetched, installable=True, **kw):
+        """install_update with the download answering ``fetched`` ((ok, path or message))."""
+        import types
+        timers, window = [], mock.MagicMock()
+        module = types.ModuleType("ui.update_window")
+        module.UpdateWindow = mock.MagicMock(return_value=window)
+        with mock.patch.object(main, "APP_VERSION", "2.0.0"), \
+                mock.patch.object(main.sys, "platform", "win32"), \
+                mock.patch.object(main.threading, "Thread", _Inline), \
+                mock.patch.object(main.updater, "cached_download", return_value=fetched), \
+                mock.patch.object(main.updater, "launch_installer", return_value=(True, "C:/t/setup.exe")) as launch, \
+                mock.patch.object(main.updater, "spawn_relauncher", return_value=object()), \
+                mock.patch.object(main.updater, "can_self_install", return_value=installable), \
+                mock.patch.object(main.updater, "is_all_users_install", return_value=False), \
+                mock.patch.object(main.updater, "new_log_path", return_value="C:/t/u.log"), \
                 mock.patch.object(main, "QTimer", SimpleNamespace(
                     singleShot=lambda ms, fn: timers.append(fn))), \
+                mock.patch.dict(sys.modules, {"ui.update_window": module}), \
                 mock.patch.object(main.webbrowser, "open") as browser:
             app.install_update("v2.0.1", **kw)
-        return timers, browser
+        return timers, browser, window, launch
 
-    def test_installed_clears_pending_saves_and_quits(self):
+    def test_an_installed_update_keeps_pending_records_the_attempt_and_quits_properly(self):
         app = self._app()
-        timers, _ = self._install(app, (True, "C:/tmp/TranscribeApp-Windows-Setup.exe"), manual=False)
-        self.assertEqual(app.cfg["pending_update_version"], "")
+        with tempfile.NamedTemporaryFile(suffix=".exe", delete=False) as f:
+            path = f.name
+        try:
+            timers, _, window, launch = self._install(app, (True, path), manual=False)
+        finally:
+            os.unlink(path)
+        launch.assert_called_once_with(path, all_users=False, log_path="C:/t/u.log", relaunch=True)
+        self.assertEqual(app.cfg["pending_update_version"], "v2.0.1")        # until the new version actually runs
+        self.assertEqual(app.cfg["update_attempt"], {"to": "v2.0.1", "log": "C:/t/u.log", "from": "2.0.0"})
         self.assertEqual(app.flushed, 1)
-        self.assertEqual(timers, [app.quit_app])
+        self.assertEqual(timers, [app.quit_app])                              # the one proper quit, after a moment
         self.assertIn(("update_install_started", {"manual": False, "to": "v2.0.1"}), app.tracked)
         self.assertIn(("update_install_result", {"manual": False, "ok": True}), app.tracked)
 
-    def test_a_failure_goes_to_the_page_or_a_notification(self):
+    def test_a_failure_goes_to_the_page_and_the_window_not_a_notification(self):
         app = self._app()
         got = []
-        timers, _ = self._install(app, (False, "Couldn't download the update."),
-                                  on_done=lambda ok, info: got.append((ok, info)))
+        timers, _, window, launch = self._install(app, (False, "Couldn't download the update."),
+                                                  on_done=lambda ok, info: got.append((ok, info)))
         self.assertEqual(got, [(False, "Couldn't download the update.")])
+        window.show_failed.assert_called_once_with("Couldn't download the update.", "")
         self.assertEqual(app.hints, [])
         self.assertEqual(timers, [])
+        launch.assert_not_called()
         self.assertEqual(app.cfg["pending_update_version"], "v2.0.1")
         app = self._app()
-        self._install(app, (False, "Couldn't download the update."))
-        self.assertEqual(app.hints, [("Update not installed", "Couldn't download the update.")])
-
-    def test_on_a_mac_the_release_page_opens(self):
-        app = self._app()
-        _, browser = self._install(app, (False, updater.UNSUPPORTED))
-        browser.assert_called_once_with(updater.release_page("v2.0.1"))
+        _, _, window, _ = self._install(app, (False, "Couldn't download the update."))      # the notice's click
+        window.show_failed.assert_called_once()                    # the window says it: no second voice
         self.assertEqual(app.hints, [])
 
-    def test_install_on_quit_runs_the_installer_fetched_ahead(self):
-        app = SimpleNamespace(cfg={"install_updates_on_quit": True, "pending_update_version": "v2.0.1"},
-                              tracked=[], schedule_config_save=lambda: None)
+    def test_on_a_mac_or_a_portable_copy_the_release_page_opens(self):
+        app = self._app()
+        got = []
+        _, browser, window, launch = self._install(app, (True, "x"), installable=False,
+                                                   on_done=lambda ok, info: got.append((ok, info)))
+        browser.assert_called_once_with(updater.release_page("v2.0.1"))
+        self.assertEqual(got, [(False, "")])                       # the row resets with no red text
+        self.assertEqual(app.hints[0][1], "Opening the download page in your browser.")
+        launch.assert_not_called()
+        window.show_downloading.assert_not_called()
+
+    def test_install_on_quit_runs_the_installer_fetched_ahead_quietly_for_this_user(self):
+        app = SimpleNamespace(cfg={"install_updates_on_quit": True, "pending_update_version": "v2.0.1",
+                                   "update_attempt": {}},
+                              tracked=[], saves=0, _update_closing=False)
+        app.schedule_config_save = lambda: setattr(app, "saves", app.saves + 1)
         app.track = lambda e, p=None: app.tracked.append((e, p))
         with tempfile.NamedTemporaryFile(delete=False) as f:
             path = f.name
         try:
             app._update_ready = ("v2.0.1", path)
             with mock.patch.object(main, "APP_VERSION", "2.0.0"), \
-                    mock.patch.object(main.updater, "launch", return_value=(True, path)) as launch:
+                    mock.patch.object(main.updater, "can_self_install", return_value=True), \
+                    mock.patch.object(main.updater, "is_all_users_install", return_value=False), \
+                    mock.patch.object(main.updater, "new_log_path", return_value="C:/t/u.log"), \
+                    mock.patch.object(main.updater, "launch_installer", return_value=(True, path)) as launch:
                 main.AppController._run_update_on_quit(app)
-            launch.assert_called_once_with(path)
-            self.assertEqual(app.cfg["pending_update_version"], "")
+            launch.assert_called_once_with(path, all_users=False, log_path="C:/t/u.log", relaunch=False)
+            self.assertEqual(app.cfg["pending_update_version"], "v2.0.1")
+            self.assertEqual(app.cfg["update_attempt"], {"to": "v2.0.1", "log": "C:/t/u.log", "from": "2.0.0",
+                                                         "quit": True})
+            self.assertEqual(app.saves, 1)                         # quit_app flushes it right after
             app._update_ready = ("v2.0.1", path)
             app.cfg["install_updates_on_quit"] = False
-            with mock.patch.object(main.updater, "launch") as launch:
+            with mock.patch.object(main.updater, "launch_installer") as launch:
                 main.AppController._run_update_on_quit(app)
             launch.assert_not_called()
         finally:
@@ -1059,33 +1114,40 @@ class TestKeyringWritesOnlyChanges(unittest.TestCase):
 class TestUpdatesWaitForRecordings(unittest.TestCase):
     def _app(self, **kw):
         app = SimpleNamespace(cfg={"pending_update_version": "v2.0.1"}, hints=[], tracked=[],
-                              is_rec=False, _file_job_running=False, _update_installing=False,
-                              _update_ready=None, _update_fetching=None, _update_notice_shown=None,
-                              meeting_session=SimpleNamespace(is_busy=False))
+                              is_rec=False, _busy=False, _file_job_running=False, _update_notice_shown=None,
+                              meeting_session=SimpleNamespace(is_busy=False), **_update_state())
         for k, v in kw.items():
             setattr(app, k, v)
         app.show_tray_hint = lambda t, m, on_click=None: app.hints.append((t, m))
         app.track = lambda e, p=None: app.tracked.append((e, p))
         app.save_config = lambda: None
         bind(app, "install_update", "_prompt_update", "_prepare_update_on_quit", "_on_update_fetched",
-             "_run_on_gui")
+             "_start_update_fetch", "_update_blocker", "_run_on_gui")
         app._is_newer = main.AppController._is_newer
         return app
 
-    def test_install_waits_for_a_recording_or_a_file_job(self):
+    def test_install_waits_for_a_recording_a_dictation_or_a_file_job(self):
         for kw, words in (({"is_rec": True}, "recording"),
                           ({"meeting_session": SimpleNamespace(is_busy=True)}, "recording"),
+                          ({"_busy": True}, "dictation"),
                           ({"_file_job_running": True}, "converting")):
             app, got = self._app(**kw), []
-            with mock.patch.object(main.threading, "Thread") as thread:
+            with mock.patch.object(main, "APP_VERSION", "2.0.0"), \
+                    mock.patch.object(main.sys, "platform", "win32"), \
+                    mock.patch.object(main.updater, "can_self_install", return_value=True), \
+                    mock.patch.object(main.threading, "Thread") as thread:
                 self.assertFalse(app.install_update("v2.0.1", on_done=lambda ok, info: got.append((ok, info))))
             thread.assert_not_called()                     # nothing downloads, nothing quits
             self.assertEqual(len(got), 1)
             self.assertFalse(got[0][0])
             self.assertIn(words, got[0][1])
             self.assertFalse(app._update_installing)
+            self.assertIsNone(app._update_window)          # not even a window
         app = self._app(is_rec=True)
-        app.install_update("v2.0.1", manual=False)        # the notification's click
+        with mock.patch.object(main, "APP_VERSION", "2.0.0"), \
+                mock.patch.object(main.sys, "platform", "win32"), \
+                mock.patch.object(main.updater, "can_self_install", return_value=True):
+            app.install_update("v2.0.1", manual=False)        # the notification's click
         self.assertEqual(app.hints[0][0], "Update not installed")
 
     def test_no_notice_during_a_meeting(self):
@@ -1100,13 +1162,14 @@ class TestUpdatesWaitForRecordings(unittest.TestCase):
         app.cfg.update(install_updates_on_quit=True, dismissed_update_version="v2.0.1")
         with mock.patch.object(main, "APP_VERSION", "2.0.0"), \
                 mock.patch.object(main.sys, "platform", "win32"), \
+                mock.patch.object(main.updater, "can_self_install", return_value=True), \
                 mock.patch.object(main.threading, "Thread", _Inline), \
                 mock.patch.object(main.updater, "cached_download", return_value=(True, "C:/t/setup.exe")) as dl:
             app._prepare_update_on_quit("v2.0.1")
             dl.assert_not_called()
             app.cfg["dismissed_update_version"] = ""
             app._prepare_update_on_quit("v2.0.1")
-        dl.assert_called_once_with("v2.0.1")              # kept per release, reused next run
+        dl.assert_called_once_with("v2.0.1", on_progress=mock.ANY, should_cancel=mock.ANY)   # kept per release
         self.assertEqual(app._update_ready, ("v2.0.1", "C:/t/setup.exe"))
         with tempfile.NamedTemporaryFile(delete=False) as f:
             path = f.name
@@ -1115,7 +1178,9 @@ class TestUpdatesWaitForRecordings(unittest.TestCase):
             app.cfg["dismissed_update_version"] = "v2.0.1"       # skipped after it was fetched
             app.schedule_config_save = lambda: None
             with mock.patch.object(main, "APP_VERSION", "2.0.0"), \
-                    mock.patch.object(main.updater, "launch") as launch:
+                    mock.patch.object(main.updater, "can_self_install", return_value=True), \
+                    mock.patch.object(main.updater, "is_all_users_install", return_value=False), \
+                    mock.patch.object(main.updater, "launch_installer") as launch:
                 main.AppController._run_update_on_quit(app)
             launch.assert_not_called()
         finally:

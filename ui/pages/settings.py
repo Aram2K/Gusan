@@ -60,14 +60,17 @@ Integration notes for Wave 4
    main.show_gpu_settings() opens show_main("settings", section="speech",
    focus="gpu"). "Remove" (ready, Gusan's own download only: app.gpu_removable())
    calls app.remove_gpu_download(); the card follows the re-probe.
-3. Updates: "Install update" calls app.install_update(tag) when the controller
-   has it (recommended: updater.install on a worker, clear
-   pending_update_version, flush the save, track update_install_result, then
-   sig_quit). Without it the page runs updater.install itself and emits
-   app.sig_quit. After "Check now" the page calls app.note_update_check(status,
-   tag) if present, so the controller can store pending_update_version (a
-   PROTECTED key pages can't write). The status shown before any check comes
-   from cfg pending_update_version.
+3. Updates: "Install update" calls app.install_update(tag, on_done=...) when the
+   controller has it: it opens the update window (download progress, Cancel,
+   "Installing", Try again; ui/update_window.py), installs quietly and quits;
+   it calls on_done(ok, info) only when it did NOT install ("" = a Cancel or the
+   browser took over), so the row can say why. Without it the page runs
+   updater.install itself and emits app.sig_quit. unsaved_edits() lets the
+   controller ask before an install closes Gusan over a typed API key.
+   After "Check now" the page calls app.note_update_check(status, tag) if
+   present, so the controller can store pending_update_version (a PROTECTED
+   key pages can't write). The status shown before any check comes from cfg
+   pending_update_version.
 4. Delete all history: history_actions.counts / clear plus
    transcript_store.delete_all_transcripts() for "Delete everything"; then
    app.sig_history_changed.emit() if the controller has that signal (add it:
@@ -3184,6 +3187,21 @@ class SettingsPage(QWidget):
         def failed(_e):
             done((False, "Couldn't check it right now."))
         run_bg(api_keys.test_key, field, key, cfg, then=done, error=failed, owner=self)
+
+    def unsaved_edits(self):
+        """True while a key is typed into an open "My API keys" editor and not saved yet. Installing an
+        update closes Gusan: the controller (AppController._update_unsaved_edits) asks first."""
+        rows = list(getattr(self, "key_rows", {}).values())
+        panel = getattr(self, "writer_panel", None)           # (the Speech section may not be built yet)
+        if panel is not None:
+            rows.append(panel.key_row)
+        for row in rows:
+            try:
+                if row.is_editing() and row.input.text().strip():
+                    return True
+            except RuntimeError:                  # a row already torn down
+                continue
+        return False
 
     def _row_for(self, field):
         if self.writer_panel.isVisible() and self.writer_panel.key_row.field == field and \

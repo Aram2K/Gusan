@@ -1034,3 +1034,60 @@ def test_the_palette_is_complete_and_the_style_is_fusion(qapp, scheme):
     assert pal.color(QPalette.Window).lightness() > 200 and pal.color(QPalette.WindowText).lightness() < 80
     assert contrast(pal.color(QPalette.Active, QPalette.PlaceholderText), pal.color(QPalette.Base)) >= BAR
     assert contrast(pal.color(QPalette.Active, QPalette.WindowText), pal.color(QPalette.Window)) >= 12
+
+
+# ═══════════════════════════ the update window (ui/update_window.py) ═══════════════════════════
+def _update_window_stages(w):
+    """(name, go) for every stage the controller puts the update window in."""
+    mb = 2 ** 20
+    long_log = "Details: C:/Users/Someone/AppData/Local/Temp/gusan-update/logs/gusan-update-0a1b2c3d.log"
+    return (("downloading", lambda: w.show_downloading()),
+            ("progress", lambda: (w.show_downloading(), w.show_progress(45 * mb, 100 * mb))),
+            ("checking", lambda: (w.show_downloading(), w.show_progress(100 * mb, 100 * mb))),
+            ("waiting", lambda: w.show_waiting()),
+            ("waiting for a typed key", lambda: w.show_waiting(can_install=True)),
+            ("installing", lambda: w.show_installing()),
+            ("installing as administrator", lambda: w.show_installing(admin=True)),
+            ("installing, nothing reopens it", lambda: w.show_installing(reopens=False, admin=True)),
+            ("failed", lambda: w.show_failed("The update couldn't be downloaded. Check your connection.")),
+            ("failed with the log", lambda: w.show_failed("The installer stopped before it finished.", long_log)))
+
+
+def test_the_update_window_is_readable_in_every_stage(qapp, scheme, made):
+    from ui.update_window import UpdateWindow
+    w = UpdateWindow("v2.0.2")
+    made.append(w)
+    for name, go in _update_window_stages(w):
+        go()
+        rows = readable(w, "the update window (%s)" % name, minimum=4)
+        names = " ".join(n for n, *_ in rows)
+        assert "Updating Gusan" in names, name
+
+
+def test_the_update_window_looks_the_same_on_a_dark_windows(qapp):
+    from ui import theme
+    from ui.update_window import UpdateWindow
+
+    def pictures():
+        w = UpdateWindow("v2.0.2")
+        out = {}
+        for name, go in _update_window_stages(w):
+            go()
+            _show(w)
+            out[name] = w.grab().toImage()
+        w.close()
+        w.deleteLater()
+        return out
+
+    qapp.setPalette(os_light_palette())
+    theme.install_light_scheme(qapp)
+    light = pictures()
+    qapp.setPalette(os_dark_palette())
+    theme.install_light_scheme(qapp)
+    dark = pictures()
+    qapp.setPalette(os_light_palette())
+    theme.install_light_scheme(qapp)
+    assert set(light) == set(dark)
+    for key in light:
+        assert light[key].size() == dark[key].size(), key
+        assert light[key] == dark[key], "%s looks different on a dark Windows" % key

@@ -412,6 +412,44 @@ class TestInstaller(unittest.TestCase):
         icons = [_expand(e["Name"], self.defines) for e in _entries(self.text, "Icons")]
         self.assertEqual(icons, ["{group}\\Gusan", "{group}\\Uninstall Gusan", "{autodesktop}\\Gusan"])
 
+    def test_an_in_app_update_can_name_its_install_mode_and_reopen_gusan(self):
+        """What the update window's quiet install (updater.install_command) relies on."""
+        import updater
+        setup = _setup(self.text)
+        self.assertEqual(updater.APP_ID, V1_APP_ID[1:])     # the uninstall key it reads is this installer's (the {{ is Inno's escape)
+        self.assertEqual(setup["PrivilegesRequired"].lower(), "lowest")
+        # /CURRENTUSER and /ALLUSERS are only certain to be honoured with "commandline".
+        self.assertIn("commandline", setup["PrivilegesRequiredOverridesAllowed"].split())
+        self.assertIn("dialog", setup["PrivilegesRequiredOverridesAllowed"].split())     # the wizard still asks
+        run = _entries(self.text, "Run")
+        relaunch = [e for e in run if e.get("Check") == "RelaunchAfterUpdate"]
+        self.assertEqual(len(relaunch), 1)
+        flags = relaunch[0]["Flags"].split()
+        self.assertEqual(relaunch[0]["Parameters"], "--show-settings")
+        self.assertIn("runasoriginaluser", flags)         # as the person, never as the administrator who approved
+        self.assertIn("nowait", flags)
+        self.assertNotIn("postinstall", flags)
+        self.assertNotIn("skipifsilent", flags)           # it runs in a silent install, when asked to
+        self.assertIn("{param:relaunch|0}", self.text)    # asked by updater's /relaunch=1 only
+        self.assertIn("/relaunch=1", updater.install_command("x.exe", relaunch=True, log_path="l")[2])
+        func = self.text[self.text.index("function RelaunchAfterUpdate"):]
+        self.assertIn("WizardSilent", func.split("end;")[0])
+        # A plain silent deployment still doesn't start the app; the wizard's own Launch box keeps working.
+        post = [e for e in run if "postinstall" in e.get("Flags", "")]
+        self.assertEqual(len(post), 1)
+        self.assertIn("skipifsilent", post[0]["Flags"].split())
+
+    def test_an_update_never_applies_the_start_at_login_task_again(self):
+        import updater
+        tasks = {e["Name"]: e for e in _entries(self.text, "Tasks")}
+        self.assertIn("startup", tasks)
+        self.assertEqual(tasks["startup"].get("Check"), "not IsUpgrade")      # fresh installs only...
+        self.assertIn('/MERGETASKS="!startup"', updater.INSTALL_ARGS)          # ...and the app says so as well
+        self.assertIn("/NORESTARTAPPLICATIONS", updater.INSTALL_ARGS)
+        for line in _section(self.text, "Registry"):
+            if "CurrentVersion\\Run" in line:
+                self.assertIn("Tasks: startup", line)                         # the Run value only with that task
+
 
 class TestBuild(unittest.TestCase):
 
