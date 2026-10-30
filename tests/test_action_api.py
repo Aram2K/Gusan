@@ -132,5 +132,189 @@ class TestVocabularyInPrompts(unittest.TestCase):
         self.assertIn("Aibuben", msgs[0]["content"])
 
 
+def _sse(*events):
+    """Server-sent lines for the given JSON events, ending the way a server does."""
+    import json
+    return [("data: %s" % json.dumps(e)).encode("utf-8") for e in events] + [b"data: [DONE]"]
+
+
+def _chunk(text="", finish=None):
+    return {"choices": [{"delta": {"content": text} if text else {}, "finish_reason": finish}]}
+
+
+class _Stream:
+    """A streaming response: the given lines, then (optionally) the connection drops."""
+    status_code = 200
+
+    def __init__(self, lines, drop=False, kind="text/event-stream"):
+        self.headers = {"Content-Type": kind}
+        self.lines, self.drop, self.closed = list(lines), drop, False
+
+    def iter_lines(self, *a, **k):
+        for line in self.lines:
+            yield line
+        if self.drop:
+            raise action_api.requests.ConnectionError("reset")
+
+    def close(self):
+        self.closed = True
+
+
+NOTES_TEXT = "You: hello\nThem: hi there. " + "word " * 5000
+OPENAI_CFG = {"action_api_provider": "openai_compatible", "action_api_key": "k"}
+GEMINI_CFG = {"action_api_provider": "gemini", "action_api_key": "k"}
+ANTHROPIC_CFG = {"action_api_provider": "anthropic", "action_api_key": "k"}
+
+
+class TestNotesStreams(unittest.TestCase):
+    """Meeting notes are streamed on every route. When the model stops at its limit, or the connection drops after some text,
+    the caller's ``info`` dict says so (and the text that arrived is kept)."""
+
+    def managed(self, lines, info=None, drop=False, text=NOTES_TEXT):
+        resp = _Stream(lines, drop)
+        with patch.object(action_api.requests, "post", return_value=resp) as post:
+            out = action_api.run_managed_action_stream(text, "meeting_notes", "tok", lambda d: None, info=info)
+        return out, post, resp
+
+    def test_a_whole_answer_is_not_cut(self):
+        info = {}
+        out, _post, resp = self.managed(_sse(_chunk("## Summary\n"), _chunk("Done."), _chunk("", "stop")), info)
+        self.assertEqual(out, "## Summary\nDone.")
+        self.assertEqual(info, {})
+        self.assertTrue(resp.closed)
+
+    def test_the_model_stopping_at_its_limit_is_a_cut(self):
+        info = {}
+        out, _post, _r = self.managed(_sse(_chunk("## Summary\nPart"), _chunk("", "length")), info)
+        self.assertEqual(out, "## Summary\nPart")
+        self.assertTrue(info["cut"])
+
+    def test_every_providers_word_for_stopping_early_is_a_cut(self):
+        for reason in ("length", "model_length", "content_filter", "max_tokens", "MAX_TOKENS", "SAFETY"):
+            info = {}
+            action_api._note_finish(info, reason)
+            self.assertTrue(info.get("cut"), reason)
+        for reason in ("stop", "end_turn", "STOP", "", None, "tool_calls"):
+            info = {}
+            action_api._note_finish(info, reason)
+            self.assertEqual(info, {}, reason)
+        action_api._note_finish(None, "length")                         # no info dict: nothing to say, nothing breaks
+
+    def test_a_connection_that_drops_after_some_text_keeps_it_and_is_a_cut(self):
+        info = {}
+        out, _post, _r = self.managed(_sse(_chunk("## Summary\nPart"))[:-1], info, drop=True)
+        self.assertEqual(out, "## Summary\nPart")
+        self.assertTrue(info["cut"])
+
+    def test_a_connection_that_drops_before_any_text_is_an_error(self):
+        with self.assertRaises(action_api.ActionAPIError):
+            self.managed([], {}, drop=True)
+
+    def test_info_is_optional(self):
+        out, _post, _r = self.managed(_sse(_chunk("Text"), _chunk("", "length")), None)
+        self.assertEqual(out, "Text")
+
+    def test_the_request_streams_and_asks_for_what_the_meeting_needs(self):
+        _out, post, _r = self.managed(_sse(_chunk("x"), _chunk("", "stop")))
+        body = post.call_args.kwargs["json"]
+        self.assertTrue(body["stream"])
+        self.assertEqual(body["mode"], "meeting_notes")
+        self.assertEqual(body["max_tokens"], 3600)                      # ~5,000 words
+        self.assertEqual(body["messages"][1]["content"], action_api.build_messages(NOTES_TEXT, "meeting_notes")[1]["content"])
+        self.assertEqual(post.call_args.kwargs["timeout"], (10, 90))        # idle time, not a whole-answer limit
+
+    def test_a_short_meeting_asks_for_less_and_a_very_long_one_for_more(self):
+        _o, post, _r = self.managed(_sse(_chunk("x")), text="You: hi\nThem: hello")
+        self.assertEqual(post.call_args.kwargs["json"]["max_tokens"], 1200)
+        _o, post, _r = self.managed(_sse(_chunk("x")), text="word " * 12000)
+        self.assertEqual(post.call_args.kwargs["json"]["max_tokens"], 5000)
+
+    def test_an_older_server_that_answers_in_one_json_piece_still_works(self):
+        resp = MagicMock(status_code=200, headers={"Content-Type": "application/json"})
+        resp.json.return_value = {"text": "## Summary\nWhole."}
+        info = {}
+        with patch.object(action_api.requests, "post", return_value=resp):
+            out = action_api.run_managed_action_stream(NOTES_TEXT, "meeting_notes", "tok", lambda d: None, info=info)
+        self.assertEqual(out, "## Summary\nWhole.")
+        self.assertEqual(info, {})
+
+    def own(self, cfg, lines, info, drop=False):
+        resp = _Stream(lines, drop)
+        with patch.object(action_api.requests, "post", return_value=resp) as post:
+            out = action_api.run_action_stream(NOTES_TEXT, "meeting_notes", cfg, lambda d: None, info=info)
+        return out, post
+
+    def test_an_openai_compatible_key_streams_and_flags_a_cut(self):
+        info = {}
+        out, post = self.own(OPENAI_CFG, _sse(_chunk("## Summary\nA"), _chunk("", "length")), info)
+        self.assertEqual(out, "## Summary\nA")
+        self.assertTrue(info["cut"])
+        body = post.call_args.kwargs["json"]
+        self.assertTrue(body["stream"])
+        self.assertEqual(body["max_tokens"], 3600)
+        self.assertEqual(post.call_args.kwargs["timeout"], (10, 60))
+        info = {}
+        self.own(OPENAI_CFG, _sse(_chunk("A"), _chunk("", "stop")), info)
+        self.assertEqual(info, {})
+
+    def test_an_openai_compatible_server_that_ignores_stream_still_gives_the_notes(self):
+        resp = MagicMock(status_code=200, headers={"Content-Type": "application/json"})
+        resp.json.return_value = {"choices": [{"message": {"content": "## Summary\nWhole."}, "finish_reason": "length"}]}
+        info, seen = {}, []
+        with patch.object(action_api.requests, "post", return_value=resp):
+            out = action_api.run_action_stream(NOTES_TEXT, "meeting_notes", OPENAI_CFG, seen.append, info=info)
+        self.assertEqual((out, seen), ("## Summary\nWhole.", ["## Summary\nWhole."]))
+        self.assertTrue(info["cut"])
+
+    def test_an_openai_compatible_stream_that_drops_is_a_cut(self):
+        info = {}
+        out, _post = self.own(OPENAI_CFG, _sse(_chunk("## Summary\nA"))[:-1], info, drop=True)
+        self.assertEqual(out, "## Summary\nA")
+        self.assertTrue(info["cut"])
+
+    def test_gemini_says_max_tokens_in_its_own_words(self):
+        def gem(text, reason):
+            ev = {"candidates": [{"content": {"parts": [{"text": text}]}}]}
+            if reason:
+                ev["candidates"][0]["finishReason"] = reason
+            return ev
+        info = {}
+        out, _p = self.own(GEMINI_CFG, _sse(gem("## Summary\nA", None), gem("B", "MAX_TOKENS")), info)
+        self.assertEqual(out, "## Summary\nAB")
+        self.assertTrue(info["cut"])
+        info = {}
+        self.own(GEMINI_CFG, _sse(gem("A", None), gem("B", "STOP")), info)
+        self.assertEqual(info, {})
+
+    def test_anthropic_says_max_tokens_in_its_own_words(self):
+        def delta(text):
+            return {"type": "content_block_delta", "delta": {"type": "text_delta", "text": text}}
+
+        def stop(reason):
+            return {"type": "message_delta", "delta": {"stop_reason": reason}}
+        info = {}
+        out, post = self.own(ANTHROPIC_CFG, _sse(delta("## Summary\nA"), stop("max_tokens"), {"type": "message_stop"}), info)
+        self.assertEqual(out, "## Summary\nA")
+        self.assertTrue(info["cut"])
+        self.assertEqual(post.call_args.kwargs["json"]["max_tokens"], 3600)
+        info = {}
+        self.own(ANTHROPIC_CFG, _sse(delta("A"), stop("end_turn"), {"type": "message_stop"}), info)
+        self.assertEqual(info, {})
+
+    def test_a_live_answer_without_info_is_as_before(self):
+        resp = _Stream(_sse(_chunk("Short."), _chunk("", "length")))
+        seen = []
+        with patch.object(action_api.requests, "post", return_value=resp):
+            out = action_api.run_action_stream("hello", "live_assist", OPENAI_CFG, seen.append)
+        self.assertEqual((out, seen), ("Short.", ["Short."]))
+
+    def test_cut_short_is_a_str_that_says_so(self):
+        cut = action_api.CutShort("## Summary\nA")
+        self.assertIsInstance(cut, str)
+        self.assertEqual(cut, "## Summary\nA")
+        self.assertTrue(cut.cut)
+        self.assertFalse(getattr("plain", "cut", False))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -281,6 +281,12 @@ def build_scenarios():
                                                  "mistral": [{"stall": True}]})
     add("stall_smart_stream", FULL_ENV, [SMART_STREAM], {"live": [{"stall": True}], "openai": [{"stall": True}]})
     # what the app may send
+    # meeting notes (the app streams them): up to 6000 tokens, streamed, 12 s to first words from each engine
+    add("notes_tokens", ONLY_OPENAI, [req("meeting_notes", max_tokens=v) for v in (3000, 5000, 6000, 9000, 1e9)]
+        + [req("summarize", max_tokens=5000), req("meeting_notes", max_tokens=-1), req("meeting_notes", max_tokens=None)])
+    add("notes_stream", FULL_ENV, [req("meeting_notes", stream=True)], ALL_FAIL)
+    add("notes_stream_ok", ONLY_OPENAI, [req("meeting_notes", stream=True, max_tokens=4500)])
+    add("notes_stream_claude", FULL_ENV, [req("meeting_notes", stream=True)], {"openai": [{"status": 500}]})
     add("max_tokens", ONLY_OPENAI,
         [req("translate", max_tokens=v) for v in (-5, 0, 0.5, "-Infinity", "Infinity", "abc", None, 300.7, 1e9)])
     add("size", ONLY_OPENAI, [{**SMART, "pad": 9_000_000}, {**SMART, "pad": 1_000_000},
@@ -602,6 +608,34 @@ class TestSmartActionRoutes(unittest.TestCase):
         r = self.sc("empty_stream")[0]
         self.assertEqual(self.hosts(r), ["openai", "mistral"])
         self.assertIn("mistral words", r["text"])
+
+    def test_meeting_notes_may_ask_for_up_to_6000_tokens_and_everything_else_stays_at_2000(self):
+        r = self.sc("notes_tokens")
+        got = [self.openai_body(x)["max_completion_tokens"] for x in r]
+        self.assertEqual(got, [3000, 5000, 6000, 6000, 6000, 2000, 600, 600])
+
+    def test_streamed_notes_get_12_seconds_to_first_words_from_every_engine(self):
+        r = self.sc("notes_stream")[0]
+        self.assertEqual(self.hosts(r), ["openai", "anthropic", "mistral", "gemini", "gemini"])
+        self.assertEqual([c["budget"] for c in r["calls"]], [12_000] * 5)
+        for c in r["calls"]:
+            if c["host"] != "anthropic":
+                self.assertIs(c["body"]["stream"], True)
+
+    def test_streamed_notes_are_relayed_and_logged_without_their_text(self):
+        r = self.sc("notes_stream_ok")[0]
+        self.assertEqual(r["status"], 200)
+        self.assertIn("openai words", r["text"])
+        self.assertEqual(self.openai_body(r)["max_completion_tokens"], 4500)
+        lines = [l for l in r["logs"] if l.startswith("meeting notes streamed")]
+        self.assertEqual(len(lines), 1)
+        self.assertIn('"route":"openai"', lines[0])
+        self.assertNotIn("openai words", " ".join(r["logs"]))
+
+    def test_streamed_notes_fall_to_claude_when_openai_fails(self):
+        r = self.sc("notes_stream_claude")[0]
+        self.assertEqual(self.hosts(r), ["openai", "anthropic"])
+        self.assertIn("anthropic words", r["text"])
 
     def test_an_answer_cut_off_at_max_tokens_is_kept_from_openai(self):
         for res in self.sc("cut_off"):          # a Smart Action and meeting notes

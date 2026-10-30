@@ -2,6 +2,7 @@ import re
 
 import action_api
 import local_llm
+import notes_prompt
 import smart_prompt
 import vocabulary
 
@@ -295,6 +296,10 @@ def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_I
         token = (config or {}).get("_managed_token")
         if token:
             try:
+                if mode == ACTION_MEETING_NOTES:
+                    return _notes_from_stream(lambda info: action_api.run_managed_action_stream(
+                        text, mode, token, _drop_token, source_lang=source_lang, target_lang=target_lang,
+                        vocab_block=vocab_block, image_b64=(config or {}).get("_image_png_b64"), info=info))
                 return action_api.run_managed_action(
                     text, mode, token, source_lang=source_lang, target_lang=target_lang,
                     vocab_block=vocab_block,
@@ -307,6 +312,9 @@ def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_I
             raise ActionError("Add your action API settings before using this action engine.")
         api_config = cloud_api_config(model, config)
         try:
+            if mode == ACTION_MEETING_NOTES:
+                return _notes_from_stream(lambda info: action_api.run_action_stream(
+                    text, mode, api_config, _drop_token, source_lang=source_lang, target_lang=target_lang, info=info))
             return action_api.run_action(text, mode, api_config, source_lang=source_lang, target_lang=target_lang)
         except action_api.ActionAPIError as e:
             raise ActionError(str(e)) from e
@@ -348,6 +356,29 @@ def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_I
                     raise ActionError(str(e)) from e
             raise
     return text
+
+
+def _drop_token(_delta):
+    """The notes appear when they are finished: the streamed pieces are not shown."""
+
+
+NOTES_CUT_MESSAGE = "The AI stopped before the notes were finished. Try again."
+
+
+def _notes_from_stream(call):
+    """Meeting notes through a streaming engine call (``call(info)``): a long meeting's notes take longer than any
+    whole-answer wait, so they are always streamed - the pieces are not shown, the finished text is returned. When the
+    model stopped at its token limit (or the connection dropped late) the text is trimmed to its last whole line and comes
+    back as a CutShort (a str with .cut), which the session says above the notes; stopped inside the Summary, the notes
+    are not worth keeping and it is an error (the notes page offers 'Write notes again')."""
+    info = {}
+    text = (call(info) or "").strip()
+    if not info.get("cut"):
+        return text
+    kept = notes_prompt.finish_cut(text)
+    if not notes_prompt.past_the_summary(kept):
+        raise ActionError(NOTES_CUT_MESSAGE)
+    return action_api.CutShort(kept)
 
 
 NO_ENGINE_MESSAGE = ("No AI engine is connected. Sign in to Gusan Pro, or add an "
@@ -703,11 +734,28 @@ def _extract_action_items_heuristic(text):
     return items
 
 
+_SPEAKER_LABEL = re.compile(r"^[ \t]*(?:You|Them|Speaker\s+(?:\d+|\?))[ \t]*:[ \t]*", re.M)
+
+
+def _without_speaker_labels(text):
+    """A labelled transcript ("You: ...", "Them: ...", "Speaker 2: ...") as plain sentences: the labels are not words
+    of the talk, and a line without its full stop ends its sentence anyway."""
+    lines = []
+    for line in (text or "").split("\n"):
+        body = _SPEAKER_LABEL.sub("", line).strip()
+        if body:
+            lines.append(body if body[-1] in ".!?…:;," else body + ".")
+    return " ".join(lines)
+
+
 def _meeting_notes_extractive(text):
     """Best-effort notes when no LLM is available.
 
     Output mirrors the structure of the LLM prompt so downstream code can
-    treat both kinds of output the same way."""
+    treat both kinds of output the same way. Short on purpose: a summary and
+    the action items (no Discussion)."""
+    if _SPEAKER_LABEL.search(text or ""):
+        text = _without_speaker_labels(text)
     summary = _summarize_extractive(text)
     action_items = _extract_action_items_heuristic(text)
     parts = []

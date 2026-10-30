@@ -210,8 +210,10 @@ class TestMeetingNotes(unittest.TestCase):
         self.assertIn("- [ ]", out)            # at least one checkbox item
 
     def test_meeting_notes_cloud_uses_api(self):
-        with patch.object(actions.action_api, "run_action",
-                          return_value="## Summary\nGreat meeting.") as call:
+        # the notes are streamed: no whole-answer wait on a long meeting (see TestMeetingNotesStreaming)
+        with patch.object(actions.action_api, "run_action_stream",
+                          return_value="## Summary\nGreat meeting.") as call, \
+                patch.object(actions.action_api, "run_action") as oneshot:
             out = actions.process(
                 self.SAMPLE,
                 actions.ACTION_MEETING_NOTES,
@@ -220,6 +222,7 @@ class TestMeetingNotes(unittest.TestCase):
             )
         self.assertIn("Great meeting", out)
         call.assert_called_once()
+        oneshot.assert_not_called()
 
     def test_summarize_cloud_uses_api(self):
         with patch.object(actions.action_api, "run_action",
@@ -232,6 +235,151 @@ class TestMeetingNotes(unittest.TestCase):
             )
         self.assertEqual(out, "Two sentences.")
         call.assert_called_once()
+
+
+def _stream_answer(text, cut=False, seen=None):
+    """A stand-in for a streaming engine call: it returns ``text`` and says whether the model was cut."""
+    def run(*args, **kwargs):
+        if seen is not None:
+            seen.append((args, kwargs))
+        if cut and kwargs.get("info") is not None:
+            kwargs["info"]["cut"] = True
+        return text
+    return run
+
+
+LABELLED = ("You: Thanks for joining. I will send the budget by Friday.\n"
+            "Them: Good, and we need to confirm the venue.\n"
+            "Speaker 2: I'll check the venue on Monday. Let's decide on the date.\n")
+
+
+class TestMeetingNotesStreaming(unittest.TestCase):
+    """The notes are always streamed (a long meeting's notes outlast any whole-answer wait). A cut-off answer is trimmed, flagged
+    and kept - unless it never got past the Summary."""
+    MANAGED = {"_managed_token": "tok"}
+    OWN = {"action_api_key": "k", "privacy_mode": False}
+
+    def process(self, model, config, stream_name, **kw):
+        with patch.object(actions.action_api, stream_name, **kw) as call, \
+                patch.object(actions.action_api, "run_managed_action") as managed_once, \
+                patch.object(actions.action_api, "run_action") as once:
+            out = actions.process("You: hello", actions.ACTION_MEETING_NOTES, model=model, config=config)
+        managed_once.assert_not_called()
+        once.assert_not_called()
+        return out, call
+
+    def test_gusan_cloud_streams_the_notes(self):
+        seen = []
+        out, call = self.process(actions.API_MANAGED_ID, self.MANAGED, "run_managed_action_stream",
+                                 side_effect=_stream_answer("## Summary\nOk.\n\n## Action items\n- [ ] x", seen=seen))
+        self.assertEqual(out, "## Summary\nOk.\n\n## Action items\n- [ ] x")
+        self.assertNotIsInstance(out, actions.action_api.CutShort)
+        args, kwargs = seen[0]
+        self.assertEqual(args[1:3], (actions.ACTION_MEETING_NOTES, "tok"))
+        self.assertIsInstance(kwargs["info"], dict)
+
+    def test_an_own_key_streams_the_notes(self):
+        for model in (actions.API_OPENAI_ID, actions.API_ANTHROPIC_ID, actions.API_GEMINI_ID):
+            config = dict(self.OWN, google_api_key="g")
+            out, _call = self.process(model, config, "run_action_stream", side_effect=_stream_answer("## Summary\nOk."))
+            self.assertEqual(out, "## Summary\nOk.", model)
+
+    def test_the_streamed_pieces_are_not_shown_anywhere(self):
+        self.assertIsNone(actions._drop_token("piece"))
+
+    def test_other_actions_are_still_answered_in_one_piece(self):
+        with patch.object(actions.action_api, "run_action", return_value="Two sentences.") as once, \
+                patch.object(actions.action_api, "run_action_stream") as stream:
+            out = actions.process("some text", actions.ACTION_SUMMARIZE, model=actions.API_OPENAI_ID, config=self.OWN)
+        self.assertEqual(out, "Two sentences.")
+        once.assert_called_once()
+        stream.assert_not_called()
+
+    CUT = ("## Summary\nAram led the call.\n\n## Action items\n- [ ] Send it (Owner: Aram, Due: Friday)\n"
+           "- [ ] Half a sen")
+
+    def test_a_cut_answer_is_trimmed_and_comes_back_flagged(self):
+        for model, config, name in ((actions.API_MANAGED_ID, self.MANAGED, "run_managed_action_stream"),
+                                    (actions.API_OPENAI_ID, self.OWN, "run_action_stream")):
+            out, _call = self.process(model, config, name, side_effect=_stream_answer(self.CUT, cut=True))
+            self.assertEqual(out, "## Summary\nAram led the call.\n\n## Action items\n"
+                                  "- [ ] Send it (Owner: Aram, Due: Friday)")
+            self.assertIsInstance(out, actions.action_api.CutShort)
+            self.assertTrue(out.cut)
+
+    def test_a_cut_answer_in_a_discussion_keeps_what_was_written(self):
+        text = "## Summary\nA.\n\n## Discussion\n### One\n- It slips. A week.\n\n### Two\n- It cos"
+        out, _call = self.process(actions.API_MANAGED_ID, self.MANAGED, "run_managed_action_stream",
+                                  side_effect=_stream_answer(text, cut=True))
+        self.assertEqual(out, "## Summary\nA.\n\n## Discussion\n### One\n- It slips. A week.")
+        self.assertTrue(out.cut)
+
+    def test_an_answer_cut_inside_the_summary_is_not_kept(self):
+        with self.assertRaises(actions.ActionError) as cm:
+            self.process(actions.API_MANAGED_ID, self.MANAGED, "run_managed_action_stream",
+                         side_effect=_stream_answer("## Summary\nAram led the call and then", cut=True))
+        self.assertEqual(str(cm.exception), actions.NOTES_CUT_MESSAGE)
+        self.assertNotIn("token", actions.NOTES_CUT_MESSAGE.lower())
+
+    def test_an_engine_error_is_an_action_error(self):
+        err = actions.action_api.ActionAPIError("Daily fair-use limit reached")
+        with self.assertRaises(actions.ActionError) as cm:
+            self.process(actions.API_MANAGED_ID, self.MANAGED, "run_managed_action_stream", side_effect=err)
+        self.assertIn("fair-use", str(cm.exception))
+
+    def test_an_empty_answer_stays_empty(self):
+        out, _call = self.process(actions.API_MANAGED_ID, self.MANAGED, "run_managed_action_stream",
+                                  side_effect=_stream_answer("  "))
+        self.assertEqual(out, "")
+
+    def test_privacy_mode_never_streams_to_a_cloud(self):
+        with patch.object(actions.action_api, "run_managed_action_stream") as m, \
+                patch.object(actions.action_api, "run_action_stream") as s:
+            out = actions.process(LABELLED, actions.ACTION_MEETING_NOTES, model=actions.API_MANAGED_ID,
+                                  config={"_managed_token": "tok", "privacy_mode": True})
+            out2 = actions.process(LABELLED, actions.ACTION_MEETING_NOTES, model=actions.API_OPENAI_ID,
+                                   config={"action_api_key": "k", "privacy_mode": True})
+        m.assert_not_called()
+        s.assert_not_called()
+        self.assertIn("## Summary", out)
+        self.assertIn("## Summary", out2)
+
+
+class TestRuleBasedNotesOnALabelledTranscript(unittest.TestCase):
+    """The built-in formatter reads the talk, not the labels: no 'You:' or 'Them:' in its sentences. It stays short."""
+
+    def notes(self, text):
+        return actions.process(text, actions.ACTION_MEETING_NOTES, model=actions.RULE_BASED_ID)
+
+    def test_no_label_reaches_the_summary_or_the_action_items(self):
+        out = self.notes(LABELLED)
+        for label in ("You:", "Them:", "Speaker 2:"):
+            self.assertNotIn(label, out)
+        self.assertIn("## Summary", out)
+        self.assertIn("## Action items", out)
+        self.assertIn("- [ ] I will send the budget by Friday", out)
+        self.assertIn("- [ ] I'll check the venue on Monday", out)
+
+    def test_it_is_short_and_has_no_discussion(self):
+        long = "\n".join("You: Sentence number %d is about something. Them: Reply %d is about something else." % (i, i)
+                         for i in range(400))
+        out = self.notes(long)
+        self.assertNotIn("## Discussion", out)
+        self.assertLess(len(out.split()), 400)
+
+    def test_a_line_without_its_full_stop_still_ends_its_sentence(self):
+        out = self.notes("You: first line without stop\nThem: second line without stop\nYou: third")
+        self.assertNotIn("You:", out)
+        self.assertIn("first line without stop.", out)
+
+    def test_a_transcript_without_labels_is_read_as_before(self):
+        plain = "We need to lock the API contract by Friday. I'll draft the spec tonight. Nothing else."
+        self.assertEqual(self.notes(plain), actions._meeting_notes_extractive(plain))
+        self.assertIn("- [ ] We need to lock the API contract by Friday", self.notes(plain))
+
+    def test_a_name_with_a_colon_is_not_a_label(self):
+        out = self.notes("Budget: we need to send the budget by Friday. Anna: will check.")
+        self.assertIn("Budget: we need to send the budget by Friday", out)
 
 
 class TestGusanWords(unittest.TestCase):

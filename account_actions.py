@@ -217,16 +217,17 @@ def is_guest(app):
     return app_tier(app) == entitlements.TIER_GUEST
 
 
-def first_name(app):
+def first_name(app, email_fallback=True):
     """The signed-in person's first name (their profile name, else the front of
     their email), "" for a guest: whatever a session still holds - a super
     admin previewing Guest is signed in underneath - a guest is never called
-    by it."""
+    by it. ``email_fallback=False``: the profile name only (a name that goes into
+    a document is never made up from an address)."""
     if is_guest(app):
         return ""
     auth = getattr(app, "auth", None)
     name = str(getattr(auth, "user_name", None) or "").strip()
-    if not name:
+    if not name and email_fallback:
         email = str(getattr(auth, "user_email", None) or "").strip()
         name = email.split("@")[0] if email else ""
     return name.split()[0] if name else ""

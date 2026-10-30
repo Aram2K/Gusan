@@ -182,6 +182,17 @@ What transcribes a session (Gusan 2.0.1)
     the people on the call apart from the segments kept at Stop (meeting_speakers.refine_meeting)
     and otherwise says the words were left as they are; finishing an interrupted session keeps
     its live pieces as the transcript; the Transcript tab doesn't suggest a re-read for one.
+Richer notes
+  * The notes scale with the meeting (notes_prompt.plan_for, from the words of what the engine is
+    given): a few sentences for a short one; a longer one gets a two-paragraph Summary and a
+    "## Discussion" LAST (### Topic headings, a few bullets each); Key decisions, Action items and
+    Open questions keep their places. They are always streamed (actions._notes_from_stream), so a long
+    meeting's notes never meet a whole-answer wait; an answer the engine cut off at its limit is
+    trimmed to its last whole line, kept, and said above the notes (``NOTES_CUT_NOTICE`` in meta
+    ``notes_notice``, never inside notes.md) - or, cut inside the Summary, is an error with "Write notes
+    again". _summarize_and_finish saves rich_text.clean_notes(notes): every action item in one shape
+    ('Owner: Them' / 'Owner: , Due: ' never survive, "You" becomes the profile first name), no empty
+    section. _notes_input tells an AI engine who "You" is (the profile name, never an email's front).
 """
 import importlib.util
 import json
@@ -199,6 +210,7 @@ import diarization
 import invite_context
 import meeting_speakers
 import meeting_store
+import rich_text
 import speaker_followup
 import speech_langs
 import storage
@@ -258,6 +270,9 @@ QUIT_CHUNK_WAIT = 3.0      # s: pieces being transcribed at Quit may still land
 # An interrupted meeting finished from its saved recording (see _recover_then_notes).
 RECOVERED_NOTICE = ("Gusan was closed before this meeting was finished, so the transcript was "
                     "rebuilt from the saved recording.")
+# The AI stopped writing at its limit: the notes are kept up to their last whole line (actions.CutShort).
+NOTES_CUT_NOTICE = ("The notes stopped early, so the last topic may be missing. "
+                    "Write them again from \u22ef \u203a Rewrite notes.")
 # The same for a Live Assistant session whose words came from a cloud engine: the recording is NOT
 # read again (that would replace them with this computer's much worse text, see _reread_plan).
 RECOVERED_CLOUD_NOTICE = ("Gusan was closed before this meeting was finished, so the transcript is "
@@ -2014,14 +2029,29 @@ class MeetingCore:
             "call. If the meeting was still going, check the microphone and the speaker output in "
             "Windows sound settings." % span)
 
+    def _recorder_name(self):
+        """The signed-in person's first name from their profile ('' for a guest or without one): who "You" is in the
+        transcript. Never made up from an email address."""
+        try:
+            import account_actions
+            return account_actions.first_name(self.app, email_fallback=False)
+        except Exception:
+            return ""
+
     def _notes_input(self, with_invite=True):
         """What the notes engine is given: the calendar invite's title, people and
         agenda (invite_context.notes_header - framed as data, empty for a generic
         title, nobody and no agenda) in front of the transcript, then the user's
-        own notes. The bare transcript when there is no invite context."""
+        own notes. For an AI engine, a transcript with "You:" lines also gets one
+        line saying who You is (the profile name). The bare transcript when there
+        is nothing to put in front of it."""
         transcript = self._final_transcript or ""
         header = (invite_context.notes_header(self._meeting_title, self._meeting_attendees,
                                               self._meeting_agenda) if with_invite else "")
+        if with_invite and re.search(r"(?m)^You:", transcript):
+            who = invite_context.recorder_line(self._recorder_name())
+            if who:
+                header = (header + "\n" + who) if header else who
         note_context = (header + "\n\nTranscript:\n" + transcript) if header else transcript
         if self._user_notes:
             note_context += ("\n\nAdditional visual meeting notes provided by "
@@ -2074,8 +2104,14 @@ class MeetingCore:
                 model=engine,
                 config=engine_config,
             )
+            # One clean shape for every action item and no empty section, whatever the engine wrote ('Owner: Them',
+            # 'Owner: , Due: ', 'None.'): notes.md, the history entry and every export start from this text. "You"
+            # becomes the person's own name, because notes are shared. A cut-off answer (CutShort) is said above them.
+            cut = bool(getattr(notes, "cut", False))
+            cleaned = rich_text.clean_notes(notes, me=self._recorder_name())
+            notes = cleaned if cleaned.strip() else notes          # never turn whatever the engine wrote into nothing
             self._summary_downgraded = bool(downgraded_from)
-            self._notes_notice = ""
+            self._notes_notice = NOTES_CUT_NOTICE if cut else ""
             if downgraded_from:
                 reason = ("sign in with a Pro account to use it" if kind == "managed"
                           else "add its API key to use it")

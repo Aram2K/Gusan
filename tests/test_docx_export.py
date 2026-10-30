@@ -163,6 +163,66 @@ class TestStyledNotes(unittest.TestCase):
         self.assertEqual(dx.inline_runs("<b>not a tag</b>"), [("<b>not a tag</b>", False, False)])
 
 
+RICH_NOTES = """## Summary
+Aram led the call.
+
+## Key decisions
+- None.
+
+## Action items
+- [ ] Send the file (Owner: Them, Due: )
+- [ ] Book the room (Owner: Aram, Due: Friday)
+- [ ] Review it (Owner: , Due: )
+
+## Open questions
+_None._
+
+## Discussion
+### Release
+- It slips by a week.
+
+### Empty topic
+
+### Pricing
+- **290 euros** a year.
+"""
+
+
+class TestRichNotesInWord(unittest.TestCase):
+    """The Discussion's topics are sub-headings, an empty section is not printed, and an owner that is nobody is not either."""
+
+    def test_sections_are_headings_and_topics_are_bold_sub_headings(self):
+        paras = dx.notes_paragraphs(RICH_NOTES)
+        styles = [(p["style"], p["text"]) for p in paras if p["style"] in ("heading", "subheading")]
+        self.assertEqual(styles, [("heading", "Summary"), ("heading", "Action items"), ("heading", "Discussion"),
+                                  ("subheading", "Release"), ("subheading", "Pricing")])
+
+    def test_an_empty_section_and_a_none_section_are_left_out(self):
+        text = " ".join(p["text"] for p in dx.notes_paragraphs(RICH_NOTES))
+        for gone in ("Key decisions", "Open questions", "Empty topic", "None"):
+            self.assertNotIn(gone, text)
+
+    def test_an_owner_that_is_nobody_is_not_printed(self):
+        tasks = [p for p in dx.notes_paragraphs(RICH_NOTES) if p["style"] == "task"]
+        self.assertEqual([(t["text"], t["after"]) for t in tasks],
+                         [("Send the file", ""), ("Book the room", "(Aram · by Friday)"), ("Review it", "")])
+
+    def test_the_word_file_has_no_markdown_and_no_empty_owner_text(self):
+        doc = _parts(dx.build_docx("Notes", dx.notes_paragraphs(RICH_NOTES), include_timestamps=False))["word/document.xml"]
+        minidom.parseString(doc)
+        for raw in ("##", "###", "**", "Owner:", "Due:", "Them", "- [ ]"):
+            self.assertNotIn(raw, doc)
+        self.assertIn('<w:b/></w:rPr><w:t xml:space="preserve">290 euros</w:t>', doc)
+
+    def test_a_topic_is_bold_at_body_size_and_a_section_is_14_pt(self):
+        doc = _parts(dx.build_docx("Notes", dx.notes_paragraphs(RICH_NOTES), include_timestamps=False))["word/document.xml"]
+        self.assertIn('<w:sz w:val="28"/><w:szCs w:val="28"/><w:b/></w:rPr><w:t xml:space="preserve">Discussion</w:t>', doc)
+        self.assertIn('<w:sz w:val="22"/><w:szCs w:val="22"/><w:b/></w:rPr><w:t xml:space="preserve">Release</w:t>', doc)
+
+    def test_notes_that_are_all_empty_sections_make_no_paragraphs(self):
+        self.assertEqual(dx.notes_paragraphs("## Key decisions\n\n## Open questions\n- None.\n"), [])
+
+
 class TestGroupSegments(unittest.TestCase):
     def _seg(self, start, end, text, speaker=None):
         return {"start": start, "end": end, "text": text, "speaker": speaker}

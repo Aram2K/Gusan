@@ -74,6 +74,65 @@ class TestMarkdownToBlocks(unittest.TestCase):
         self.assertEqual(ne.markdown_to_blocks(None), [])
 
 
+def _text(block):
+    """The visible text of a block's rich_text, and its annotated pieces."""
+    kind = block["type"]
+    rich = block[kind]["rich_text"]
+    return "".join(r["text"]["content"] for r in rich), [
+        (r["text"]["content"], r.get("annotations")) for r in rich if r.get("annotations")]
+
+
+class TestRichNotesInNotion(unittest.TestCase):
+    """The Discussion's topics and the marks the notes use reach Notion as Notion's own blocks and marks."""
+
+    def test_bold_italic_and_code_become_annotations_not_literal_marks(self):
+        (block,) = ne.markdown_to_blocks("- **290 euros** a year, *not* `monthly`")
+        text, marked = _text(block)
+        self.assertEqual(text, "290 euros a year, not monthly")
+        self.assertEqual(marked, [("290 euros", {"bold": True, "italic": False, "code": False}),
+                                  ("not", {"bold": False, "italic": True, "code": False}),
+                                  ("monthly", {"bold": False, "italic": False, "code": True})])
+
+    def test_the_marks_work_in_paragraphs_numbers_and_to_dos(self):
+        blocks = ne.markdown_to_blocks("A **bold** word\n1. **first** one\n- [ ] **Fix** it (Owner: Al)")
+        for block in blocks:
+            text, marked = _text(block)
+            self.assertNotIn("*", text)
+            self.assertEqual(len(marked), 1)
+
+    def test_text_without_marks_is_one_plain_run_as_before(self):
+        (block,) = ne.markdown_to_blocks("- snake_case and 2 * 3 = 6")
+        rich = block["bulleted_list_item"]["rich_text"]
+        self.assertEqual(len(rich), 1)
+        self.assertNotIn("annotations", rich[0])
+        self.assertEqual(rich[0]["text"]["content"], "snake_case and 2 * 3 = 6")
+
+    def test_markup_in_the_text_stays_text(self):
+        (block,) = ne.markdown_to_blocks("- **<b>x</b> & y**")
+        self.assertEqual(_text(block)[0], "<b>x</b> & y")
+
+    def test_a_long_marked_line_is_still_chunked_under_the_cap(self):
+        (block,) = ne.markdown_to_blocks("- **" + "x" * 5000 + "** tail")
+        rich = block["bulleted_list_item"]["rich_text"]
+        self.assertTrue(all(len(r["text"]["content"]) <= ne.MAX_RICH_LEN for r in rich))
+        self.assertEqual("".join(r["text"]["content"] for r in rich), "x" * 5000 + " tail")
+
+    def test_a_topic_heading_is_a_heading_and_a_deeper_one_too(self):
+        blocks = ne.markdown_to_blocks("## Discussion\n### Topic\n#### Deeper\n###### Deepest")
+        self.assertEqual([b["type"] for b in blocks], ["heading_2", "heading_3", "heading_3", "heading_3"])
+        self.assertEqual([_text(b)[0] for b in blocks], ["Discussion", "Topic", "Deeper", "Deepest"])
+
+    def test_the_page_title_has_no_marks(self):
+        self.assertEqual(ne._rich("a **b**"), [{"type": "text", "text": {"content": "a **b**"}}])
+
+    def test_cleaned_notes_make_to_dos_without_empty_owner_text(self):
+        import rich_text
+        md = rich_text.clean_notes("## Action items\n- [ ] Send it (Owner: Them, Due: )\n"
+                                   "- [ ] Call (Owner: , Due: Friday)\n- [x] Book (Owner: Aram)\n")
+        texts = [_text(b)[0] for b in ne.markdown_to_blocks(md) if b["type"] == "to_do"]
+        self.assertEqual(texts, ["Send it", "Call (Due: Friday)", "Book (Owner: Aram)"])
+
+
 class TestPublishFlow(unittest.TestCase):
     TOKEN = "ntn_test"
     PAGE = "0123456789abcdef0123456789abcdef"

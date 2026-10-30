@@ -74,3 +74,36 @@ class TestLongInputHandling(unittest.TestCase):
     def test_infer_lock_shared_across_legacy_aliases(self):
         lock = local_llm._infer_lock_for("qwen_tiny")
         self.assertIs(lock, local_llm._infer_lock_for("aibuben_tiny"))
+
+
+class TestLocalNotesLength(unittest.TestCase):
+    """The notes' length is planned from the meeting as it was, even when the on-computer model has to condense it first."""
+
+    def run_notes(self, text, condensed="the condensed talk"):
+        seen = []
+        with patch.object(local_llm, "_chat", lambda llm, messages, max_tokens: seen.append((messages, max_tokens)) or "ok"), \
+                patch.object(local_llm, "_condense_to_fit", lambda llm, t, target: condensed):
+            local_llm._run_action_locked(_FakeTokLLM(), text, "meeting_notes", "auto", "en", "")
+        return seen
+
+    def test_a_long_meeting_is_planned_long_though_the_model_reads_the_condensed_text(self):
+        (messages, max_tokens), = self.run_notes("word " * 12000)
+        user = messages[-1]["content"]
+        self.assertIn("at most 8 topics", user)
+        self.assertTrue(user.endswith("User text:\nthe condensed talk"))
+        self.assertEqual(max_tokens, 2500)               # the on-computer budget is unchanged
+
+    def test_a_meeting_that_fits_is_planned_from_itself(self):
+        (messages, _mt), = self.run_notes("word " * 1000)
+        self.assertIn("at most 4 topics", messages[-1]["content"])
+        (messages, _mt), = self.run_notes("You: hello there. Them: hi.")
+        self.assertNotIn("## Discussion", messages[-1]["content"])
+
+    def test_the_condensing_asks_to_keep_the_topics_in_order(self):
+        self.assertIn("topics in the order", local_llm._CONDENSE_INSTRUCTION)
+        self.assertIn("owner name, number, date", local_llm._CONDENSE_INSTRUCTION)
+
+    def test_the_other_modes_do_not_plan(self):
+        for mode in ("summarize", "write_email", "make_todo_list", "live_recap"):
+            body = local_llm._messages_for(mode, "word " * 1000, "auto", "en", notes_words=12000)[-1]["content"]
+            self.assertNotIn("Discussion", body, mode)

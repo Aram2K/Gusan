@@ -17,6 +17,10 @@ stdlib only, so tests/ (PySide6 stubbed) can import it.
                           ("bullet", text) (numbered items too) /
                           ("task", (done, text, line_index)) / ("quote", text);
                           a code fence comes back as ("para", code).
+                          sections=True (the notes view): a topic heading under a
+                          section ("### Topic" below "## Discussion") is
+                          ("subhead", text), and a section with nothing under it
+                          (or only "None.") is left out.
     inline_html(text, code=False)  escape, **b**, *i* / _i_, `code` stripped
                           (code=True keeps it as <code>).
     strip_inline(text) no ** * _ ` markers.
@@ -31,6 +35,14 @@ stdlib only, so tests/ (PySide6 stubbed) can import it.
     transcript_paragraphs(text, max_chars=550)  a meeting transcript as
                           readable paragraphs (sentence packing).
     parse_task / toggle_task_line / notes_plain  the meeting notes helpers.
+    split_task(text)   '(Owner: X, Due: Y)' in every shape a model writes it ->
+                          (task, owner, due); a generic side ("Them", "Speaker 2"),
+                          an empty or placeholder value is no owner.
+    clean_notes(md, me="")  the notes with every action item in one clean shape
+                          and no empty section: what notes.md, Notion and the
+                          Markdown export get.
+    heading_roles(blocks)   which headings are sections and which are topics.
+    inline_runs(text)  '**Fix** the *drift*' -> [(text, bold, italic)] for Word.
 """
 
 import html as _html
@@ -41,9 +53,6 @@ _TASK_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s*\[( |x|X)\]\s*(.*)$")
 _BULLET_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+(.*)$")
 _HEAD_RE = re.compile(r"^\s*(#{1,6})\s+(.*?)\s*#*\s*$")
 _BOLD_HEAD_RE = re.compile(r"^\s*\*\*([^*]{2,60}?):?\*\*:?\s*$")
-_OWNER_RE = re.compile(r"\(\s*Owner:\s*([^,)]*)(?:,\s*Due:\s*([^)]*))?\)", re.I)
-_DUE_RE = re.compile(r"\(\s*Due:\s*([^)]*)\)", re.I)
-_EMPTY = {"", "-", "—", "none", "n/a", "na", "tbd", "unassigned", "unknown", "unspecified", "not specified"}
 # New: numbered items and code fences.
 _NUM_RE = re.compile(r"^\s*(\d+)[.)]\s+(.*)$")
 _FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})\s*([^\s`]*)[^`]*$")
@@ -93,6 +102,26 @@ def _strip_md(text):
     s = _BOLD_RE.sub(r"\1", text or "")
     s = _CODE_RE.sub(r"\1", s)
     return s.strip()
+
+
+_INLINE_TAG_RE = re.compile(r"(</?b>|</?i>|</?code>)")
+
+
+def inline_runs(text):
+    """'**Fix** the *drift*' -> [("Fix", True, False), (" the ", False, False), ("drift", False, True)]: the inline
+    Markdown as (text, bold, italic) runs (the Word export's)."""
+    out = []
+    bold = italic = False
+    for piece in _INLINE_TAG_RE.split(inline_html(text or "")):
+        if piece in ("<b>", "</b>"):
+            bold = piece == "<b>"
+        elif piece in ("<i>", "</i>"):
+            italic = piece == "<i>"
+        elif piece in ("<code>", "</code>"):
+            continue
+        elif piece:
+            out.append((_html.unescape(piece), bold, italic))
+    return out
 
 
 def has_markup(md):
@@ -190,15 +219,24 @@ def parse_blocks(md):
     return [block for block, _gap in _scan(md)]
 
 
-def parse_notes(md):
+def parse_notes(md, sections=False):
     """The meeting notes view's blocks (meeting_views.parse_notes, same shape):
     ("head", text) / ("para", text) / ("bullet", text) /
-    ("task", (done, text, line_index)) / ("quote", text)."""
+    ("task", (done, text, line_index)) / ("quote", text).
+    ``sections=True`` (what the notes view shows): a topic heading under a section
+    is ("subhead", text) instead (see heading_roles) and a section with nothing
+    under it - or only a "None." line - is left out. line_index is still the raw
+    line of ``md``, so a ticked box finds its line."""
+    blocks = [b for b, _gap in _scan(md, " ")]
+    roles = {}
+    if sections:
+        blocks = _without_empty_sections(blocks)
+        roles = heading_roles(blocks)
     out = []
-    for block in (b for b, _gap in _scan(md, " ")):
+    for i, block in enumerate(blocks):
         kind = block[0]
         if kind == "head":
-            out.append(("head", block[2]))
+            out.append(("subhead" if roles.get(i) == "sub" else "head", block[2]))
         elif kind == "num":
             out.append(("bullet", block[2]))
         elif kind == "task":
@@ -210,28 +248,286 @@ def parse_notes(md):
     return out
 
 
-def parse_task(text):
-    """'`Fix X` (Owner: David, Due: Wed)' -> (task, owner, due)."""
-    t = text or ""
+# ── sections, topics and empty sections ──────────────────────────────────────
+def heading_roles(blocks):
+    """For parse_blocks() output: {index: "section" | "sub"} for each head. A heading is a sub-heading (a topic) when it
+    is level 3 or deeper and the notes also have a level 1-2 heading (the section titles): "### Topic" under
+    "## Discussion". Notes that only have deep headings keep them all as sections."""
+    levels = [b[1] for b in blocks if b[0] == "head"]
+    has_sections = any(lv <= 2 for lv in levels)
+    return {i: ("sub" if has_sections and b[1] >= 3 else "section")
+            for i, b in enumerate(blocks) if b[0] == "head"}
+
+
+# A section whose only line says there is nothing ("None.", "_None._", "No open questions.") is as empty as no line at all.
+_NONE_LINE = re.compile(
+    r"^(?:none|nothing|n/?a|aucune?|rien|no (?:key )?decisions?(?: (?:were )?(?:made|taken|reached))?|"
+    r"no action items?(?: (?:were )?(?:identified|found|mentioned|assigned))?|"
+    r"no open questions?(?: (?:were )?(?:raised|identified|left))?)\.?$", re.I)
+
+
+def _empty_sections(items):
+    """``items``: [(level, text)] in order - level is the heading's level, 0 for a body line (text = what it says; a
+    task or a code line counts as real content). The indexes to drop: a heading with nothing under it (the next heading
+    is of the same or a higher rank, or the notes end) or with only a "None." line, and that line. A title above its
+    sections or a section made of topics has a deeper heading next, so it stays - until its topics are gone too."""
+    dropped = set()
+    while True:
+        live = [i for i in range(len(items)) if i not in dropped]
+        found = set()
+        for pos, i in enumerate(live):
+            level = items[i][0]
+            if not level:
+                continue
+            j = pos + 1
+            while j < len(live) and not items[live[j]][0]:
+                j += 1
+            body = live[pos + 1:j]
+            nxt = items[live[j]][0] if j < len(live) else 0
+            if not body and (j >= len(live) or nxt <= level):
+                found.add(i)
+            elif len(body) == 1 and _NONE_LINE.match(items[body[0]][1].strip()):
+                found.update((i, body[0]))
+        if not found:
+            return dropped
+        dropped |= found
+
+
+def _block_text(b):
+    kind = b[0]
+    if kind in ("para", "bullet", "quote"):
+        return strip_inline(b[1])
+    if kind == "num":
+        return strip_inline(b[2])
+    return "x"                                      # a task or a code block is real content
+
+
+def _without_empty_sections(blocks):
+    items = [(b[1] if b[0] == "head" else 0, "" if b[0] == "head" else _block_text(b)) for b in blocks]
+    drop = _empty_sections(items)
+    return [b for i, b in enumerate(blocks) if i not in drop] if drop else blocks
+
+
+# ── who an action item belongs to ────────────────────────────────────────────
+# A model writes "(Owner: David, Due: Wed)" - and also "(Owner: , Due: )", "Owner: Aram Due: Friday", "(Due: Fri, Owner:
+# Aram)", "Responsable : Aram", "(Owner: Them)". One tolerant reader, shared by the notes view, Copy, Word, Notion and
+# clean_notes, so every surface agrees.
+# Words that mean "no value" in an Owner / Due slot.
+EMPTY_VALUES = {
+    "", "-", "–", "—", "?", "none", "n/a", "na", "tbd", "tbc", "unassigned", "unknown", "unspecified",
+    "not specified", "not assigned", "not mentioned", "not given", "nobody", "no one", "no owner", "name", "date",
+    "blank", "owner", "due", "aucun", "inconnu", "non spécifié", "non précisé", "à définir", "n/d"}
+# What a transcript calls people it cannot name, and the ways a model paraphrases "the group": a side or a group is not a
+# person, so it is never an owner. ("You" is not here: it is the person who recorded - see clean_notes.)
+_GENERIC_OWNER = re.compile(
+    r"^(?:them|they|speaker\s*[\d?]+|spk\s*[\d?]+|participant\s*\d*|caller|(?:the\s+)?other\s+(?:side|party|person|speaker)s?|"
+    r"(?:the\s+)?other\s+participants?|(?:the\s+)?others|someone|somebody|everyone|everybody|all|both|we|us|team|"
+    r"the\s+team|the\s+group|the\s+speaker|the\s+interviewer|the\s+interviewee|eux|elles|les\s+autres|"
+    r"l'autre\s+partie|tout\s+le\s+monde|nous|l'?[ée]quipe)$", re.I)
+OWNER_LABELS = ("owner", "assignee", "assigned to", "responsible", "responsable", "propriétaire", "verantwortlich")
+DUE_LABELS = ("due", "due date", "deadline", "échéance", "date limite", "fällig")
+_ALL_LABELS = "|".join(re.escape(x) for x in sorted(OWNER_LABELS + DUE_LABELS, key=len, reverse=True))
+_LABEL_RE = re.compile(r"(?<![\w])(%s)\s*:\s*" % _ALL_LABELS, re.I)
+# one "(...)", with one level of parentheses inside ("Owner: Aram (host), Due: Fri")
+_GROUP_RE = re.compile(r"\(((?:[^()]|\([^()]*\))*)\)")
+_TAIL_RE = re.compile(r"(?:\s+[-–—|]\s+|\.\s+|\s+)((?:%s)\s*:.*)$" % _ALL_LABELS, re.I)
+_SEP = re.compile(r"\s*(?:/|&|\+|;|,|\band\b|\bet\b|\bund\b)\s*", re.I)
+_MAX_META = 400                     # a longer "(...)" is prose, not an owner and a date
+_TAIL_WINDOW = 240                  # where a trailing "Owner: .., Due: .." may start (and keeps the search linear)
+
+
+def _plain(value):
+    """An Owner / Due value without markdown marks, wrapping brackets or quotes and a closing full stop."""
+    v = (value or "")[:_MAX_META].replace("**", "").replace("`", "").strip("*_ \t")
+    v = v.rstrip(".").strip()
+    for a, b in (("[", "]"), ("<", ">"), ('"', '"'), ("'", "'"), ("(", ")")):
+        if len(v) >= 2 and v[0] == a and v[-1] == b and a not in v[1:-1]:
+            v = v[1:-1].strip()
+    return v
+
+
+def is_empty_value(value):
+    """True for '', '-', 'none', 'TBD', '[blank]', '<name>' ... (nothing was said)."""
+    return _plain(value).lower() in EMPTY_VALUES
+
+
+def owner_is_generic(name):
+    """True for no name at all and for a side or a group rather than a person: Them, Speaker 2, the other side,
+    everyone, the interviewer ..."""
+    n = _plain(name).lower()
+    return not n or n in EMPTY_VALUES or bool(_GENERIC_OWNER.match(n))
+
+
+def owner_names(value):
+    """The people an Owner value names, in order: 'Them / Speaker 2' -> [], 'Marc and Nadia' -> ['Marc', 'Nadia']."""
+    if is_empty_value(value):
+        return []
+    out = []
+    for part in _SEP.split(_plain(value)):
+        name = _plain(part)
+        if name and not owner_is_generic(name) and name not in out:
+            out.append(name)
+    return out
+
+
+def clean_owner(value):
+    """An Owner value as one clean string ('' when it names nobody): 'Marc and Nadia' -> 'Marc, Nadia'."""
+    return ", ".join(owner_names(value))
+
+
+def _fields(meta):
+    """'Aram Due: Friday, March 3' -> ({'owner': 'Aram', 'due': 'Friday, March 3'}, text before the first label).
+    Label-aware: a value keeps its commas, and the labels may come in either order, with or without a comma."""
+    marks = list(_LABEL_RE.finditer(meta))
+    out = {}
+    for i, m in enumerate(marks):
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(meta)
+        kind = "owner" if m.group(1).lower() in OWNER_LABELS else "due"
+        out.setdefault(kind, meta[m.end():end].strip().strip(",;").strip())
+    return out, (meta[:marks[0].start()] if marks else meta)
+
+
+def _split(text):
+    """(task as written, owner, due, found): ``found`` says an Owner / Due part was there to take off the end."""
+    t = (text or "").strip()
     owner = due = ""
-    m = _OWNER_RE.search(t)
-    if m:
-        owner = (m.group(1) or "").strip()
-        due = (m.group(2) or "").strip()
-        t = (t[:m.start()] + t[m.end():])
-    else:
-        d = _DUE_RE.search(t)
-        if d:
-            due = d.group(1).strip()
-            t = t[:d.start()] + t[d.end():]
-    t = t.replace("`", "").strip().rstrip(" -–—").strip()
-    if owner.lower() in _EMPTY:
-        owner = ""
-    if due.lower() in _EMPTY:
-        due = ""
-    if due and not due.lower().startswith(("by ", "before ", "until ")):
+    found = False
+    for m in reversed(list(_GROUP_RE.finditer(t))):         # the last "(...)" that carries a label
+        inner = m.group(1)
+        if ":" not in inner or len(inner) > _MAX_META:
+            continue
+        fields, rest = _fields(inner)
+        if fields and not rest.strip(" ,;"):
+            owner, due, found = fields.get("owner", ""), fields.get("due", ""), True
+            t = (t[:m.start()].rstrip() + " " + t[m.end():].lstrip()).strip()
+            break
+    if not found:
+        m = _TAIL_RE.search(t, max(0, len(t) - _TAIL_WINDOW))
+        if m and len(m.group(1)) <= _MAX_META:
+            fields, rest = _fields(m.group(1))
+            plain_space = not re.search(r"[-–—|.]", t[m.start():m.start(1)])
+            # a plain-space tail ("Pay the invoice due: next month") needs BOTH labels: prose can say "due:" or "owner:"
+            if fields and not rest.strip(" ,;") and (not plain_space or len(fields) == 2):
+                owner, due, found = fields.get("owner", ""), fields.get("due", ""), True
+                t = t[:m.start()].strip()
+    return t.rstrip(" -–—,;:").strip(), clean_owner(owner), "" if is_empty_value(due) else _plain(due), found
+
+
+def split_task(text):
+    """'`Fix X` (Owner: David, Due: Wed)' -> ('Fix X', 'David', 'Wed'). Tolerant (see above); an empty, placeholder or
+    generic owner comes back as '', an empty due as ''. The due is as written: no 'by ' (see parse_task)."""
+    task, owner, due, _found = _split(text)
+    return task.replace("`", "").strip(), owner, due
+
+
+# "by" goes in front of a due only when it starts like an English date ("Wed", "15 November", "March 3", "next week", "Q4"): a due
+# that has its own word ("within a week", "on Friday", "ASAP") or is in another language ("vendredi", "15 novembre") reads as written.
+_DAY = r"(?:mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)\b"
+_MONTH = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
+          r"nov(?:ember)?|dec(?:ember)?)\b")
+_BY_DUE = re.compile(
+    r"^(?:%s|%s|(?:tomorrow|today|tonight|next|this|the|end|mid|early|late|q[1-4])\b|"
+    r"\d+(?:st|nd|rd|th)?(?:\s+of)?\s+%s|\d+(?:st|nd|rd|th)\b|\d{1,2}\s*[ap]m\b|\d{1,4}[/.-]\d{1,2}(?:[/.-]\d{1,4})?$)"
+    % (_DAY, _MONTH, _MONTH), re.I)
+
+
+def parse_task(text):
+    """'`Fix X` (Owner: David, Due: Wed)' -> (task, owner, due): split_task, with 'by ' put in front of a due that starts like
+    an English date ('by Wed', 'by 15 November', 'by next week'); not before 'within a week', 'on Friday', 'ASAP' or a due in
+    another language ('vendredi')."""
+    task, owner, due = split_task(text)
+    if due and _BY_DUE.match(due):
         due = "by " + due
-    return t, owner, due
+    return task, owner, due
+
+
+def render_task_meta(owner, due):
+    """' (Owner: X, Due: Y)' with the empty parts left out ('' when both are)."""
+    parts = []
+    if owner:
+        parts.append("Owner: %s" % owner)
+    if due:
+        parts.append("Due: %s" % due)
+    return " (%s)" % ", ".join(parts) if parts else ""
+
+
+_TASK_LINE = re.compile(r"^(\s*(?:[-*\u2022]|\d+[.)])\s*\[(?: |x|X)\]\s*)(.*)$")
+
+
+def _line_text(line):
+    """What a notes line says, for deciding whether a section is empty."""
+    s = line.strip()
+    if _TASK_RE.match(s):
+        return "x"
+    m = _BULLET_RE.match(s)
+    return strip_inline(m.group(1) if m else s)
+
+
+def clean_notes(md, me=""):
+    """The notes in the shape every surface can show as it is: each action item is
+    '- [ ] task (Owner: Name, Due: date)' with the empty and the generic parts left out ('Owner: , Due: ' and 'Owner:
+    Them' never survive; 'Owner: You' becomes ``me``, the person's first name, when it is known), and a section with
+    nothing under it or only 'None.' is gone. Everything else is untouched (a ticked box stays ticked, the line endings
+    stay), and cleaning clean notes changes nothing. The line numbers of the lines that stay move up when a section goes,
+    so this is for text that is saved or sent (notes.md, the history entry, Notion, the Markdown export) - the notes view
+    shows the raw notes through parse_notes(sections=True)."""
+    lines = (md or "").split("\n")
+    changed = False
+    in_fence = None
+    items = []                                      # [(level, text)] of the lines outside code, for the empty sections
+    keep = []
+    for raw in lines:
+        cr = raw.endswith("\r")
+        line = raw[:-1] if cr else raw
+        if in_fence is not None:
+            if re.match(r"^\s*%s{%d,}\s*$" % (re.escape(in_fence[0]), len(in_fence)), line):
+                in_fence = None
+            items.append((0, "x"))
+            keep.append(raw)
+            continue
+        f = _FENCE_RE.match(line)
+        if f:
+            in_fence = f.group(1)
+            items.append((0, "x"))
+            keep.append(raw)
+            continue
+        m = _TASK_LINE.match(line)
+        if m:
+            task, owner, due, found = _split(m.group(2))
+            if found or owner or due:
+                names = [(me if me and x.lower() == "you" else x) for x in owner.split(", ") if x]
+                owner = ", ".join(names)
+                new = m.group(1) + task + render_task_meta(owner, due) if (task or owner or due) else line
+                if new != line:
+                    changed = True
+                line = new
+            items.append((0, "x"))
+            keep.append(line + ("\r" if cr else ""))
+            continue
+        h = _HEAD_RE.match(line) if line.strip() else None
+        items.append((len(h.group(1)), "") if h else (0, _line_text(line) if line.strip() else ""))
+        keep.append(raw)
+    # blank lines are not body: only text under a heading counts
+    live = [i for i, (lv, t) in enumerate(items) if lv or t]
+    drop = _empty_sections([items[i] for i in live])
+    if drop:
+        gone = {live[i] for i in drop}
+        out, blank = [], True
+        for i, raw in enumerate(keep):
+            if i in gone:
+                continue
+            if not raw.strip():
+                if blank:
+                    continue
+                blank = True
+            else:
+                blank = False
+            out.append(raw)
+        while out and not out[-1].strip():
+            out.pop()
+        tail = "\n" if (md or "").endswith("\n") else ""
+        return "\n".join(out) + (tail if out else "")
+    return "\n".join(keep) if changed else (md or "")
 
 
 def toggle_task_line(md, line_index, done):
@@ -319,15 +615,28 @@ def _task_html(block, code):
                              _html.escape(extra, quote=False))
 
 
+def _topic_ids(blocks):
+    """ids of the blocks that are topic headings (see heading_roles)."""
+    roles = heading_roles(blocks)
+    return {id(b) for i, b in enumerate(blocks) if roles.get(i) == "sub"}
+
+
 def to_html(md):
     """A minimal HTML fragment for the clipboard (Word, Outlook, Gmail, Docs,
-    Notion, Slack, Teams): real headings, lists and bold, no styling."""
+    Notion, Slack, Teams): real headings, lists and bold, no styling. A topic
+    under a section ("### Topic" below "## Discussion") is an <h4>."""
     parts = []
-    for kind, items in _groups(parse_blocks(md)):
+    blocks = parse_blocks(md)
+    topics = _topic_ids(blocks)
+    for kind, items in _groups(blocks):
         b = items[0]
         if kind == "head":
             text = inline_html(b[2], code=True)
-            parts.append("<h3>%s</h3>" % text if b[1] < BOLD_HEAD_LEVEL else "<p><b>%s</b></p>" % text)
+            if b[1] >= BOLD_HEAD_LEVEL:
+                parts.append("<p><b>%s</b></p>" % text)
+            else:
+                tag = "h4" if id(b) in topics else "h3"
+                parts.append("<%s>%s</%s>" % (tag, text, tag))
         elif kind == "para":
             parts.append("<p>%s</p>" % "<br>".join(inline_html(line, code=True) for line in b[1].split("\n")))
         elif kind == "bullet":
@@ -358,11 +667,16 @@ def qt_html(md, colors=None):
     text_c, muted_c, head_c = c.get("text"), c.get("muted"), c.get("head") or c.get("text")
     p_style = style(("margin-top", "0px"), ("margin-bottom", "8px"), ("color", text_c))
     parts = []
-    for kind, items in _groups(parse_blocks(md)):
+    blocks = parse_blocks(md)
+    topics = _topic_ids(blocks)
+    for kind, items in _groups(blocks):
         b = items[0]
         if kind == "head":
             text = inline_html(b[2], code=True)
-            if b[1] < BOLD_HEAD_LEVEL:
+            if b[1] < BOLD_HEAD_LEVEL and id(b) in topics:
+                parts.append("<p%s><b>%s</b></p>" % (style(("margin-top", "6px"), ("margin-bottom", "4px"),
+                                                           ("color", head_c)), text))
+            elif b[1] < BOLD_HEAD_LEVEL:
                 parts.append("<h3%s>%s</h3>" % (style(("margin-top", "4px"), ("margin-bottom", "6px"),
                                                       ("color", head_c)), text))
             else:
