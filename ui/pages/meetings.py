@@ -126,7 +126,7 @@ from ui.calendar_door import (CONNECT_BODY, CONNECT_DETAIL, CONNECT_LINK, CONNEC
                               EXPIRED_NOTE)
 from ui.components import (Button, Card, Chip, Divider, IconButton, PageHeader, ProTag, SettingRow,
                            SettingsRail, Toggle, icons, label, row_actions)
-from ui.pages import meeting_delete
+from ui.pages import meeting_delete, meeting_speakers_ui
 from ui.pages import meeting_views as views
 from ui.pages.meeting_views import (AUDIO_MODES, LANGS, NOTICE_TEXT, UPSELL_RECORD, BgRunner, ElidedLabel,
                                     Faces, call_mark, call_name, dot_label, dot_pixmap, fmt_duration, fmt_when,
@@ -646,14 +646,18 @@ class MeetingsPage(QWidget):
         notes) was queued, started or ended. The meeting open in the notes view
         shows its banner meanwhile and, once the pass ended, its new transcript."""
         self.list_view.meetings.sync_blocked()          # "Finishing up": it can't be deleted until it ends
+        s = self._session
+        working = bool(callable(getattr(s, "speakers_state", None)) and folder and s.speakers_state(folder))
+        line = None
+        if folder and not working and callable(getattr(s, "speakers_result", None)):
+            line = s.speakers_result(folder)             # how it ended - given once, so taken even if nobody is looking
         if self._view != "notes" or not self.notes_view.folder or not folder or not self.is_same(folder):
             return
-        s = self._session
-        working = bool(callable(getattr(s, "speakers_state", None)) and s.speakers_state(folder))
         # Whoever is reading this meeting (its Transcript, or typing in My notes) keeps the
         # tab and the place: the page only changes under them, never moves them.
         if not working:
             self.notes_view.reload(keep_view=True)
+            meeting_speakers_ui.say_line(self.notes_view, line)     # "Found 2 speakers on the call."
         elif str((self.notes_view.data or {}).get("folder") or "") == str(self.notes_view.folder):
             self.notes_view.render_keeping_view()    # (a meeting still loading renders when it is read)
 

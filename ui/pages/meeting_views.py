@@ -1770,7 +1770,11 @@ class NotesView(QWidget):
             self._people.addLayout(r)
         self.people_card.setVisible(bool(rows))
 
-    def _banner(self, title, text, tone="amber", button=None, slot=None):
+    def _banner(self, title, text, tone="amber", button=None, slot=None, progress=None):
+        """A calm banner at the top of the notes. ``progress``: None = no bar, -1 = a bar that just moves
+        (not known how long), 0..1 = a bar filled that far. The frame keeps its ``title_label``,
+        ``text_label`` (None without text), ``bar`` (None without progress) and ``button`` (when it has
+        one), so a banner that is on the page can be updated in place."""
         fr = QFrame()
         fr.setProperty("gusan", "banner")
         fr.setProperty("tone", tone)
@@ -1783,9 +1787,28 @@ class NotesView(QWidget):
         h.addWidget(icon_label(ic[0], 18, ic[1]), 0, Qt.AlignTop)
         col = QVBoxLayout()
         col.setSpacing(2)
-        col.addWidget(tlabel(title, 13.5, 600, "ink", wrap=True))
+        # (plain text: a title or a line can come from outside - a notes error - and is never markup)
+        fr.title_label = tlabel(title, 13.5, 600, "ink", wrap=True)
+        fr.title_label.setTextFormat(Qt.PlainText)
+        col.addWidget(fr.title_label)
+        fr.text_label = None
         if text:
-            col.addWidget(tlabel(text, 12.5, 400, "text2", wrap=True))
+            fr.text_label = tlabel(text, 12.5, 400, "text2", wrap=True)
+            fr.text_label.setTextFormat(Qt.PlainText)
+            col.addWidget(fr.text_label)
+        fr.bar = None
+        if progress is not None:
+            fr.bar = QProgressBar(fr)
+            fr.bar.setTextVisible(False)
+            fr.bar.setFixedHeight(6)
+            fr.bar.setAccessibleName("Progress")
+            if progress < 0:
+                fr.bar.setRange(0, 0)
+            else:
+                fr.bar.setRange(0, 1000)
+                fr.bar.setValue(int(max(0.0, min(1.0, progress)) * 1000))
+            col.addSpacing(5)
+            col.addWidget(fr.bar)
         h.addLayout(col, 1)
         if button:
             b = Button(button, "secondary", "s", parent=fr)
@@ -2146,6 +2169,7 @@ def _menu_offset(menu):
 
 def read_meeting(folder):
     """Everything the notes view shows, read off the GUI thread."""
+    import meeting_speakers
     import meeting_store
     meta = meeting_store.load_meta(folder)
     notes = meeting_store.load_notes(folder)
@@ -2170,10 +2194,14 @@ def read_meeting(folder):
     # The recording ends before the transcript does (a meeting past the ~2-hour cap):
     # the Transcript tab never suggests Identify speakers then (meeting_speakers_ui).
     cut_short = bool(parts) and meeting_store.recording_cut_short(meta, meeting_store.part_seconds(parts))
+    # Can the speaker pass still tell the people on the call apart from what the meeting kept (its
+    # segments and the call's sound)? Two small files read here, off the window's thread: the page
+    # offers "Identify speakers" for a meeting that still says "Them" only when it can.
+    can_name_call = bool(meeting_speakers.refinable(folder)) if "Them:" in transcript else False
     return {"folder": str(folder), "meta": meta, "title": str(meta.get("title") or "Untitled Meeting"),
             "notes": notes, "transcript": transcript, "my_notes": my_notes, "parts": parts,
             "people": list(people), "started": started, "duration_sec": duration,
-            "recording_cut_short": cut_short}
+            "recording_cut_short": cut_short, "can_name_call": can_name_call}
 
 
 _SPK_RE = rich_text.SPEAKER_RE          # "Speaker 1: …", "You: …", "Anna: …"

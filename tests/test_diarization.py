@@ -252,6 +252,177 @@ class TestSherpaOnACallSmoke(unittest.TestCase):
         self.assertTrue(out.texts)
         self.assertTrue(out.text.startswith("You: me"))
 
+# ── one voice print per stretch (embed_spans), with a stand-in for the speaker model ─────────────────────
+
+class FakeExtractor:
+    """create_stream / accept_waveform / compute like sherpa's: a voice print that tells what it was given."""
+    dim = 3
+
+    def __init__(self):
+        self.streams = 0
+
+    def create_stream(self):
+        self.streams += 1
+        return FakeStream()
+
+    def compute(self, stream):
+        x = stream.x
+        return [float(x.mean()), float(len(x)), 1.0]
+
+
+class FakeStream:
+    def accept_waveform(self, rate, samples):
+        self.rate, self.x = rate, samples
+
+    def input_finished(self):
+        pass
+
+
+@unittest.skipUnless(_real_numpy(), "real numpy not importable (stubbed)")
+class TestEmbedSpans(unittest.TestCase):
+    def setUp(self):
+        import numpy as np
+        self.np = np
+        for patcher in (mock.patch.object(diarization, "is_available", return_value=True),
+                        mock.patch.dict("os.environ", {"GUSAN_DIARIZE_IN_PROCESS": "1"}),
+                        mock.patch.object(diarization, "build_extractor", side_effect=lambda threads=None: self.extractor)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.extractor = FakeExtractor()
+        self._saved = diarization.last_error
+        self.addCleanup(setattr, diarization, "last_error", self._saved)
+        # 0-2 s: 0.1, 2-4 s: 0.2, 4-6 s: silence, 6-6.5 s: 0.3
+        self.audio = np.concatenate([np.full(32000, 0.1, np.float32), np.full(32000, 0.2, np.float32),
+                                     np.zeros(32000, np.float32), np.full(8000, 0.3, np.float32)])
+
+    def test_each_stretch_gets_the_voice_print_of_its_own_sound(self):
+        vectors, err = diarization.embed_spans(self.audio, [(0.0, 2.0), (2.0, 4.0)])
+        self.assertEqual(err, "")
+        self.assertEqual([round(v[0], 3) for v in vectors], [0.1, 0.2])
+        self.assertEqual([v[1] for v in vectors], [32000.0, 32000.0])
+        self.assertEqual(self.extractor.streams, 2)
+        self.assertEqual(diarization.last_error, "")
+
+    def test_a_stretch_with_nothing_to_embed_is_none_and_costs_no_work(self):
+        spans = [(0.0, 2.0), (4.0, 6.0), (6.0, 6.5), (7.0, 9.0), (3.0, 3.0), (5.0, 4.0)]
+        vectors, err = diarization.embed_spans(self.audio, spans)
+        self.assertEqual(err, "")
+        self.assertEqual([v is None for v in vectors], [False, True, True, True, True, True])   # silent / too short / past the end
+        self.assertEqual(self.extractor.streams, 1)
+
+    def test_only_silence_never_loads_the_speaker_model(self):
+        with mock.patch.object(diarization, "build_extractor", side_effect=AssertionError("no model needed")):
+            vectors, err = diarization.embed_spans(self.audio, [(4.0, 6.0), (10.0, 12.0)])
+        self.assertEqual((vectors, err), ([None, None], ""))
+
+    def test_int16_sound_is_read_as_the_same_voice_as_float(self):
+        pcm = self.np.rint(self.audio * 32767).astype(self.np.int16)
+        a, _ = diarization.embed_spans(self.audio, [(0.0, 2.0)])
+        b, _ = diarization.embed_spans(pcm, [(0.0, 2.0)])
+        self.assertAlmostEqual(a[0][0], b[0][0], places=3)
+
+    def test_stereo_sound_is_mixed_down(self):
+        stereo = self.np.stack([self.audio, self.audio], axis=1)
+        vectors, err = diarization.embed_spans(stereo, [(0.0, 2.0)])
+        self.assertEqual(err, "")
+        self.assertAlmostEqual(vectors[0][0], 0.1, places=3)
+
+    def test_progress_counts_every_stretch_and_a_failing_callback_changes_nothing(self):
+        marks = []
+        diarization.embed_spans(self.audio, [(0.0, 2.0), (4.0, 6.0), (2.0, 4.0)],
+                                on_progress=lambda d, t: marks.append((d, t)))
+        self.assertEqual(marks, [(1, 3), (2, 3), (3, 3)])
+
+        def broken(d, t):
+            raise RuntimeError("the page went away")
+        vectors, err = diarization.embed_spans(self.audio, [(0.0, 2.0), (2.0, 4.0)], on_progress=broken)
+        self.assertEqual((err, len(vectors)), ("", 2))
+
+    def test_a_cancel_hands_back_what_was_made(self):
+        answers = iter([False, False, True])
+        vectors, err = diarization.embed_spans(self.audio, [(0.0, 2.0), (2.0, 4.0), (0.0, 2.0), (2.0, 4.0)],
+                                               should_cancel=lambda: next(answers, True))
+        self.assertEqual(err, "cancelled")
+        self.assertEqual(len(vectors), 2)
+        self.assertEqual(diarization.last_error, "cancelled")
+
+    def test_quitting_the_app_stops_it_too(self):
+        import diarization_proc
+        diarization_proc._cancel_all.set()
+        self.addCleanup(diarization_proc._cancel_all.clear)
+        vectors, err = diarization.embed_spans(self.audio, [(0.0, 2.0)])
+        self.assertEqual((vectors, err), ([], "app quitting"))
+
+    def test_a_model_that_cannot_be_built_is_an_error_with_a_reason(self):
+        with mock.patch.object(diarization, "build_extractor", side_effect=RuntimeError("model file is damaged")):
+            vectors, err = diarization.embed_spans(self.audio, [(0.0, 2.0)])
+        self.assertEqual(vectors, [])
+        self.assertIn("model file is damaged", err)
+        self.assertEqual(diarization.last_error, err)
+
+    def test_a_model_that_fails_midway_keeps_the_prefix(self):
+        real = self.extractor.compute
+        calls = {"n": 0}
+
+        def flaky(stream):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("out of memory")
+            return real(stream)
+        self.extractor.compute = flaky
+        vectors, err = diarization.embed_spans(self.audio, [(0.0, 2.0), (2.0, 4.0), (0.0, 2.0)])
+        self.assertEqual(len(vectors), 1)
+        self.assertIn("out of memory", err)
+
+    def test_nothing_asked_nothing_done(self):
+        self.assertEqual(diarization.embed_spans(self.audio, []), ([], ""))
+        self.assertEqual(diarization.embed_spans(self.audio, None), ([], ""))
+
+    def test_without_the_speaker_tool_it_says_so(self):
+        with mock.patch.object(diarization, "is_available", return_value=False):
+            self.assertEqual(diarization.embed_spans(self.audio, [(0.0, 2.0)]), ([], "unavailable"))
+        self.assertEqual(diarization.last_error, "unavailable")
+
+    def test_sound_that_cannot_be_read_is_bad_audio_not_a_crash(self):
+        vectors, err = diarization.embed_spans(object(), [(0.0, 2.0)])
+        self.assertEqual((vectors, err), ([], "bad audio"))
+        vectors, err = diarization.embed_spans(self.audio, [("x", "y")])
+        self.assertEqual((vectors, err), ([], "bad audio"))
+
+    def test_the_child_process_is_used_unless_told_otherwise(self):
+        import os
+        with mock.patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("GUSAN_DIARIZE_IN_PROCESS", None)
+            with mock.patch.object(diarization.diarization_proc, "run_voices",
+                                   return_value=([[1.0, 2.0]], "")) as run:
+                vectors, err = diarization.embed_spans(self.audio, [(0.0, 2.0), (4.0, 6.0)])
+        self.assertEqual((vectors, err), ([[1.0, 2.0]], ""))
+        audio, lengths = run.call_args[0][:2]
+        self.assertEqual(lengths, [32000, 0])                       # the silent stretch is not sent
+        self.assertEqual(len(audio), 32000)
+        self.assertEqual(self.extractor.streams, 0)                  # nothing was made in this process
+
+    def test_the_worker_count_is_the_childs_own_rule(self):
+        self.assertEqual(diarization.voice_threads(), diarization.diarization_proc.voice_threads())
+
+
+@unittest.skipUnless(_real_numpy() and diarization.is_available(),
+                     "diarization models / real numpy not available")
+class TestVoicePrintSmoke(unittest.TestCase):
+    """The real speaker model: the same sound gives the same voice print, 512 finite numbers."""
+
+    def test_the_real_model_gives_finite_repeatable_voice_prints(self):
+        import numpy as np
+        rng = np.random.default_rng(3)
+        audio = (rng.standard_normal(16000 * 6) * 0.05).astype(np.float32)
+        with mock.patch.dict("os.environ", {"GUSAN_DIARIZE_IN_PROCESS": "1"}):
+            a, err_a = diarization.embed_spans(audio, [(0.0, 3.0), (3.0, 6.0), (0.0, 3.0)])
+        self.assertEqual(err_a, "")
+        self.assertEqual([len(v) for v in a], [512, 512, 512])
+        self.assertTrue(all(np.isfinite(v).all() for v in a))
+        self.assertEqual(a[0], a[2])                                  # identical sound, identical voice print
+        self.assertNotEqual(a[0], a[1])
+
 
 if __name__ == "__main__":
     unittest.main()

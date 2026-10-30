@@ -10,11 +10,12 @@ suggestion line for a call that was never told apart."""
 import threading
 
 import pytest
-from PySide6.QtCore import QUrl, Signal
-from PySide6.QtWidgets import QFrame, QLabel
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtWidgets import QFrame, QLabel, QProgressBar, QPushButton
 
 from tests_qt.test_page_meetings import (FakeSession, _inline_bg, _meeting, _open, _wait_for,  # noqa: F401
                                          meetings_root, shell)
+from ui.pages import meeting_speakers_ui as msu
 
 LINK = "gusan:identify-speakers"
 
@@ -340,16 +341,30 @@ NAMED = "You: Hello team.\nSpeaker 1: We ship Friday."
 
 
 class WorkingSession(IdentifySession):
-    """The session with a background speaker pass the page can see and cancel."""
+    """The session with a background speaker pass the page can see and cancel. ``snap`` holds what the pass
+    reports beyond its state (what it waits for, the stage, the progress ...); ``line`` the one line about how
+    it ended, given once."""
     speakers_changed = Signal(str)
 
     def __init__(self, state="", **kw):
         super().__init__(**kw)
         self.state_of = state
+        self.snap = {}
+        self.line = None
         self.cancelled = []
 
     def speakers_state(self, folder=None):
         return self.state_of
+
+    def speakers_progress(self, folder):
+        data = {"state": self.state_of, "stopping": False, "waiting_for": "", "stage": "", "done": 0,
+                "total": 0, "fraction": None, "eta_s": None, "tries": 0}
+        data.update(self.snap)
+        return data
+
+    def speakers_result(self, folder):
+        line, self.line = self.line, None
+        return line
 
     def cancel_speaker_followup(self, folder=None):
         self.cancelled.append(str(folder))
@@ -376,8 +391,8 @@ def test_while_the_names_are_added_the_notes_show_one_calm_banner_with_cancel(sh
     assert nv.act_identify.isEnabled()
     nv.banner.button.click()
     assert session.cancelled == [str(folder)]
-    assert "Speaker names can be added from" in nv.flash_label.text()
-    assert nv.flash_label.text().startswith("Stopped.")
+    assert nv.flash_label.text() == "Stopped."
+    assert [b.accessibleName() for b in _banners(page)] == ["Speakers aren't told apart yet"]   # and the offer is back
 
 
 def test_a_pass_that_waits_for_the_computer_says_so_and_can_be_cancelled(shell, meetings_root):
@@ -398,7 +413,7 @@ def test_another_banner_of_the_meeting_comes_first(shell, meetings_root):
 
 
 def test_a_session_without_the_feature_shows_no_banner_of_this_kind(shell, meetings_root):
-    page, _s, _f = _open_notes(shell, meetings_root, transcript=YOU_THEM)       # the plain fake session
+    page, _s, _f = _open_notes(shell, meetings_root, session=FakeSession(), transcript=YOU_THEM)   # no Identify speakers
     assert [b.accessibleName() for b in _banners(page)] == []
 
 
@@ -434,7 +449,7 @@ def test_the_page_follows_the_pass_banner_first_then_the_new_transcript(shell, m
     session = WorkingSession("")
     page, session, folder = _open_notes(shell, meetings_root, session=session, transcript=YOU_THEM)
     nv = page.notes_view
-    assert _banners(page) == []
+    assert [b.accessibleName() for b in _banners(page)] == ["Speakers aren't told apart yet"]
     session.state_of = "waiting"
     session.speakers_changed.emit(str(folder))                    # queued behind other work
     assert [b.accessibleName() for b in _banners(page)] == ["Speaker names are next"]
@@ -477,7 +492,8 @@ def test_a_real_session_pass_in_the_background_to_the_new_transcript_and_a_cance
     gate, started = threading.Event(), threading.Event()
     calls = []
 
-    def fake_refine(folder, *, privacy=False, status=None, should_cancel=None, names=None, diarizer=None):
+    def fake_refine(folder, *, privacy=False, status=None, should_cancel=None, names=None, diarizer=None,
+                    progress=None, resume=None):
         calls.append(str(folder))
         started.set()
         while not gate.is_set():
@@ -521,7 +537,8 @@ def test_a_real_session_pass_in_the_background_to_the_new_transcript_and_a_cance
     assert _wait_for(lambda: bool(_banners(page)), timeout=10)
     nv.banner.button.click()
     assert _wait_for(lambda: s.speakers_state(str(folder)) == "", timeout=10)
-    assert _wait_for(lambda: _banners(page) == [], timeout=10)
+    assert _wait_for(lambda: [b.accessibleName() for b in _banners(page)] == ["Speakers aren't told apart yet"],
+                     timeout=10)                                   # Stopped: the offer is back
     assert (folder / "transcript.txt").read_text(encoding="utf-8") == YOU_THEM      # nothing changed
     assert "aren't told apart yet" in _hint(page)                 # so the suggestion is back
     s.deleteLater()
@@ -616,3 +633,494 @@ def test_deleting_a_meeting_stops_its_pass_first(shell, meetings_root):
     page.notes_view.apply_delete()
     assert session.stopped == [(str(folder), True)]               # asked while the folder was still there
     assert not folder.exists()                                    # and then it went
+
+
+# ── the honest banner: waiting, starting, running, stopping, and how it ends ──────────────────────────
+# (every one runs in light and in dark: the `scheme` fixture)
+
+def _names_to_tell(folder, text=YOU_THEM):
+    """What a meeting keeps so that the pass can tell the call's people apart later: its segments and the
+    call's saved sound (meeting_speakers.refinable)."""
+    import meeting_store
+    (folder / "audio_part1_system.wav").write_bytes(b"RIFF" + b"\0" * 400)
+    assert meeting_store.write_segments(folder, {"version": 1, "parts": [{
+        "audio": "audio_part1.wav", "kind": "sources", "seconds": 40.0, "done": False, "text": text,
+        "segments": [{"s": 2.0, "e": 6.0, "t": "Hello team.", "src": "you"},
+                     {"s": 7.0, "e": 30.0, "t": "We ship Friday.", "src": "them"}]}]})
+
+
+def _meeting_page(shell, meetings_root, state="", snap=None, transcript=YOU_THEM, names=True,
+                  notes="## Summary\n- ok", **meta):
+    """A meeting that still says You / Them, open in the notes view, with a session whose pass is in ``state``."""
+    session = WorkingSession(state)
+    session.snap = dict(snap or {})
+    folder = _meeting(meetings_root, "20261021_103134", "Live session 10:31", notes=notes,
+                      transcript=transcript, **meta)
+    _with_audio(folder)
+    if names:
+        _names_to_tell(folder, transcript)
+    win, app = shell("pro", meeting_session=session)
+    page = _open(win)
+    page.open_notes(str(folder))
+    return page, session, folder
+
+
+def _words(page):
+    """Every label of the banners on the page, in order."""
+    return [lb.text() for b in _banners(page) for lb in b.findChildren(QLabel) if lb.text()]
+
+
+def _bar(page):
+    bars = [bar for b in _banners(page) for bar in b.findChildren(QProgressBar)]
+    return bars[0] if bars else None
+
+
+def _buttons(page):
+    return [bt.text() for b in _banners(page) for bt in b.findChildren(QPushButton)]
+
+
+@pytest.mark.parametrize("reason,words", [
+    ("recording", "Waiting for your recording to finish."),
+    ("dictation", "Waiting for your dictation to finish."),
+    ("file", "Waiting for the file conversion to finish."),
+    ("notes", "Waiting for the notes to finish."),
+    ("queue", "Waiting for another meeting to finish."),
+    ("settling", "Starting in a moment."),
+    ("", "Starting in a moment."),
+    ("busy", "Waiting for your other work to finish."),
+])
+def test_a_pass_that_is_only_queued_says_what_it_waits_for_and_never_says_identifying(
+        scheme, shell, meetings_root, reason, words):
+    page, session, folder = _meeting_page(shell, meetings_root, "waiting", {"waiting_for": reason})
+    nv = page.notes_view
+    assert [b.accessibleName() for b in _banners(page)] == ["Speaker names are next"]
+    assert _words(page) == ["Speaker names are next", "The notes are ready. " + words]
+    assert "Identifying" not in " ".join(_words(page))
+    assert _buttons(page) == ["Cancel"] and _bar(page) is None
+    assert nv.banner.property("tone") == "blue"
+
+
+def test_a_pass_that_has_not_reported_yet_is_getting_ready_with_a_bar_that_just_moves(scheme, shell, meetings_root):
+    page, session, folder = _meeting_page(shell, meetings_root, "running", {"stage": "reading"})
+    assert _words(page) == ["Identifying speakers…", "The notes are ready. Getting ready."]
+    bar = _bar(page)
+    assert bar is not None and (bar.minimum(), bar.maximum()) == (0, 0)          # not known how long
+    assert bar.maximumHeight() == 6                                              # the app's own thin bar
+    assert _buttons(page) == ["Cancel"]
+
+
+def test_a_running_pass_shows_the_real_percentage_a_bar_and_the_time_left(scheme, shell, meetings_root):
+    page, session, folder = _meeting_page(
+        shell, meetings_root, "running", {"stage": "voices", "done": 102, "total": 299, "fraction": 102 / 299.0,
+                                          "eta_s": 100.0})
+    nv = page.notes_view
+    assert [b.accessibleName() for b in _banners(page)] == ["Identifying speakers · 34%"]
+    assert _words(page) == ["Identifying speakers · 34%",
+                            "The notes are ready. “Them” becomes Speaker 1, 2 and so on. About 2 min left."]
+    bar = _bar(page)
+    assert (bar.minimum(), bar.maximum(), bar.value()) == (0, 1000, 341)
+    assert _buttons(page) == ["Cancel"]
+
+
+def test_the_banner_follows_the_pass_in_place_every_second(scheme, shell, meetings_root):
+    page, session, folder = _meeting_page(
+        shell, meetings_root, "running", {"stage": "voices", "fraction": 0.1, "eta_s": 300.0})
+    nv = page.notes_view
+    frame = nv.banner
+    assert frame.timer.interval() == 1000 and frame.timer.isActive()
+    assert "About 5 min left." in _words(page)[1]
+    session.snap.update(fraction=0.5, eta_s=60.0)
+    msu.tick(nv, frame)
+    assert nv.banner is frame                                      # the same banner: nothing was drawn again
+    assert _words(page) == ["Identifying speakers · 50%",
+                            "The notes are ready. “Them” becomes Speaker 1, 2 and so on. About 1 min left."]
+    assert _bar(page).value() == 500 and frame.accessibleName() == "Identifying speakers · 50%"
+    session.snap.update(fraction=0.9, eta_s=20.0)
+    msu.tick(nv, frame)
+    assert "Less than a minute left." in _words(page)[1]
+    session.snap.update(fraction=0.95, eta_s=None)                 # no estimate: no sentence about it
+    msu.tick(nv, frame)
+    assert _words(page)[1] == "The notes are ready. “Them” becomes Speaker 1, 2 and so on."
+    # the pass reports nothing again (a new try): the bar goes back to "just moving"
+    session.snap.update(fraction=None, stage="")
+    msu.tick(nv, frame)
+    assert _words(page) == ["Identifying speakers…", "The notes are ready. Getting ready."]
+    assert _bar(page).maximum() == 0
+    assert nv.banner is frame
+
+
+def test_the_banner_draws_the_page_once_when_its_kind_changes(scheme, shell, meetings_root):
+    page, session, folder = _meeting_page(shell, meetings_root, "waiting", {"waiting_for": "dictation"})
+    nv = page.notes_view
+    waiting = nv.banner
+    session.snap["waiting_for"] = "settling"
+    msu.tick(nv, waiting)
+    assert nv.banner is waiting and "Starting in a moment." in _words(page)[1]      # same kind: in place
+    session.state_of = "running"                                   # waiting -> working, no signal came
+    msu.tick(nv, waiting)
+    assert nv.banner is not waiting
+    assert [b.accessibleName() for b in _banners(page)] == ["Identifying speakers…"]
+    assert not waiting.timer.isActive()                            # the old one stopped looking
+    msu.tick(nv, waiting)                                          # (a late tick of the old banner does nothing)
+    assert [b.accessibleName() for b in _banners(page)] == ["Identifying speakers…"]
+    session.snap["stopping"] = True
+    msu.tick(nv, nv.banner)
+    assert [b.accessibleName() for b in _banners(page)] == ["Stopping…"]
+
+
+def test_cancel_says_stopping_until_the_worker_has_really_stopped(scheme, shell, meetings_root):
+    page, session, folder = _meeting_page(shell, meetings_root, "running",
+                                          {"stage": "voices", "fraction": 0.4, "eta_s": 90.0})
+    nv = page.notes_view
+
+    def slow_cancel(folder=None):
+        session.cancelled.append(str(folder))
+        session.snap["stopping"] = True                            # told, but the worker has not ended yet
+        return True
+    session.cancel_speaker_followup = slow_cancel
+    nv.banner.button.click()
+    assert session.cancelled == [str(folder)]
+    assert [b.accessibleName() for b in _banners(page)] == ["Stopping…"]
+    assert _words(page) == ["Stopping…"] and _buttons(page) == [] and _bar(page) is None
+    assert nv.flash_label.isHidden()                               # nothing is said until it has stopped
+    # the worker ended: the session says so and has the line for it
+    session.state_of, session.snap, session.line = "", {}, ("Stopped.", "ok")
+    session.speakers_changed.emit(str(folder))
+    assert nv.flash_label.text() == "Stopped."
+    assert [b.accessibleName() for b in _banners(page)] == ["Speakers aren't told apart yet"]   # and the offer is back
+
+
+@pytest.mark.parametrize("line,text,tone", [
+    (("Found 2 speakers on the call.", "ok"), "Found 2 speakers on the call.", "ok"),
+    (("Only one person spoke on the call.", "ok"), "Only one person spoke on the call.", "ok"),
+    (("The other side spoke only briefly, so it stays Them.", "ok"),
+     "The other side spoke only briefly, so it stays Them.", "ok"),
+    (("Nobody on the call spoke.", "ok"), "Nobody on the call spoke.", "ok"),
+])
+def test_when_the_pass_finishes_the_banner_goes_and_one_calm_line_says_what_changed(
+        scheme, shell, meetings_root, line, text, tone):
+    page, session, folder = _meeting_page(shell, meetings_root, "running",
+                                          {"stage": "voices", "fraction": 0.99, "eta_s": 2.0})
+    nv = page.notes_view
+    assert _banners(page)
+    (folder / "transcript.txt").write_text(NAMED, encoding="utf-8")
+    import meeting_store
+    meeting_store.update_meta(folder, speakers_at="2026-10-30 16:40:00")
+    session.state_of, session.snap, session.line = "", {}, line
+    session.speakers_changed.emit(str(folder))
+    assert _banners(page) == []                                    # the banner is gone ...
+    assert "Speaker 1" in _hint(page) and "Them" not in _hint(page)        # ... the page shows what the pass wrote ...
+    assert nv.flash_label.text() == text and not nv.flash_label.isHidden()   # ... and says what came of it
+    assert nv.flash_label.property("mtone") == tone
+    assert nv._flash.interval() == 6000                            # for a few seconds: long enough to read
+    assert session.line is None                                    # the line was taken: given once
+
+
+def test_a_pass_that_could_not_tell_them_apart_says_so_in_amber_and_offers_the_retry(scheme, shell, meetings_root):
+    notice = "People on the call couldn't be told apart, so they are shown as \"Them\". Try again from ⋯ › Identify speakers."
+    page, session, folder = _meeting_page(shell, meetings_root, "running", {"stage": "voices", "fraction": 0.5})
+    nv = page.notes_view
+    import meeting_store
+    meeting_store.update_meta(folder, notices=[notice])             # the pass left its notice above the notes
+    session.state_of, session.snap, session.line = "", {}, ("Couldn't tell the people on the call apart.", "amber")
+    session.speakers_changed.emit(str(folder))
+    assert nv.flash_label.text() == "Couldn't tell the people on the call apart."
+    assert nv.flash_label.property("mtone") == "amber"
+    assert [b.accessibleName() for b in _banners(page)] == ["Speakers aren't told apart yet"]
+    assert notice in [lb.text() for lb in nv.doc.findChildren(QLabel)]      # the notice stays where it was
+    assert _buttons(page) == ["Identify speakers"]
+
+
+def test_a_pass_that_other_work_kept_interrupting_says_so_and_can_be_tried_again(scheme, shell, meetings_root):
+    page, session, folder = _meeting_page(shell, meetings_root, "waiting", {"waiting_for": "dictation"})
+    nv = page.notes_view
+    session.state_of, session.snap = "", {}
+    session.line = ("Other work kept interrupting it. You can try again.", "amber")
+    session.speakers_changed.emit(str(folder))
+    assert nv.flash_label.text() == "Other work kept interrupting it. You can try again."
+    assert nv.flash_label.property("mtone") == "amber"
+    assert [b.accessibleName() for b in _banners(page)] == ["Speakers aren't told apart yet"]
+
+
+def test_the_line_is_taken_even_when_the_meeting_is_not_open(scheme, shell, meetings_root):
+    page, session, folder = _meeting_page(shell, meetings_root, "")
+    page.show_list()
+    session.line = ("Found 2 speakers on the call.", "ok")
+    session.speakers_changed.emit(str(folder))
+    assert session.line is None                                    # the session keeps nothing
+    assert page.current_view() == "list"
+    page.open_notes(str(folder))
+    assert page.notes_view.flash_label.isHidden()                  # and it was not left for a later look
+
+
+def test_a_line_for_a_pass_that_is_still_going_is_not_taken_early(scheme, shell, meetings_root):
+    page, session, folder = _meeting_page(shell, meetings_root, "waiting", {"waiting_for": "dictation"})
+    session.line = ("Stopped.", "ok")
+    session.speakers_changed.emit(str(folder))                     # a signal while it still waits (an interruption)
+    assert session.line == ("Stopped.", "ok")
+    assert page.notes_view.flash_label.isHidden()
+
+
+# ── a banner that stays behind is the worst outcome ──────────────────────────────────────────────────
+def test_a_lost_signal_cannot_leave_the_banner_behind(scheme, shell, meetings_root):
+    page, session, folder = _meeting_page(shell, meetings_root, "running", {"stage": "voices", "fraction": 0.7})
+    nv = page.notes_view
+    frame = nv.banner
+    (folder / "transcript.txt").write_text(NAMED, encoding="utf-8")
+    import meeting_store
+    meeting_store.update_meta(folder, speakers_at="2026-10-30 16:40:00")
+    session.state_of, session.snap = "", {}                        # the pass ended, and speakers_changed never came
+    session.line = ("Found 2 speakers on the call.", "ok")
+    msu.tick(nv, frame)                                            # the banner looks again by itself
+    assert _banners(page) == []
+    assert "Speaker 1" in _hint(page)                              # it read the meeting again
+    assert nv.flash_label.text() == "Found 2 speakers on the call."
+    assert not frame.timer.isActive()
+
+
+def test_the_banner_looks_again_on_its_own_timer(scheme, shell, meetings_root):
+    from PySide6.QtWidgets import QApplication
+    page, session, folder = _meeting_page(shell, meetings_root, "running", {"stage": "voices", "fraction": 0.2})
+    nv = page.notes_view
+    nv.banner.timer.setInterval(20)                                # (a second is too long to wait for in a test)
+    session.snap.update(fraction=0.6)
+    assert _wait_for(lambda: "60%" in nv.banner.accessibleName(), timeout=5)
+    session.state_of, session.snap = "", {}
+    assert _wait_for(lambda: _buttons(page) == ["Identify speakers"], timeout=5)
+    QApplication.processEvents()
+
+
+def test_a_banner_that_was_replaced_stops_looking(scheme, shell, meetings_root):
+    page, session, folder = _meeting_page(shell, meetings_root, "waiting", {"waiting_for": "dictation"})
+    nv = page.notes_view
+    first = nv.banner
+    nv.render()
+    assert nv.banner is not first
+    msu.tick(nv, first)
+    assert not first.timer.isActive()
+    assert nv.banner.timer.isActive()
+
+def test_a_banner_the_page_took_off_stops_looking_and_does_not_read_the_meeting_again(scheme, shell, meetings_root):
+    page, session, folder = _meeting_page(shell, meetings_root, "running", {"stage": "voices", "fraction": 0.5})
+    nv = page.notes_view
+    old = nv.banner
+    (folder / "transcript.txt").write_text(NAMED, encoding="utf-8")
+    import meeting_store
+    meeting_store.update_meta(folder, speakers_at="2026-10-30 16:40:00")
+    session.state_of, session.snap = "", {}
+    session.speakers_changed.emit(str(folder))                     # the page reloaded: no banner any more
+    assert _banners(page) == []
+    session.line = ("Found 2 speakers on the call.", "ok")
+    msu.tick(nv, old)                                              # a late tick of the banner that went away
+    assert not old.timer.isActive()
+    assert session.line == ("Found 2 speakers on the call.", "ok")        # it did not take (or say) anything
+
+def test_a_session_that_raises_cannot_break_the_page(scheme, shell, meetings_root):
+    page, session, folder = _meeting_page(shell, meetings_root, "running", {"stage": "voices", "fraction": 0.3})
+    nv = page.notes_view
+
+    def boom(folder):
+        raise RuntimeError("session gone")
+    session.speakers_progress = boom
+    msu.tick(nv, nv.banner)                                        # falls back to the state alone: still working
+    assert [b.accessibleName() for b in _banners(page)] == ["Identifying speakers…"]
+    session.speakers_state = boom
+    msu.tick(nv, nv.banner)                                        # nothing can be read: the pass is taken as gone
+    assert "Identifying" not in " ".join(_words(page))
+
+
+# ── after a restart (or a cancel, a give-up, a failure): the offer ───────────────────────────────────
+def test_after_a_restart_the_notes_offer_identify_speakers_with_a_clear_line(scheme, shell, meetings_root):
+    page, session, folder = _meeting_page(shell, meetings_root, "")           # nothing queued: the app was restarted
+    nv = page.notes_view
+    assert nv.stack.currentIndex() == 0                                          # the Notes tab
+    assert [b.accessibleName() for b in _banners(page)] == ["Speakers aren't told apart yet"]
+    assert _words(page) == ["Speakers aren't told apart yet", "The people on the call show as “Them”."]
+    assert _buttons(page) == ["Identify speakers"] and _bar(page) is None
+    assert nv.banner.property("tone") == "neutral"
+    assert nv.banner.button.accessibleName() or nv.banner.button.text()
+    nv.banner.button.click()
+    assert session.identify_calls == [str(folder)]                               # once
+    # the Transcript tab keeps its one-line suggestion
+    assert _hint(page).startswith("The people on the call aren't told apart yet. Identify speakers")
+
+
+def test_identify_speakers_on_the_banner_shows_the_waiting_banner_at_once(scheme, shell, meetings_root):
+    page, session, folder = _meeting_page(shell, meetings_root, "")
+    nv = page.notes_view
+
+    def queue(folder):
+        session.identify_calls.append(str(folder))
+        session.state_of, session.snap = "waiting", {"waiting_for": "dictation"}   # (what the real session does)
+        return True, "", ""
+    session.identify_speakers = queue
+    nv.banner.button.click()
+    assert [b.accessibleName() for b in _banners(page)] == ["Speaker names are next"]
+    assert _words(page)[1] == "The notes are ready. Waiting for your dictation to finish."
+
+
+def test_a_refusal_of_identify_speakers_is_said_and_the_offer_stays(scheme, shell, meetings_root):
+    page, session, folder = _meeting_page(shell, meetings_root, "")
+    session.result = (False, "busy", "Finish your dictation first, then try again.")
+    nv = page.notes_view
+    nv.banner.button.click()
+    assert nv.flash_label.text() == "Finish your dictation first, then try again."
+    assert [b.accessibleName() for b in _banners(page)] == ["Speakers aren't told apart yet"]
+
+
+@pytest.mark.parametrize("kind", ["speakers_at", "named", "cloud_nothing_saved", "no_them", "no_recording"])
+def test_no_offer_when_there_is_nothing_to_offer(scheme, shell, meetings_root, kind):
+    kw = {}
+    transcript, names, audio = YOU_THEM, True, True
+    if kind == "speakers_at":
+        kw["speakers_at"] = "2026-10-30 16:40:00"                  # a pass reached its end
+    elif kind == "named":
+        transcript = NAMED
+    elif kind == "cloud_nothing_saved":
+        kw["transcribed_with"] = "cloud"
+        names = False                                              # its words are kept and nothing is left to work from
+    elif kind == "no_them":
+        transcript = "You: Hello team.\nAnna: We ship Friday."
+    elif kind == "no_recording":
+        names = audio = False
+    session = WorkingSession("")
+    folder = _meeting(meetings_root, "20261021_103134", "Live session 10:31", notes="## Summary\n- ok",
+                      transcript=transcript, **kw)
+    if audio:
+        _with_audio(folder)
+    if names:
+        _names_to_tell(folder, transcript)
+    win, app = shell("pro", meeting_session=session)
+    page = _open(win)
+    page.open_notes(str(folder))
+    assert _banners(page) == []
+
+
+def test_a_cloud_meeting_that_can_still_be_named_gets_the_offer(scheme, shell, meetings_root):
+    page, session, folder = _meeting_page(shell, meetings_root, "", transcribed_with="cloud")
+    assert page.notes_view.data["can_name_call"] is True
+    assert [b.accessibleName() for b in _banners(page)] == ["Speakers aren't told apart yet"]
+
+
+def test_another_banner_comes_before_the_offer(scheme, shell, meetings_root):
+    page, session, folder = _meeting_page(shell, meetings_root, "", notes="", notes_error="quota exceeded")
+    assert [b.accessibleName() for b in _banners(page)] == ["Notes couldn't be written."]
+
+
+def test_the_page_knows_whether_the_call_can_still_be_named(scheme, shell, meetings_root):
+    import ui.pages.meeting_views as views
+    page, session, folder = _meeting_page(shell, meetings_root, "")
+    assert views.read_meeting(str(folder))["can_name_call"] is True
+    (folder / "audio_part1_system.wav").unlink()                   # the call's sound is gone
+    assert views.read_meeting(str(folder))["can_name_call"] is False
+    (folder / "transcript.txt").write_text(NAMED, encoding="utf-8")
+    assert views.read_meeting(str(folder))["can_name_call"] is False
+
+
+# ── what is said, and what must never get in ─────────────────────────────────────────────────────────
+def test_the_words_are_fixed_text_so_nothing_from_outside_can_become_markup(scheme, shell, meetings_root):
+    hostile = "<b>dictation</b><img src=x onerror=1>"
+    page, session, folder = _meeting_page(
+        shell, meetings_root, "waiting", {"waiting_for": hostile},
+        transcript="You: <b>Hello</b> team.\nThem: *bold* __x__ <script>1</script>")
+    nv = page.notes_view
+    assert _words(page) == ["Speaker names are next", "The notes are ready. Starting in a moment."]
+    for lb in nv.banner.findChildren(QLabel):
+        if lb.text():                                              # (the icon is a picture)
+            assert lb.textFormat() == Qt.PlainText
+    session.snap["waiting_for"] = "dictation"
+    msu.tick(nv, nv.banner)
+    assert _words(page)[1] == "The notes are ready. Waiting for your dictation to finish."
+
+
+def test_a_hostile_meeting_title_and_notice_never_change_the_banners_words(scheme, shell, meetings_root):
+    page, session, folder = _meeting_page(shell, meetings_root, "", notices=["<b>x</b>"])
+    nv = page.notes_view
+    nv.data["title"] = "<i>Quarterly</i> *review*"
+    nv.render()
+    assert _words(page) == ["Speakers aren't told apart yet", "The people on the call show as “Them”."]
+    assert "<" not in nv.banner.accessibleName()
+
+
+@pytest.mark.parametrize("state,snap", [
+    ("waiting", {"waiting_for": "recording"}),
+    ("running", {}),
+    ("running", {"stage": "voices", "fraction": 0.34, "eta_s": 100.0}),
+    ("running", {"stopping": True}),
+    ("", {}),
+])
+def test_every_banner_has_a_name_and_no_markdown_or_markup_in_its_words(scheme, shell, meetings_root, state, snap):
+    page, session, folder = _meeting_page(shell, meetings_root, state, snap)
+    (banner,) = _banners(page)
+    assert banner.accessibleName().strip()
+    assert banner.accessibleName() == page.notes_view.banner.title_label.text()
+    for text in _words(page):
+        assert not any(ch in text for ch in "*_`#<>[]{}\\"), text
+        assert "limit" not in text.lower() and "Armen" not in text
+    for button in banner.findChildren(QPushButton):
+        assert button.text().strip() and button.isEnabled()
+    for bar in banner.findChildren(QProgressBar):
+        assert bar.accessibleName() == "Progress" and not bar.isTextVisible()
+
+
+def test_cancel_calls_the_session_once_and_only_once(scheme, shell, meetings_root):
+    page, session, folder = _meeting_page(shell, meetings_root, "waiting", {"waiting_for": "recording"})
+    page.notes_view.banner.button.click()
+    assert session.cancelled == [str(folder)]
+
+
+def test_the_banner_of_a_meeting_does_not_move_the_notes_or_the_side_column(scheme, shell, meetings_root):
+    # The right column (People and the player) and the notes keep their places: the banner only ever
+    # changes the banner (the chat on the side must not be disturbed by a pass)
+    from PySide6.QtWidgets import QApplication
+    page, session, folder = _meeting_page(shell, meetings_root, "running", {"stage": "voices", "fraction": 0.1})
+    win = page.window()
+    win.resize(1100, 800)
+    win.show()
+    QApplication.processEvents()
+    nv = page.notes_view
+    before = (nv.people_card.geometry(), nv.audio_card.geometry())
+    session.snap.update(fraction=0.6, eta_s=40.0)
+    msu.tick(nv, nv.banner)
+    QApplication.processEvents()
+    assert (nv.people_card.geometry(), nv.audio_card.geometry()) == before
+
+
+# ── the words, without a window ──────────────────────────────────────────────────────────────────────
+def test_eta_text():
+    assert msu.eta_text(None) == "" and msu.eta_text("x") == "" and msu.eta_text(-5) == ""
+    assert msu.eta_text(float("nan")) == ""
+    assert msu.eta_text(0) == msu.eta_text(44.9) == "Less than a minute left."
+    assert msu.eta_text(45) == "About 1 min left."
+    assert msu.eta_text(89) == "About 1 min left."
+    assert msu.eta_text(90) == msu.eta_text(100) == "About 2 min left."
+    assert msu.eta_text(600) == "About 10 min left."
+
+
+def test_waiting_text_knows_only_its_own_reasons():
+    assert msu.waiting_text("recording") == "Waiting for your recording to finish."
+    assert msu.waiting_text("anything else") == msu.waiting_text(None) == msu.waiting_text("") == "Starting in a moment."
+
+
+def test_working_lines():
+    assert msu.working_lines({}) == ("Identifying speakers…", "The notes are ready. Getting ready.", -1)
+    assert msu.working_lines({"fraction": "x"})[2] == -1
+    title, line, progress = msu.working_lines({"fraction": 0.5, "eta_s": 30})
+    assert (title, progress) == ("Identifying speakers · 50%", 0.5)
+    assert line.endswith("Less than a minute left.")
+    assert msu.working_lines({"fraction": 7})[0] == "Identifying speakers · 100%"
+    assert msu.working_lines({"fraction": -1})[0] == "Identifying speakers · 0%"
+
+
+def test_needs_names():
+    base = {"transcript": YOU_THEM, "meta": {}, "can_name_call": True}
+    assert msu.needs_names(base) is True
+    assert msu.needs_names(dict(base, transcript=NAMED)) is False
+    assert msu.needs_names(dict(base, transcript="You: Hi.")) is False
+    assert msu.needs_names(dict(base, meta={"speakers_at": "2026-10-30 16:40:00"})) is False
+    assert msu.needs_names(dict(base, can_name_call=False, meta={"transcribed_with": "cloud"}, parts=["a.wav"])) is False
+    assert msu.needs_names(dict(base, can_name_call=False, parts=["a.wav"])) is True       # a recording to read again
+    assert msu.needs_names(dict(base, can_name_call=False)) is False                       # nothing to work from
+    assert msu.needs_names(dict(base, can_name_call=False, parts=["a.wav"], recording_cut_short=True)) is False
+    assert msu.needs_names(None) is False and msu.needs_names({}) is False
+    assert msu.needs_names({"transcript": YOU_THEM}) is True                               # (an older page's data)

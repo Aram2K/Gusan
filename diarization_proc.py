@@ -23,6 +23,20 @@ the reason: callers already treat "no turns" as "keep the plain transcript".
 Never raises. GUSAN_DIARIZE_IN_PROCESS=1 runs it in the app's own process
 again (tests, debugging).
 
+The same child also makes voice prints (``run_voices``; the 5th argument "voices"): one
+vector per stretch of speech, for the voice-print engine of the speaker pass after a
+meeting's notes (voice_prints.py, meeting_speakers.name_the_call). It differs from the
+sliding-window run in what the pass needs to be quick and honest:
+
+  * it runs at NORMAL priority with 2 threads (``voice_threads``): below-normal priority was
+    starved 8 times over on a busy computer, and the pass only starts while nothing is
+    recording or being dictated (speaker_followup) and is ended at once when that changes;
+  * the child writes each finished voice print to ``voices.f32`` the moment it has it and a
+    progress file after every one, so the parent reports real progress, keeps what was done
+    when the pass is stopped (a later try goes on from there) and notices a child that made
+    no progress for ``stall_s`` seconds (hung, or starved): it is ended and the pass says
+    "stalled" instead of waiting for ever.
+
 Qt-free; numpy is imported only where audio is written or read.
 """
 import json
@@ -45,10 +59,17 @@ AUDIO_FILE = "audio.f32"
 PROGRESS_FILE = "progress.json"
 RESULT_FILE = "result.json"
 ERR_FILE = "worker.log"
+UNITS_FILE = "units.json"         # voices: how many samples each stretch took (0 = nothing to embed)
+VOICES_FILE = "voices.f32"        # voices: one row of float32 per finished stretch, written as they come
+DIM_FILE = "dim.json"             # voices: the length of a row
+VOICES_MODE = "voices"            # the 5th argument of the child's command line
 POLL_S = 0.25
 MIN_TIMEOUT_S = 15 * 60
 TIMEOUT_PER_AUDIO_S = 4.0         # the child may take this many seconds per second of audio
 STALE_S = 6 * 3600                # leftover folders (a killed app) older than this are removed
+VOICE_MIN_TIMEOUT_S = 10 * 60     # voices: at least this long ...
+VOICE_TIMEOUT_PER_AUDIO_S = 1.5   # ... or this many seconds per second of audio it is given
+VOICE_STALL_S = 120.0             # voices: no progress for this long means it is hung or starved
 
 _lock = threading.Lock()
 _children = set()                 # live subprocess.Popen objects
@@ -66,6 +87,22 @@ def worker_threads(cpu=None):
     window, the recorder and the rest of the computer keep room."""
     cpu = (os.cpu_count() or 4) if cpu is None else cpu
     return max(2, min(6, cpu // 2))
+
+
+def voice_threads(cpu=None):
+    """Threads for the voice-print child: a quarter of the logical processors (2..4). Measured: four
+    threads are only 1.3 times quicker than two for 1.6 times the processor time."""
+    cpu = (os.cpu_count() or 4) if cpu is None else cpu
+    return max(2, min(4, cpu // 4))
+
+
+def voice_timeout(audio_sec):
+    return max(VOICE_MIN_TIMEOUT_S, VOICE_TIMEOUT_PER_AUDIO_S * float(audio_sec or 0))
+
+
+def cancelled_for_quit():
+    """The app is quitting: nothing new starts and what runs ends."""
+    return _cancel_all.is_set()
 
 
 def worker_command():
@@ -131,35 +168,39 @@ def sweep_stale(max_age_s=STALE_S, root=None, now=None):
 
 # ── the app's side ───────────────────────────────────────────────────────────
 
-def run(audio, num_speakers=None, threshold=0.7, on_progress=None, should_cancel=None,
-        timeout_s=None, threads=None, sample_rate=16000):
-    """Diarize 16 kHz mono float32 ``audio`` in a child process.
-    Returns ``(turns, error)``: ``turns`` is ``[(start_s, end_s, speaker_id)]``
-    (``[]`` on failure), ``error`` is "" on success else a short reason."""
+def _in_child(audio, args, threads, wait, finish=None, low_priority=True, extra_json=None):
+    """The part every job shares: ``audio`` goes to a private temp folder, this program starts again
+    as ``--diarize-worker <folder> <args...>`` (bound to a job object on Windows), ``wait(proc,
+    workdir)`` waits for it and returns ``(payload, error)``, and whatever happens the child is
+    gone and the folder removed at the end. ``finish(workdir, payload, error)`` runs after the
+    child is gone and before its folder is, and may change the answer (the voice prints it already
+    wrote are read there, even when it was stopped). Never raises."""
     if _cancel_all.is_set():
         return [], "app quitting"
     workdir = None
     proc = None
     job = None
+    payload, error = [], "failed"
     try:
         import numpy as np
         audio = np.ascontiguousarray(audio, dtype=np.float32)
-        audio_sec = len(audio) / float(sample_rate)
         try:
             sweep_stale()
         except Exception:
             pass
         workdir = tempfile.mkdtemp(prefix=PREFIX)
         audio.tofile(os.path.join(workdir, AUDIO_FILE))
-        threads = int(threads or worker_threads())
-        cmd = worker_command() + [workdir, str(int(num_speakers or 0)), repr(float(threshold)), str(threads)]
+        for name, data in (extra_json or {}).items():
+            with open(os.path.join(workdir, name), "w", encoding="utf-8") as f:
+                json.dump(data, f)
+        cmd = worker_command() + [workdir] + [str(a) for a in args]
         env = dict(os.environ)
         env[ENV_IN_PROCESS] = "1"
         env[ENV_THREADS] = str(threads)
         kw = {}
         if os.name == "nt":
-            # no console window; below-normal priority (the window stays smooth)
-            kw["creationflags"] = 0x08000000 | 0x00004000
+            # no console window; below-normal priority unless the job must not be starved
+            kw["creationflags"] = 0x08000000 | (0x00004000 if low_priority else 0)
         err = open(os.path.join(workdir, ERR_FILE), "wb")
         try:
             proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -169,11 +210,10 @@ def run(audio, num_speakers=None, threshold=0.7, on_progress=None, should_cancel
         with _lock:
             _children.add(proc)
         job = _bind_to_job(proc)
-        return _wait(proc, workdir, audio_sec, on_progress, should_cancel,
-                     default_timeout(audio_sec) if timeout_s is None else float(timeout_s))
+        payload, error = wait(proc, workdir)
     except Exception as e:
         logger.warning("Speaker pass could not run in its own process: %s", e)
-        return [], "could not start: %s" % (str(e)[:120] or type(e).__name__)
+        payload, error = [], "could not start: %s" % (str(e)[:120] or type(e).__name__)
     finally:
         if proc is not None:
             _kill(proc)
@@ -184,34 +224,99 @@ def run(audio, num_speakers=None, threshold=0.7, on_progress=None, should_cancel
             with _lock:
                 _children.discard(proc)
         _close_job(job)
+        if finish is not None and workdir:
+            try:
+                payload, error = finish(workdir, payload, error)
+            except Exception:
+                logger.debug("Speaker pass: reading the child's work failed", exc_info=True)
         if workdir:
             _remove_folder(workdir)
+    return payload, error
 
 
-def _wait(proc, workdir, audio_sec, on_progress, should_cancel, timeout_s):
+def run(audio, num_speakers=None, threshold=0.7, on_progress=None, should_cancel=None,
+        timeout_s=None, threads=None, sample_rate=16000):
+    """Diarize 16 kHz mono float32 ``audio`` in a child process.
+    Returns ``(turns, error)``: ``turns`` is ``[(start_s, end_s, speaker_id)]``
+    (``[]`` on failure), ``error`` is "" on success else a short reason."""
+    threads = int(threads or worker_threads())
+    audio_sec = len(audio) / float(sample_rate)
+    limit = default_timeout(audio_sec) if timeout_s is None else float(timeout_s)
+    return _in_child(
+        audio, [int(num_speakers or 0), repr(float(threshold)), threads], threads,
+        lambda proc, workdir: _wait(proc, workdir, audio_sec, on_progress, should_cancel, limit))
+
+
+def run_voices(audio, lengths, on_progress=None, should_cancel=None, timeout_s=None, threads=None,
+               stall_s=VOICE_STALL_S, sample_rate=16000):
+    """One voice print per stretch of speech, made in a child process (see the module notes).
+    ``audio``: the stretches joined, 16 kHz mono float32; ``lengths``: how many samples each took
+    (0 = nothing to embed: it gets no voice print). Returns ``(vectors, error)``: ``vectors`` has an
+    entry per stretch - a list of floats, or None for a length of 0 - and ``error`` is "" when all
+    are done. On an error (cancelled, app quitting, timed out, stalled, a crash) ``vectors`` holds
+    the stretches that were finished before it (a prefix: the child wrote each one as it had it).
+    ``on_progress(done, total)`` counts stretches. ``stall_s``: seconds without any progress after
+    which the child is ended as "stalled" (None or 0: never)."""
+    lengths = [max(0, int(n)) for n in lengths]
+    threads = int(threads or voice_threads())
+    audio_sec = sum(lengths) / float(sample_rate)
+    limit = voice_timeout(audio_sec) if timeout_s is None else float(timeout_s)
+
+    def wait(proc, workdir):
+        reason, rc = _poll(proc, workdir, audio_sec, on_progress, should_cancel, limit, stall_s=stall_s)
+        if reason:
+            return [], reason
+        return [], _voices_error(workdir, rc)
+
+    def finish(workdir, payload, error):
+        vectors = _read_voices(workdir, lengths)
+        if not error and len(vectors) < len(lengths):
+            error = "incomplete"
+        return vectors, error
+    return _in_child(audio, [0, "0", threads, VOICES_MODE], threads, wait, finish,
+                     low_priority=False, extra_json={UNITS_FILE: lengths})
+
+
+def _poll(proc, workdir, audio_sec, on_progress, should_cancel, timeout_s, stall_s=None):
+    """Wait for the child: ("", exit code) when it ended on its own, else (why it was ended,
+    exit code): "app quitting", "cancelled", "timed out" or, with ``stall_s``, "stalled"."""
     started = time.monotonic()
+    changed_at = started
     last_seen = None
     while True:
         rc = proc.poll()
-        if on_progress is not None:
-            last_seen = _report_progress(workdir, last_seen, on_progress)
+        if on_progress is not None or stall_s:
+            seen = _report_progress(workdir, last_seen, on_progress)
+            if seen != last_seen:
+                last_seen, changed_at = seen, time.monotonic()
         if _cancel_all.is_set():            # (cancel_all kills the child itself: rc is set then too)
             _kill(proc)
-            return [], "app quitting"
+            return "app quitting", rc
         if rc is not None:
-            break
+            return "", rc
         if should_cancel is not None:
             try:
                 if should_cancel():
                     _kill(proc)
-                    return [], "cancelled"
+                    return "cancelled", rc
             except Exception:
                 pass
-        if time.monotonic() - started > timeout_s:
+        now = time.monotonic()
+        if now - started > timeout_s:
             _kill(proc)
             logger.warning("Speaker pass gave up after %.0f s (%.0f s of audio)", timeout_s, audio_sec)
-            return [], "timed out"
+            return "timed out", rc
+        if stall_s and now - changed_at > stall_s:
+            _kill(proc)
+            logger.warning("Speaker pass made no progress for %.0f s (%.0f s of audio): ended", stall_s, audio_sec)
+            return "stalled", rc
         time.sleep(POLL_S)
+
+
+def _wait(proc, workdir, audio_sec, on_progress, should_cancel, timeout_s):
+    reason, rc = _poll(proc, workdir, audio_sec, on_progress, should_cancel, timeout_s)
+    if reason:
+        return [], reason
     result = _read_json(os.path.join(workdir, RESULT_FILE))
     if not isinstance(result, dict):
         tail = _tail(os.path.join(workdir, ERR_FILE))
@@ -229,16 +334,52 @@ def _wait(proc, workdir, audio_sec, on_progress, should_cancel, timeout_s):
     return turns, ""
 
 
+def _voices_error(workdir, rc):
+    """"" when the voice-print child ended with an ok result, else why not."""
+    result = _read_json(os.path.join(workdir, RESULT_FILE))
+    if not isinstance(result, dict):
+        tail = _tail(os.path.join(workdir, ERR_FILE))
+        logger.warning("Speaker pass ended without a result (exit code %s)%s", rc,
+                       (": " + tail) if tail else "")
+        return "worker exited with code %s" % rc
+    if not result.get("ok"):
+        return str(result.get("error") or "failed")[:200]
+    return ""
+
+
+def _read_voices(workdir, lengths):
+    """The voice prints the child has written so far (a row per finished stretch; None where the
+    stretch had nothing to embed or its numbers are not usable). A half-written last row is ignored."""
+    meta = _read_json(os.path.join(workdir, DIM_FILE))
+    try:
+        dim = int(meta.get("dim")) if isinstance(meta, dict) else 0
+    except (TypeError, ValueError):
+        dim = 0
+    if dim <= 0:
+        return []
+    try:
+        import numpy as np
+        data = np.fromfile(os.path.join(workdir, VOICES_FILE), dtype=np.float32)
+    except Exception:
+        return []
+    out = []
+    for i in range(min(len(lengths), len(data) // dim)):
+        row = data[i * dim:(i + 1) * dim]
+        out.append(row.tolist() if lengths[i] > 0 and bool(np.isfinite(row).all()) else None)
+    return out
+
+
 def _report_progress(workdir, last_seen, on_progress):
     data = _read_json(os.path.join(workdir, PROGRESS_FILE))
     if not isinstance(data, dict):
         return last_seen
     mark = (data.get("done"), data.get("total"))
     if mark != last_seen and None not in mark:
-        try:
-            on_progress(int(mark[0]), max(1, int(mark[1])))
-        except Exception:
-            pass
+        if on_progress is not None:
+            try:
+                on_progress(int(mark[0]), max(1, int(mark[1])))
+            except Exception:
+                pass
         return mark
     return last_seen
 
@@ -322,10 +463,52 @@ def _close_job(job):
 
 # ── the child's side ─────────────────────────────────────────────────────────
 
+def _voices_main(workdir, threads):
+    """The voice-print job (``... <threads> voices``): reads <folder>/audio.f32 (the stretches joined)
+    and <folder>/units.json (the samples of each), writes <folder>/dim.json, then one row of
+    voices.f32 per stretch the moment it has it, progress.json after every one (at least every half
+    second) and result.json at the end. A length of 0 is a stretch with nothing to embed: a row of
+    zeros, no work."""
+    out = {"ok": False, "error": "worker failed"}
+    try:
+        import numpy as np
+        audio = np.fromfile(os.path.join(workdir, AUDIO_FILE), dtype=np.float32)
+        with open(os.path.join(workdir, UNITS_FILE), "r", encoding="utf-8") as f:
+            lengths = [max(0, int(n)) for n in json.load(f)]
+        import diarization
+        extractor = diarization.build_extractor(threads)
+        dim = int(extractor.dim)
+        _write_json(os.path.join(workdir, DIM_FILE), {"dim": dim})
+        total = len(lengths)
+        _write_json(os.path.join(workdir, PROGRESS_FILE), {"done": 0, "total": total})
+        last = time.monotonic()
+        pos = 0
+        with open(os.path.join(workdir, VOICES_FILE), "wb") as rows:
+            for i, n in enumerate(lengths):
+                row = np.zeros(dim, dtype=np.float32)
+                if n > 0:
+                    vec = np.asarray(diarization.voice_print(extractor, audio[pos:pos + n]), dtype=np.float32)
+                    pos += n
+                    if vec.shape == (dim,):
+                        row = vec
+                rows.write(row.tobytes())
+                rows.flush()
+                now = time.monotonic()
+                if now - last >= 0.5 or i + 1 >= total:
+                    last = now
+                    _write_json(os.path.join(workdir, PROGRESS_FILE), {"done": i + 1, "total": total})
+        out = {"ok": True, "dim": dim, "done": total}
+    except BaseException as e:      # noqa: BLE001 - the parent only needs the reason
+        out = {"ok": False, "error": (str(e)[:160] or type(e).__name__)}
+    _write_json(os.path.join(workdir, RESULT_FILE), out)
+    return 0
+
+
 def worker_main(argv=None):
-    """``--diarize-worker <folder> <num_speakers> <threshold> <threads>``:
+    """``--diarize-worker <folder> <num_speakers> <threshold> <threads> [voices]``:
     reads <folder>/audio.f32, writes <folder>/progress.json while it works and
-    <folder>/result.json at the end. Returns the exit code."""
+    <folder>/result.json at the end. Returns the exit code. With the 5th argument
+    "voices" it makes voice prints instead (_voices_main)."""
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == WORKER_FLAG:
         argv = argv[1:]
@@ -335,6 +518,8 @@ def worker_main(argv=None):
         return 2
     os.environ[ENV_IN_PROCESS] = "1"
     os.environ[ENV_THREADS] = str(threads)
+    if len(argv) > 4 and argv[4] == VOICES_MODE:
+        return _voices_main(workdir, threads)         # (normal priority: see the module notes)
     if os.name != "nt":
         try:
             os.nice(10)
