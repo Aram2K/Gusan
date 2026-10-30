@@ -602,11 +602,139 @@ def test_a_child_that_stops_making_progress_is_ended_as_stalled(stub_voices, mon
     monkeypatch.setenv("STUB_AFTER", "2")
     audio, lengths = _joined(*([1.0] * 5))
     t0 = time.monotonic()
-    vectors, err = diarization_proc.run_voices(audio, lengths, stall_s=1.0)
+    # (the limit counts from the child's last sign of progress, not from its start - a loaded computer takes
+    # seconds to start a child - and has a margin over the stub's own pace so a busy machine does not fail it)
+    vectors, err = diarization_proc.run_voices(audio, lengths, stall_s=3.0)
     assert err == "stalled"
     assert len(vectors) == 2                                        # the two it finished are still handed back
-    assert time.monotonic() - t0 < 15
+    assert time.monotonic() - t0 < 60
     assert _work_folders(stub_voices) == [] and not diarization_proc._children
+
+
+# ── the watch over the child, on a clock of its own (no child, no waiting, no load to fail on) ──────────
+
+class _Clock:
+    """Time that only moves when the loop sleeps (or a test says so)."""
+
+    def __init__(self):
+        self.now = 1000.0
+        self.jumps = {}                  # number of the sleep -> extra seconds that pass in it
+        self.sleeps = 0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps += 1
+        self.now += seconds + self.jumps.get(self.sleeps, 0.0)
+
+
+class _Proc:
+    """A child that runs until ``clock.now`` reaches ``ends_at`` (never, when None) and then exits with 0."""
+
+    def __init__(self, clock, ends_at=None):
+        self.clock, self.ends_at, self.killed = clock, ends_at, False
+
+    def poll(self):
+        if self.killed:
+            return -9
+        return 0 if self.ends_at is not None and self.clock.now >= self.ends_at else None
+
+    def kill(self):
+        self.killed = True
+
+
+def _watch(tmp_path, clock, proc, progress=None, **kw):
+    if progress is not None:
+        diarization_proc._write_json(str(tmp_path / diarization_proc.PROGRESS_FILE),
+                                     {"done": progress[0], "total": progress[1]})
+    args = dict(audio_sec=60.0, on_progress=None, should_cancel=None, timeout_s=10 ** 6, stall_s=None)
+    args.update(kw)
+    return diarization_proc._poll(proc, str(tmp_path), args.pop("audio_sec"), args.pop("on_progress"),
+                                  args.pop("should_cancel"), args.pop("timeout_s"), clock=clock, sleep=clock.sleep,
+                                  **args)
+
+
+def test_a_child_that_makes_no_progress_for_the_stall_limit_is_ended(tmp_path):
+    clock = _Clock()
+    proc = _Proc(clock)
+    reason, _rc = _watch(tmp_path, clock, proc, progress=(1, 5), stall_s=10.0)
+    assert reason == "stalled" and proc.killed
+    assert 10.0 < clock.now - 1000.0 <= 10.0 + 2 * diarization_proc.POLL_S            # about ten seconds, not before
+
+
+def test_progress_keeps_resetting_the_stall_limit(tmp_path):
+    clock = _Clock()
+    proc = _Proc(clock, ends_at=1100.0)
+    done = [0]
+
+    def on_progress(d, t):
+        pass
+    orig_sleep = clock.sleep
+
+    def sleep(seconds):
+        orig_sleep(seconds)
+        if clock.sleeps % 20 == 0:                       # a new voice print every five seconds
+            done[0] += 1
+            diarization_proc._write_json(str(tmp_path / diarization_proc.PROGRESS_FILE), {"done": done[0], "total": 99})
+    clock.sleep = sleep
+    reason, rc = diarization_proc._poll(proc, str(tmp_path), 60.0, on_progress, None, 10 ** 6, stall_s=10.0,
+                                        clock=clock, sleep=clock.sleep)
+    assert (reason, rc) == ("", 0)                       # it ended by itself after 100 s, never "stalled"
+
+
+def test_the_first_sign_of_life_has_its_own_longer_limit_the_model_loads_first(tmp_path):
+    clock = _Clock()
+    seen = []
+    reason, _rc = _watch(tmp_path, clock, _Proc(clock), stall_s=10.0, start_s=100.0,
+                         should_cancel=lambda: seen.append(clock.now) or clock.now - 1000.0 > 60.0)
+    assert reason == "cancelled"                         # not "stalled" at ten seconds: nothing was due yet
+    clock = _Clock()
+    reason, _rc = _watch(tmp_path, clock, _Proc(clock), stall_s=10.0, start_s=100.0)
+    assert reason == "stalled" and 100.0 < clock.now - 1000.0 <= 100.0 + 2 * diarization_proc.POLL_S
+    assert clock.now - 1000.0 > 100.0
+    clock = _Clock()                                     # (no start limit: the stall limit counts from the start)
+    reason, _rc = _watch(tmp_path, clock, _Proc(clock), stall_s=10.0)
+    assert reason == "stalled" and clock.now - 1000.0 < 20.0
+
+
+def test_the_overall_limit_ends_a_child_that_keeps_going(tmp_path):
+    clock = _Clock()
+    proc = _Proc(clock)
+    reason, _rc = _watch(tmp_path, clock, proc, timeout_s=30.0)
+    assert reason == "timed out" and proc.killed and 30.0 < clock.now - 1000.0 <= 31.0
+
+
+def test_a_computer_that_slept_does_not_end_a_healthy_child(tmp_path):
+    # The lid closes for half an hour: the clock keeps counting through sleep, the child did nothing meanwhile.
+    clock = _Clock()
+    clock.jumps = {8: 1800.0}
+    proc = _Proc(clock, ends_at=1000.0 + 1800.0 + 5.0)
+    reason, rc = _watch(tmp_path, clock, proc, progress=(3, 9), stall_s=10.0, timeout_s=600.0)
+    assert (reason, rc) == ("", 0), reason               # it was not "stalled", not "timed out" - it finished
+    assert not proc.killed
+
+
+def test_a_real_stall_after_a_sleep_is_still_found_and_a_real_timeout_too(tmp_path):
+    clock = _Clock()
+    clock.jumps = {4: 3600.0}
+    proc = _Proc(clock)
+    reason, _rc = _watch(tmp_path, clock, proc, progress=(3, 9), stall_s=10.0)
+    assert reason == "stalled"
+    assert clock.now - 1000.0 > 3600.0                    # (it went on to count the time that really passed)
+    clock = _Clock()
+    clock.jumps = {4: 3600.0}
+    reason, _rc = _watch(tmp_path, clock, _Proc(clock), timeout_s=30.0)
+    assert reason == "timed out"
+
+
+def test_a_short_gap_between_two_looks_is_not_a_sleep(tmp_path):
+    clock = _Clock()
+    clock.jumps = {2: diarization_proc.SLEEP_JUMP_S - 1.0}   # a computer that was only busy for a few seconds
+    proc = _Proc(clock)
+    reason, _rc = _watch(tmp_path, clock, proc, progress=(3, 9), stall_s=10.0)
+    assert reason == "stalled"
+    assert clock.now - 1000.0 < 10.0 + diarization_proc.SLEEP_JUMP_S                    # the gap counted in full
 
 
 @needs_numpy
@@ -622,7 +750,8 @@ def test_a_voice_pass_that_takes_too_long_is_ended_with_what_it_made(stub_voices
     monkeypatch.setenv("STUB_MODE", "hang_after")
     monkeypatch.setenv("STUB_AFTER", "1")
     audio, lengths = _joined(*([1.0] * 4))
-    vectors, err = diarization_proc.run_voices(audio, lengths, timeout_s=1.0, stall_s=None)
+    # (the clock starts when the child does; the margin is for a computer that takes seconds to start one)
+    vectors, err = diarization_proc.run_voices(audio, lengths, timeout_s=10.0, stall_s=None)
     assert err == "timed out" and len(vectors) == 1
 
 
@@ -659,7 +788,7 @@ def test_voice_prints_that_are_not_numbers_become_none_and_a_half_written_row_is
     assert err == "" and vectors[0] == [1.0, 16000.0, 1.0] and vectors[1] is None and vectors[2][0] == 3.0
     monkeypatch.setenv("STUB_MODE", "half_row")
     monkeypatch.setenv("STUB_AFTER", "1")
-    vectors, err = diarization_proc.run_voices(audio, lengths, stall_s=1.0)
+    vectors, err = diarization_proc.run_voices(audio, lengths, stall_s=3.0)
     assert len(vectors) == 1                                        # the half row at the end is not a voice print
 
 

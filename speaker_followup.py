@@ -18,11 +18,14 @@ The rules, all of them about not getting in the way:
     again (each start loads the speaker model for nothing);
   * if a recording, a dictation or a file job starts while it works, it stops at
     once (``should_cancel`` is polled by the child process' wait loop several times a
-    second) and tries again when the computer is free - at most MAX_RETRIES times per
-    queued job (a meeting stopped again, once continued, starts the count anew), after
-    which it leaves the meeting as it is (the page keeps offering "Identify speakers").
-    The work already done is not lost: the pass keeps what it made (``status.resume``,
-    a dict that lives as long as the job does) and goes on from there;
+    second) and tries again when the computer is free. The work already done is not lost:
+    the pass keeps what it made (``status.resume``, a dict that lives as long as the job does)
+    and goes on from there. Only an interruption that got nowhere (under MIN_PROGRESS new voice
+    prints) counts toward MAX_RETRIES per queued job - a try that moved the pass forward is not a
+    failure, so a person who dictates every half minute still gets the pass finished - and at most
+    MAX_ATTEMPTS interruptions end it whatever they made. Then it leaves the meeting as it is (the page
+    keeps offering "Identify speakers") but keeps the voice prints it made (the last MAX_KEPT
+    meetings'), so that the next Identify speakers goes on instead of starting over;
   * "Cancel" and the app quitting end it for good; nothing is retried;
   * one pass at a time, the oldest meeting first; the worker thread exists only while
     there is something to do.
@@ -54,7 +57,10 @@ import time
 logger = logging.getLogger("transcribe")
 
 POLL_S = 2.0            # how often a waiting pass looks whether the computer is free
-MAX_RETRIES = 5         # interruptions one meeting's pass survives; the next one ends it
+MAX_RETRIES = 5         # interruptions that got nowhere one meeting's pass survives; the next one ends it
+MIN_PROGRESS = 3        # new voice prints a try must have made for its interruption not to count as one
+MAX_ATTEMPTS = 40       # interruptions of any kind one job survives (a pass that crawls must end too)
+MAX_KEPT = 3            # meetings whose voice prints are kept after the pass gave up (memory is not free)
 SETTLE_POLLS = 3        # quiet looks (about 6 s) in a row wanted after the computer was busy
 ETA_MIN_DONE = 3        # pieces made in this try before a time left is worked out ...
 ETA_MIN_SECONDS = 4.0   # ... and seconds of this try's own pace
@@ -76,6 +82,14 @@ def _key(folder):
 
 def _thread(target):
     threading.Thread(target=target, daemon=True, name="gusan-speaker-pass").start()
+
+
+def _prints(resume):
+    """How many voice prints a job's ``resume`` dict holds (whatever lists it keeps, counted)."""
+    try:
+        return sum(len(v) for v in resume.values() if isinstance(v, (list, tuple)))
+    except Exception:
+        return 0
 
 
 class _Crashed:
@@ -131,8 +145,11 @@ class SpeakerFollowUp:
         self._running = False
         self._alive = False                 # a worker thread exists
         self._worker_ident = None           # its thread id (wait_idle must not wait on itself)
-        self._retries = {}                  # folder key -> interruptions so far (while the job lasts)
-        self._resume = {}                   # folder key -> what a stopped try made (while the job lasts)
+        self._retries = {}                  # folder key -> interruptions that got nowhere (while the job lasts)
+        self._attempts = {}                 # folder key -> interruptions of any kind (while the job lasts)
+        self._resume = {}                   # folder key -> what a stopped try made (while the job lasts,
+        #                                     and after the pass gave up: see _kept)
+        self._kept = []                     # folder keys whose resume outlives a job that gave up, oldest first
         self._prog = {}                     # folder key -> the current try's progress
         self._results = {}                  # folder key -> (result, how): kept until take_result
         self._reason_now = ""               # what the current job waits for (see wait_reason)
@@ -157,9 +174,11 @@ class SpeakerFollowUp:
             if working or any(_key(f) == key for f in self._queue):
                 return False
             # A new job (a continued meeting's new part, say) starts with a fresh count: a
-            # meeting that once used up its retries must not get none the next time.
+            # meeting that once used up its retries must not get none the next time. What a pass that
+            # gave up kept is NOT dropped (Identify speakers goes on from it); the pass looks it up by the
+            # recording's name and the number of stretches, so what belongs to something else is not used.
             self._retries.pop(key, None)
-            self._resume.pop(key, None)
+            self._attempts.pop(key, None)
             self._results.pop(key, None)
             self._prog.pop(key, None)
             if first:
@@ -220,7 +239,9 @@ class SpeakerFollowUp:
         ``waiting_for`` (wait_reason), ``stage`` ("" | "reading" | "voices"), ``done`` and ``total``
         (the pass's own count, 0 until it has one), ``fraction`` (0..1, None while unknown),
         ``eta_s`` (seconds left from this try's pace, None until it is worth saying) and ``tries``
-        (interruptions so far)."""
+        (interruptions that got nowhere so far). ``stage`` is "download" while the speaker model is
+        fetched (first use), "reading" while the sound is read (the fraction of the voices already made
+        stays), "voices" while the voice prints are made."""
         state = self.state(folder)
         out = {"state": state, "stopping": False, "waiting_for": "", "stage": "", "done": 0, "total": 0,
                "fraction": None, "eta_s": None, "tries": 0}
@@ -236,10 +257,11 @@ class SpeakerFollowUp:
                 return out
             p = self._prog.get(key) or {}
             out["stage"] = p.get("stage", "")
-            if out["stage"] == "voices" and p.get("total", 0) > 0:
+            if out["stage"] in ("voices", "reading", "download") and p.get("total", 0) > 0:
                 done, total = int(p.get("done", 0)), int(p["total"])
                 out["done"], out["total"] = done, total
                 out["fraction"] = max(0.0, min(1.0, done / float(total)))
+            if out["stage"] == "voices" and out["fraction"] is not None:
                 made = done - int(p.get("first_done", done))
                 span = float(p.get("last_t", 0.0)) - float(p.get("first_t", 0.0))
                 if made >= ETA_MIN_DONE and span >= ETA_MIN_SECONDS:
@@ -249,7 +271,7 @@ class SpeakerFollowUp:
     def take_result(self, folder):
         """How ``folder``'s last job ended, once: ``(result, how)`` - the pass's result (None when it
         never ran) and how: "done", "cancelled" (the person stopped it) or "gave_up" (other work
-        interrupted it too often). ``(None, "")`` when there is nothing to take."""
+        interrupted it again and again without it getting anywhere). ``(None, "")`` when there is nothing to take."""
         with self._lock:
             return self._results.pop(_key(folder), (None, ""))
 
@@ -288,6 +310,9 @@ class SpeakerFollowUp:
             for f in hit:
                 self._results[_key(f)] = (None, HOW_CANCELLED)
                 self._forget(_key(f))
+            for kept in list(self._kept):           # (the voice prints a pass that gave up left: no one will ask for them)
+                if key is None or kept == key:
+                    self._forget(kept)
             if self._current and (key is None or _key(self._current) == key):
                 hit.append(self._current)
                 self._cancel.set()
@@ -332,24 +357,39 @@ class SpeakerFollowUp:
                 if p.get("first_t") is None:
                     p["first_t"], p["first_done"] = now, int(done)
                 p["done"], p["total"], p["last_t"] = int(done), int(total), now
+            elif stage in ("reading", "download"):
+                p["done"], p["total"] = int(done), int(total)      # (no pace: the time left is the voices')
         if stage == "voices" and total:
             self.status_text = "Telling the voices apart… %d%%" % int(100.0 * done / total)
         elif stage == "reading":
             self.status_text = "Reading the call's sound…"
+        elif stage == "download":
+            self.status_text = "Getting the speaker model…"
 
     def _forget(self, key):
         """Everything kept for a job that is over (or dropped)."""
         self._resume.pop(key, None)
+        if key in self._kept:
+            self._kept.remove(key)
         self._retries.pop(key, None)
+        self._attempts.pop(key, None)
         self._cooling.discard(key)
         self._prog.pop(key, None)
 
-    def _finish(self, folder, result, how):
-        """The job is over for good: keep how it ended for the page, drop everything else of it."""
+    def _finish(self, folder, result, how, keep_resume=False):
+        """The job is over for good: keep how it ended for the page, drop everything else of it -
+        except, with ``keep_resume`` (the pass gave up), the voice prints it made: the next Identify
+        speakers goes on from them. Only the last MAX_KEPT meetings' are kept."""
         key = _key(folder)
         with self._lock:
             self._results[key] = (result, how)
+            resume = self._resume.get(key)
             self._forget(key)
+            if keep_resume and resume:
+                self._resume[key] = resume
+                self._kept.append(key)
+                while len(self._kept) > MAX_KEPT:
+                    self._resume.pop(self._kept.pop(0), None)
 
     def _check_worker(self):
         """A worker thread that is gone (it died without cleaning up) must not leave a meeting
@@ -472,6 +512,9 @@ class SpeakerFollowUp:
             self._reason_now = ""
             self._prog[key] = {"stage": ""}               # a new try: its own pace
             resume = self._resume.setdefault(key, {})
+            if key in self._kept:
+                self._kept.remove(key)                    # in use again: it is the job's own once more
+            before = _prints(resume)
         self._changed(folder)
         # 2. the pass; it stops by itself when the computer gets busy
         result = self._run(folder, self._should_cancel, PassStatus(self, folder, resume))
@@ -482,14 +525,22 @@ class SpeakerFollowUp:
             self._finish(folder, result, HOW_CANCELLED)   # on request: no retry
             return
         with self._lock:
-            self._retries[key] = tries = self._retries.get(key, 0) + 1
-        if tries > self.max_retries:
-            logger.info("The speaker pass of a meeting was interrupted %d times; left for "
-                        "Identify speakers", tries)
-            self._finish(folder, result, HOW_GAVE_UP)
+            # A try that moved the pass forward (it made voice prints that are kept) is no failure.
+            p = self._prog.get(key) or {}
+            made = _prints(resume) - before
+            if p.get("first_done") is not None:
+                made = max(made, int(p.get("done", 0)) - int(p["first_done"]))
+            attempts = self._attempts[key] = self._attempts.get(key, 0) + 1
+            tries = self._retries.get(key, 0)
+            if made < MIN_PROGRESS:
+                self._retries[key] = tries = tries + 1
+        if tries > self.max_retries or attempts > MAX_ATTEMPTS:
+            logger.info("The speaker pass of a meeting was interrupted %d times (%d got nowhere); left for "
+                        "Identify speakers", attempts, tries)
+            self._finish(folder, result, HOW_GAVE_UP, keep_resume=True)
             return
-        logger.info("The speaker pass was interrupted (%d of %d); it tries again when the computer is free",
-                    tries, self.max_retries)
+        logger.info("The speaker pass was interrupted (%d voice prints made in this try; %d of %d got "
+                    "nowhere); it tries again when the computer is free", made, tries, self.max_retries)
         with self._lock:
             self._cooling.add(key)
             self._prog.pop(key, None)

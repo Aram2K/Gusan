@@ -31,10 +31,13 @@ call's speech, taken from the segments already known (voice_prints.py decides wh
 stretches and how the prints are grouped into people; diarization.embed_spans makes them in
 a child process). The first engine slid a 10 second window along the whole sound, a window
 per second, and needed 47 minutes for a 55 minute call on a busy computer, with no progress
-for the first five; this one needs about two minutes. The pass reports real progress
-(``progress(stage, done, total)``, stages "reading" and "voices") and keeps the voice prints
-it finished in ``resume`` (a dict the caller owns) so that a pass stopped by a dictation goes
-on from where it was. GUSAN_SPEAKER_ENGINE=windows brings the old engine back for comparing.
+for the first five; this one needs about two minutes. Only the stretches that hold real speech
+get a print (voice_prints.MIN_SPEECH_SEC, measured on the call's own sound): a piece that is
+mostly silence has a noisy print, and a few of them made a second "speaker" out of nothing.
+The pass reports real progress (``progress(stage, done, total)``, stages "download" - the speaker
+model, the first time only - "reading" and "voices") and keeps the voice prints it finished in
+``resume`` (a dict the caller owns) so that a pass stopped by a dictation goes on from where it
+was. GUSAN_SPEAKER_ENGINE=windows brings the old engine back for comparing.
 
 The notes are left alone after the pass (decision): they are written text the person may have
 edited or sent on (Notion, Word), and "Them" can not be mapped to one person when two or more
@@ -46,6 +49,7 @@ labels comes back as an Outcome with a ``reason`` code and a plain ``notice``
 sentence for the meeting's notices, and logs one line with the reason (INFO for the
 ones that are no problem: a recording too short to label, nobody on the call).
 """
+import inspect
 import logging
 import time
 from pathlib import Path
@@ -238,17 +242,38 @@ def _percent_reporter(say, label, step=2):
     return report
 
 
-def _ensure_speaker_tool(d, privacy, say, out):
+def _download_models(d, say, on_bytes, cancelled):
+    """d.download_models with what it understands: its status line, a cancel (looked at between two
+    chunks of the download) and the bytes for a progress bar - a diarizer that takes less gets less."""
+    kwargs = {"on_progress": say}
+    try:
+        params = inspect.signature(d.download_models).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if cancelled is not None and "should_cancel" in params:
+        kwargs["should_cancel"] = cancelled
+    if on_bytes is not None and "on_bytes" in params:
+        kwargs["on_bytes"] = on_bytes
+    return d.download_models(**kwargs)
+
+
+def _ensure_speaker_tool(d, privacy, say, out, tell=None, cancelled=None):
     """The speaker tool must be here (sherpa-onnx and its model; the model is
     downloaded once, never in Privacy mode). None when it is, else ``out`` already
-    failed with the reason."""
+    failed with the reason. The download reports as stage "download" (``tell``) and ends at once
+    when ``cancelled()`` says so (R_CANCELLED)."""
     if not d.sherpa_installed():
         return _fail(out, R_NO_COMPONENT, "sherpa-onnx is not installed")
     if not d.models_downloaded():
         if privacy:
             return _fail(out, R_PRIVACY, "speaker model missing, Privacy mode is on")
         say("Downloading the speaker model…")
-        d.download_models(on_progress=say)
+        if tell is not None:
+            tell("download", 0, 0)
+        _download_models(d, say, (lambda done, total: tell("download", done, total)) if tell is not None else None,
+                         cancelled)
+        if cancelled is not None and cancelled():
+            return _fail(out, R_CANCELLED)
         if not d.models_downloaded():
             return _fail(out, R_DOWNLOAD, "the speaker model download did not finish")
     if not d.is_available():
@@ -314,7 +339,7 @@ def build_transcript(rec, parts, *, language=None, privacy=False, status=None,
 
         # 1. the speaker tool (the fast half does not diarize: it needs none)
         if diarize:
-            failed = _ensure_speaker_tool(d, privacy, say, out)
+            failed = _ensure_speaker_tool(d, privacy, say, out, cancelled=should_cancel)
             if failed is not None:
                 return failed
             if cancelled():
@@ -584,19 +609,62 @@ def _embed(d, samples, spans, on_progress, should_cancel):
     return d.embed_spans(samples, spans, on_progress=on_progress, should_cancel=should_cancel)
 
 
+def _plan_part(part):
+    """The stretches of one part that get a voice print: (units, the seconds of speech in each, the part's
+    length in seconds, the part's sound as it was read - None when there was none). The stretches come
+    from the segments (voice_prints.units_for); then the call's own sound is read and only those that
+    hold at least voice_prints.MIN_SPEECH_SEC of speech are kept - a piece that is mostly silence has a
+    noisy voice print, and a handful of them look like one more person. When the sound cannot be read,
+    every stretch is kept and its length stands in for its speech."""
+    units = voice_prints.units_for(part.segments)
+    seconds = part.seconds
+    if not units:
+        return [], [], seconds, None
+    samples = part.load()
+    if samples is None or not len(samples):
+        return units, [e - s for s, e in units], seconds, None
+    seconds = max(seconds, len(samples) / float(SAMPLE_RATE))
+    try:
+        levels = speaker_labels.frame_rms(samples)
+        speech = voice_prints.speech_seconds(levels, units, speaker_labels.system_threshold(),
+                                             speaker_labels.HOP_SEC)
+    except Exception:
+        logger.debug("the speech in the call's stretches could not be measured", exc_info=True)
+        return units, [e - s for s, e in units], seconds, samples
+    units, speech = voice_prints.gate_units(units, speech)
+    return units, speech, seconds, samples
+
+
 def _turns_by_voices(d, parts, out, say, tell, should_cancel, cancelled, resume):
     """One voice print per stretch of the call's speech (see the module notes). Returns (turns, the
     parts' offsets, an Outcome to return right away or None). The voice prints already made for a
     part (``resume``, filled even when this ends early) are not made again."""
-    plans = [voice_prints.units_for(p.segments) for p in parts]
+    # 1. which stretches get a voice print (the sound is read once for this, and let go of)
+    tell("reading", 0, 0)
+    say("Reading the call's sound…")
+    t0 = time.monotonic()
+    plans, speeches, lengths = [], [], []
+    held = {}                       # a meeting of one part keeps its sound from here to the voice prints
+    for k, part in enumerate(parts):
+        if cancelled():
+            return None, None, _fail(out, R_CANCELLED)
+        units, speech, seconds, samples = _plan_part(part)
+        plans.append(units)
+        speeches.append(speech)
+        lengths.append(seconds)
+        if len(parts) == 1 and samples is not None:
+            held[k] = samples       # (one read, not two; a longer meeting reads each part again when its turn comes)
+        samples = None
+    t_read = time.monotonic() - t0
     total = sum(len(u) for u in plans)
     out.units = total
     voice_threads = getattr(d, "voice_threads", None)
     logger.info("Speaker pass started: call=%.0fs units=%d threads=%s", out.call_seconds, total,
                 voice_threads() if callable(voice_threads) else "?")
+    # 2. the voice prints (the ones an earlier try made are not made again)
     per_part, offsets = [], []
     offset, base, error = 0.0, 0, ""
-    t_read = t_voices = 0.0
+    t_voices = 0.0
     milestone = [0]
     for k, part in enumerate(parts):
         if cancelled():
@@ -604,13 +672,12 @@ def _turns_by_voices(d, parts, out, say, tell, should_cancel, cancelled, resume)
         units = plans[k]
         key = (part.key or k, len(units))
         have = list(resume.get(key) or [])[:len(units)] if resume is not None else []
-        seconds = part.seconds
+        samples = held.pop(k, None)
         if units and len(have) < len(units):
-            tell("reading", 0, 1)
+            tell("reading", base + len(have), total)
             say("Reading the call's sound…")
             t0 = time.monotonic()
-            samples = part.load()
-            seconds = max(seconds, (len(samples) / float(SAMPLE_RATE)) if samples is not None else 0.0)
+            samples = samples if samples is not None else part.load()
             t_read += time.monotonic() - t0
             if cancelled():
                 return None, None, _fail(out, R_CANCELLED)
@@ -633,10 +700,11 @@ def _turns_by_voices(d, parts, out, say, tell, should_cancel, cancelled, resume)
             samples = None                  # the call's sound is let go before the names are worked out
             t_voices += time.monotonic() - t1
             have += list(vectors)
+        samples = None                      # (also when every voice print was already there)
         have += [None] * (len(units) - len(have))
         per_part.append(have)
         offsets.append(offset)
-        offset += seconds
+        offset += lengths[k]
         base += len(units)
         if error:
             break
@@ -650,10 +718,15 @@ def _turns_by_voices(d, parts, out, say, tell, should_cancel, cancelled, resume)
     if cancelled():
         return None, None, _fail(out, R_CANCELLED)
 
+    # 3. the voice prints become people
     t_cluster = time.monotonic()
     flat_units = [u for units in plans for u in units]
     flat_vectors = [v for vectors in per_part for v in vectors]
-    ids = voice_prints.cluster(flat_vectors, [e - s for s, e in flat_units])
+    flat_speech = [s for speech in speeches for s in speech]
+    try:
+        ids = voice_prints.cluster(flat_vectors, flat_speech, should_cancel=cancelled)
+    except voice_prints.Cancelled:
+        return None, None, _fail(out, R_CANCELLED)
     out.timings["cluster"] = round(time.monotonic() - t_cluster, 1)
     out.shares = voice_prints.shares(flat_units, ids)
     turns, at = [], 0
@@ -682,10 +755,12 @@ def name_the_call(parts, *, privacy=False, status=None, should_cancel=None, name
     nothing runs, ``reason`` is R_BRIEF and the transcript stays as it is. A single
     remote person is "Speaker 1" only when exactly one voice was found (voices that talk for
     only moments are folded into the others: voice_prints.cluster, merge_minor_speakers); no
-    names are invented. ``progress(stage, done, total)``: "reading" while the sound is read,
-    "voices" with the voice prints made so far. ``resume``: a dict the caller keeps between
-    tries - the voice prints made for a part (key: its name and the number of stretches) are
-    stored in it as they come, also when the pass is stopped, and are not made again. Never raises."""
+    names are invented. ``progress(stage, done, total)``: "download" while the speaker model is
+    fetched (first use), "reading" while the sound is read (with the voice prints already made, when
+    it goes on from an earlier try), "voices" with the voice prints made so far. ``resume``: a dict
+    the caller keeps between tries - the voice prints made for a part (key: its name and the number
+    of stretches) are stored in it as they come, also when the pass is stopped, and are not made
+    again. Never raises."""
     d = diarizer or diarization
     say = _say(status)
     tell = _tell(progress)
@@ -709,7 +784,7 @@ def name_the_call(parts, *, privacy=False, status=None, should_cancel=None, name
             logger.info("Speaker labels: the call spoke for %.0f s only, kept as Them", out.call_seconds)
             return out
 
-        failed = _ensure_speaker_tool(d, privacy, say, out)
+        failed = _ensure_speaker_tool(d, privacy, say, out, tell=tell, cancelled=cancelled)
         if failed is not None:
             return failed
         if cancelled():
@@ -863,6 +938,13 @@ def _finish_pass(folder, data, used, out):
             logger.warning("Speaker names: transcript.txt of %s could not be replaced; it stays "
                            "You / Them", Path(folder).name)
             return PassResult(PassResult.FAILED, R_ERROR)
+    if out.texts and out.speakers > 0 and not changed:
+        # People were told apart but the transcript is no longer what the pass worked from (it was
+        # rewritten while the minutes went by): nothing was replaced, so nothing is said to have
+        # been done - the meeting is not marked, and a stale "Found 2 speakers" never shows.
+        logger.info("Speaker names: the transcript of %s changed while the pass ran; its result was not used",
+                    Path(folder).name)
+        return PassResult(PassResult.NOTHING)
     concluded = out.reason != R_TIMEOUT
     if concluded:
         for entry in used:

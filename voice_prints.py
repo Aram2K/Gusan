@@ -6,7 +6,7 @@ slid a 10 second window along the whole sound, one window per second, and embedd
 window again: about 1500 windows for a 55 minute call, 47 minutes on a busy computer,
 nothing to show for the first five of them. The words are already known: segments.json
 keeps where every piece of the call starts and ends. So this engine takes one voice
-print (the speaker model's embedding) per stretch of speech instead - 299 pieces for the
+print (the speaker model's embedding) per stretch of speech instead - 256 of them for the
 same call, about two minutes - and groups the prints.
 
 This module holds only the decisions, in plain Python (numpy is used for the
@@ -20,11 +20,18 @@ vectors over.
     is cut into equal pieces; a lone stretch under TINY_SEC is left out (its words are
     given to the nearest voice afterwards, speaker_labels.attribute); at most MAX_UNITS
     are kept, spread over the whole call.
+  * ``speech_seconds(levels, units, ...)`` and ``gate_units``: how much of a stretch is SPEECH
+    (frames of the call's sound above the level of silence), and the stretches with less than
+    MIN_SPEECH_SEC of it are left out. A stretch is the span of a transcript piece and a cloud
+    piece is a fixed 5 seconds, so one holding a single short word and silence has a noisy voice
+    print; on the real call 14 such pieces (a second of speech each, 23% of their frames active)
+    formed a "second speaker" that was no one. Their words go to the nearest voice by time.
   * ``cluster(vectors, durations)``: average-linkage clustering on cosine similarity
     (``average_linkage``, the nearest-neighbour-chain algorithm: O(n^2)), then a cluster
-    of fewer than MIN_CLUSTER_UNITS pieces or under MIN_CLUSTER_SEC joins the most similar
-    real one (a cough or a half-word is not a person) - when there is no real one the call
-    is one voice - and at most MAX_SPEAKERS voices are kept.
+    of fewer than MIN_CLUSTER_UNITS pieces or under ``min_cluster_seconds`` of SPEECH joins the
+    most similar real one (a cough or a half-word is not a person) - when there is no real one
+    the call is one voice - and at most MAX_SPEAKERS voices are kept. A voice print with a
+    non-finite number counts as none; ``should_cancel`` is looked at between the rounds.
   * ``turns_for(units, ids, offset)``: the turns speaker_labels.attribute works from.
 
 THRESHOLD is where two groups of voice prints stop being one voice. 0.35 comes from the
@@ -45,10 +52,13 @@ MIN_UNIT_SEC = 4.0          # a voice print of less than this is noisy: join nei
 MAX_UNIT_SEC = 8.0          # a longer stretch is cut into equal pieces
 JOIN_GAP_SEC = 0.8          # neighbours this close are one stretch
 TINY_SEC = 1.5              # a lone stretch shorter than this is not embedded
+MIN_SPEECH_SEC = 1.5        # a stretch with less speech in it than this gets no voice print
 MIN_CLUSTER_UNITS = 2       # a voice needs at least this many pieces ...
-MIN_CLUSTER_SEC = 10.0      # ... and this many seconds, else it is folded into the nearest voice
+MIN_CLUSTER_SEC = 10.0      # ... and this many seconds of speech (the most it asks), else it is folded in
+MIN_CLUSTER_FLOOR_SEC = 4.0     # a short call asks less: MIN_CLUSTER_SHARE of its speech, but not under this
+MIN_CLUSTER_SHARE = 0.08
 MAX_SPEAKERS = 8
-MAX_UNITS = 1500            # most voice prints for one recording part (a 2 hour call is about 1400)
+MAX_UNITS = 1000            # most voice prints for one recording part (a 2 hour call is about 1400: one in 1.4 is kept)
 
 ENV_ENGINE = "GUSAN_SPEAKER_ENGINE"
 ENGINE_VOICES = "voices"
@@ -115,6 +125,50 @@ def units_for(segments, max_units=MAX_UNITS):
         every = len(units) / float(max_units)
         units = [units[int(i * every)] for i in range(max_units)]
     return units
+
+
+def speech_seconds(levels, units, threshold, hop_sec):
+    """The seconds of speech in each ``(start_s, end_s)`` of ``units``. ``levels``: the call's sound as
+    one level per ``hop_sec`` (frame k covers k * hop .. (k + 1) * hop: speaker_labels.frame_rms); a frame
+    at or above ``threshold`` is speech. A stretch past the end of the sound has none."""
+    hop = float(hop_sec)
+    prefix = [0]
+    running = 0
+    for level in levels:
+        try:
+            if float(level) >= threshold:
+                running += 1
+        except (TypeError, ValueError):
+            pass
+        prefix.append(running)
+    count = len(levels)
+    out = []
+    for start, end in units:
+        first = max(0, min(count, int(float(start) / hop)))
+        last = max(first, min(count, int(math.ceil(float(end) / hop - 1e-9))))
+        out.append((prefix[last] - prefix[first]) * hop)
+    return out
+
+
+def gate_units(units, speech, minimum=MIN_SPEECH_SEC):
+    """(units, speech) without the stretches that hold less than ``minimum`` seconds of speech: too little
+    for a voice print that means anything. Their words are given to the nearest voice afterwards."""
+    kept = [(u, s) for u, s in zip(units, speech) if s >= minimum]
+    return [u for u, _s in kept], [s for _u, s in kept]
+
+
+def min_cluster_seconds(total_speech):
+    """How much speech a voice needs to count as a person: MIN_CLUSTER_SEC, or for a short call
+    MIN_CLUSTER_SHARE of what the call spoke, but never under MIN_CLUSTER_FLOOR_SEC."""
+    try:
+        total = max(0.0, float(total_speech))
+    except (TypeError, ValueError):
+        total = 0.0
+    return max(MIN_CLUSTER_FLOOR_SEC, min(MIN_CLUSTER_SEC, MIN_CLUSTER_SHARE * total))
+
+
+class Cancelled(Exception):
+    """cluster() was asked to stop (its ``should_cancel`` said so between two rounds)."""
 
 
 # ── similarity ───────────────────────────────────────────────────────────────
@@ -258,11 +312,12 @@ def _mean_similarity(sim, members, others):
 
 
 def _absorb_small(labels, sim, seconds):
-    """A group of fewer than MIN_CLUSTER_UNITS pieces or under MIN_CLUSTER_SEC joins the most
-    similar real group; with no real group everyone is one voice."""
+    """A group of fewer than MIN_CLUSTER_UNITS pieces or under ``min_cluster_seconds`` of speech joins
+    the most similar real group; with no real group everyone is one voice."""
     groups = _groups(labels)
+    floor = min_cluster_seconds(sum(seconds))
     big = [g for g, members in groups.items()
-           if len(members) >= MIN_CLUSTER_UNITS and sum(seconds[i] for i in members) >= MIN_CLUSTER_SEC]
+           if len(members) >= MIN_CLUSTER_UNITS and sum(seconds[i] for i in members) >= floor]
     if not big:
         return [0] * len(labels)
     if len(big) == len(groups):
@@ -291,14 +346,29 @@ def _merge_smallest(labels, sim, seconds, keep):
             labels[i] = target
 
 
-def cluster(vectors, durations, threshold=THRESHOLD, max_speakers=MAX_SPEAKERS):
+def _usable(vector):
+    """A voice print worth grouping: some numbers, every one of them finite (one NaN would make every
+    similarity NaN and the grouping would end in an error)."""
+    if vector is None or not len(vector):
+        return False
+    try:
+        return all(math.isfinite(float(x)) for x in vector)
+    except (TypeError, ValueError):
+        return False
+
+
+def cluster(vectors, durations, threshold=THRESHOLD, max_speakers=MAX_SPEAKERS, should_cancel=None):
     """A voice id per unit: ``vectors[i]`` is the voice print of unit i (None = it has none: the
-    unit was silent or past the end of the sound), ``durations[i]`` its length in seconds. The
-    result is parallel to ``vectors`` - 0, 1, 2 ... in order of first appearance, None where there
-    was no voice print. See the module notes for the rules."""
+    unit was silent, held too little speech, or was past the end of the sound), ``durations[i]`` the
+    seconds of SPEECH in it. The result is parallel to ``vectors`` - 0, 1, 2 ... in order of first
+    appearance, None where there was no (usable) voice print. See the module notes for the rules.
+    ``should_cancel()`` is asked between the rounds (a long call takes seconds); a yes raises Cancelled."""
+    def check():
+        if should_cancel is not None and should_cancel():
+            raise Cancelled()
     n = len(vectors)
     out = [None] * n
-    keep = [i for i in range(n) if vectors[i] is not None and len(vectors[i])]
+    keep = [i for i in range(n) if _usable(vectors[i])]
     if not keep:
         return out
     secs = []
@@ -307,11 +377,14 @@ def cluster(vectors, durations, threshold=THRESHOLD, max_speakers=MAX_SPEAKERS):
             secs.append(max(0.0, float(durations[i])))
         except (TypeError, ValueError, IndexError):
             secs.append(0.0)
+    check()
     sim = cosine_matrix([vectors[i] for i in keep])
+    check()
     labels = _absorb_small(average_linkage(sim, threshold), sim, secs)
     cap = max(1, int(max_speakers))
     thr = float(threshold)
     while len(set(labels)) > cap and thr - 0.05 >= LOWEST_THRESHOLD - 1e-9:
+        check()
         thr -= 0.05
         labels = _absorb_small(average_linkage(sim, thr), sim, secs)
     if len(set(labels)) > cap:

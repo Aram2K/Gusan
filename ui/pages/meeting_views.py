@@ -41,6 +41,7 @@ SYNC_BG = False            # tests: run background work inline
 FLASH_MS = 1800            # how long "Copied" and friends stay up
 FLASH_ERROR_MS = 5000      # a failure to read: the Notion errors
 FLASH_MIN_W = 160          # the flash line wraps rather than get narrower than this
+NOTE_MS = 6000             # how long the one line about how a speaker pass ended stays up (the header's note)
 NOTION_THEN = "Send this meeting"       # the Notion sheet's button when it was opened from here
 NOTION_REASONS = ("auth", "no_access", "rate", "offline", "full")      # telemetry: why a send failed (else "other")
 
@@ -1392,6 +1393,10 @@ class NotesView(QWidget):
         self._flash.setSingleShot(True)
         self._flash.setInterval(FLASH_MS)
         self._flash.timeout.connect(self._end_flash)
+        self._note = QTimer(self)
+        self._note.setSingleShot(True)
+        self._note.setInterval(NOTE_MS)
+        self._note.timeout.connect(self._end_note)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1473,7 +1478,22 @@ class NotesView(QWidget):
         self.back_link.setFixedHeight(20)
         self.back_link.setAccessibleName("Back to Meetings")
         self.back_link.clicked.connect(lambda: self.page.show_list())
-        lay.addWidget(self.back_link, 0, Qt.AlignLeft)
+        # The note at the end of this row (how a speaker pass ended) has room to spare there whatever the
+        # window's width: the toolbar below is as wide as its buttons and a line beside them would push the
+        # page wider than a window of 1200 pixels or less.
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(12)
+        top.addWidget(self.back_link, 0, Qt.AlignLeft)
+        top.addStretch(1)
+        self.note_label = tlabel("", 12.5, 600, "ok")
+        self.note_label.setTextFormat(Qt.PlainText)
+        self.note_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.note_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.note_label.setMinimumWidth(0)
+        self.note_label.hide()
+        top.addWidget(self.note_label, 1000, Qt.AlignVCenter)
+        lay.addLayout(top)
         self.title_label = label("", "title", w)
         self.title_label.setTextFormat(Qt.PlainText)    # a calendar invite's title is text, never markup
         self.title_label.setFixedHeight(34)
@@ -1563,6 +1583,8 @@ class NotesView(QWidget):
         same = str(folder) == self.folder
         if not same:
             self.audio_player.stop(release=True)     # another meeting: let go of this recording
+            self._note.stop()
+            self.note_label.hide()                   # (and what was said about the last one)
         # (only when what is on screen IS this meeting: a meeting still being opened has nothing
         # to keep, and the previous one's scroll position is not its own)
         shown = str((self.data or {}).get("folder") or "") == str(folder)
@@ -1846,6 +1868,19 @@ class NotesView(QWidget):
         set_tone(self.flash_label, tone)
         self.flash_label.show()
         self._flash.start(ms or FLASH_MS)
+
+    def note(self, text, tone="ok", ms=None):
+        """A short line at the top right of the page (plain text, one line, never wider than the room it
+        has): how a speaker pass ended. Hidden again after ``ms`` and when another meeting opens."""
+        self.note_label.setText(text)
+        self.note_label.setToolTip(text)
+        set_tone(self.note_label, tone)
+        self.note_label.show()
+        self._note.start(ms or NOTE_MS)
+
+    def _end_note(self):
+        self.note_label.hide()
+        self.note_label.setText("")
 
     def _end_flash(self):
         self.flash_label.hide()

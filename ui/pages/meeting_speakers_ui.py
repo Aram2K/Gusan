@@ -21,7 +21,8 @@ honest about what is happening:
   * waiting: "Speaker names are next", with what it waits for (your dictation, your
     recording, a file conversion, the notes, another meeting) - never "Identifying";
   * working: "Identifying speakers", first "Getting ready", then the real percentage, a
-    bar and the time left, with Cancel;
+    bar and the time left, with Cancel (the very first time, "Getting the speaker model" with the
+    real percentage of the download - Cancel works there too);
   * stopping: "Stopping..." from Cancel until the worker has really stopped.
 
 The banner looks at the pass again every second (tick): its words follow in place, and
@@ -258,6 +259,9 @@ TITLE_WAITING = "Speaker names are next"
 TITLE_WORKING = "Identifying speakers…"
 TITLE_PERCENT = "Identifying speakers · %d%%"
 TITLE_STOPPING = "Stopping…"
+TITLE_DOWNLOAD = "Getting the speaker model…"
+TITLE_DOWNLOAD_PERCENT = "Getting the speaker model · %d%%"
+TEXT_DOWNLOAD = "It is downloaded once."
 TITLE_UNTOLD = "Speakers aren't told apart yet"
 TEXT_UNTOLD = "The people on the call show as “Them”."
 NOTES_READY = "The notes are ready."
@@ -301,10 +305,18 @@ def working_lines(snap):
     the bar at ``progress`` (0..1)."""
     frac = snap.get("fraction")
     try:
-        frac = None if frac is None else max(0.0, min(1.0, float(frac)))
+        frac = None if frac is None else float(frac)
     except (TypeError, ValueError):
         frac = None
-    if frac is None or frac != frac:
+    if frac is not None:
+        frac = None if frac != frac else max(0.0, min(1.0, frac))        # (not a number: not known)
+    if snap.get("stage") == "download":
+        # the speaker model comes down once, on the very first pass: say so, with the real percentage
+        line = "%s %s" % (NOTES_READY, TEXT_DOWNLOAD)
+        if frac is None:
+            return TITLE_DOWNLOAD, line, -1
+        return TITLE_DOWNLOAD_PERCENT % int(frac * 100), line, frac
+    if frac is None:
         return TITLE_WORKING, "%s Getting ready." % NOTES_READY, -1
     line = "%s %s" % (NOTES_READY, THEM_BECOMES)
     eta = eta_text(snap.get("eta_s"))
@@ -432,14 +444,17 @@ def _update(frame, group, snap):
 
 
 def say_line(view, line):
-    """``line`` - (text, tone) from the session, or None - by the toolbar, for a few seconds."""
+    """``line`` - (text, tone) from the session, or None - for a few seconds, at the top right of the page
+    (the page's note: it has room there in a narrow window, where a line beside the toolbar's buttons would
+    push the page wider than the window)."""
     if line:
         text, tone = line
-        view.flash(text, tone, ms=RESULT_FLASH_MS)
+        say = getattr(view, "note", None) or view.flash
+        say(text, tone, ms=RESULT_FLASH_MS)
 
 
 def say_result(view, folder, default=None):
-    """The one line about how a pass ended - "Found 2 speakers on the call." - by the toolbar. Given once
+    """The one line about how a pass ended - "Found 2 speakers on the call." - in the page's note. Given once
     by the session (it keeps nothing); ``default`` is said when it has none."""
     s = view.page.session()
     line = None

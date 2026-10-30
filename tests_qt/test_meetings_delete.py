@@ -60,9 +60,15 @@ class Session(FakeSession):
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self.pass_state = ""
+        self.stopped = []
 
     def speakers_state(self, folder=None):
         return self.pass_state
+
+    def stop_speaker_pass(self, folder, timeout=8.0):
+        self.stopped.append(str(folder))
+        self.pass_state = ""
+        return True
 
 
 @pytest.fixture
@@ -553,6 +559,37 @@ def test_notes_being_written_or_names_being_added_say_finishing_up(shell, meetin
     session.pass_state = ""
     page._on_speakers_changed(str(b))
     assert all(r.blocked() == "" for r in ml.rows)
+
+
+def test_a_names_pass_that_is_only_waiting_does_not_block_a_delete_and_is_ended_first(shell, meetings_root, asked):
+    # (it waits for a recording that may last an hour, holds no file and does nothing: "Finishing up" would be a lie)
+    a, b, c = _three(meetings_root)
+    session = Session("idle")
+    win, _app = shell("pro", meeting_session=session)
+    win.show()
+    page, ml = _list(win)
+    session.pass_state = "waiting"
+    session.speakers_changed = type("S", (), {"emit": staticmethod(lambda f: None)})
+    page._on_speakers_changed(str(b))
+    assert all(r.blocked() == "" for r in ml.rows)
+    assert ml.row_for(str(b)).trash.isEnabled() and ml.row_for(str(b)).trash.toolTip() == "Delete"
+    ml.row_for(str(b)).trash.click()                                      # confirmed
+    assert session.stopped == [str(b)]                                    # its pass was ended (and let go) first
+    assert _titles(ml) == ["Q4 roadmap", "Design review"] and not b.exists()
+
+
+def test_a_names_pass_that_is_working_still_blocks_a_delete_from_the_list(shell, meetings_root, asked):
+    a, b, c = _three(meetings_root)
+    session = Session("idle")
+    win, _app = shell("pro", meeting_session=session)
+    win.show()
+    page, ml = _list(win)
+    session.pass_state = "running"
+    session.speakers_changed = type("S", (), {"emit": staticmethod(lambda f: None)})
+    page._on_speakers_changed(str(b))
+    assert all(r.blocked() == "Finishing up" for r in ml.rows)
+    ml.row_for(str(b)).trash.click()
+    assert session.stopped == [] and b.exists()                           # nothing was stopped, nothing deleted
 
 
 # ═══════════════════════════ the work happens off the window's thread ═══════════════════════════

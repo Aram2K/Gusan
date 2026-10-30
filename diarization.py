@@ -78,26 +78,72 @@ def is_available():
     return sherpa_installed() and models_downloaded()
 
 
-def download_models(on_progress=None):
+DOWNLOAD_TIMEOUT_S = 15        # a connection that sends nothing for this long ends the download with an error
+DOWNLOAD_CHUNK = 64 * 1024     # the size of one read: a cancel is looked at between two of them
+
+
+def _download(url, dest, on_bytes=None, should_cancel=None, timeout=DOWNLOAD_TIMEOUT_S):
+    """``url`` into the file ``dest``, in chunks. ``should_cancel()`` is asked before every chunk and a
+    yes ends it at once (False); a connection that goes quiet for ``timeout`` seconds, or ends early,
+    raises - the pass must never wait for ever on a stalled link. ``on_bytes(done, total)`` (total 0
+    when the server did not say). True when the whole file arrived; ``dest`` is removed otherwise."""
+    finished = False
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            try:
+                total = int(response.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError, AttributeError):
+                total = 0
+            got = 0
+            with open(dest, "wb") as out:
+                while True:
+                    if should_cancel is not None and should_cancel():
+                        return False
+                    block = response.read(DOWNLOAD_CHUNK)
+                    if not block:
+                        break
+                    out.write(block)
+                    got += len(block)
+                    if on_bytes is not None:
+                        on_bytes(got, total)
+            if total and got < total:
+                raise OSError("the download ended early (%d of %d bytes)" % (got, total))
+        finished = True
+        return True
+    finally:
+        if not finished:
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+
+
+def download_models(on_progress=None, should_cancel=None, on_bytes=None):
     """Fetch the segmentation + embedding models into the app data dir.
 
     Safe to call when already present (no-op). Returns True on success. Never
-    raises - logs and returns False so the caller can fall back gracefully.
+    raises - logs and returns False so the caller can fall back gracefully (also
+    after ``should_cancel()`` said yes, which ends it between two chunks).
+    ``on_progress(text)``: the status line, at most every 5 points; ``on_bytes(done, total)``: the
+    bytes of the speaker model (the 40 MB one the voice prints need; the small segmentation model
+    after it goes by without), for a real progress bar (total 0 = not known).
     """
     try:
         d = _models_dir()
         d.mkdir(parents=True, exist_ok=True)
 
-        def hook_for(label):
-            """urlretrieve's reporthook: the status line shows the percent
-            (at most every 5 points - a status line is not a progress bar)."""
+        def bytes_for(label, bar=None):
+            """The status line shows the percent (at most every 5 points - a status line is not
+            a progress bar); ``bar`` (on_bytes) gets every chunk."""
             seen = [-10]
 
-            def hook(blocks, block_size, total):
+            def hook(got, total):
+                if bar is not None:
+                    bar(got, total)
                 if not on_progress or total <= 0:
                     return
-                pct = min(100, int(blocks * block_size * 100 / total))
-                if pct >= seen[0] + 5:
+                pct = min(100, int(got * 100 / total))
+                if pct >= seen[0] + 5 or (pct >= 100 and seen[0] < 100):
                     seen[0] = pct
                     on_progress("%s %d%%" % (label, pct))
             return hook
@@ -106,14 +152,16 @@ def download_models(on_progress=None):
             if on_progress:
                 on_progress("Downloading speaker model (40 MB)...")
             tmp = d / "embedding.onnx.part"
-            urllib.request.urlretrieve(_EMB_URL, tmp, hook_for("Downloading speaker model (40 MB)"))
+            if not _download(_EMB_URL, tmp, bytes_for("Downloading speaker model (40 MB)", on_bytes), should_cancel):
+                return False
             tmp.replace(emb_model_path())
 
         if not seg_model_path().exists():
             if on_progress:
                 on_progress("Downloading segmentation model (7 MB)...")
             arch = d / "seg.tar.bz2"
-            urllib.request.urlretrieve(_SEG_URL, arch, hook_for("Downloading segmentation model (7 MB)"))
+            if not _download(_SEG_URL, arch, bytes_for("Downloading segmentation model (7 MB)"), should_cancel):
+                return False
             with tarfile.open(arch) as tf:
                 tf.extractall(d)
             try:

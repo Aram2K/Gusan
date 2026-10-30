@@ -1,7 +1,7 @@
 """When the speaker pass after the notes runs (speaker_followup.py): only while the
 computer is free, polled gently; stopped at once when a recording / dictation / file
-job starts and tried again later - at most five times per meeting; ended for good by
-Cancel and by quitting; one meeting at a time, oldest first. The pass itself is a fake
+job starts and tried again later - at most five times per meeting that got nowhere (a try that
+moved the pass forward is no failure); ended for good by Cancel and by quitting; one meeting at a time, oldest first. The pass itself is a fake
 here (its work is tested with meeting_speakers.refine_meeting).
 
 Pure Python: runs under test_core's suite-wide stubs."""
@@ -166,6 +166,23 @@ class TestSettling(unittest.TestCase):
         self.assertEqual(h.polls, 3)                       # one busy look, then two quiet ones
 
 
+    def test_a_pass_interrupted_by_something_already_over_still_lets_the_computer_settle(self):
+        state = {"n": 0}
+
+        def run(h, folder, cancel):
+            state["n"] += 1
+            if state["n"] == 1:
+                h.busy = True
+                cancel()                                   # the pass saw the computer busy ...
+                h.busy = False                             # ... and it is free again before the pass looks
+                return Result("cancelled")
+            return Result("done")
+        h = Harness(on_run=run, settle=2)
+        h.f.enqueue("A")
+        self.assertEqual(h.runs, ["A", "A"])
+        self.assertEqual(h.polls, 2)                       # two quiet looks before it starts again: it was busy
+
+
 class TestInterruptions(unittest.TestCase):
     def test_a_recording_that_starts_mid_pass_stops_it_at_once_and_it_runs_again_later(self):
         state = {"n": 0}
@@ -204,6 +221,83 @@ class TestInterruptions(unittest.TestCase):
         self.assertEqual(h.f.take_result("A")[1], "gave_up")
         self.assertEqual(h.f.state("A"), "")
         self.assertEqual(h.f.folders(), [])                # not queued again
+
+    def _crawling(self, per_try, jobs=12, **kw):
+        """A pass that makes ``per_try`` voice prints and is interrupted by a dictation after each of its
+        first ``jobs`` tries (the voice prints it made are kept in ``status.resume``, as the real pass does)."""
+        state = {"n": 0}
+
+        def run(h, folder, cancel, status=None):
+            state["n"] += 1
+            if state["n"] <= jobs:
+                box = h.f._resume[sf._key(folder)]
+                box["prints"] = box.get("prints", []) + [None] * per_try
+                h.busy = True
+                cancel()
+                return Result("cancelled")
+            return Result("done")
+        h = Harness(on_run=run, **kw)
+        h.f._wait = lambda s: setattr(h, "busy", False)
+        return h, state
+
+    def test_an_interruption_after_a_try_that_made_progress_does_not_count(self):
+        # a person who dictates every half minute: every try gets some prints done, none of them is a failure
+        h, state = self._crawling(per_try=sf.MIN_PROGRESS, jobs=12)
+        h.f.enqueue("A")
+        self.assertEqual(state["n"], 13)                   # twelve interruptions, far past the five of a failing pass
+        self.assertEqual(h.f.take_result("A")[1], "done")
+
+    def test_an_interruption_after_a_try_that_made_next_to_nothing_counts(self):
+        h, state = self._crawling(per_try=sf.MIN_PROGRESS - 1, jobs=12)
+        h.f.enqueue("A")
+        self.assertEqual(state["n"], 6)                    # the first try + five retries
+        self.assertEqual(h.f.take_result("A")[1], "gave_up")
+
+    def test_progress_the_pass_reports_counts_too(self):
+        # (a pass that keeps nothing in resume but reports how far it got)
+        state = {"n": 0}
+
+        def run(h, folder, cancel):
+            state["n"] += 1
+            if state["n"] <= 9:
+                h.f._progress(folder, "voices", 0, 100)
+                h.f._progress(folder, "voices", 10, 100)
+                h.busy = True
+                cancel()
+                return Result("cancelled")
+            return Result("done")
+        h = Harness(on_run=run)
+        h.f._wait = lambda s: setattr(h, "busy", False)
+        h.f.enqueue("A")
+        self.assertEqual((state["n"], h.f.take_result("A")[1]), (10, "done"))
+
+    def test_however_much_they_make_a_job_is_not_interrupted_for_ever(self):
+        h, state = self._crawling(per_try=50, jobs=500)
+        h.f.enqueue("A")
+        self.assertEqual(state["n"], sf.MAX_ATTEMPTS + 1)
+        self.assertEqual(h.f.take_result("A")[1], "gave_up")
+
+    def test_a_pass_that_gave_up_keeps_its_voice_prints_for_the_next_identify_speakers(self):
+        h, state = self._crawling(per_try=1, jobs=6)
+        h.f.enqueue("A")
+        self.assertEqual(h.f.take_result("A")[1], "gave_up")
+        self.assertEqual(h.f.state("A"), "")
+        self.assertEqual(len(h.f._resume[sf._key("A")]["prints"]), 6)           # six tries' worth, kept
+        seen = []
+        h.on_run = lambda hh, folder, cancel: seen.append(
+            len(hh.f._resume[sf._key(folder)].get("prints", []))) or Result("done")
+        h.f.enqueue("A", first=True)                      # the person presses Identify speakers
+        self.assertEqual(seen, [6])                        # ... it goes on from them, it does not start over
+        self.assertEqual(h.f._resume, {})                  # (and once it is done nothing is kept)
+
+    def test_only_the_last_few_meetings_keep_their_voice_prints(self):
+        h, _state = self._crawling(per_try=1, jobs=10 ** 6)
+        for name in ("A", "B", "C", "D", "E"):
+            h.f.enqueue(name)
+        self.assertEqual(len(h.f._resume), sf.MAX_KEPT)
+        self.assertEqual(set(h.f._resume), {sf._key(n) for n in ("C", "D", "E")})
+        h.f.cancel("E")                                    # a later Cancel clears what is kept
+        self.assertNotIn(sf._key("E"), h.f._resume)
 
     def test_the_bound_is_per_meeting(self):
         runs = {"A": 0, "B": 0}
@@ -542,12 +636,34 @@ class TestSnapshot(unittest.TestCase):
         self.assertEqual((box["snap"]["state"], box["snap"]["stage"], box["snap"]["fraction"]),
                          ("running", "", None))
 
-    def test_reading_the_sound_is_a_stage_without_a_percentage(self):
+    def test_reading_the_sound_is_a_stage_without_a_percentage_until_the_count_is_known(self):
         def body(status, f, box):
-            status.progress("reading", 0, 1)
+            status.progress("reading", 0, 0)
             box["snap"] = f.snapshot("A")
         box, _f = self._running(body)
         self.assertEqual((box["snap"]["stage"], box["snap"]["fraction"], box["snap"]["eta_s"]), ("reading", None, None))
+
+    def test_reading_the_sound_again_keeps_the_percentage_of_the_voice_prints_already_made(self):
+        # (a try that goes on from an earlier one: the bar must not fall back to "getting ready" for a moment)
+        def body(status, f, box):
+            status.progress("reading", 51, 100)
+            box["snap"] = f.snapshot("A")
+        box, _f = self._running(body)
+        snap = box["snap"]
+        self.assertEqual((snap["stage"], snap["done"], snap["total"], snap["fraction"], snap["eta_s"]),
+                         ("reading", 51, 100, 0.51, None))
+
+    def test_the_download_of_the_speaker_model_is_its_own_stage_with_a_real_percentage(self):
+        snaps = []
+
+        def body(status, f, box):
+            status.progress("download", 0, 0)
+            snaps.append(f.snapshot("A"))                    # the size is not known yet
+            status.progress("download", 10, 40)
+            snaps.append(f.snapshot("A"))
+        self._running(body)
+        self.assertEqual([(s["stage"], s["fraction"]) for s in snaps], [("download", None), ("download", 0.25)])
+        self.assertIsNone(snaps[1]["eta_s"])                 # no time left is guessed for a download
 
     def test_the_percentage_is_the_real_count_and_the_time_left_comes_from_this_tries_pace(self):
         snaps = []
@@ -714,7 +830,7 @@ class TestHowItEnded(unittest.TestCase):
         f.enqueue("A")
         self.assertEqual(f.take_result("A"), (None, ""))              # the new job's result will come, not that one
 
-    def test_nothing_is_kept_for_a_job_that_ended(self):
+    def test_nothing_is_kept_for_a_job_that_ended_but_the_voice_prints_of_one_that_gave_up(self):
         for how in ("done", "cancelled", "gave_up", "crashed"):
             def run(h, folder, cancel, how=how):
                 h.f._resume.setdefault(sf._key(folder), {})["kept"] = 1
@@ -731,7 +847,9 @@ class TestHowItEnded(unittest.TestCase):
             h = Harness(on_run=run, max_retries=1)
             h.f._wait = lambda s, h=h: setattr(h, "busy", False)
             h.f.enqueue("A")
-            self.assertEqual((h.f._retries, h.f._resume, h.f._prog, h.f._cooling), ({}, {}, {}, set()), how)
+            kept = {sf._key("A"): {"kept": 1}} if how == "gave_up" else {}      # (what it made stays for Identify speakers)
+            self.assertEqual((h.f._retries, h.f._attempts, h.f._resume, h.f._prog, h.f._cooling),
+                             ({}, {}, kept, {}, set()), how)
             self.assertEqual(h.f.state(), "", how)
 
 

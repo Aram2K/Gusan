@@ -104,6 +104,53 @@ class TestUnits(unittest.TestCase):
         self.assertEqual(len(vp.units_for(segs)), 400)        # under the default cap: all of them
 
 
+class TestSpeechGate(unittest.TestCase):
+    HOP = 0.05
+
+    def _levels(self, loud_runs, seconds):
+        """A call's sound as one level per 50 ms: loud (0.1) inside the given (start, end) runs, silent (0) elsewhere."""
+        n = int(round(seconds / self.HOP))
+        out = [0.0] * n
+        for a, b in loud_runs:
+            for i in range(int(round(a / self.HOP)), int(round(b / self.HOP))):
+                out[i] = 0.1
+        return out
+
+    def test_the_seconds_of_speech_are_the_loud_frames_inside_each_stretch(self):
+        levels = self._levels([(0.0, 2.0), (5.0, 8.0)], 10.0)
+        got = vp.speech_seconds(levels, [(0.0, 5.0), (5.0, 10.0), (1.0, 6.0)], 0.002, self.HOP)
+        self.assertEqual([round(x, 2) for x in got], [2.0, 3.0, 2.0])
+
+    def test_a_frame_at_the_level_counts_and_odd_levels_are_silence(self):
+        levels = [0.002, 0.00199, float("nan"), None, "x", 0.5]
+        self.assertEqual(vp.speech_seconds(levels, [(0.0, 0.3)], 0.002, self.HOP), [2 * self.HOP])
+
+    def test_a_stretch_past_the_end_of_the_sound_holds_none_and_a_partial_frame_counts_whole(self):
+        levels = self._levels([(0.0, 1.0)], 1.0)
+        self.assertEqual(vp.speech_seconds(levels, [(5.0, 9.0), (1.0, 2.0)], 0.002, self.HOP), [0.0, 0.0])
+        self.assertEqual(vp.speech_seconds(levels, [(0.02, 0.07)], 0.002, self.HOP), [2 * self.HOP])
+        self.assertEqual(vp.speech_seconds([], [(0.0, 5.0)], 0.002, self.HOP), [0.0])
+        self.assertEqual(vp.speech_seconds(levels, [], 0.002, self.HOP), [])
+
+    def test_a_stretch_with_less_speech_than_the_floor_gets_no_voice_print(self):
+        units = [(0.0, 5.0), (5.0, 10.0), (10.0, 15.0)]
+        kept, speech = vp.gate_units(units, [3.9, 1.49, 1.5])
+        self.assertEqual((kept, speech), ([(0.0, 5.0), (10.0, 15.0)], [3.9, 1.5]))     # (the floor itself passes)
+        self.assertEqual(vp.MIN_SPEECH_SEC, 1.5)
+        self.assertEqual(vp.gate_units([], []), ([], []))
+        self.assertEqual(vp.gate_units(units, [0.0, 0.0, 0.0]), ([], []))
+        self.assertEqual(vp.gate_units(units, [2.0, 0.5, 4.0], minimum=3.0)[0], [(10.0, 15.0)])
+
+    def test_a_voice_needs_ten_seconds_of_speech_but_a_short_call_asks_for_less(self):
+        self.assertEqual(vp.min_cluster_seconds(1000.0), 10.0)               # a long call: the ten seconds
+        self.assertEqual(vp.min_cluster_seconds(125.0), 10.0)                # (8 percent of it is just 10)
+        self.assertAlmostEqual(vp.min_cluster_seconds(100.0), 8.0)           # a short call: 8 percent of what it spoke
+        self.assertEqual(vp.min_cluster_seconds(20.0), 4.0)                  # ... but never under four seconds
+        self.assertEqual(vp.min_cluster_seconds(0.0), 4.0)
+        self.assertEqual(vp.min_cluster_seconds(None), 4.0)
+        self.assertEqual(vp.min_cluster_seconds("x"), 4.0)
+
+
 class TestSimilarity(unittest.TestCase):
     def test_cosine_of_known_vectors(self):
         m = vp.cosine_matrix([[1, 0], [0, 1], [2, 0], [1, 1]])
@@ -281,6 +328,54 @@ class TestCluster(unittest.TestCase):
         self.assertEqual(set(ids), set(range(vp.MAX_SPEAKERS)))
         self.assertEqual(len(set(vp.cluster(vectors, secs(len(vectors), 6.0), max_speakers=3))), 3)
 
+    def test_exactly_as_many_voices_as_the_cap_are_all_kept(self):
+        # eight voices, two of them rather alike (cosine 0.32: apart at 0.35, together at 0.30): the cap is
+        # a cap - it must not pull the threshold down and merge them when there are not more than it allows
+        rng = random.Random(12)
+        close = [0.0] * 12
+        close[6], close[7] = 0.32, math.sqrt(1.0 - 0.32 ** 2)
+        vectors = []
+        for k in range(vp.MAX_SPEAKERS - 1):
+            vectors += blob(rng, axis(k), 4, 0.02)
+        vectors += blob(rng, close, 4, 0.02)
+        ids = vp.cluster(vectors, secs(len(vectors), 6.0))
+        self.assertEqual(len(set(ids)), vp.MAX_SPEAKERS)
+        self.assertEqual(len(set(vp.cluster(vectors, secs(len(vectors), 6.0), threshold=0.30))), vp.MAX_SPEAKERS - 1)
+
+    def test_a_short_call_keeps_a_voice_that_spoke_a_little_and_a_long_one_folds_it_in(self):
+        rng = random.Random(13)
+        main, other = blob(rng, axis(0), 10), blob(rng, axis(1), 2)
+        short = vp.cluster(main + other, secs(10, 4.0) + [3.0, 3.0])        # 40 s and 6 s of speech: 6 >= 4
+        self.assertEqual(len(set(short)), 2)
+        tiny = vp.cluster(main + other, secs(10, 4.0) + [1.5, 1.5])         # 3 s of speech: not a person
+        self.assertEqual(set(tiny), {0})
+        long_call = vp.cluster(blob(rng, axis(0), 100) + other, secs(100, 4.0) + [3.0, 3.0])
+        self.assertEqual(set(long_call), {0})                              # 6 s of 406: the ten seconds apply
+
+    def test_a_voice_print_with_a_number_that_is_not_one_counts_as_none(self):
+        rng = random.Random(14)
+        good = blob(rng, axis(0), 8)
+        broken = [float("nan")] + good[0][1:]
+        wide = [float("inf")] + good[0][1:]
+        vectors = good[:4] + [broken] + good[4:] + [wide]
+        ids = vp.cluster(vectors, secs(len(vectors)))                      # (it used to end in an IndexError)
+        self.assertIsNone(ids[4])
+        self.assertIsNone(ids[-1])
+        self.assertEqual({i for i in ids if i is not None}, {0})
+        self.assertEqual(vp.cluster([["x", 1.0], None], secs(2)), [None, None])
+
+    def test_a_long_grouping_can_be_stopped_between_its_rounds(self):
+        rng = random.Random(15)
+        vectors = []
+        for k in range(12):
+            vectors += blob(rng, axis(k), 4, 0.05)
+        with self.assertRaises(vp.Cancelled):
+            vp.cluster(vectors, secs(len(vectors), 6.0), should_cancel=lambda: True)
+        asked = []
+        ids = vp.cluster(vectors, secs(len(vectors), 6.0), should_cancel=lambda: asked.append(1) and False)
+        self.assertGreaterEqual(len(asked), 3)                             # asked again and again, not once
+        self.assertEqual(len(set(ids)), vp.MAX_SPEAKERS)
+
     def test_the_threshold_decides_how_alike_two_voices_may_be(self):
         rng = random.Random(9)
         close = [0.7 if i == 1 else (1.0 if i == 0 else 0.0) for i in range(12)]   # cosine about 0.82 to axis 0
@@ -300,6 +395,8 @@ class TestCluster(unittest.TestCase):
         self.assertEqual(vp.THRESHOLD, 0.35)
         self.assertEqual((vp.MIN_UNIT_SEC, vp.MAX_UNIT_SEC, vp.JOIN_GAP_SEC, vp.TINY_SEC), (4.0, 8.0, 0.8, 1.5))
         self.assertEqual((vp.MIN_CLUSTER_UNITS, vp.MIN_CLUSTER_SEC, vp.MAX_SPEAKERS), (2, 10.0, 8))
+        self.assertEqual((vp.MIN_CLUSTER_FLOOR_SEC, vp.MIN_CLUSTER_SHARE, vp.MIN_SPEECH_SEC), (4.0, 0.08, 1.5))
+        self.assertEqual(vp.MAX_UNITS, 1000)
 
 
 class TestTurns(unittest.TestCase):
@@ -327,19 +424,43 @@ class TestEngineSwitch(unittest.TestCase):
 
 
 class TestWholeShape(unittest.TestCase):
-    def test_a_call_like_the_measured_one_gives_one_big_voice_and_one_small(self):
-        # 299 pieces of 5 s: 285 of one voice and 14 of another (the shares measured on a real call)
+    def _the_measured_call(self):
+        """The shape of the real 55 minute call (invented numbers, no words of it): 274 pieces of about 5 s;
+        260 of one voice with about 4 s of speech in each (76% of their frames active) and 14 more whose voice
+        prints are unlike them but which hold about a second of speech each (23% of their frames active):
+        a short word and silence in a fixed 5 second cloud piece."""
         rng = random.Random(11)
-        main, other = blob(rng, axis(0, 24), 285, 0.15), blob(rng, axis(1, 24), 14, 0.15)
+        main, other = blob(rng, axis(0, 24), 260, 0.15), blob(rng, axis(1, 24), 14, 0.15)
         vectors = main[:100] + other[:5] + main[100:200] + other[5:] + main[200:]
-        segs = [them(i * 5.4, i * 5.4 + 5) for i in range(299)]
+        speech = [4.0] * 100 + [1.1] * 5 + [4.0] * 100 + [0.9] * 9 + [4.0] * 60
+        segs = [them(i * 5.4, i * 5.4 + 5) for i in range(274)]
         units = vp.units_for(segs)
-        self.assertEqual(len(units), 299)
-        ids = vp.cluster(vectors, [e - s for s, e in units])
+        self.assertEqual(len(units), 274)
+        return units, vectors, speech
+
+    def test_the_pieces_that_are_mostly_silence_are_not_a_second_speaker(self):
+        units, vectors, speech = self._the_measured_call()
+        # (what the first engine did: every piece gets a print, a piece counts for its length)
+        old = vp.cluster(vectors, [e - s for s, e in units])
+        self.assertEqual(len(set(old)), 2)                                   # ... and said "Found 2 speakers"
+        # (and counting only their speech is not enough by itself: 14 pieces of a second are 14 seconds)
+        self.assertEqual(len(set(vp.cluster(vectors, speech))), 2)
+        # the pieces with too little speech get no print at all
+        kept_units, kept_speech = vp.gate_units(units, speech)
+        keep = [i for i, s in enumerate(speech) if s >= vp.MIN_SPEECH_SEC]
+        self.assertEqual(len(kept_units), 260)
+        ids = vp.cluster([vectors[i] for i in keep], kept_speech)
+        self.assertEqual(len(set(ids)), 1)                                   # one voice on the call
+        self.assertEqual(vp.shares(kept_units, ids), [1.0])
+        self.assertEqual(len(vp.turns_for(kept_units, ids)), 260)            # (the other 14 take the nearest voice by time)
+
+    def test_a_real_second_voice_with_real_speech_is_still_found(self):
+        units, vectors, speech = self._the_measured_call()
+        speech = [4.0] * len(speech)                                          # the same 14 pieces, now with real speech
+        kept_units, kept_speech = vp.gate_units(units, speech)
+        ids = vp.cluster(vectors, kept_speech)
         self.assertEqual(len(set(ids)), 2)
-        self.assertEqual(vp.shares(units, ids), [0.95, 0.05])
-        turns = vp.turns_for(units, ids)
-        self.assertEqual(len(turns), 299)
+        self.assertEqual(vp.shares(kept_units, ids), [0.95, 0.05])
 
 
 if __name__ == "__main__":

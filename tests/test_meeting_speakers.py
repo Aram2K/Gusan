@@ -148,6 +148,23 @@ class FakeDiarizer:
         return getattr(diarization, name)
 
 
+def slow_download_diarizer(steps, **kw):
+    """A diarizer whose model is not here yet; its download takes ``steps`` chunks and understands cancel
+    and byte progress, like diarization.download_models."""
+    class Down(FakeDiarizer):
+        def download_models(inner, on_progress=None, should_cancel=None, on_bytes=None):
+            inner.downloads += 1
+            for i in range(steps):
+                if should_cancel is not None and should_cancel():
+                    inner.stopped_at = i
+                    return False
+                if on_bytes is not None:
+                    on_bytes((i + 1) * 10, steps * 10)
+            inner.downloaded = True
+            return True
+    return Down(downloaded=False, **kw)
+
+
 def burst(np, seconds, level, seed):
     return (np.random.default_rng(seed).standard_normal(int(seconds * SR)) * level).astype(np.float32)
 
@@ -213,6 +230,22 @@ class TestMicAndSystemSound(unittest.TestCase):
         self.assertTrue(out.ok, (out.reason, out.notice))
         self.assertEqual(out.text.split("\n"),
                          ["Speaker 1: a", "You: u1", "Speaker 1: b", "You: u2", "Speaker 1: c"])
+
+    def test_cancel_during_the_first_download_at_stop_ends_it_at_once_and_quietly(self):
+        part = self._part(30, [(2, 8)], [(10, 20)])
+        d = slow_download_diarizer(50)
+        state = {"on": False}
+        d.download_models_orig = d.download_models
+
+        def download(on_progress=None, should_cancel=None, on_bytes=None):
+            state["on"] = True                               # the person stops it while the model comes down
+            return d.download_models_orig(on_progress=on_progress, should_cancel=should_cancel, on_bytes=on_bytes)
+        d.download_models = download
+        out = msp.build_transcript(FakeRec([seg(2, 8, "a"), seg(10, 20, "b")]), [part], diarizer=d,
+                                   should_cancel=lambda: state["on"])
+        self.assertTrue(out.cancelled)
+        self.assertEqual(d.stopped_at, 0)                    # before the first chunk, not after fifty
+        self.assertEqual(out.texts, [])
 
     def test_a_stale_diarizer_error_is_not_this_passes_reason(self):
         # The speaker tool's last_error belongs to its LAST run (a file job, an earlier
@@ -778,6 +811,130 @@ class TestNameTheCall(unittest.TestCase):
         self.assertEqual([r.levelno for r in cm.records if "Speaker labels" in r.getMessage()], [logging.INFO])
         self.assertEqual(msp.MIN_CALL_SEC, 20.0)
 
+    # -- the stretches that are mostly silence (the real call: 14 of them made a "second speaker") --
+    def _quiet_call(self, quiet_seconds, quiet_every=3, count=40, **kw):
+        """A call of ``count`` stretches of 5 s, ten seconds apart. Every ``quiet_every``-th holds only
+        ``quiet_seconds`` of sound (a short word and silence, like a fixed 5 second cloud piece); the rest are
+        all speech. Returns (the part, the spans of the quiet stretches, the diarizer: the quiet ones sound
+        like another voice)."""
+        spans = [(i * 10.0, i * 10.0 + 5.0) for i in range(count)]
+        quiet = [s for i, s in enumerate(spans) if i % quiet_every == quiet_every - 1]
+        sound = [(a, a + quiet_seconds) if (a, b) in quiet else (a, b) for a, b in spans]
+        rows = [(a, b, "w%d" % i, "them") for i, (a, b) in enumerate(spans)]
+        part, _ = _call_part(self.np, count * 10.0 + 5.0, [], sound, rows, **kw)
+        d = FakeDiarizer(voices=lambda start, end: 1 if (round(start, 1), round(end, 1)) in quiet else 0)
+        return part, quiet, d
+
+    def test_stretches_that_are_mostly_silence_get_no_voice_print_and_are_no_second_speaker(self):
+        part, quiet, d = self._quiet_call(1.0, quiet_every=3, count=45)          # 15 stretches of one second of speech
+        out = msp.name_the_call([part], diarizer=d)
+        self.assertTrue(out.ok, (out.reason, out.notice))
+        asked = [span for call in d.embed_calls for span in call["spans"]]
+        self.assertEqual(len(asked), 30)                                       # the 15 quiet ones are not asked for
+        self.assertEqual(out.units, 30)
+        self.assertFalse([s for s in asked if (round(s[0], 1), round(s[1], 1)) in quiet])
+        self.assertEqual(out.speakers, 1)                                      # one voice, as there really was
+        self.assertEqual(out.text.count("Speaker"), 1)                         # ... one block, every word in it
+        self.assertTrue(out.text.startswith("Speaker 1: w0 w1 w2 w3"))         # (the quiet stretches' words included)
+        self.assertEqual(msp.result_line(msp.PassResult(msp.PassResult.DONE, "", "", out.speakers)),
+                         (msp.LINE_ONE, "ok"))
+
+    def test_without_the_speech_floor_those_stretches_would_have_been_a_second_speaker(self):
+        part, quiet, d = self._quiet_call(1.0, quiet_every=3, count=45)
+        with mock.patch.object(msp.voice_prints, "MIN_SPEECH_SEC", 0.0), \
+                mock.patch.object(msp.voice_prints, "gate_units",
+                                  lambda units, speech, minimum=0.0: (units, speech)):
+            out = msp.name_the_call([part], diarizer=d)
+        self.assertEqual(out.speakers, 2)                                      # what the call got before the floor
+
+    def test_a_second_voice_that_really_speaks_is_still_found(self):
+        part, quiet, d = self._quiet_call(4.0, quiet_every=3, count=45)          # the same stretches, with real speech
+        out = msp.name_the_call([part], diarizer=d)
+        self.assertTrue(out.ok, (out.reason, out.notice))
+        self.assertEqual(out.speakers, 2)
+        self.assertEqual(out.units, 45)
+
+    def test_a_stretch_whose_sound_cannot_be_measured_is_kept_by_its_length(self):
+        part, _quiet, d = self._quiet_call(1.0, quiet_every=3, count=45)
+        with mock.patch.object(msp.speaker_labels, "frame_rms", side_effect=RuntimeError("numpy trouble")):
+            out = msp.name_the_call([part], diarizer=d)
+        self.assertTrue(out.ok, (out.reason, out.notice))
+        self.assertEqual(out.units, 45)                                        # nothing was dropped for it
+
+    def test_the_sound_of_a_one_part_meeting_is_read_once_and_a_longer_one_once_per_use(self):
+        part, _ = _call_part(self.np, 40, self.YOU, self.THEM, self.SEGS)
+        loads = []
+        real = part._loader
+        part._loader = lambda: loads.append(1) or real()
+        self.assertTrue(msp.name_the_call([part], diarizer=FakeDiarizer()).ok)
+        self.assertEqual(len(loads), 1)                                        # for the speech in it and for the prints
+        p1, _ = _call_part(self.np, 40, self.YOU, self.THEM, self.SEGS, key="p1")
+        p2, _ = _call_part(self.np, 40, [], [(2, 30)], [(2, 30, "z", "them")], key="p2")
+        loads2 = []
+        for p in (p1, p2):
+            real = p._loader
+            p._loader = (lambda real=real: loads2.append(1) or real())
+        self.assertTrue(msp.name_the_call([p1, p2], diarizer=FakeDiarizer()).ok)
+        self.assertEqual(len(loads2), 4)                                       # (never two parts held at once)
+
+    def test_the_grouping_can_be_cancelled_and_ends_quietly(self):
+        part, _ = _call_part(self.np, 40, self.YOU, self.THEM, self.SEGS)
+        with mock.patch.object(msp.voice_prints, "cluster", side_effect=msp.voice_prints.Cancelled()):
+            out = msp.name_the_call([part], diarizer=FakeDiarizer())
+        self.assertTrue(out.cancelled)
+        self.assertEqual((out.notice, out.texts), ("", []))
+
+    # -- the speaker model comes down once, and Cancel works while it does --
+    def _downloader(self, steps, **kw):
+        return slow_download_diarizer(steps, **kw)
+
+    def test_the_download_reports_its_bytes_as_a_stage_of_its_own(self):
+        part, _ = _call_part(self.np, 40, self.YOU, self.THEM, self.SEGS)
+        d = self._downloader(4)
+        seen = []
+        out = msp.name_the_call([part], diarizer=d, progress=lambda *a: seen.append(a))
+        self.assertTrue(out.ok, (out.reason, out.notice))
+        self.assertEqual([e for e in seen if e[0] == "download"],
+                         [("download", 0, 0), ("download", 10, 40), ("download", 20, 40),
+                          ("download", 30, 40), ("download", 40, 40)])
+        self.assertLess(seen.index(("download", 40, 40)), seen.index(("reading", 0, 0)))
+
+    def test_cancel_during_the_download_ends_it_at_once_and_quietly(self):
+        part, _ = _call_part(self.np, 40, self.YOU, self.THEM, self.SEGS)
+        d = self._downloader(50)
+        cancel = {"now": False}
+
+        def progress(stage, done, total):
+            if stage == "download" and done >= 20:
+                cancel["now"] = True
+        out = msp.name_the_call([part], diarizer=d, progress=progress, should_cancel=lambda: cancel["now"])
+        self.assertTrue(out.cancelled)                                           # not "the download did not finish"
+        self.assertEqual((out.reason, out.notice, out.texts), (msp.R_CANCELLED, "", []))
+        self.assertLessEqual(d.stopped_at, 3)                                    # between two chunks, not at the end
+        self.assertEqual(d.embed_calls, [])
+
+    def test_an_error_that_arrives_together_with_a_cancel_is_a_quiet_cancel(self):
+        # (the child was ended because the person pressed Cancel / started to dictate: its exit code is no news)
+        part, _ = _call_part(self.np, 40, self.YOU, self.THEM, self.SEGS)
+        state = {"asked": False}
+        d = FakeDiarizer()
+
+        def embed(audio, spans, on_progress=None, should_cancel=None):
+            state["asked"] = True
+            return [], "worker exited with code 3"
+        d.embed_spans = embed
+        out = msp.name_the_call([part], diarizer=d, should_cancel=lambda: state["asked"])
+        self.assertTrue(out.cancelled)
+        self.assertEqual((out.notice, out.texts), ("", []))
+        out = msp.name_the_call([part], diarizer=d)                          # (without a cancel it is an error)
+        self.assertEqual((out.reason, out.notice), (msp.R_ERROR, msp.CALL_TOGETHER))
+
+    def test_a_download_that_fails_is_still_said_in_plain_words(self):
+        part, _ = _call_part(self.np, 40, self.YOU, self.THEM, self.SEGS)
+        out = msp.name_the_call([part], diarizer=FakeDiarizer(downloaded=False, download_ok=False))
+        self.assertEqual(out.reason, msp.R_DOWNLOAD)
+        self.assertIn("check your internet connection", out.notice)
+
     def test_nobody_on_the_call_spoke(self):
         part, _ = _call_part(self.np, 30, [(2, 12)], [], [(2, 12, "a", "you")])
         with self.assertLogs("transcribe", level="INFO") as cm:
@@ -883,7 +1040,9 @@ class TestNameTheCall(unittest.TestCase):
         seen = []
         out = msp.name_the_call([part], diarizer=FakeDiarizer(), progress=lambda *a: seen.append(a))
         self.assertTrue(out.ok)
-        self.assertEqual(seen[0], ("reading", 0, 1))                        # the sound is being read first
+        # the sound is read first (how many stretches there will be is not known yet), then again for the prints
+        self.assertEqual([e for e in seen if e[0] == "reading"], [("reading", 0, 0), ("reading", 0, 4)])
+        self.assertEqual(seen[0], ("reading", 0, 0))
         voices = [(done, total) for stage, done, total in seen if stage == "voices"]
         self.assertEqual(voices, [(1, 4), (2, 4), (3, 4), (4, 4)])
         self.assertEqual([s for s, _d, _t in seen if s not in ("reading", "voices")], [])
@@ -920,13 +1079,14 @@ class TestNameTheCall(unittest.TestCase):
         self.assertTrue(second.ok, (second.reason, second.notice))
         self.assertEqual(len(second_d.embed_calls[0]["spans"]), 2)           # only the rest
         self.assertEqual(second.text.split("\n"), ["You: a", "Speaker 1: b", "You: c", "Speaker 1: d"])
-        # a third run needs no sound at all: everything is there
+        # a third run makes no voice print at all - everything is there (the sound is read once, for the speech in it)
         loads = []
-        part._loader = lambda: loads.append(1)
+        real_loader = part._loader
+        part._loader = lambda: loads.append(1) or real_loader()
         third_d = FakeDiarizer()
         third = msp.name_the_call([part], diarizer=third_d, resume=resume)
         self.assertTrue(third.ok, (third.reason, third.notice))
-        self.assertEqual((loads, third_d.embed_calls), ([], []))
+        self.assertEqual((loads, third_d.embed_calls), ([1], []))
 
     def test_voice_prints_that_do_not_belong_to_these_stretches_are_not_reused(self):
         part, _ = _call_part(self.np, 40, self.YOU, self.THEM, self.SEGS, key="audio_part1.wav")
@@ -1157,8 +1317,14 @@ class TestRefineMeeting(unittest.TestCase):
                                                         encoding="utf-8")
         self._meeting()
         res = msp.refine_meeting(self.folder, diarizer=Probe(hook))
-        self.assertEqual(res.state, "concluded")
+        # Nothing was replaced, so nothing is claimed: no "Found 2 speakers", the meeting is not marked as done
+        # (it would never offer Identify speakers again), the backup is gone, the person's rewrite is untouched.
+        self.assertEqual(res.state, "nothing")
+        self.assertIsNone(msp.result_line(res))
         self.assertEqual(self._read(), "You: a\nSpeaker 1: b\nYou: c\nSpeaker 2: d")
+        self.assertNotIn("speakers_at", ms.load_meta(self.folder))
+        self.assertFalse(ms.load_segments(self.folder)["parts"][0]["done"])
+        self.assertFalse((self.folder / ms.BEFORE_SPEAKERS).exists())
 
     def test_the_transcript_is_replaced_whole_or_not_at_all(self):
         self._meeting()
@@ -1381,7 +1547,7 @@ class TestRefineMeeting(unittest.TestCase):
         res = msp.refine_meeting(self.folder, diarizer=FakeDiarizer(), progress=lambda *a: seen.append(a),
                                  resume=resume)
         self.assertEqual(res.state, "done")
-        self.assertEqual(seen[0], ("reading", 0, 1))
+        self.assertEqual(seen[0], ("reading", 0, 0))
         self.assertEqual(seen[-1], ("voices", 4, 4))
         self.assertEqual(list(resume), [("audio_part1.wav", 4)])        # keyed by the recording's own name
 

@@ -184,44 +184,113 @@ class TestDiarizeSaysWhy(unittest.TestCase):
         self.assertIn("model file is damaged", diarization.last_error)
 
 
+class _Response:
+    """What urlopen gives back: a Content-Length, ``read(n)`` in pieces, and a context manager."""
+
+    def __init__(self, total=1000, sent=None, fail_after=None, error=None):
+        self.headers = {"Content-Length": str(total)} if total is not None else {}
+        self.left = total if sent is None else sent
+        self.reads = 0
+        self.fail_after = fail_after
+        self.error = error
+
+    def read(self, n=-1):
+        self.reads += 1
+        if self.fail_after is not None and self.reads > self.fail_after:
+            raise self.error or OSError("timed out")
+        n = self.left if n is None or n < 0 else min(n, self.left)
+        self.left -= n
+        return b"m" * n
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
 class TestDownloadProgress(unittest.TestCase):
-    def test_the_status_line_follows_the_download_in_steps_of_five_percent(self):
+    def setUp(self):
         import tempfile
         from pathlib import Path
-        with tempfile.TemporaryDirectory() as tmp:
-            d = Path(tmp)
-            seg = d / diarization._SEG_REL
-            seg.parent.mkdir(parents=True)
-            seg.write_bytes(b"x")                                 # only the speaker model is missing
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.d = Path(self._tmp.name)
+        seg = self.d / diarization._SEG_REL
+        seg.parent.mkdir(parents=True)
+        seg.write_bytes(b"x")                                      # only the speaker model is missing
+        for patcher in (mock.patch.object(diarization, "_models_dir", return_value=self.d),
+                        mock.patch.object(diarization, "DOWNLOAD_CHUNK", 10)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
-            def fake_retrieve(url, filename, reporthook=None):
-                total = 1000
-                for blocks in range(0, 101):
-                    if reporthook:
-                        reporthook(blocks, 10, total)
-                Path(filename).write_bytes(b"model")
-                return filename, None
-            messages = []
-            with mock.patch.object(diarization, "_models_dir", return_value=d), \
-                    mock.patch.object(diarization.urllib.request, "urlretrieve", fake_retrieve):
-                ok = diarization.download_models(on_progress=messages.append)
-            self.assertTrue(ok)
-            self.assertEqual(messages[0], "Downloading speaker model (40 MB)...")
-            pct = [m for m in messages if m.endswith("%")]
-            self.assertTrue(all(m.startswith("Downloading speaker model (40 MB)") for m in pct))
-            self.assertLessEqual(len(pct), 21)                     # not a message per block
-            self.assertTrue(pct[-1].endswith("100%"))
-            self.assertTrue((d / diarization._EMB_REL).is_file())
-            self.assertFalse((d / "embedding.onnx.part").exists())
+    def _download(self, response=None, **kw):
+        response = response or _Response()
+        opened = []
+
+        def fake_urlopen(url, timeout=None):
+            opened.append((url, timeout))
+            return response
+        with mock.patch.object(diarization.urllib.request, "urlopen", fake_urlopen):
+            ok = diarization.download_models(**kw)
+        return ok, opened, response
+
+    def test_the_status_line_follows_the_download_in_steps_of_five_percent(self):
+        messages = []
+        ok, _opened, _r = self._download(on_progress=messages.append)
+        self.assertTrue(ok)
+        self.assertEqual(messages[0], "Downloading speaker model (40 MB)...")
+        pct = [m for m in messages if m.endswith("%")]
+        self.assertTrue(all(m.startswith("Downloading speaker model (40 MB)") for m in pct))
+        self.assertLessEqual(len(pct), 21)                         # not a message per block
+        self.assertTrue(pct[-1].endswith("100%"))
+        self.assertTrue((self.d / diarization._EMB_REL).is_file())
+        self.assertEqual((self.d / diarization._EMB_REL).stat().st_size, 1000)
+        self.assertFalse((self.d / "embedding.onnx.part").exists())
+
+    def test_the_bytes_come_as_they_arrive_for_a_progress_bar(self):
+        seen = []
+        ok, _opened, _r = self._download(on_bytes=lambda done, total: seen.append((done, total)))
+        self.assertTrue(ok)
+        self.assertEqual(seen[0], (10, 1000))
+        self.assertEqual(seen[-1], (1000, 1000))
+        self.assertEqual([d for d, _t in seen], sorted(d for d, _t in seen))
 
     def test_a_download_that_fails_returns_false_and_never_raises(self):
-        import tempfile
-        from pathlib import Path
-        with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch.object(diarization, "_models_dir", return_value=Path(tmp)), \
-                    mock.patch.object(diarization.urllib.request, "urlretrieve",
-                                               side_effect=OSError("no network")):
-                self.assertFalse(diarization.download_models())
+        with mock.patch.object(diarization.urllib.request, "urlopen", side_effect=OSError("no network")):
+            self.assertFalse(diarization.download_models())
+        self.assertFalse((self.d / "embedding.onnx.part").exists())
+
+    def test_a_connection_that_goes_quiet_ends_with_an_error_and_never_hangs(self):
+        ok, opened, _r = self._download(_Response(fail_after=3, error=OSError("the read timed out")))
+        self.assertFalse(ok)                                       # (the pass says "check your internet connection")
+        self.assertEqual(opened[0][1], diarization.DOWNLOAD_TIMEOUT_S)         # a timeout is always asked for
+        self.assertEqual(diarization.DOWNLOAD_TIMEOUT_S, 15)
+        self.assertFalse((self.d / "embedding.onnx.part").exists())            # no half file left
+        self.assertFalse((self.d / diarization._EMB_REL).exists())
+
+    def test_a_download_that_ends_early_is_a_failure_not_a_model(self):
+        ok, _opened, _r = self._download(_Response(total=1000, sent=400))
+        self.assertFalse(ok)
+        self.assertFalse((self.d / diarization._EMB_REL).exists())
+        self.assertFalse((self.d / "embedding.onnx.part").exists())
+
+    def test_cancel_stops_it_between_two_chunks_and_leaves_nothing(self):
+        asked = []
+
+        def cancel():
+            asked.append(1)
+            return len(asked) > 4                                  # said yes at the fifth look
+        ok, _opened, response = self._download(should_cancel=cancel)
+        self.assertFalse(ok)
+        self.assertEqual(response.reads, 4)                        # four chunks came, the fifth was never asked for
+        self.assertFalse((self.d / "embedding.onnx.part").exists())
+        self.assertFalse((self.d / diarization._EMB_REL).exists())
+
+    def test_a_cancel_before_the_first_chunk_asks_for_nothing(self):
+        ok, _opened, response = self._download(should_cancel=lambda: True)
+        self.assertFalse(ok)
+        self.assertEqual(response.reads, 0)
 
 
 @unittest.skipUnless(_real_numpy() and diarization.is_available(),

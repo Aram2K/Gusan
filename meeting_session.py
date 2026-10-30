@@ -132,8 +132,10 @@ Who said what (Gusan 2.0.1)
     recording, no Stop, no Rewrite notes, no Identify speakers) and no dictation / Audio to text
     job is active (``_speaker_pass_blocker`` names what it waits for: "recording", "notes",
     "dictation", "file"; looked at every 2 s), stops at once when one starts and goes on from
-    the voice prints it had when free (at most 5 times per queued job, then the page keeps
-    offering Identify speakers), is ended by Cancel (cancel_speaker_followup), by quitting
+    the voice prints it had when free (an interruption that got nowhere counts, at most 5 times
+    per queued job - one after a try that made progress does not - then the page keeps offering
+    Identify speakers, and the next one goes on from the prints kept), is ended by Cancel
+    (cancel_speaker_followup), by quitting
     (shutdown_speaker_followup) and by the meeting being deleted (stop_speaker_pass waits until
     it has let go of the folder; refine_meeting also stops by itself when the folder is gone), and
     never starts by itself at launch - only a meeting that just finished queues itself (a launch

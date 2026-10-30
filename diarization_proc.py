@@ -35,7 +35,10 @@ sliding-window run in what the pass needs to be quick and honest:
     progress file after every one, so the parent reports real progress, keeps what was done
     when the pass is stopped (a later try goes on from there) and notices a child that made
     no progress for ``stall_s`` seconds (hung, or starved): it is ended and the pass says
-    "stalled" instead of waiting for ever.
+    "stalled" instead of waiting for ever. The stall limit counts from the child's last sign of
+    progress (until its first one - the speaker model loads - ``VOICE_START_S`` is the limit), and a
+    computer that sleeps mid-pass does not end a healthy child: the clocks keep counting through
+    sleep, so a gap of more than SLEEP_JUMP_S between two looks is taken off every limit.
 
 Qt-free; numpy is imported only where audio is written or read.
 """
@@ -70,6 +73,8 @@ STALE_S = 6 * 3600                # leftover folders (a killed app) older than t
 VOICE_MIN_TIMEOUT_S = 10 * 60     # voices: at least this long ...
 VOICE_TIMEOUT_PER_AUDIO_S = 1.5   # ... or this many seconds per second of audio it is given
 VOICE_STALL_S = 120.0             # voices: no progress for this long means it is hung or starved
+VOICE_START_S = 120.0             # voices: the child's first sign of life (the speaker model loads) may take this long
+SLEEP_JUMP_S = 10.0               # two looks this far apart: the computer slept (a look is every POLL_S)
 
 _lock = threading.Lock()
 _children = set()                 # live subprocess.Popen objects
@@ -263,7 +268,8 @@ def run_voices(audio, lengths, on_progress=None, should_cancel=None, timeout_s=N
     limit = voice_timeout(audio_sec) if timeout_s is None else float(timeout_s)
 
     def wait(proc, workdir):
-        reason, rc = _poll(proc, workdir, audio_sec, on_progress, should_cancel, limit, stall_s=stall_s)
+        reason, rc = _poll(proc, workdir, audio_sec, on_progress, should_cancel, limit, stall_s=stall_s,
+                           start_s=max(VOICE_START_S, float(stall_s or 0)))
         if reason:
             return [], reason
         return [], _voices_error(workdir, rc)
@@ -277,18 +283,33 @@ def run_voices(audio, lengths, on_progress=None, should_cancel=None, timeout_s=N
                      low_priority=False, extra_json={UNITS_FILE: lengths})
 
 
-def _poll(proc, workdir, audio_sec, on_progress, should_cancel, timeout_s, stall_s=None):
+def _poll(proc, workdir, audio_sec, on_progress, should_cancel, timeout_s, stall_s=None, start_s=None,
+          clock=time.monotonic, sleep=time.sleep):
     """Wait for the child: ("", exit code) when it ended on its own, else (why it was ended,
-    exit code): "app quitting", "cancelled", "timed out" or, with ``stall_s``, "stalled"."""
-    started = time.monotonic()
+    exit code): "app quitting", "cancelled", "timed out" or, with ``stall_s``, "stalled".
+
+    ``stall_s`` counts from the child's last sign of progress; until its first one (the speaker model
+    loads) ``start_s`` is the limit instead (default: ``stall_s``). A computer that sleeps mid-pass
+    must not end a healthy child: the clock keeps counting through sleep (Windows' monotonic clock does),
+    so a gap between two looks of more than SLEEP_JUMP_S is taken off every limit.
+    ``clock`` and ``sleep`` are the time (tests stand fakes in)."""
+    started = clock()
     changed_at = started
+    last_look = started
     last_seen = None
     while True:
         rc = proc.poll()
+        now = clock()
+        if now - last_look > SLEEP_JUMP_S:
+            gap = now - last_look - POLL_S
+            started += gap
+            changed_at += gap
+            logger.info("Speaker pass: the computer was asleep for about %.0f s; its limits wait for it", gap)
+        last_look = now
         if on_progress is not None or stall_s:
             seen = _report_progress(workdir, last_seen, on_progress)
             if seen != last_seen:
-                last_seen, changed_at = seen, time.monotonic()
+                last_seen, changed_at = seen, now
         if _cancel_all.is_set():            # (cancel_all kills the child itself: rc is set then too)
             _kill(proc)
             return "app quitting", rc
@@ -301,16 +322,17 @@ def _poll(proc, workdir, audio_sec, on_progress, should_cancel, timeout_s, stall
                     return "cancelled", rc
             except Exception:
                 pass
-        now = time.monotonic()
         if now - started > timeout_s:
             _kill(proc)
             logger.warning("Speaker pass gave up after %.0f s (%.0f s of audio)", timeout_s, audio_sec)
             return "timed out", rc
-        if stall_s and now - changed_at > stall_s:
-            _kill(proc)
-            logger.warning("Speaker pass made no progress for %.0f s (%.0f s of audio): ended", stall_s, audio_sec)
-            return "stalled", rc
-        time.sleep(POLL_S)
+        if stall_s:
+            limit = stall_s if (last_seen is not None or start_s is None) else max(start_s, stall_s)
+            if now - changed_at > limit:
+                _kill(proc)
+                logger.warning("Speaker pass made no progress for %.0f s (%.0f s of audio): ended", limit, audio_sec)
+                return "stalled", rc
+        sleep(POLL_S)
 
 
 def _wait(proc, workdir, audio_sec, on_progress, should_cancel, timeout_s):
