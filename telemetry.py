@@ -89,6 +89,7 @@ ALLOWED_EVENTS = {
     "meeting_notes_failed",
     "meeting_exported",
     "meeting_deleted",            # {"count": n, "from": "row" | "selection" | "key" | "live" | "notes"} - a count, never a name
+    "meeting_chat_asked",         # {"engine": "cloud" | "own_key" | "local"} - one question was asked, never its text
     # Monetization / accounts funnel.
     "paywall_viewed",
     "upgrade_clicked",

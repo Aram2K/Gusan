@@ -19,7 +19,7 @@ from collections import deque
 
 from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication, QIcon, QLinearGradient, QPainter
-from PySide6.QtWidgets import (QCheckBox, QFileDialog, QFrame, QHBoxLayout,
+from PySide6.QtWidgets import (QBoxLayout, QCheckBox, QFileDialog, QFrame, QHBoxLayout,
                                QLabel, QMenu, QPlainTextEdit, QProgressBar, QScrollArea,
                                QSizePolicy, QStackedWidget, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
@@ -43,6 +43,10 @@ FLASH_ERROR_MS = 5000      # a failure to read: the Notion errors
 FLASH_MIN_W = 160          # the flash line wraps rather than get narrower than this
 NOTION_THEN = "Send this meeting"       # the Notion sheet's button when it was opened from here
 NOTION_REASONS = ("auth", "no_access", "rate", "offline", "full")      # telemetry: why a send failed (else "other")
+CHAT_MIN_W, CHAT_MAX_W = 320, 520   # the notes view's right column (the chat above People and the recording)
+CHAT_H, CHAT_H_NARROW = 340, 440    # the chat card's height: at least, and when it sits below the notes
+NARROW_W, WIDE_W = 830, 846         # the page is narrower than this: the column goes below the notes (the second
+                                    # number is where it goes back: no flicker while a scroll bar comes and goes)
 
 # ── words ────────────────────────────────────────────────────────────────────
 LANGS = (("auto", "Detect automatically"), ("multi", "Mixed languages"), ("en", "English"),
@@ -1401,6 +1405,8 @@ class NotesView(QWidget):
         body = QHBoxLayout()
         body.setContentsMargins(32, 0, 32, 28)
         body.setSpacing(24)
+        self._body = body
+        self._narrow = False            # the side column sits below the notes (see resizeEvent)
         self.article = white_card(16, "card", self)
         self.article.setAccessibleName("Meeting notes")
         self.article.setMinimumWidth(380)
@@ -1443,7 +1449,9 @@ class NotesView(QWidget):
         side = QVBoxLayout()
         side.setContentsMargins(0, 0, 0, 0)
         side.setSpacing(16)
-        side.addStretch(1)
+        from ui.pages import meeting_chat_ui            # (it imports this module: loaded here, not at the top)
+        self.chat = meeting_chat_ui.ChatCard(self)      # "Ask about this meeting" fills the room above People
+        side.addWidget(self.chat, 1)
         self.people_card = Card(self, pad=(18, 16), gap=12)
         self.people_card.setAccessibleName("People")
         self.people_card.add(label("People", "h3", self.people_card))
@@ -1455,10 +1463,42 @@ class NotesView(QWidget):
         side.addWidget(self.audio_card)
         sidew = QWidget(self)
         sidew.setLayout(side)
-        sidew.setMinimumWidth(280)
+        sidew.setMinimumWidth(CHAT_MIN_W)
+        sidew.setMaximumWidth(CHAT_MAX_W)
+        self._side = sidew
         body.addWidget(sidew, 0)
         root.addLayout(body, 1)
         meeting_speakers_ui.install(self)          # ⋯ › Identify speakers, and its line in the Transcript tab
+
+    # ── the two columns ──
+    def resizeEvent(self, e):                                       # noqa: N802 (Qt name)
+        super().resizeEvent(e)
+        self._fit_columns()
+
+    def _fit_columns(self, force=False):
+        """Wide: the notes, and the chat with People and the recording beside them. Narrow (the 960 px window
+        and below): the notes on top and the column below them - and the toolbar's two longest buttons shorten,
+        so it fits the viewport (it needed 817 px)."""
+        w = self.width()
+        narrow = w < NARROW_W or (self._narrow and w < WIDE_W)
+        if narrow == self._narrow and not force:
+            return
+        self._narrow = narrow
+        self._body.setDirection(QBoxLayout.TopToBottom if narrow else QBoxLayout.LeftToRight)
+        self.article.setMaximumWidth(16777215 if narrow else 620)
+        self.article.setMinimumHeight(460 if narrow else 0)
+        self._side.setMaximumWidth(16777215 if narrow else CHAT_MAX_W)
+        self._side.setMinimumWidth(0 if narrow else CHAT_MIN_W)
+        if narrow:
+            self.chat.setFixedHeight(CHAT_H_NARROW)
+        else:
+            self.chat.setMinimumHeight(CHAT_H)
+            self.chat.setMaximumHeight(16777215)
+        self.copy_btn.setText(self._copy_label())
+        self.continue_btn.setText("Continue" if narrow else "Continue recording")
+
+    def _copy_label(self):
+        return "Copy" if self._narrow else "Copy notes"
 
     # ── building ──
     def _build_header(self):
@@ -1563,6 +1603,7 @@ class NotesView(QWidget):
         same = str(folder) == self.folder
         if not same:
             self.audio_player.stop(release=True)     # another meeting: let go of this recording
+            self.chat.unbind()                       # ... and of its chat (a running answer ends in its own folder)
         # (only when what is on screen IS this meeting: a meeting still being opened has nothing
         # to keep, and the previous one's scroll position is not its own)
         shown = str((self.data or {}).get("folder") or "") == str(folder)
@@ -1750,7 +1791,22 @@ class NotesView(QWidget):
         self.audio_player.set_parts(audio, d.get("duration_sec") or 0)     # the same parts: keeps playing
         self.copy_btn.setEnabled(bool(notes.strip()))
         self.sync_actions()
+        self.chat.bind(self.folder, d, busy, self._transcript_final(busy))
         meeting_speakers_ui.after_render(self)
+
+    def _transcript_final(self, busy):
+        """False while a Stop still has to write this meeting's final transcript.txt (the plain one that lands
+        earlier has no speaker labels): the chat waits for it."""
+        if not busy:
+            return True
+        s = self.page.session()
+        fn = getattr(s, "transcript_final", None)
+        if not callable(fn):
+            return True
+        try:
+            return bool(fn(self.folder))
+        except Exception:
+            return True
 
     def _render_people(self, people):
         clear_layout(self._people)
@@ -1826,7 +1882,7 @@ class NotesView(QWidget):
 
     def _end_flash(self):
         self.flash_label.hide()
-        self.copy_btn.setText("Copy notes")
+        self.copy_btn.setText(self._copy_label())
         self._flash.setInterval(FLASH_MS)       # the next "Copied" is short again
 
     def copy_notes(self):
@@ -2056,6 +2112,7 @@ class NotesView(QWidget):
         meeting = dict(self.data or {}, dir=folder)
         # A loaded recording holds its file open: Windows would refuse the move.
         self.audio_player.stop(release=True)
+        self.chat.release()                          # nothing more is written into a folder that is going away
         s = self.page.session()
         deleter = self.page.list_view.meetings.deleter
 
@@ -2077,6 +2134,8 @@ class NotesView(QWidget):
                 self.folder = None
                 self.audio_player.set_parts([])
                 self.page.show_list(refresh=True)
+            else:
+                self.render_keeping_view()           # it stays: its chat (let go of above) comes back
         self._bg.run(work, done)
 
     def _is_folder(self, folder):
@@ -2091,12 +2150,14 @@ class NotesView(QWidget):
         let go of the file first (Windows will not move a folder that has a file open)."""
         if self._is_folder(folder):
             self.audio_player.stop(release=True)
+            self.chat.release()
 
     def forget_folder(self, folder):
         """``folder`` left the library (the list deleted it): this view no longer shows it."""
         if self._is_folder(folder):
             self.folder = None
             self.audio_player.set_parts([])
+            self.chat.release()
 
     def play(self):
         """Play or pause the recording, right here."""
@@ -2173,7 +2234,8 @@ def read_meeting(folder):
     return {"folder": str(folder), "meta": meta, "title": str(meta.get("title") or "Untitled Meeting"),
             "notes": notes, "transcript": transcript, "my_notes": my_notes, "parts": parts,
             "people": list(people), "started": started, "duration_sec": duration,
-            "recording_cut_short": cut_short}
+            "recording_cut_short": cut_short,
+            "transcript_file": meeting_store.has_transcript_file(folder)}      # (else only the live pieces are there)
 
 
 _SPK_RE = rich_text.SPEAKER_RE          # "Speaker 1: …", "You: …", "Anna: …"

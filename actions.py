@@ -16,6 +16,7 @@ ACTION_MEETING_NOTES = "meeting_notes"
 ACTION_LIVE_ASSIST = "live_assist"       # real-time copilot (ui/live_assist.py)
 ACTION_LIVE_RECAP = "live_recap"         # rolling "so far" summary during a call
 ACTION_LIVE_RULE = "live_rule"           # the Live Assistant's standing instruction run on every piece of the talk
+ACTION_MEETING_CHAT = "meeting_chat"     # "Ask about this meeting" (meeting_chat.py): free-form questions on one meeting
 
 RULE_BASED_ID = "rule_based"
 API_OPENAI_ID = "api_openai_compatible"
@@ -179,10 +180,15 @@ class ActionError(RuntimeError):
     pass
 
 
+class ContextTooLong(ActionError):
+    """The prompt does not fit the engine's window (the on-computer model's fixed 8192 tokens): nothing was
+    generated, so a caller can send a smaller one (meeting_chat re-plans)."""
+
+
 _ACTION_MODE_WHITELIST = {
     ACTION_TRANSCRIBE_ONLY, ACTION_SMART_AUTO, ACTION_WRITE_EMAIL,
     ACTION_MAKE_TODO, ACTION_TRANSLATE, ACTION_SUMMARIZE, ACTION_MEETING_NOTES,
-    ACTION_LIVE_ASSIST, ACTION_LIVE_RECAP, ACTION_LIVE_RULE,
+    ACTION_LIVE_ASSIST, ACTION_LIVE_RECAP, ACTION_LIVE_RULE, ACTION_MEETING_CHAT,
 }
 
 
@@ -391,7 +397,7 @@ def process_stream(text, mode, on_token, source_lang="auto", target_lang="en",
     # The glossary fixes spellings when a transcript is REWRITTEN (notes,
     # emails...). Live answers and recaps are the model's own words - a list of
     # names there only tempts it to drop them in.
-    vocab_block = ("" if mode in (ACTION_LIVE_ASSIST, ACTION_LIVE_RECAP, ACTION_LIVE_RULE)
+    vocab_block = ("" if mode in (ACTION_LIVE_ASSIST, ACTION_LIVE_RECAP, ACTION_LIVE_RULE, ACTION_MEETING_CHAT)
                    else vocabulary.spelling_authority_block(config or {}))
     if vocab_block and config is not None:
         config = {**config, "_vocab_block": vocab_block}
@@ -422,9 +428,30 @@ def process_stream(text, mode, on_token, source_lang="auto", target_lang="en",
                 target_lang=target_lang, vocab_block=vocab_block,
                 image_b64=(config or {}).get("_image_png_b64"),
                 image_status=(config or {}).get("_image_status"))
+    except local_llm.ContextTooLong as e:
+        raise ContextTooLong(str(e)) from e
     except (local_llm.LocalLLMError, action_api.ActionAPIError) as e:
         raise ActionError(str(e)) from e
     raise ActionError(NO_ENGINE_MESSAGE)
+
+
+# The daily allowance of the Gusan Cloud AI is used up (the server's 429). One sentence, one place: the Live
+# Assistant and "Ask about this meeting" say it the same way. (No "limit": the app never uses that word.)
+CLOUD_ALLOWANCE_USED = "Today's cloud allowance is used up. It comes back tomorrow."
+
+
+def usable_engine(engine, config, downloaded=None):
+    """``engine`` when it can really run with what ``config`` holds - a cloud engine needs its own key, the
+    managed one a token (``_managed_token``), a local model is taken as it is - else the first downloaded
+    local model, or None (the built-in formatter is never an answer). ``downloaded``: a model id -> bool
+    (default: what is on disk)."""
+    config = config or {}
+    kind = ACTION_MODELS.get(engine, {}).get("kind")
+    if (engine == RULE_BASED_ID or kind is None
+            or (kind == "cloud" and not engine_has_key(engine, config))
+            or (kind == "managed" and not config.get("_managed_token"))):
+        return _first_downloaded_local_model() if downloaded is None else _first_downloaded_local_model(downloaded)
+    return engine
 
 
 def live_engine(engine, config):
@@ -441,14 +468,9 @@ def live_engine(engine, config):
     if config.get("privacy_mode") or config.get("live_assist_writer") == "local":
         # On-device only: a local model or nothing - never the server.
         return engine if kind == "local_llm" else _first_downloaded_local_model()
-    has_token = bool(config.get("_managed_token"))
-    if has_token:
+    if config.get("_managed_token"):
         return API_MANAGED_ID
-    if (engine == RULE_BASED_ID or kind is None
-            or (kind == "cloud" and not engine_has_key(engine, config))
-            or (kind == "managed" and not has_token)):
-        return _first_downloaded_local_model()
-    return engine
+    return usable_engine(engine, config)
 
 
 def warm_up(model, config):
@@ -505,10 +527,11 @@ def _live_assist_basic(text):
     return "\n".join(lines)
 
 
-def _first_downloaded_local_model():
+def _first_downloaded_local_model(downloaded=None):
+    check = downloaded or local_llm.model_downloaded
     for model_id in local_llm.MODEL_CATALOG:
         try:
-            if local_llm.model_downloaded(model_id):
+            if check(model_id):
                 return model_id
         except local_llm.LocalLLMError:
             pass

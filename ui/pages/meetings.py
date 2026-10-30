@@ -15,7 +15,10 @@ The page follows ``app.meeting_session`` (whoever started the recording) and
 never stops it: leaving the page or closing the window keeps it running.
 
 on_open options: ``view="list"|"live"|"notes"``, ``folder=<meeting folder>``
-(or ``meeting=``; opens its notes), and for a recording started from elsewhere (the calendar
+(or ``meeting=``; opens its notes; ``writing=True`` opens the notes view even while that meeting's notes are
+still being written - the Live Assistant's Stop does: the chat on its side can answer as soon as the transcript
+is saved, and the page fills in by itself; without it a meeting being written still opens on the live view),
+and for a recording started from elsewhere (the calendar
 reminder, the tray) ``title=``, ``attendees=`` (list or comma string),
 ``calendar_event_id=`` to prefill the start card, plus ``record=True`` to press
 Record (Pro gate and consent included).
@@ -148,6 +151,9 @@ NOTES_KEY = "meeting_notes_model"
 MANAGED = "managed"            # actions.API_MANAGED_ID
 LOCAL_DEFAULT = "qwen_tiny"    # local_llm.QWEN_TINY_ID
 
+# Settings that decide which AI answers "Ask about this meeting" (meeting_chat.pick_engine).
+_CHAT_KEYS = {"privacy_mode", "action_model", NOTES_KEY, "action_api_key", "action_api_provider", "google_api_key",
+              "backend"}
 _SETTING_KEYS = {
     "meeting_audio_mode", "meeting_language", "language", NOTES_KEY, "action_model", "backend",
     "whisper_model", "privacy_mode", "managed_provider", "google_stt_model", "mistral_stt_model",
@@ -239,6 +245,7 @@ class MeetingsPage(QWidget):
         self._calendar = None
         self._downloads = None
         self._view = None
+        self._writing_folder = ""       # the meeting a Live Assistant Stop opened while its notes were being written
         self.setAccessibleName("Meetings")
         self.setStyleSheet(views.page_qss() + _CALENDAR_QSS % (theme.qss_color("blue-l"), theme.qss_color("bg")))
         lay = QVBoxLayout(self)
@@ -364,7 +371,8 @@ class MeetingsPage(QWidget):
         for name, slot in (("state_changed", self._on_phase), ("live_line", self._on_line),
                            ("recap", self.live_view.set_recap), ("status", self.live_view.set_status),
                            ("levels", self.live_view.set_levels), ("finished", self._on_finished),
-                           ("error", self._on_error), ("speakers_changed", self._on_speakers_changed)):
+                           ("error", self._on_error), ("speakers_changed", self._on_speakers_changed),
+                           ("transcript_saved", self._on_transcript_saved)):
             sig = getattr(s, name, None)
             if sig is None:
                 continue
@@ -490,11 +498,19 @@ class MeetingsPage(QWidget):
         self._show("live")
         self.live_view.sync()
 
-    def open_notes(self, folder, item=None):
-        if self.is_active_folder(folder) and self.shows_live():
+    def open_notes(self, folder, item=None, writing=False):
+        """Show a meeting's notes. A meeting the session is recording or writing opens on the live view - except
+        with ``writing=True`` and its notes being written (right after the Live Assistant's Stop): then the notes
+        view, whose banner says "Writing notes…" and which fills in when they are ready."""
+        if (self.is_active_folder(folder) and self.shows_live()
+                and not (writing and self.phase() == "processing")):
             self.show_live()
             return
         self._show("notes")
+        if writing and self.is_active_folder(folder):
+            self._writing_folder = str(folder)
+        elif self._writing_folder and not self._same_folder(folder, self._writing_folder):
+            self._writing_folder = ""             # another meeting: the one that was being written is not special now
         self.notes_view.load(folder, item)
 
     def list_changed(self):
@@ -522,7 +538,7 @@ class MeetingsPage(QWidget):
         if prefill:
             self.list_view.start_card.prefill(**prefill)
         if folder:
-            self.open_notes(folder)
+            self.open_notes(folder, writing=bool(opts.get("writing")))
         elif view == "live" and phase != "idle" and not self.is_rewriting():
             self.show_live()
         elif view in ("list", "notes"):
@@ -560,6 +576,8 @@ class MeetingsPage(QWidget):
             self.record()
 
     def on_setting_changed(self, key):
+        if key in _CHAT_KEYS:
+            self.notes_view.chat.refresh_gate()      # the AI that would answer a question about the meeting changed
         if key not in _SETTING_KEYS:
             return
         self.list_view.sync_settings()
@@ -639,7 +657,18 @@ class MeetingsPage(QWidget):
             else:
                 self.live_view.sync()
         elif self._view == "notes" and self.notes_view.folder and folder and self.is_same(folder):
-            self.notes_view.reload()
+            # Notes arriving never move somebody who is reading the transcript or typing in My notes: when this
+            # meeting was opened while its notes were still being written, they keep their tab and place.
+            keep = bool(self._writing_folder) and self.is_same(self._writing_folder)
+            self._writing_folder = ""
+            self.notes_view.reload(keep_view=keep)
+
+    def _on_transcript_saved(self, folder):
+        """The final transcript of a meeting just stopped is on disk (before its notes): the meeting open here reads
+        it again - the Transcript tab, and the chat can answer."""
+        if self._view != "notes" or not self.notes_view.folder or not folder or not self.is_same(folder):
+            return
+        self.notes_view.reload(keep_view=True)
 
     def _on_speakers_changed(self, folder):
         """The background speaker pass of a meeting (the names that come after its
@@ -657,12 +686,16 @@ class MeetingsPage(QWidget):
         elif str((self.notes_view.data or {}).get("folder") or "") == str(self.notes_view.folder):
             self.notes_view.render_keeping_view()    # (a meeting still loading renders when it is read)
 
-    def is_same(self, folder):
+    @staticmethod
+    def _same_folder(a, b):
         import os
         try:
-            return os.path.normcase(os.path.abspath(folder)) == os.path.normcase(os.path.abspath(self.notes_view.folder))
+            return os.path.normcase(os.path.abspath(str(a))) == os.path.normcase(os.path.abspath(str(b)))
         except Exception:
-            return folder == self.notes_view.folder
+            return a == b
+
+    def is_same(self, folder):
+        return self._same_folder(folder, self.notes_view.folder)
 
     def _on_error(self, code, message):
         if code == "empty" and self._view == "live":

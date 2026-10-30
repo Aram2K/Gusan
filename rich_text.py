@@ -28,6 +28,9 @@ stdlib only, so tests/ (PySide6 stubbed) can import it.
                           <i> <code> <pre> <blockquote>); no fonts, colours or
                           -qt- CSS.
     qt_html(md, colors=None)  the same structure for QLabel / QTextEdit.
+    answer_text(md, streaming=False)  a model's answer ready for qt_html: links, images and tables as plain
+                          words, break points in long strings; streaming_markdown(md) hides a half-written
+                          ** or ` while an answer is still arriving.
     transcript_paragraphs(text, max_chars=550)  a meeting transcript as
                           readable paragraphs (sentence packing).
     parse_task / toggle_task_line / notes_plain  the meeting notes helpers.
@@ -396,6 +399,71 @@ def qt_html(md, colors=None):
                                                     ("color", text_c)),
                                               _html.escape(b[2], quote=False)))
     return "".join(parts)
+
+
+# ── a model's answer, shown in the app ───────────────────────────────────────
+def streaming_markdown(md):
+    """An answer that is still streaming, safe to render: an open ``` fence
+    is closed, and a half-written ** or ` is left out until its pair arrives,
+    so Markdown markers never flash as raw characters."""
+    s = md or ""
+    if s.count("```") % 2:
+        return s + "\n```"
+    for mark in ("**", "`"):
+        if s.count(mark) % 2:
+            i = s.rfind(mark)
+            s = s[:i] + s[i + len(mark):]
+    return s
+
+
+_IMAGE_RE = re.compile(r"!\[([^\]\n]*)\]\([^)\n]*\)")
+_LINK_RE = re.compile(r"\[([^\]\n]+)\]\(\s*<?([^)\s>]*)>?[^)\n]*\)")
+_REF_LINK_RE = re.compile(r"\[([^\]\n]+)\]\[[^\]\n]*\]")
+_REF_DEF_RE = re.compile(r"(?m)^[ \t]*\[[^\]\n]+\]:[ \t]*\S+.*$\n?")
+_TABLE_SEP_RE = re.compile(r"^:?-{2,}:?$")
+_BREAK_RE = re.compile(r"(\S{19}[^\s*`])(?=[^\s*`])")
+_ZWSP = "\u200b"                     # a place where a line may end, drawn as nothing (ui.components.mini_prompt)
+
+
+def _plain_table_rows(md):
+    """A Markdown table's rows as plain lines ("a · b"): a label cannot draw a table, and its pipes would show
+    as symbols. The separator row ("---|---") is dropped."""
+    out = []
+    for line in (md or "").split("\n"):
+        s = line.strip()
+        if s.startswith("|") and s.count("|") >= 2:
+            cells = [c.strip() for c in s.strip("|").split("|")]
+            if all(_TABLE_SEP_RE.match(c) for c in cells if c) and any(cells):
+                continue
+            out.append(" · ".join(c for c in cells if c))
+        elif s and "|" in s and all(_TABLE_SEP_RE.match(c.strip()) for c in s.split("|") if c.strip()) \
+                and s.count("-") >= 3:
+            continue                                           # a separator row without outer pipes
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+def answer_text(md, streaming=False):
+    """A model's answer made ready for qt_html: everything the label cannot show properly becomes plain words.
+    Images give their description, links their text (never clickable: ``[text](url)`` -> "text", "text (url)"
+    when they differ), table rows become lines, a run of 20+ characters without a space gets break points (a
+    pasted address cannot widen the card). ``streaming``: a half-written ** or ` is left out for now
+    (streaming_markdown). Qt-free; everything stays escaped later (inline_html), so nothing the model writes
+    is ever read as HTML."""
+    s = str(md or "").replace("\r\n", "\n").replace("\r", "\n")
+    s = _plain_table_rows(s)
+    s = _IMAGE_RE.sub(lambda m: m.group(1).strip(), s)
+
+    def link(m):
+        text, url = m.group(1).strip(), m.group(2).strip()
+        return text if not url or url == text or url.rstrip("/") == text.rstrip("/") else "%s (%s)" % (text, url)
+    s = _LINK_RE.sub(link, s)
+    s = _REF_LINK_RE.sub(lambda m: m.group(1), s)
+    s = _REF_DEF_RE.sub("", s)
+    if streaming:
+        s = streaming_markdown(s)
+    return _BREAK_RE.sub("\\1" + _ZWSP, s)
 
 
 # ── meeting transcripts (D10) ────────────────────────────────────────────────

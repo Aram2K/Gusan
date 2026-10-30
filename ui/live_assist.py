@@ -162,6 +162,7 @@ from live_context import others_of, start_session
 import invite_context
 import live_docs
 import live_rules
+from rich_text import streaming_markdown  # noqa: F401  (it moved to rich_text: the meeting chat renders streams too)
 from ui import glass, live_docs_ui
 
 logger = logging.getLogger("transcribe")
@@ -260,7 +261,7 @@ RULES_TIP_ON = ("Everything you hear: each new sentence is handled by your rule 
 RULES_TIP_OFF = ("Questions only: your rule shapes every answer, but nothing is done to "
                  "everything you hear. Turn on \"Apply to everything I hear\" for that.")
 NEEDS_RULE_TEXT = "Write a rule in the context first."
-LIMIT_WORDS = "Today's cloud allowance is used up. It comes back tomorrow."
+LIMIT_WORDS = actions.CLOUD_ALLOWANCE_USED
 
 QUICK_ACTIONS = (
     ("Answer", ""),
@@ -389,20 +390,6 @@ def render_markdown(text_edit, md):
 
 
 STREAM_RENDER_MS = 120      # a streaming answer is re-rendered at most this often
-
-
-def streaming_markdown(md):
-    """An answer that is still streaming, safe to render: an open ``` fence
-    is closed, and a half-written ** or ` is left out until its pair arrives,
-    so Markdown markers never flash as raw characters."""
-    s = md or ""
-    if s.count("```") % 2:
-        return s + "\n```"
-    for mark in ("**", "`"):
-        if s.count(mark) % 2:
-            i = s.rfind(mark)
-            s = s[:i] + s[i + len(mark):]
-    return s
 
 
 def jpeg_b64(img, max_w=1600, quality=80):
@@ -3037,11 +3024,39 @@ class LiveAssistOverlay(QWidget):
         if session is None or getattr(session, "state", None) != "recording":
             return
         try:
-            session.stop()
+            folder, source, had_content = self._session_facts(session)       # before the Stop changes them
+            stopped = session.stop()
             self._set_status("Stopped - your notes will be in Meetings.")
+            # Stop on a Live Assistant session that recorded something takes the user to its meeting (Meetings >
+            # notes, the chat beside them; the notes are still being written). A session started from the Meetings
+            # page or the calendar keeps its own way: no jump.
+            if stopped is True and source == "live_assist" and had_content and folder:
+                QTimer.singleShot(0, lambda f=str(folder): self._open_stopped_meeting(f))
         except Exception as e:
             logger.warning("Live Assistant stop failed: %s", e, exc_info=True)
             self._set_status(f"Couldn't stop: {str(e)[:80]}")
+
+    def _session_facts(self, session):
+        """(folder, where it started, did it record anything) of the session about to stop: some of the live
+        words, or at least five seconds. Never raises - nothing here may get in the way of the Stop."""
+        try:
+            folder, source = session.meeting_dir, getattr(session, "source", "")
+            elapsed = session.elapsed_sec()
+            return folder, source, bool(self._live_text.strip()) or float(elapsed or 0) >= 5
+        except Exception:
+            logger.debug("Live Assistant: the session's facts are unavailable", exc_info=True)
+            return None, "", False
+
+    def _open_stopped_meeting(self, folder):
+        """After the card repainted: Gusan's window comes to the front on that meeting (the controller decides how,
+        when the card is hidden from screen share). Never raises."""
+        opener = getattr(self.app, "open_meeting_after_live_stop", None)
+        if not callable(opener):
+            return
+        try:
+            opener(folder)
+        except Exception:
+            logger.warning("Opening the meeting after Stop failed", exc_info=True)
 
     # ── data feed (GUI thread) ──
     def set_meeting_active(self, active, title="", attendees="", agenda=""):

@@ -1,7 +1,8 @@
 """On-disk meeting library: %APPDATA%/Transcribe/meetings/<YYYYMMDD_HHMMSS>/.
 
 Each folder holds meta.json, transcript.txt, notes.md, my_notes.md (what the
-user typed during the meeting), chunks.jsonl (live chunks) and
+user typed during the meeting), chat.json (the questions the user asked about
+the meeting and the answers: see load_chat), chunks.jsonl (live chunks) and
 audio_partN.wav (one per recording segment - a resumed meeting adds a part;
 a mic + system sound meeting also keeps audio_partN_mic.wav and
 audio_partN_system.wav, the two sources apart, for later speaker labels) and
@@ -41,6 +42,15 @@ _PART_RE = re.compile(r"^audio_part(\d+)\.wav$", re.I)
 DISCARDED_CHUNKS = "chunks.discarded.jsonl"
 META_FILE = "meta.json"
 MY_NOTES_FILE = "my_notes.md"
+# "Ask about this meeting" (meeting_chat.py): the conversation, one file per meeting folder. It lives and
+# dies with the folder (the trash moves the folder whole, a permanent delete removes it), and nothing else
+# reads it: no export, no Notion send, no search.
+CHAT_FILE = "chat.json"
+CHAT_VERSION = 1
+CHAT_MAX_MESSAGES = 200
+CHAT_MAX_CHARS = 20000
+CHAT_ROLES = ("user", "assistant")
+CHAT_STATUSES = ("done", "stopped")       # an answer is kept only when it ended, or the user stopped it
 
 # Row status for the Meetings list (see meeting_status).
 STATUS_RECORDING = "recording"
@@ -158,6 +168,70 @@ def save_my_notes(folder, text):
         return True
     except OSError:
         return False
+
+
+def chat_path(folder):
+    return Path(folder) / CHAT_FILE
+
+
+def _chat_int(value, low=0, high=10 ** 9):
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    return n if low <= n <= high else None
+
+
+def clean_chat(messages):
+    """The conversation as the file keeps it: only the user's questions and the answers that ended (``done``) or
+    were stopped (``stopped``), in order, at most CHAT_MAX_MESSAGES of them (the newest) and CHAT_MAX_CHARS
+    characters each. Anything else - another role, an unknown status, no text, a row that is not a dict - is
+    dropped; an answer with a status this build does not know counts as stopped, never as complete."""
+    out = []
+    for m in messages if isinstance(messages, list) else []:
+        if not isinstance(m, dict) or m.get("role") not in CHAT_ROLES:
+            continue
+        text = m.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        row = {"role": m["role"], "text": text[:CHAT_MAX_CHARS]}
+        ts = _chat_int(m.get("ts"))
+        if ts is not None:
+            row["ts"] = ts
+        if m["role"] == "assistant":
+            row["status"] = m.get("status") if m.get("status") in CHAT_STATUSES else "stopped"
+            for key in ("engine", "kind"):
+                if isinstance(m.get(key), str) and m[key].strip():
+                    row[key] = m[key].strip()[:120]
+            cov = m.get("coverage")
+            if isinstance(cov, dict):
+                clean = {"complete": bool(cov.get("complete", True))}
+                for key in ("pct", "covered_min", "total_min"):
+                    n = _chat_int(cov.get(key))
+                    if n is not None:
+                        clean[key] = n
+                row["coverage"] = clean
+            try:
+                secs = round(float(m.get("seconds")), 1)
+                if 0 <= secs < 86400:
+                    row["seconds"] = secs
+            except (TypeError, ValueError):
+                pass
+        out.append(row)
+    return out[-CHAT_MAX_MESSAGES:]
+
+
+def load_chat(folder):
+    """The meeting's chat (chat.json) as a clean list of messages (see clean_chat); [] when there is none or the
+    file cannot be read (bad JSON, another version, not a list). Never raises."""
+    try:
+        with open(chat_path(folder), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return []
+    if not isinstance(data, dict) or data.get("version") != CHAT_VERSION:
+        return []
+    return clean_chat(data.get("messages"))
 
 
 def load_transcript(folder):

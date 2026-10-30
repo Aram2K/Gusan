@@ -107,6 +107,14 @@ Quitting mid-meeting (Wave 5 review)
   * ``holds_recorder``: recording, or transcribing a recording. Notes written
     from a saved transcript (Retry, Rewrite, pending) don't use the recorder,
     so dictation stays available meanwhile (main.py _on_hotkey).
+Ask about this meeting
+  * ``transcript_saved(folder)`` is emitted by the Stop's worker once the FINAL transcript.txt (the
+    You / Them labels in it) and segments.json are on disk, a little before the notes are written (and by the
+    finishing of an interrupted meeting after its transcript.txt). The Meetings page reads the open meeting
+    again on it, and the meeting's chat (meeting_chat.py, ui/pages/meeting_chat_ui.py) can answer from then
+    on. ``transcript_final(folder)`` is False until that moment for the meeting a run is writing (the plain
+    transcript.txt that lands earlier has no labels). The chat uses the notes' engine:
+    ``effective_notes_engine`` / ``notes_engine`` are the one rule for it.
 Who said what (Gusan 2.0.1)
   * A mic + system sound meeting keeps the two sources as separate tracks
     (recorder.get_full_audio_tracks()); Stop saves them next to the recording as
@@ -187,6 +195,7 @@ import importlib.util
 import json
 import logging
 import math
+import os
 import re
 import sys
 import threading
@@ -281,6 +290,9 @@ _SIGNALS = (
     ("error", (str, str)),
     # The background speaker pass of a meeting folder queued / started / ended (any thread).
     ("speakers_changed", (str,)),
+    # A Stop's final transcript.txt (the You / Them labels in it) is on disk, before the notes: the
+    # meeting open on the Meetings page reads it again, and its chat can answer (any thread).
+    ("transcript_saved", (str,)),
     # 1.9 names, read by main.py / Live Assistant: emitted from worker threads.
     ("sig_chunk", (str,)),
     ("sig_summary", (str,)),
@@ -424,21 +436,54 @@ def pending_notes_folders():
     return out
 
 
-def default_engine_id(app):
+def default_engine(pro, downloaded=None):
     """Notes engine to use when none is chosen (the saved one is rule-based):
     Gusan Cloud for Pro, else a local model that is actually downloaded, else
     Gusan Cloud (which then degrades with a notice) - never a default that
-    would go straight to the built-in formatter."""
+    would go straight to the built-in formatter. ``downloaded``: model id -> bool
+    (default: what is on disk)."""
     try:
-        if app is not None and app.is_pro():
+        if pro:
             return actions.API_MANAGED_ID
         import local_llm
+        check = downloaded or local_llm.model_downloaded
         for mid in local_llm.MODEL_CATALOG:
-            if local_llm.model_downloaded(mid):
+            if check(mid):
                 return mid
     except Exception:
         pass
     return actions.API_MANAGED_ID
+
+
+def default_engine_id(app):
+    """default_engine for an app (its plan is asked: Pro runs on Gusan Cloud)."""
+    try:
+        pro = app is not None and bool(app.is_pro())
+    except Exception:
+        return actions.API_MANAGED_ID
+    return default_engine(pro)
+
+
+def notes_engine(cfg, pro, override=None, downloaded=None):
+    """The engine id the notes are written with, before the Pro routing: this meeting's ``override`` (the start
+    card's pick), else None = the saved ``action_model`` - except the built-in formatter, which is never picked
+    for meeting notes (default_engine then). The one rule the notes and "Ask about this meeting" share."""
+    if override:
+        return override
+    saved = actions.normalize_action_model((cfg or {}).get("action_model"))
+    if saved == actions.RULE_BASED_ID:
+        return default_engine(pro, downloaded)
+    return None
+
+
+def effective_notes_engine(app, override=None):
+    """notes_engine for an app (its settings and plan)."""
+    if override:
+        return override
+    saved = actions.normalize_action_model((getattr(app, "cfg", None) or {}).get("action_model"))
+    if saved == actions.RULE_BASED_ID:
+        return default_engine_id(app)
+    return None
 
 
 class _PySignal:
@@ -543,6 +588,10 @@ class MeetingCore:
         # Worker milestones save_for_quit waits on / reads (any thread).
         self._segment_saved = threading.Event()
         self._transcript_saved = threading.Event()     # this run's transcript.txt
+        # The folder whose FINAL transcript.txt (the one with the You / Them labels) this run still has to
+        # write; "" when none. The plain one lands a little earlier (_save_plain_transcript_early), so the
+        # file's mere existence says nothing: "Ask about this meeting" waits on transcript_final().
+        self._transcript_pending = ""
         self._notes_saved = threading.Event()
         # Runs that work from a SAVED recording (nothing live to keep at Quit):
         # "Identify speakers" (_identify_only: labels, no notes) and finishing
@@ -632,6 +681,28 @@ class MeetingCore:
     def active_dir(self):
         """The folder being recorded or processed (never delete it), or None."""
         return self._meeting_dir if self.is_busy else None
+
+    def transcript_final(self, folder):
+        """False while a Stop (or the finishing of an interrupted meeting) has still to write ``folder``'s final
+        transcript.txt - until then the file, if it is there, is the plain one without the speaker labels.
+        True for every other meeting and once the run has written it (transcript_saved)."""
+        pending = self._transcript_pending
+        if not pending:
+            return True
+        try:
+            return os.path.normcase(os.path.abspath(pending)) != os.path.normcase(os.path.abspath(str(folder)))
+        except Exception:
+            return str(pending) != str(folder)
+
+    def _transcript_written(self):
+        """Worker: this run's final transcript.txt (and the segments the names that come later need) is on disk."""
+        folder = str(self._meeting_dir or "")
+        self._transcript_pending = ""
+        if folder:
+            try:
+                self.transcript_saved.emit(folder)
+            except RuntimeError:
+                pass                             # session already destroyed
 
     @property
     def identifying(self):
@@ -764,12 +835,7 @@ class MeetingCore:
         """The engine override for the notes, or None (= the saved
         action_model). The saved one is used unless it is the built-in
         formatter, which is never picked for meeting notes."""
-        if self._notes_engine:
-            return self._notes_engine
-        saved = actions.normalize_action_model(self._cfg().get("action_model"))
-        if saved == actions.RULE_BASED_ID:
-            return default_engine_id(self.app)
-        return None
+        return effective_notes_engine(self.app, self._notes_engine)
 
     # ── start ──
     def start(self, title="", attendees="", audio_mode=None, language=None,
@@ -1569,6 +1635,7 @@ class MeetingCore:
 
     def _process_meeting_notes(self):
         try:
+            self._transcript_pending = str(self._meeting_dir or "")
             self._transcript_notices = []
             self._sources_part = None
             self._followup_folder = ""
@@ -1730,6 +1797,7 @@ class MeetingCore:
                         raise OSError("could not write transcript.txt")
                     self._transcript_saved.set()        # a Quit from here on keeps it
                     self._keep_segments()               # what the names that come after the notes need
+                    self._transcript_written()          # the open meeting reads it; its chat can answer
             except Exception:
                 logger.warning("Could not save the meeting transcript", exc_info=True)
 
@@ -2159,6 +2227,7 @@ class MeetingCore:
 
     # ── outcome (GUI thread) ──
     def _on_processing_finished(self, notes, error_msg):
+        self._transcript_pending = ""           # whatever the run did, nothing is waiting for a transcript now
         # The session's AI work is over (notes or not): free the local model
         # now rather than idling with it for minutes.
         if self.app and hasattr(self.app, "release_models_after_session"):
@@ -2460,6 +2529,7 @@ class MeetingCore:
         transcript.txt instead, with a notice saying why there are no labels."""
         folder = self._meeting_dir
         text = live_text = self._final_transcript or ""
+        self._transcript_pending = str(folder or "")
         try:
             self._drop_speaker_notices()
             if meeting_store.load_meta(folder).get("transcribed_with") == TRANSCRIBED_CLOUD:
@@ -2483,7 +2553,9 @@ class MeetingCore:
             text = live_text
         if text.strip() and folder is not None:
             self._final_transcript = text
-            if not meeting_store.write_transcript(folder, text):
+            if meeting_store.write_transcript(folder, text):
+                self._transcript_written()
+            else:
                 logger.warning("Could not save the recovered transcript of %s", folder)
         self._summarize_and_finish()
 
@@ -2879,6 +2951,7 @@ if _QObject is not None:
         finished = _QtSignal(str, str, str)
         error = _QtSignal(str, str)
         speakers_changed = _QtSignal(str)
+        transcript_saved = _QtSignal(str)
         sig_chunk = _QtSignal(str)
         sig_summary = _QtSignal(str)
         sig_status = _QtSignal(str)

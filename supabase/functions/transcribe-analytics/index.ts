@@ -51,6 +51,7 @@ const allowedEvents = new Set([
   'meeting_notes_failed',
   'meeting_exported',
   'meeting_deleted',
+  'meeting_chat_asked',
   'paywall_viewed',
   'upgrade_clicked',
   'checkout_opened',
