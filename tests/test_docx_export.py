@@ -219,6 +219,17 @@ class TestRichNotesInWord(unittest.TestCase):
         self.assertIn('<w:sz w:val="28"/><w:szCs w:val="28"/><w:b/></w:rPr><w:t xml:space="preserve">Discussion</w:t>', doc)
         self.assertIn('<w:sz w:val="22"/><w:szCs w:val="22"/><w:b/></w:rPr><w:t xml:space="preserve">Release</w:t>', doc)
 
+    def test_a_wrapped_answer_with_a_table_is_paragraphs_not_a_code_block(self):
+        wrapped = ("```markdown\n## Summary\nAram led the call.\n\n## Action items\n| Task | Owner | Due |\n|---|---|---|\n"
+                   "| Ship it | Claire | Friday |\n```\n")
+        paras = dx.notes_paragraphs(wrapped)
+        self.assertEqual([(p["style"], p["text"]) for p in paras[:2]], [("heading", "Summary"), ("body", "Aram led the call.")])
+        tasks = [p for p in paras if p["style"] == "task"]
+        self.assertEqual([(t["text"], t["after"]) for t in tasks], [("Ship it", "(Claire \u00b7 by Friday)")])
+        doc = _parts(dx.build_docx("Notes", paras, include_timestamps=False))["word/document.xml"]
+        for raw in ("```", "|", "##", "Task"):
+            self.assertNotIn(raw, doc)
+
     def test_notes_that_are_all_empty_sections_make_no_paragraphs(self):
         self.assertEqual(dx.notes_paragraphs("## Key decisions\n\n## Open questions\n- None.\n"), [])
 

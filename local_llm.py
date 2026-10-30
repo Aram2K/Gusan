@@ -384,6 +384,19 @@ def _messages_tokens(llm, messages):
     return 16 + sum(24 + _count_tokens(llm, m.get("content") or "") for m in messages)
 
 
+class CutText(str):
+    """What the model wrote when it stopped at its token limit (``cut`` is True): a str, so callers that only want the
+    text keep working; the meeting notes (actions._notes_result) trim it to its last whole line and say so."""
+    cut = True
+
+
+def _stopped_at_limit(result):
+    try:
+        return result["choices"][0].get("finish_reason") == "length"
+    except Exception:
+        return False
+
+
 def _chat(llm, messages, max_tokens):
     result = llm.create_chat_completion(
         messages=messages,
@@ -392,7 +405,8 @@ def _chat(llm, messages, max_tokens):
         max_tokens=max_tokens,
         repeat_penalty=1.08,
     )
-    return _extract_text(result)
+    text = _extract_text(result)
+    return CutText(text) if text and _stopped_at_limit(result) else text
 
 
 def _split_by_tokens(llm, text, chunk_tokens):

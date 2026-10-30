@@ -228,11 +228,11 @@ def markdown_to_blocks(md):
         if not line:
             continue
         if re.match(r"^#{3,6} ", line):
-            blocks.append(_block("heading_3", re.sub(r"^#+ ", "", line)))
+            blocks.append(_block("heading_3", rich_text.strip_inline(re.sub(r"^#+ ", "", line))))
         elif line.startswith("## "):
-            blocks.append(_block("heading_2", line[3:]))
+            blocks.append(_block("heading_2", rich_text.strip_inline(line[3:])))
         elif line.startswith("# "):
-            blocks.append(_block("heading_1", line[2:]))
+            blocks.append(_block("heading_1", rich_text.strip_inline(line[2:])))
         elif (m := re.match(r"^[-*] \[([ xX])\] (.*)$", line)):
             blocks.append({"object": "block", "type": "to_do",
                            "to_do": {"rich_text": _rich(m.group(2).strip(), True),

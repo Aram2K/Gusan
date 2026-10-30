@@ -39,14 +39,17 @@ stdlib only, so tests/ (PySide6 stubbed) can import it.
                           (task, owner, due); a generic side ("Them", "Speaker 2"),
                           an empty or placeholder value is no owner.
     clean_notes(md, me="")  the notes with every action item in one clean shape
-                          and no empty section: what notes.md, Notion and the
-                          Markdown export get.
+                          and no empty section, no wrapper (a code fence, a
+                          "Here are the notes:") and no table: what notes.md,
+                          Notion and the Markdown export get.
     heading_roles(blocks)   which headings are sections and which are topics.
     inline_runs(text)  '**Fix** the *drift*' -> [(text, bold, italic)] for Word.
 """
 
 import html as _html
 import re
+
+import notes_prompt
 
 # ── block patterns (the meeting notes view's, unchanged) ─────────────────────
 _TASK_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s*\[( |x|X)\]\s*(.*)$")
@@ -259,16 +262,48 @@ def heading_roles(blocks):
             for i, b in enumerate(blocks) if b[0] == "head"}
 
 
-# A section whose only line says there is nothing ("None.", "_None._", "No open questions.") is as empty as no line at all.
+# A section whose only line says there is nothing ("None.", "_None._", "No open questions.", "No specific decisions were
+# made.", "Aucune décision n'a été prise.", a lone dash) is as empty as no line at all: a short line that starts like that
+# and names what is missing. The Summary is never dropped (a one-line Summary may well start with "No decision ...").
+_NONE_START = re.compile(
+    r"^(?:no|none|nothing|not applicable|n/?a|aucun(?:e)?|rien|pas d[e']|keine?|kein(?:e)?|"
+    r"there (?:were|was|are|is) (?:no|none|nothing))\b", re.I)
+_NONE_TOPIC = re.compile(
+    r"decision|action|question|item|point|issue|identif|mention|raised|specific|explicit|applicable|report|unresolved|open|"
+    r"agreed|assigned|discuss|d[ée]cision|t[âa]che|signaler|mentionn|soulev|[ée]voqu|relev|entscheid|frage|aufgabe", re.I)
+
+
+# The few sentences that are "nothing here" at any level, a topic's too ("### Pricing" with only "No action items." under it
+# is not a topic that was discussed).
 _NONE_LINE = re.compile(
     r"^(?:none|nothing|n/?a|aucune?|rien|no (?:key )?decisions?(?: (?:were )?(?:made|taken|reached))?|"
     r"no action items?(?: (?:were )?(?:identified|found|mentioned|assigned))?|"
     r"no open questions?(?: (?:were )?(?:raised|identified|left))?)\.?$", re.I)
 
 
+def _is_none_text(text, topic=False):
+    """True for a line that only says there is nothing under its heading. ``topic``: the heading is a topic (level 3 or
+    deeper): only the few plain sentences count, so a real line that starts with "No" ("No action was agreed on pricing.")
+    is never taken for an empty one."""
+    s = (text or "").strip().strip("*_ ").strip()
+    if not s.strip("-–—•*_ ."):
+        return True                                     # nothing but a dash
+    s = s.lstrip("-–—•* ").strip().strip("*_ ").strip()
+    if _NONE_LINE.match(s):
+        return True
+    words = s.split()
+    if topic or len(words) > 10 or not _NONE_START.match(s):
+        return False
+    return len(words) == 1 or bool(_NONE_TOPIC.search(s))
+
+
+def _is_summary_title(title):
+    return re.sub(r"[*_:#\s]", "", title or "").lower() in ("summary", "résumé", "resume")
+
+
 def _empty_sections(items):
-    """``items``: [(level, text)] in order - level is the heading's level, 0 for a body line (text = what it says; a
-    task or a code line counts as real content). The indexes to drop: a heading with nothing under it (the next heading
+    """``items``: [(level, text)] in order - level is the heading's level (text = its title), 0 for a body line (text = what
+    it says; a task or a code line counts as real content). The indexes to drop: a heading with nothing under it (the next heading
     is of the same or a higher rank, or the notes end) or with only a "None." line, and that line. A title above its
     sections or a section made of topics has a deeper heading next, so it stays - until its topics are gone too."""
     dropped = set()
@@ -286,7 +321,8 @@ def _empty_sections(items):
             nxt = items[live[j]][0] if j < len(live) else 0
             if not body and (j >= len(live) or nxt <= level):
                 found.add(i)
-            elif len(body) == 1 and _NONE_LINE.match(items[body[0]][1].strip()):
+            elif (len(body) == 1 and _is_none_text(items[body[0]][1], topic=level >= 3)
+                  and not _is_summary_title(items[i][1])):
                 found.update((i, body[0]))
         if not found:
             return dropped
@@ -303,7 +339,7 @@ def _block_text(b):
 
 
 def _without_empty_sections(blocks):
-    items = [(b[1] if b[0] == "head" else 0, "" if b[0] == "head" else _block_text(b)) for b in blocks]
+    items = [(b[1], b[2]) if b[0] == "head" else (0, _block_text(b)) for b in blocks]
     drop = _empty_sections(items)
     return [b for i, b in enumerate(blocks) if i not in drop] if drop else blocks
 
@@ -316,20 +352,33 @@ def _without_empty_sections(blocks):
 EMPTY_VALUES = {
     "", "-", "–", "—", "?", "none", "n/a", "na", "tbd", "tbc", "unassigned", "unknown", "unspecified",
     "not specified", "not assigned", "not mentioned", "not given", "nobody", "no one", "no owner", "name", "date",
-    "blank", "owner", "due", "aucun", "inconnu", "non spécifié", "non précisé", "à définir", "n/d"}
-# What a transcript calls people it cannot name, and the ways a model paraphrases "the group": a side or a group is not a
-# person, so it is never an owner. ("You" is not here: it is the person who recorded - see clean_notes.)
+    "blank", "owner", "due", "aucun", "inconnu", "non spécifié", "non précisé", "à définir", "n/d", "tba",
+    "to be determined", "to be confirmed", "to be assigned", "to be decided", "not applicable", "not defined", "not yet",
+    "à déterminer", "à confirmer", "à assigner", "non applicable", "non défini", "n.a.", "n.a"}
+# What a transcript calls people it cannot name, the roles a model gives them ("the interviewer", "Recruiter", "the
+# company") and the ways it paraphrases "the group": a side, a role or a group is not a person, so it is never an owner.
+# ("You" is not here: it is the person who recorded - see _YOU_WORDS and clean_notes.)
+_ROLE = (r"interviewer|interviewee|recruiter|candidate|applicant|host|moderator|presenter|speaker|manager|company|client|"
+         r"customer|vendor|supplier|employer|organi[sz]ation|business|firm|panel|committee|board|recorder|"
+         r"recruteu(?:r|se)|candidat(?:e)?|interlocuteu(?:r|se)|interlocutrice|intervieweu(?:r|se)|entreprise|"
+         r"soci[ée]t[ée]|cliente?|fournisseur|h[ôo]te")
 _GENERIC_OWNER = re.compile(
-    r"^(?:them|they|speaker\s*[\d?]+|spk\s*[\d?]+|participant\s*\d*|caller|(?:the\s+)?other\s+(?:side|party|person|speaker)s?|"
+    r"^(?:them|they|speaker(?:\s*(?:\d+|\?|[a-z]))?|spk\s*[\d?]+|participant\s*\d*|caller|unknown\s+(?:speaker|person|participant)|"
+    r"unidentified\s+(?:speaker|person|participant)|(?:the\s+)?other\s+(?:side|party|person|speaker)s?|"
     r"(?:the\s+)?other\s+participants?|(?:the\s+)?others|someone|somebody|everyone|everybody|all|both|we|us|team|"
-    r"the\s+team|the\s+group|the\s+speaker|the\s+interviewer|the\s+interviewee|eux|elles|les\s+autres|"
-    r"l'autre\s+partie|tout\s+le\s+monde|nous|l'?[ée]quipe)$", re.I)
+    r"the\s+team|the\s+group|(?:the\s+|le\s+|la\s+|les\s+|l')?(?:%s)s?|eux|elles|les\s+autres|"
+    r"l'autre\s+partie|tout\s+le\s+monde|nous|l'?[ée]quipe)$" % _ROLE, re.I)
+# The recorder, in the words a model uses for "you" (the notes view and clean_notes turn it into their name).
+_YOU_WORDS = frozenset(("you", "vous", "toi", "moi", "tu"))
 OWNER_LABELS = ("owner", "assignee", "assigned to", "responsible", "responsable", "propriétaire", "verantwortlich")
 DUE_LABELS = ("due", "due date", "deadline", "échéance", "date limite", "fällig")
 _ALL_LABELS = "|".join(re.escape(x) for x in sorted(OWNER_LABELS + DUE_LABELS, key=len, reverse=True))
 _LABEL_RE = re.compile(r"(?<![\w])(%s)\s*:\s*" % _ALL_LABELS, re.I)
 # one "(...)", with one level of parentheses inside ("Owner: Aram (host), Due: Fri")
-_GROUP_RE = re.compile(r"\(((?:[^()]|\([^()]*\))*)\)")
+_PAREN_RE = re.compile(r"\(((?:[^()]|\([^()]*\))*)\)")
+# the same, with square brackets too: "[Owner: Claire, Due: Friday]"
+_GROUP_RE = re.compile(r"[(\[]((?:[^()\[\]]|\([^()]*\)|\[[^\[\]]*\])*)[)\]]")
+_OUTER_INNER = re.compile(r"^(.*?)\s*\((.*)\)$")
 _TAIL_RE = re.compile(r"(?:\s+[-–—|]\s+|\.\s+|\s+)((?:%s)\s*:.*)$" % _ALL_LABELS, re.I)
 _SEP = re.compile(r"\s*(?:/|&|\+|;|,|\band\b|\bet\b|\bund\b)\s*", re.I)
 _MAX_META = 400                     # a longer "(...)" is prose, not an owner and a date
@@ -353,20 +402,54 @@ def is_empty_value(value):
 
 def owner_is_generic(name):
     """True for no name at all and for a side or a group rather than a person: Them, Speaker 2, the other side,
-    everyone, the interviewer ..."""
-    n = _plain(name).lower()
-    return not n or n in EMPTY_VALUES or bool(_GENERIC_OWNER.match(n))
+    everyone, the interviewer, 'Them (the company)' ..."""
+    return not owner_names(name)
+
+
+def _split_owner(value):
+    """An Owner value cut into its people at ',', '/', '&', '+', ';', 'and', 'et', 'und' - not inside a parenthesis, and not
+    in 'N/A'."""
+    held = []
+
+    def hold(m):
+        held.append(m.group(0))
+        return "\x00%d\x00" % (len(held) - 1)
+
+    masked = re.sub(r"\b([nN])/([aA])\b", "\\1\x01\\2", _PAREN_RE.sub(hold, value))
+    return [re.sub("\x00(\\d+)\x00", lambda m: held[int(m.group(1))], p).replace("\x01", "/")
+            for p in _SEP.split(masked)]
+
+
+def _people(part):
+    """The people one piece of an Owner value stands for: 'Claire' -> ['Claire'], 'Them (Claire)' -> ['Claire'],
+    'Aram (You)' -> ['Aram'], 'Speaker 1' / 'the interviewer' / 'N/A (to be assigned)' -> [], 'Vous' -> ['You']."""
+    p = _plain(part)
+    if not p or p.lower() in EMPTY_VALUES:
+        return []
+    m = _OUTER_INNER.match(p)
+    if m and m.group(1).strip():
+        outer, inner = m.group(1).strip(), m.group(2).strip()
+        side, within = _people(outer), owner_names(inner)
+        if not side:                                    # "Them (Claire)": the label tells nothing, the name does
+            return within
+        if side == ["You"]:                             # "You (Aram)"
+            return within or side
+        return side if within in ([], ["You"]) else [p]  # "Aram (You)" / "Claire (the host)": the name; "Marc (Acme)" as written
+    if p.lower() in _YOU_WORDS:
+        return ["You"]
+    return [] if _GENERIC_OWNER.match(p) else [p]
 
 
 def owner_names(value):
-    """The people an Owner value names, in order: 'Them / Speaker 2' -> [], 'Marc and Nadia' -> ['Marc', 'Nadia']."""
+    """The people an Owner value names, in order: 'Them / Speaker 2' -> [], 'Marc and Nadia' -> ['Marc', 'Nadia'],
+    'Them (Claire)' -> ['Claire']. The recorder ('You', 'Vous') stays 'You'."""
     if is_empty_value(value):
         return []
     out = []
-    for part in _SEP.split(_plain(value)):
-        name = _plain(part)
-        if name and not owner_is_generic(name) and name not in out:
-            out.append(name)
+    for part in _split_owner(_plain(value)):
+        for name in _people(part):
+            if name not in out:
+                out.append(name)
     return out
 
 
@@ -383,24 +466,27 @@ def _fields(meta):
     for i, m in enumerate(marks):
         end = marks[i + 1].start() if i + 1 < len(marks) else len(meta)
         kind = "owner" if m.group(1).lower() in OWNER_LABELS else "due"
-        out.setdefault(kind, meta[m.end():end].strip().strip(",;").strip())
+        out.setdefault(kind, meta[m.end():end].strip().strip(" ,;|-–—\t"))
     return out, (meta[:marks[0].start()] if marks else meta)
+
+
+_BOLD_LABEL = re.compile(r"\*\*\s*(%s)\s*:\s*\*\*|\*\*\s*(%s)\s*\*\*\s*:" % (_ALL_LABELS, _ALL_LABELS), re.I)
 
 
 def _split(text):
     """(task as written, owner, due, found): ``found`` says an Owner / Due part was there to take off the end."""
-    t = (text or "").strip()
+    original = (text or "").strip()
+    t = _BOLD_LABEL.sub(lambda m: (m.group(1) or m.group(2)) + ":", original)
     owner = due = ""
     found = False
-    for m in reversed(list(_GROUP_RE.finditer(t))):         # the last "(...)" that carries a label
+    for m in reversed(list(_GROUP_RE.finditer(t))):         # every "(...)" or "[...]" that carries a label, the last first
         inner = m.group(1)
         if ":" not in inner or len(inner) > _MAX_META:
             continue
         fields, rest = _fields(inner)
         if fields and not rest.strip(" ,;"):
-            owner, due, found = fields.get("owner", ""), fields.get("due", ""), True
+            owner, due, found = owner or fields.get("owner", ""), due or fields.get("due", ""), True
             t = (t[:m.start()].rstrip() + " " + t[m.end():].lstrip()).strip()
-            break
     if not found:
         m = _TAIL_RE.search(t, max(0, len(t) - _TAIL_WINDOW))
         if m and len(m.group(1)) <= _MAX_META:
@@ -410,6 +496,8 @@ def _split(text):
             if fields and not rest.strip(" ,;") and (not plain_space or len(fields) == 2):
                 owner, due, found = fields.get("owner", ""), fields.get("due", ""), True
                 t = t[:m.start()].strip()
+    if not found:
+        t = original                                        # nothing was taken off: the text as it was written
     return t.rstrip(" -–—,;:").strip(), clean_owner(owner), "" if is_empty_value(due) else _plain(due), found
 
 
@@ -420,15 +508,16 @@ def split_task(text):
     return task.replace("`", "").strip(), owner, due
 
 
-# "by" goes in front of a due only when it starts like an English date ("Wed", "15 November", "March 3", "next week", "Q4"): a due
-# that has its own word ("within a week", "on Friday", "ASAP") or is in another language ("vendredi", "15 novembre") reads as written.
+# "by" goes in front of a due only when it starts like an English date ("Wed", "15 November", "March 3", "next week", "Q4",
+# "this Friday"): a due that has its own word ("within a week", "on Friday", "today", "this afternoon", "ASAP") or is in another
+# language ("vendredi", "15 novembre") reads as written.
 _DAY = r"(?:mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)\b"
 _MONTH = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
           r"nov(?:ember)?|dec(?:ember)?)\b")
 _BY_DUE = re.compile(
-    r"^(?:%s|%s|(?:tomorrow|today|tonight|next|this|the|end|mid|early|late|q[1-4])\b|"
+    r"^(?:%s|%s|(?:tomorrow|next|the|end|mid|middle|early|late|q[1-4])\b|this\s+%s|"
     r"\d+(?:st|nd|rd|th)?(?:\s+of)?\s+%s|\d+(?:st|nd|rd|th)\b|\d{1,2}\s*[ap]m\b|\d{1,4}[/.-]\d{1,2}(?:[/.-]\d{1,4})?$)"
-    % (_DAY, _MONTH, _MONTH), re.I)
+    % (_DAY, _MONTH, _DAY, _MONTH), re.I)
 
 
 def parse_task(text):
@@ -463,16 +552,92 @@ def _line_text(line):
     return strip_inline(m.group(1) if m else s)
 
 
+_TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
+_TABLE_SEP = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?\s*$")
+
+
+def _cells(line):
+    s = line.strip()
+    s = s[1:] if s.startswith("|") else s
+    s = s[:-1] if s.endswith("|") else s
+    return [c.replace("**", "").strip() for c in s.split("|")]
+
+
+def _table_lines(header, rows, section):
+    """A table a model wrote anyway, as the list it should have been: under Action items one '- [ ] task (Owner: ..,
+    Due: ..)' a row (the columns are found by their titles), elsewhere '- first cell (Title: value; Title: value)'."""
+    low = [h.lower() for h in header]
+
+    def col(pattern):
+        return next((i for i, h in enumerate(low) if re.search(pattern, h)), None)
+
+    task_i = col(r"task|action|item|todo|to-do|tâche")
+    owner_i = col(r"owner|assignee|responsible|who|responsable|propriétaire")
+    due_i = col(r"due|deadline|when|date|échéance|\bby\b")
+    out = []
+    for cells in rows:
+        def cell(i):
+            return cells[i].strip() if i is not None and i < len(cells) else ""
+        if not any(cells):
+            continue
+        if "action" in section and task_i is not None and cell(task_i):
+            out.append("- [ ] " + cell(task_i) + render_task_meta(cell(owner_i), cell(due_i)))
+            continue
+        extra = "; ".join("%s: %s" % (header[i], v) for i, v in enumerate(cells[1:], 1)
+                          if v and i < len(header) and header[i])
+        extra = extra or "; ".join(v for v in cells[1:] if v)
+        first = cells[0] or next((v for v in cells if v), "")
+        out.append("- " + first + (" (%s)" % extra if extra and cells[0] else ""))
+    return out
+
+
+def _without_tables(lines):
+    """``lines`` (split on "\n", a "\r" may end each) with every markdown table made a list (see _table_lines); the same
+    list when there is none."""
+    out, i, n = [], 0, len(lines)
+    section, in_fence, changed = "", None, False
+    while i < n:
+        raw = lines[i]
+        line = raw[:-1] if raw.endswith("\r") else raw
+        if in_fence is not None:
+            if re.match(r"^\s*%s{%d,}\s*$" % (re.escape(in_fence[0]), len(in_fence)), line):
+                in_fence = None
+        elif _FENCE_RE.match(line):
+            in_fence = _FENCE_RE.match(line).group(1)
+        else:
+            h = _HEAD_RE.match(line)
+            if h:
+                section = h.group(2).strip().lower()
+            elif _TABLE_ROW.match(line) and i + 1 < n and _TABLE_SEP.match(lines[i + 1].rstrip("\r")) \
+                    and "|" in lines[i + 1]:
+                j = i + 2
+                rows = []
+                while j < n and _TABLE_ROW.match(lines[j].rstrip("\r")):
+                    rows.append(_cells(lines[j]))
+                    j += 1
+                cr = "\r" if raw.endswith("\r") else ""
+                out.extend(x + cr for x in _table_lines(_cells(line), rows, section))
+                i, changed = j, True
+                continue
+        out.append(raw)
+        i += 1
+    return out if changed else lines
+
+
 def clean_notes(md, me=""):
     """The notes in the shape every surface can show as it is: each action item is
     '- [ ] task (Owner: Name, Due: date)' with the empty and the generic parts left out ('Owner: , Due: ' and 'Owner:
-    Them' never survive; 'Owner: You' becomes ``me``, the person's first name, when it is known), and a section with
-    nothing under it or only 'None.' is gone. Everything else is untouched (a ticked box stays ticked, the line endings
-    stay), and cleaning clean notes changes nothing. The line numbers of the lines that stay move up when a section goes,
-    so this is for text that is saved or sent (notes.md, the history entry, Notion, the Markdown export) - the notes view
-    shows the raw notes through parse_notes(sections=True)."""
-    lines = (md or "").split("\n")
-    changed = False
+    Them' never survive; 'Owner: You' becomes ``me``, the person's first name, when it is known), a section with
+    nothing under it or only 'None.' is gone, and what a model wraps around its answer is taken off (a code fence around
+    all of it, 'Here are the notes:', 'Let me know ...', a table made a list). Everything else is untouched (a ticked box
+    stays ticked, the line endings stay), and cleaning clean notes changes nothing. The line numbers of the lines that stay
+    move up when a section goes, so this is for text that is saved or sent (notes.md, the history entry, Notion, the
+    Markdown export) - the notes view shows the raw notes through parse_notes(sections=True)."""
+    base = md or ""
+    src = notes_prompt.tidy_answer(base)
+    parts = src.split("\n")
+    lines = _without_tables(parts)
+    changed = src is not base or lines is not parts
     in_fence = None
     items = []                                      # [(level, text)] of the lines outside code, for the empty sections
     keep = []
@@ -497,7 +662,8 @@ def clean_notes(md, me=""):
             if found or owner or due:
                 names = [(me if me and x.lower() == "you" else x) for x in owner.split(", ") if x]
                 owner = ", ".join(names)
-                new = m.group(1) + task + render_task_meta(owner, due) if (task or owner or due) else line
+                meta = render_task_meta(owner, due)
+                new = (m.group(1) + (task + meta if task else meta.lstrip())) if (task or owner or due) else line
                 if new != line:
                     changed = True
                 line = new
@@ -505,7 +671,7 @@ def clean_notes(md, me=""):
             keep.append(line + ("\r" if cr else ""))
             continue
         h = _HEAD_RE.match(line) if line.strip() else None
-        items.append((len(h.group(1)), "") if h else (0, _line_text(line) if line.strip() else ""))
+        items.append((len(h.group(1)), h.group(2)) if h else (0, _line_text(line) if line.strip() else ""))
         keep.append(raw)
     # blank lines are not body: only text under a heading counts
     live = [i for i, (lv, t) in enumerate(items) if lv or t]
@@ -525,9 +691,9 @@ def clean_notes(md, me=""):
             out.append(raw)
         while out and not out[-1].strip():
             out.pop()
-        tail = "\n" if (md or "").endswith("\n") else ""
+        tail = "\n" if src.endswith("\n") else ""
         return "\n".join(out) + (tail if out else "")
-    return "\n".join(keep) if changed else (md or "")
+    return "\n".join(keep) if changed else base
 
 
 def toggle_task_line(md, line_index, done):

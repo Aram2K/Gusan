@@ -76,6 +76,37 @@ class TestLongInputHandling(unittest.TestCase):
         self.assertIs(lock, local_llm._infer_lock_for("aibuben_tiny"))
 
 
+class _Answering:
+    def __init__(self, text, finish):
+        self.result = {"choices": [{"message": {"content": text}, "finish_reason": finish}]}
+
+    def create_chat_completion(self, **kw):
+        return self.result
+
+
+class TestAnAnswerThatStoppedAtTheLimit(unittest.TestCase):
+    def test_it_comes_back_as_a_cut_text_that_is_still_the_text(self):
+        out = local_llm._chat(_Answering("## Summary\nA. Then the mee", "length"), [], 100)
+        self.assertEqual(out, "## Summary\nA. Then the mee")
+        self.assertIsInstance(out, str)
+        self.assertTrue(out.cut)
+
+    def test_a_finished_answer_is_a_plain_text(self):
+        for finish in ("stop", None, "eos"):
+            out = local_llm._chat(_Answering("## Summary\nA.", finish), [], 100)
+            self.assertEqual(out, "## Summary\nA.")
+            self.assertFalse(getattr(out, "cut", False), finish)
+
+    def test_an_empty_answer_is_not_a_cut_text(self):
+        self.assertFalse(getattr(local_llm._chat(_Answering("  ", "length"), [], 100), "cut", False))
+
+    def test_a_result_without_a_finish_reason_is_fine(self):
+        class Bare:
+            def create_chat_completion(self, **kw):
+                return {"choices": [{"message": {"content": "ok"}}]}
+        self.assertEqual(local_llm._chat(Bare(), [], 10), "ok")
+
+
 class TestLocalNotesLength(unittest.TestCase):
     """The notes' length is planned from the meeting as it was, even when the on-computer model has to condense it first."""
 

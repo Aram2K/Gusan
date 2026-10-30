@@ -181,6 +181,45 @@ def test_the_person_who_recorded_is_drawn_as_you_whatever_the_notes_say(qapp):
         QApplication.processEvents()
 
 
+def test_two_owners_are_both_shown_and_only_my_own_name_becomes_you(qapp):
+    from ui.pages import meeting_views as v
+    doc = _doc("Aram")
+    try:
+        doc.render("## Action items\n- [ ] One (Owner: Aram and Marc)\n- [ ] Two (Owner: Marc, Aram)\n"
+                   "- [ ] Three (Owner: Marc and Nadia)\n- [ ] Four (Owner: Aram Adamyan)\n- [ ] Five (Owner: You and Marc)")
+        assert [t.owner_shown() for t in doc.tasks] == ["You, Marc", "Marc, You", "Marc, Nadia", "You", "You, Marc"]
+        assert [t.findChild(v.Faces)._names for t in doc.tasks] == [
+            ["Aram", "Marc"], ["Marc", "Aram"], ["Marc", "Nadia"], ["Aram Adamyan"], ["Aram", "Marc"]]
+        # the chip says 'You, Marc' in bold in front of the task, so Marc is not hidden behind the viewer
+        assert "You, Marc" in doc.tasks[0].text_label.text()
+        doc.me = ""
+        doc.render("## Action items\n- [ ] One (Owner: Aram and Marc)")
+        assert doc.tasks[0].owner_shown() == "Aram, Marc"
+    finally:
+        doc.deleteLater()
+        QApplication.processEvents()
+
+
+def test_a_label_saved_as_an_owner_shows_the_name_in_it_or_nobody(qapp):
+    """Notes saved before this change, or written by a small model: 'Them (Claire)', 'Speaker 1 (Marc)', 'Interviewer'."""
+    from ui.pages import meeting_views as v
+    doc = _doc("Aram")
+    try:
+        doc.render("## Action items\n- [ ] A (Owner: Them (Claire))\n- [ ] B (Owner: Interviewer)\n"
+                   "- [ ] C (Owner: Speaker 1 (Marc), Due: Friday)\n- [ ] D (Owner: , Due: )\n- [ ] E (Owner: Claire (Speaker 1))\n"
+                   "- [ ] F (Owner: N/A (to be assigned))\n- [ ] G (Owner: Aram) (Due: today)\n- [ ] H (Owner: Vous)")
+        rows = [(t.task, t.owner_shown(), t.due) for t in doc.tasks]
+        assert rows == [("A", "Claire", ""), ("B", "", ""), ("C", "Marc", "by Friday"), ("D", "", ""), ("E", "Claire", ""),
+                        ("F", "", ""), ("G", "You", "today"), ("H", "You", "")]
+        assert [len(t.findChildren(v.Faces)) for t in doc.tasks] == [1, 0, 1, 0, 1, 0, 1, 1]
+        shown = _shown(doc)
+        for raw in ("Them", "Interviewer", "Speaker", "N/A", "Owner:", "Due:", "(", "Vous"):
+            assert raw not in shown, raw
+    finally:
+        doc.deleteLater()
+        QApplication.processEvents()
+
+
 def test_a_heading_a_topic_or_a_due_from_the_ai_is_text_never_markup(qapp):
     from PySide6.QtCore import Qt
     doc = _doc()

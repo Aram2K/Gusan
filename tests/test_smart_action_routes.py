@@ -481,7 +481,8 @@ class TestSmartActionRoutes(unittest.TestCase):
         self.assertEqual(b, {"model": "gpt-5.4-nano", "messages": MSG, "max_completion_tokens": 300,
                              "stream": True, "reasoning_effort": "none"})
         b = self.openai_body(notes)
-        self.assertEqual(b, {"model": "gpt-4.1", "messages": MSG, "max_completion_tokens": 300, "stream": False})
+        self.assertEqual(b, {"model": "gpt-4.1", "messages": MSG, "max_completion_tokens": 300, "stream": False,
+                             "temperature": 0.2})       # the notes carry figures and names: not the default 1.0
         b = self.openai_body(no_mode)
         self.assertEqual((b["model"], b["reasoning_effort"]), ("gpt-5.4-mini", "none"))
         self.assertEqual(self.openai_body(big)["max_completion_tokens"], 2000)    # the existing ceiling
@@ -502,9 +503,10 @@ class TestSmartActionRoutes(unittest.TestCase):
                     self.assertNotIn("reasoning_effort", b, model)
                 else:
                     self.assertEqual(b["reasoning_effort"], effort, model)
-            # only the gpt-4 family takes a temperature, and only for a Smart Action
+            # only the gpt-4 family takes a temperature: 0.1 for a Smart Action, 0.2 for the meeting notes
             self.assertEqual(self.openai_body(smart).get("temperature"), temp, model)
-            for res in (live, notes, no_mode):
+            self.assertEqual(self.openai_body(notes).get("temperature"), None if temp is None else 0.2, model)
+            for res in (live, no_mode):
                 self.assertNotIn("temperature", self.openai_body(res), model)
             self.assertEqual(self.openai_body(live)["stream"], True)
             self.assertEqual(self.openai_body(smart)["stream"], False)

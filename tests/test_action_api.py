@@ -301,6 +301,104 @@ class TestNotesStreams(unittest.TestCase):
         self.own(ANTHROPIC_CFG, _sse(delta("A"), stop("end_turn"), {"type": "message_stop"}), info)
         self.assertEqual(info, {})
 
+    def test_a_stream_that_ends_without_saying_the_model_is_done_is_a_cut(self):
+        """No finish reason and no [DONE]: a proxy or a server closed the connection. The last words may be half a word."""
+        half = _sse(_chunk("## Summary\nA"), _chunk("B half wo"))[:-1]
+        info = {}
+        out, _p, _r = self.managed(half, info)
+        self.assertEqual(out, "## Summary\nAB half wo")
+        self.assertTrue(info["cut"])
+        info = {}
+        out, _p = self.own(OPENAI_CFG, half, info)
+        self.assertEqual(out, "## Summary\nAB half wo")
+        self.assertTrue(info["cut"])
+        ev = {"candidates": [{"content": {"parts": [{"text": "## Summary\nA half wo"}]}}]}
+        info = {}
+        out, _p = self.own(GEMINI_CFG, _sse(ev)[:-1], info)
+        self.assertTrue(info["cut"])
+        delta = {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "## Summary\nA half wo"}}
+        info = {}
+        out, _p = self.own(ANTHROPIC_CFG, _sse(delta)[:-1], info)
+        self.assertEqual(out, "## Summary\nA half wo")
+        self.assertTrue(info["cut"])
+
+    def test_a_stream_that_says_it_is_done_in_any_way_is_not_a_cut(self):
+        # [DONE] alone, a finish reason alone, and Anthropic's message_stop alone are each a clean end
+        info = {}
+        self.managed(_sse(_chunk("A")), info)
+        self.assertEqual(info, {})
+        info = {}
+        self.managed(_sse(_chunk("A"), _chunk("", "stop"))[:-1], info)
+        self.assertEqual(info, {})
+        info = {}
+        self.own(OPENAI_CFG, _sse(_chunk("A")), info)
+        self.assertEqual(info, {})
+        delta = {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "A"}}
+        info = {}
+        self.own(ANTHROPIC_CFG, _sse(delta, {"type": "message_stop"})[:-1], info)
+        self.assertEqual(info, {})
+        ev = {"candidates": [{"content": {"parts": [{"text": "A"}]}, "finishReason": "STOP"}]}
+        info = {}
+        self.own(GEMINI_CFG, _sse(ev)[:-1], info)
+        self.assertEqual(info, {})
+
+    def test_an_error_in_the_middle_of_a_stream_keeps_the_text_as_a_cut(self):
+        err = {"error": {"message": "overloaded"}}
+        info = {}
+        out, _p, _r = self.managed(_sse(_chunk("## Summary\nA"), err, _chunk("never read")), info)
+        self.assertEqual(out, "## Summary\nA")
+        self.assertTrue(info["cut"])
+        info = {}
+        out, _p = self.own(OPENAI_CFG, _sse(_chunk("## Summary\nA"), err, _chunk("never read")), info)
+        self.assertEqual(out, "## Summary\nA")
+        self.assertTrue(info["cut"])
+        info = {}
+        out, _p = self.own(GEMINI_CFG, _sse({"candidates": [{"content": {"parts": [{"text": "## Summary\nA"}]}}], }, err), info)
+        self.assertEqual(out, "## Summary\nA")
+        self.assertTrue(info["cut"])
+        delta = {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "## Summary\nA"}}
+        info = {}
+        out, _p = self.own(ANTHROPIC_CFG, _sse(delta, {"type": "error", "error": {"type": "overloaded_error",
+                                                                              "message": "Overloaded"}}), info)
+        self.assertEqual(out, "## Summary\nA")
+        self.assertTrue(info["cut"])
+
+    def test_an_error_before_any_text_is_an_error_to_say(self):
+        err = {"error": {"message": "overloaded"}}
+        with self.assertRaises(action_api.ActionAPIError) as cm:
+            self.managed(_sse(err), {})
+        self.assertIn("overloaded", str(cm.exception))
+        with self.assertRaises(action_api.ActionAPIError) as cm:
+            self.own(OPENAI_CFG, _sse(err), {})
+        self.assertIn("overloaded", str(cm.exception))
+        with self.assertRaises(action_api.ActionAPIError):
+            self.own(GEMINI_CFG, _sse(err), {})
+        with self.assertRaises(action_api.ActionAPIError) as cm:
+            self.own(ANTHROPIC_CFG, _sse({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}), {})
+        self.assertIn("Overloaded", str(cm.exception))
+
+    def test_a_live_answer_ignores_all_this_and_reads_as_before(self):
+        seen = []
+        # no finish reason, no [DONE]: the live answer is what arrived
+        resp = _Stream(_sse(_chunk("Short."))[:-1])
+        with patch.object(action_api.requests, "post", return_value=resp):
+            out = action_api.run_action_stream("hello", "live_assist", OPENAI_CFG, seen.append)
+        self.assertEqual((out, seen), ("Short.", ["Short."]))
+        # an error object in the middle is skipped, not raised
+        resp = _Stream(_sse(_chunk("Short."), {"error": "x"}, _chunk(" More.")))
+        with patch.object(action_api.requests, "post", return_value=resp):
+            out = action_api.run_action_stream("hello", "live_assist", OPENAI_CFG, seen.append)
+        self.assertEqual(out, "Short. More.")
+
+    def test_only_the_notes_take_a_json_body_for_a_stream(self):
+        """A live answer whose stream is labelled application/json is still read as a stream (the one-piece JSON fallback is
+        for the notes only)."""
+        seen = []
+        resp = _Stream(_sse(_chunk("Live"), _chunk(" answer.", "stop")), kind="application/json")
+        with patch.object(action_api.requests, "post", return_value=resp):
+            out = action_api.run_action_stream("hello", "live_assist", OPENAI_CFG, seen.append)
+        self.assertEqual((out, seen), ("Live answer.", ["Live", " answer."]))
+
     def test_a_live_answer_without_info_is_as_before(self):
         resp = _Stream(_sse(_chunk("Short."), _chunk("", "length")))
         seen = []

@@ -122,6 +122,25 @@ class TestRichNotesInNotion(unittest.TestCase):
         self.assertEqual([b["type"] for b in blocks], ["heading_2", "heading_3", "heading_3", "heading_3"])
         self.assertEqual([_text(b)[0] for b in blocks], ["Discussion", "Topic", "Deeper", "Deepest"])
 
+    def test_a_heading_with_bold_in_it_has_no_literal_stars(self):
+        """gpt-style '## **Summary**' and '### **Release 2.4**': a Notion heading is bold already."""
+        blocks = ne.markdown_to_blocks("# **Notes**\n## **Summary**\n### **Release 2.4**\n#### `code` and *italic* topic\n"
+                                       "### Snake_case_name stays")
+        self.assertEqual([b["type"] for b in blocks], ["heading_1", "heading_2", "heading_3", "heading_3", "heading_3"])
+        self.assertEqual([_text(b)[0] for b in blocks],
+                         ["Notes", "Summary", "Release 2.4", "code and italic topic", "Snake_case_name stays"])
+
+    def test_notes_a_model_wrapped_or_tabled_reach_notion_as_blocks_not_raw_text(self):
+        import rich_text
+        wrapped = ("Here are the notes:\n\n```markdown\n## Summary\nA.\n\n## Action items\n| Task | Owner | Due |\n"
+                   "|---|---|---|\n| Ship it | Claire | Friday |\n| Call | Them | |\n```\n\nLet me know if you need more!")
+        blocks = ne.markdown_to_blocks(rich_text.clean_notes(wrapped))
+        self.assertEqual([b["type"] for b in blocks], ["heading_2", "paragraph", "heading_2", "to_do", "to_do"])
+        self.assertEqual([_text(b)[0] for b in blocks[3:]], ["Ship it (Owner: Claire, Due: Friday)", "Call"])
+        for b in blocks:
+            for raw in ("```", "|", "Here are", "Let me know"):
+                self.assertNotIn(raw, _text(b)[0])
+
     def test_the_page_title_has_no_marks(self):
         self.assertEqual(ne._rich("a **b**"), [{"type": "text", "text": {"content": "a **b**"}}])
 

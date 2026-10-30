@@ -1216,9 +1216,10 @@ class ActionItem(QWidget):
         lay.addWidget(self.box, 0, Qt.AlignVCenter)
         self._me = (me or "").strip().lower()
         if owner:
-            # the person who recorded is drawn as in the sidebar, whether the notes say "You" or their name
-            face = (me or owner) if owner.strip().lower() == "you" else owner
-            lay.addWidget(Faces([face], 22, me=me, parent=self), 0, Qt.AlignVCenter)
+            # the person who recorded is drawn as in the sidebar, whether the notes say "You" or their name; two owners,
+            # two faces
+            faces = [(me or n) if n.lower() == "you" else n for n in self._owner_names()]
+            lay.addWidget(Faces(faces, 22, me=me, parent=self), 0, Qt.AlignVCenter)
         self.text_label = QLabel(self)
         self.text_label.setTextFormat(Qt.RichText)
         self.text_label.setWordWrap(True)
@@ -1232,10 +1233,15 @@ class ActionItem(QWidget):
         self.box.toggled.connect(self._on_toggle)
         self._render()
 
+    def _owner_names(self):
+        return [n.strip() for n in (self.owner or "").split(", ") if n.strip()]
+
     def owner_shown(self):
-        if self.owner and self._me and self.owner.split()[0].lower().rstrip(",") == self._me:
-            return "You"
-        return self.owner
+        """The owner as the chip says it: the viewer's own name is 'You' ('Aram, Marc' -> 'You, Marc'), the others stay."""
+        names = self._owner_names()
+        if self._me:
+            names = ["You" if n.split()[0].lower() == self._me else n for n in names]
+        return ", ".join(dict.fromkeys(names)) if names else (self.owner or "")
 
     def _render(self):
         done = self.box.isChecked()

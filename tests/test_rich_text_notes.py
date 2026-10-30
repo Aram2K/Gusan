@@ -44,7 +44,29 @@ class TestSplitTask(unittest.TestCase):
         ("Call Anne-Marie (Owner: Anne-Marie and Jean Pierre, Due: Mon)",
          ("Call Anne-Marie", "Anne-Marie, Jean Pierre", "Mon")),
         ("Do it (Owner: **Aram**, Due: `Fri`)", ("Do it", "Aram", "Fri")),
-        ("Do it (Owner: Aram (the host), Due: Fri)", ("Do it", "Aram (the host)", "Fri")),
+        ("Do it (Owner: Aram (the host), Due: Fri)", ("Do it", "Aram", "Fri")),        # a role in brackets is no name
+        ("Do it (Owner: Aram (Acme), Due: Fri)", ("Do it", "Aram (Acme)", "Fri")),
+        # a generic label with a name: the name; a name with a label: the name
+        ("Do it (Owner: Them (Claire), Due: Fri)", ("Do it", "Claire", "Fri")),
+        ("Do it (Owner: Speaker 1 (Marc))", ("Do it", "Marc", "")),
+        ("Do it (Owner: Claire (Speaker 1))", ("Do it", "Claire", "")),
+        ("Do it (Owner: You (Aram))", ("Do it", "Aram", "")),
+        ("Do it (Owner: Aram (You))", ("Do it", "Aram", "")),
+        ("Do it (Owner: Them (the company))", ("Do it", "", "")),
+        ("Do it (Owner: Speaker 1 (the interviewer))", ("Do it", "", "")),
+        ("Do it (Owner: N/A (to be assigned), Due: TBA)", ("Do it", "", "")),
+        # two groups, brackets, bold labels, pipes and dashes
+        ("Do it (Owner: Aram) (Due: Friday)", ("Do it", "Aram", "Friday")),
+        ("Do it (Due: Friday) (Owner: Aram)", ("Do it", "Aram", "Friday")),
+        ("Do it - Owner: Aram - Due: Friday", ("Do it", "Aram", "Friday")),
+        ("Do it [Owner: Claire, Due: Friday]", ("Do it", "Claire", "Friday")),
+        ("Do it (**Owner:** Marc, **Due:** Friday)", ("Do it", "Marc", "Friday")),
+        ("Do it - **Owner**: Marc - **Due**: Friday", ("Do it", "Marc", "Friday")),
+        ("Do it (Owner: Marc | Due: Friday)", ("Do it", "Marc", "Friday")),
+        ("Do it (Owner: [blank], Due: [blank])", ("Do it", "", "")),
+        # the recorder in French
+        ("Faire le point (Responsable : Vous)", ("Faire le point", "You", "")),
+        ("Faire le point (Owner: Moi, Échéance : lundi)", ("Faire le point", "You", "lundi")),
         ("Do it (Owner: Aram, Due: Fri) because the client asked", ("Do it because the client asked", "Aram", "Fri")),
         ("(Owner: Aram)", ("", "Aram", "")),
         # what is NOT an owner or a due: the text stays as it is
@@ -67,13 +89,14 @@ class TestSplitTask(unittest.TestCase):
         self.assertEqual(rt.parse_task("Do it (Owner: Aram, Due: Friday)"), ("Do it", "Aram", "by Friday"))
         self.assertEqual(rt.parse_task("Do it (Due: 12 March.)"), ("Do it", "", "by 12 March"))
         for due in ("within a week", "on Friday", "ASAP", "before the review", "by Friday", "until 5 May", "in two days",
-                    "after the launch", "avant vendredi", "EOD", "week of Nov 3"):
+                    "after the launch", "avant vendredi", "EOD", "week of Nov 3", "today", "tonight", "this week",
+                    "this afternoon", "this morning", "this month", "this weekend"):
             self.assertEqual(rt.parse_task("Do it (Due: %s)" % due)[2], due, due)
 
     def test_by_goes_before_a_date_that_reads_as_english(self):
         for due in ("Wed", "Friday", "Friday, March 3", "March 3", "15 November", "5th November", "1st of May", "3pm",
-                    "2026-11-25", "12/03", "next week", "this week", "tomorrow", "end of November", "mid December", "Q4",
-                    "the 15th", "Mon 5 Nov"):
+                    "2026-11-25", "12/03", "next week", "tomorrow", "end of November", "mid December", "middle of December",
+                    "Q4", "the 15th", "Mon 5 Nov", "this Friday", "this wednesday"):
             self.assertEqual(rt.parse_task("Do it (Due: %s)" % due)[2], "by " + due, due)
 
     def test_a_due_in_french_is_not_given_an_english_by(self):
@@ -89,12 +112,36 @@ class TestSplitTask(unittest.TestCase):
     def test_a_generic_owner_never_becomes_a_person(self):
         for who in ("Them", "them", "THEM", "Speaker 1", "Speaker 12", "speaker ?", "Participant 2", "the other side",
                     "The other party", "someone", "Everyone", "all", "we", "the team", "Team", "the speaker",
-                    "the interviewer", "les autres", "tout le monde", "", "-", "none", "N/A", "[blank]", "unknown"):
+                    "the interviewer", "les autres", "tout le monde", "", "-", "none", "N/A", "[blank]", "unknown",
+                    "Interviewer", "Recruiter", "the Recruiter", "Candidate", "the candidate", "Host", "Speaker A",
+                    "speaker b", "Speaker", "Unknown speaker", "the company", "The client", "TBA", "To be determined",
+                    "To be confirmed", "Not applicable", "le recruteur", "la candidate", "L'interlocuteur", "le client",
+                    "À déterminer", "the recorder", "Interviewers", "Them (the company)", "Speaker 2 (the host)"):
             self.assertTrue(rt.owner_is_generic(who), who)
             self.assertEqual(rt.clean_owner(who), "", who)
 
+    def test_a_label_with_a_name_is_the_name_and_a_name_with_a_label_is_the_name(self):
+        for who, want in (("Them (Claire)", "Claire"), ("Speaker 1 (Marc)", "Marc"), ("Claire (Speaker 1)", "Claire"),
+                          ("You (Aram)", "Aram"), ("Aram (You)", "Aram"), ("Them/Claire", "Claire"),
+                          ("Speaker 1 (Marc and Nadia)", "Marc, Nadia"), ("Marc (Speaker 1) and Nadia (Speaker 2)", "Marc, Nadia"),
+                          ("Claire (the interviewer)", "Claire"), ("Marc (Acme)", "Marc (Acme)"),
+                          ("Them (Claire, Marc)", "Claire, Marc")):
+            self.assertEqual(rt.clean_owner(who), want, who)
+
+    def test_the_recorder_stays_you_in_any_language(self):
+        for who in ("You", "you", "Vous", "Moi", "toi"):
+            self.assertEqual(rt.clean_owner(who), "You", who)
+            self.assertFalse(rt.owner_is_generic("You"))
+        self.assertEqual(rt.clean_owner("Marc and Moi"), "Marc, You")
+
+    def test_na_is_not_two_owners(self):
+        self.assertEqual(rt.owner_names("N/A"), [])
+        self.assertEqual(rt.owner_names("n/a"), [])
+        self.assertEqual(rt.owner_names("Marc / N/A"), ["Marc"])
+
     def test_a_person_is_a_person(self):
-        for who in ("Aram", "You", "Marc", "Anne-Marie", "Jean Pierre", "Océane", "李伟", "Sara O'Neil", "Dr. Who"):
+        for who in ("Aram", "You", "Marc", "Anne-Marie", "Jean Pierre", "Océane", "李伟", "Sara O'Neil", "Dr. Who",
+                    "Candice", "Hostetler", "Clientele Martin", "Nadia Board", "Manon"):
             self.assertFalse(rt.owner_is_generic(who), who)
             self.assertEqual(rt.clean_owner(who), who)
 
@@ -173,6 +220,36 @@ class TestCleanNotes(unittest.TestCase):
             md = "## Summary\nA.\n\n## Open questions\n%s\n" % none
             self.assertEqual(rt.clean_notes(md), "## Summary\nA.\n", none)
 
+    def test_a_section_that_says_there_is_nothing_goes_however_it_says_it(self):
+        for none in ("No specific decisions were made.", "No decisions were explicitly made.", "There were no decisions.",
+                     "None identified.", "No explicit action items.", "No action items were mentioned in the meeting.",
+                     "No unresolved questions.", "Nothing to report.", "Not applicable.", "-", "—", "- -", "*None*",
+                     "Aucune décision n'a été prise.", "Rien à signaler.", "Pas de décision.", "Aucune question ouverte.",
+                     "Keine Entscheidungen."):
+            md = "## Summary\nA.\n\n## Key decisions\n%s\n" % none
+            self.assertEqual(rt.clean_notes(md), "## Summary\nA.\n", none)
+
+    def test_a_summary_that_starts_with_no_is_never_dropped(self):
+        for text in ("No decision was taken.", "Nothing was settled.", "None."):
+            md = "## Summary\n%s\n\n## Key decisions\n- A.\n" % text
+            self.assertEqual(rt.clean_notes(md), md, text)
+            self.assertEqual(rt.parse_notes(md, sections=True)[0:2], [("head", "Summary"), ("para", text)], text)
+
+    def test_a_short_line_that_only_starts_with_no_is_a_real_line(self):
+        for text in ("No one objected to the new price.", "Nothing changes for the customers until March.",
+                     "No budget before the review, so the hire waits.", "Not the 15th: the 22nd."):
+            md = "## Summary\nA.\n\n## Key decisions\n%s\n" % text
+            self.assertEqual(rt.clean_notes(md), md, text)
+
+    def test_a_topic_with_a_line_that_starts_with_no_is_a_real_topic(self):
+        for text in ("No action was agreed on pricing.", "No decisions yet: Marc wants to wait.", "Nothing to report from Claire."):
+            md = "## Summary\nA.\n\n## Discussion\n### Pricing\n- %s\n" % text
+            self.assertEqual(rt.clean_notes(md), md, text)
+            self.assertEqual(len([b for b in rt.parse_notes(md, sections=True) if b[0] == "subhead"]), 1, text)
+        # ...but a topic that only says "None." is still empty
+        md = "## Summary\nA.\n\n## Discussion\n### Pricing\n- None.\n\n### Release\n- It slips.\n"
+        self.assertEqual(rt.clean_notes(md), "## Summary\nA.\n\n## Discussion\n\n### Release\n- It slips.\n")
+
     def test_a_section_with_more_than_a_none_line_stays(self):
         md = "## Summary\nA.\n\n## Open questions\n- None.\n- Is the price right?\n"
         self.assertEqual(rt.clean_notes(md), md)
@@ -197,11 +274,62 @@ class TestCleanNotes(unittest.TestCase):
         md = "## Action items\n- [ ] Do it (Owner: Them)\n"
         self.assertEqual(rt.clean_notes(md), "## Action items\n- [ ] Do it\n")
 
+    def test_a_fence_a_preamble_and_a_closing_remark_are_taken_off(self):
+        notes = "## Summary\nA.\n\n## Action items\n- [ ] Do it (Owner: Aram, Due: Friday)\n"
+        for wrapped in ("```markdown\n%s```\n" % notes, "Here are the meeting notes:\n\n%s" % notes,
+                        "%s\nLet me know if you need anything else!\n" % notes,
+                        "Sure! Here are the notes:\n\n```markdown\n%s```\n\nI hope this helps." % notes):
+            self.assertEqual(rt.clean_notes(wrapped).strip(), notes.strip(), wrapped)
+
+    def test_a_wrapped_answer_with_an_empty_section_and_a_remark_loses_both(self):
+        out = rt.clean_notes("## Summary\nA.\n\n## Open questions\nNone.\n\nLet me know if you need anything else!\n")
+        self.assertEqual(out, "## Summary\nA.\n")
+
+    def test_a_table_becomes_a_list(self):
+        md = ("## Summary\nA.\n\n## Action items\n| Task | Owner | Due |\n|------|-------|-----|\n"
+              "| Ship patch 2.3.1 | Claire | this week |\n| Call the vendor | Them | |\n| Plan | Aram | Friday |\n")
+        self.assertEqual(rt.clean_notes(md), (
+            "## Summary\nA.\n\n## Action items\n- [ ] Ship patch 2.3.1 (Owner: Claire, Due: this week)\n"
+            "- [ ] Call the vendor\n- [ ] Plan (Owner: Aram, Due: Friday)\n"))
+        md = ("## Discussion\n### Pricing\n| Option | Cost | Risk |\n| --- | --- | --- |\n| A | 100 | low |\n"
+              "| **B** | 250 | high |\n\nText after.\n")
+        self.assertEqual(rt.clean_notes(md), (
+            "## Discussion\n### Pricing\n- A (Cost: 100; Risk: low)\n- B (Cost: 250; Risk: high)\n\nText after.\n"))
+
+    def test_a_table_inside_code_and_a_line_with_a_pipe_are_left_alone(self):
+        md = "## A\n- x\n\n```\n| a | b |\n|---|---|\n| 1 | 2 |\n```\n"
+        self.assertEqual(rt.clean_notes(md), md)
+        md = "## A\nThe pipe | is fine | in a sentence.\n"
+        self.assertEqual(rt.clean_notes(md), md)
+        md = "## A\n| only | one row |\nnext line\n"
+        self.assertEqual(rt.clean_notes(md), md)
+
+    def test_a_table_keeps_the_line_endings(self):
+        out = rt.clean_notes("## A\r\n| Task | Owner |\r\n|---|---|\r\n| Do it | Them |\r\n")
+        self.assertEqual(out, "## A\r\n- Do it (Owner: Them)\r\n")
+
+    def test_an_item_with_a_task_but_no_text_is_cleaned_once_and_stays(self):
+        once = rt.clean_notes("## A\n- [ ] (Owner: Marc)\n")
+        self.assertEqual(once, "## A\n- [ ] (Owner: Marc)\n")
+        self.assertEqual(rt.clean_notes(once), once)
+        loose = "## A\n- [ ]   (Owner: Marc, Due: )\n"
+        a = rt.clean_notes(loose)
+        self.assertEqual(rt.clean_notes(a), a)
+        self.assertEqual(rt.clean_notes(rt.clean_notes(a)), a)
+
+    def test_cleaning_is_idempotent_on_every_shape_here(self):
+        for md in (self.RAW, "## A\n| Task | Owner |\n|---|---|\n| Do it | Them |\n",
+                   "Here are the notes:\n```md\n## Summary\nA.\n```\nLet me know!", "## A\n- [ ] (Due: Friday)\n"):
+            once = rt.clean_notes(md, me="Aram")
+            self.assertEqual(rt.clean_notes(once, me="Aram"), once, md)
+
     def test_hostile_text_is_cleaned_at_once(self):
         t0 = time.time()
         rt.clean_notes("## A\n" + "- [ ] x (Owner: Them)\n" * 20000)
         rt.clean_notes("".join("## h%d\n" % i for i in range(20000)))
         rt.clean_notes("#" * 100000 + " x\n" + "- [ ] " + " " * 100000 + "y\n")
+        rt.clean_notes("| a | b |\n|---|---|\n" + "| x | y |\n" * 20000)
+        rt.clean_notes("## Action items\n" + "- [ ] z (Owner: Them (Claire)) (Due: Fri) [Owner: Al]\n" * 5000)
         self.assertLess(time.time() - t0, 8.0)
 
 

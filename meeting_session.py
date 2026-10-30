@@ -273,6 +273,9 @@ RECOVERED_NOTICE = ("Gusan was closed before this meeting was finished, so the t
 # The AI stopped writing at its limit: the notes are kept up to their last whole line (actions.CutShort).
 NOTES_CUT_NOTICE = ("The notes stopped early, so the last topic may be missing. "
                     "Write them again from \u22ef \u203a Rewrite notes.")
+# ...and when it stopped before the Discussion, so that the rest of the notes (not one topic) is what is missing.
+NOTES_CUT_EARLY_NOTICE = ("The notes stopped early, so the end of them is missing. "
+                          "Write them again from ⋯ › Rewrite notes.")
 # The same for a Live Assistant session whose words came from a cloud engine: the recording is NOT
 # read again (that would replace them with this computer's much worse text, see _reread_plan).
 RECOVERED_CLOUD_NOTICE = ("Gusan was closed before this meeting was finished, so the transcript is "
@@ -2111,7 +2114,10 @@ class MeetingCore:
             cleaned = rich_text.clean_notes(notes, me=self._recorder_name())
             notes = cleaned if cleaned.strip() else notes          # never turn whatever the engine wrote into nothing
             self._summary_downgraded = bool(downgraded_from)
-            self._notes_notice = NOTES_CUT_NOTICE if cut else ""
+            self._notes_notice = ""
+            if cut:
+                in_discussion = re.search(r"^#{2,3}\s*Discussion\b", notes, re.M | re.I)
+                self._notes_notice = NOTES_CUT_NOTICE if in_discussion else NOTES_CUT_EARLY_NOTICE
             if downgraded_from:
                 reason = ("sign in with a Pro account to use it" if kind == "managed"
                           else "add its API key to use it")

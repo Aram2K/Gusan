@@ -888,24 +888,37 @@ class TestRicherNotesInTheSession(_Base):
         self.assertIsNone(ms.load_meta(s.meeting_dir).get("notes_notice"))
 
     def test_a_cut_off_answer_is_kept_and_said_above_the_notes_never_inside_them(self):
+        notice = msess.NOTES_CUT_EARLY_NOTICE            # these notes stop before the Discussion
         cut = msess.actions.action_api.CutShort(self.RAW)
         s = self._record(self.app(), cut)
         notes = (s.meeting_dir / "notes.md").read_text(encoding="utf-8")
         self.assertEqual(notes, self.CLEAN)
-        self.assertNotIn(msess.NOTES_CUT_NOTICE, notes)
-        self.assertEqual(s.notices(), [msess.NOTES_CUT_NOTICE])
+        self.assertNotIn(notice, notes)
+        self.assertEqual(s.notices(), [notice])
         meta = ms.load_meta(s.meeting_dir)
-        self.assertEqual(meta["notes_notice"], msess.NOTES_CUT_NOTICE)
-        self.assertEqual(meta["notices"], [msess.NOTES_CUT_NOTICE])
+        self.assertEqual(meta["notes_notice"], notice)
+        self.assertEqual(meta["notices"], [notice])
         self.assertIsInstance(s._done.calls[0][1], str)
 
     def test_the_notice_is_short_calm_and_says_how_to_write_them_again(self):
-        text = msess.NOTES_CUT_NOTICE
-        self.assertIn("stopped early", text)
-        self.assertIn("Rewrite notes", text)
-        for word in ("token", "limit", "error", "failed"):
-            self.assertNotIn(word, text.lower())
-        self.assertLessEqual(len(text), 130)
+        for text in (msess.NOTES_CUT_NOTICE, msess.NOTES_CUT_EARLY_NOTICE):
+            self.assertIn("stopped early", text)
+            self.assertIn("Rewrite notes", text)
+            for word in ("token", "limit", "error", "failed"):
+                self.assertNotIn(word, text.lower())
+            self.assertLessEqual(len(text), 130)
+
+    def test_the_notice_says_what_is_missing_the_last_topic_or_the_end_of_the_notes(self):
+        """Cut inside the Discussion: one topic may be missing. Cut before it: the Discussion and what comes after are."""
+        in_discussion = msess.actions.action_api.CutShort("## Summary\nA.\n\n## Discussion\n### One\n- It slips. A week.")
+        before = msess.actions.action_api.CutShort("## Summary\nA.\n\n## Key decisions\n- Ship in November.")
+        s = self._record(self.app(), in_discussion)
+        self.assertEqual(s.notices(), [msess.NOTES_CUT_NOTICE])
+        s = self._record(self.app(), before)
+        self.assertEqual(s.notices(), [msess.NOTES_CUT_EARLY_NOTICE])
+        self.assertEqual(ms.load_meta(s.meeting_dir)["notes_notice"], msess.NOTES_CUT_EARLY_NOTICE)
+        self.assertNotEqual(msess.NOTES_CUT_NOTICE, msess.NOTES_CUT_EARLY_NOTICE)
+        self.assertNotIn("last topic", msess.NOTES_CUT_EARLY_NOTICE)
 
     def test_a_rewrite_that_is_whole_clears_the_notice_a_cut_one_left(self):
         s = self._record(self.app(), msess.actions.action_api.CutShort(self.RAW))

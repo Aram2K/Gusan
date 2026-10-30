@@ -321,6 +321,56 @@ class TestMeetingNotesStreaming(unittest.TestCase):
         self.assertEqual(str(cm.exception), actions.NOTES_CUT_MESSAGE)
         self.assertNotIn("token", actions.NOTES_CUT_MESSAGE.lower())
 
+    WRAPPED = "## Summary\nAram led the call.\n\n## Action items\n- [ ] Send it (Owner: Aram, Due: Friday)\n"
+
+    def test_a_fence_a_preamble_and_a_closing_remark_never_reach_the_notes(self):
+        for wrapped in ("```markdown\n%s```" % self.WRAPPED, "Here are the meeting notes:\n\n%s" % self.WRAPPED,
+                        "%s\nLet me know if you need anything else!" % self.WRAPPED):
+            for model, config, name in ((actions.API_MANAGED_ID, self.MANAGED, "run_managed_action_stream"),
+                                        (actions.API_OPENAI_ID, self.OWN, "run_action_stream")):
+                out, _call = self.process(model, config, name, side_effect=_stream_answer(wrapped))
+                self.assertEqual(out.strip(), self.WRAPPED.strip(), wrapped)
+
+    def test_a_cut_answer_that_was_fenced_is_unwrapped_and_kept(self):
+        cut = "```markdown\n## Summary\nAram led the call.\n\n## Key decisions\n- Ship in November.\n- Hire a"
+        out, _call = self.process(actions.API_MANAGED_ID, self.MANAGED, "run_managed_action_stream",
+                                  side_effect=_stream_answer(cut, cut=True))
+        self.assertEqual(out, "## Summary\nAram led the call.\n\n## Key decisions\n- Ship in November.")
+        self.assertTrue(out.cut)
+
+    def test_a_cut_answer_with_headings_in_another_language_is_kept_not_thrown_away(self):
+        cut = ("## Summary\nUne réunion sur la sortie.\n\n## Décisions clés\n- Livrer en novembre.\n\n"
+               "## Points ouverts\n- Quel prix ?\n\n## Discuss")
+        for model, config, name in ((actions.API_MANAGED_ID, self.MANAGED, "run_managed_action_stream"),
+                                    (actions.API_OPENAI_ID, self.OWN, "run_action_stream")):
+            out, _call = self.process(model, config, name, side_effect=_stream_answer(cut, cut=True))
+            self.assertTrue(out.endswith("- Quel prix ?"), model)
+            self.assertTrue(out.cut)
+
+    def test_the_on_computer_model_stopping_at_its_limit_is_a_cut_too(self):
+        cut = actions.local_llm.CutText("## Summary\nA.\n\n## Key decisions\n- Ship in Nov. Then the mee")
+        with patch.object(actions.local_llm, "model_downloaded", return_value=True), \
+                patch.object(actions.local_llm, "run_action", return_value=cut):
+            out = actions.process("You: hello", actions.ACTION_MEETING_NOTES, model=actions.local_llm.QWEN_TINY_ID)
+        self.assertEqual(out, "## Summary\nA.\n\n## Key decisions\n- Ship in Nov.")
+        self.assertIsInstance(out, actions.action_api.CutShort)
+        # the same model finishing is not a cut, and the other actions are not touched
+        with patch.object(actions.local_llm, "model_downloaded", return_value=True), \
+                patch.object(actions.local_llm, "run_action", return_value="## Summary\nA."):
+            out = actions.process("You: hello", actions.ACTION_MEETING_NOTES, model=actions.local_llm.QWEN_TINY_ID)
+        self.assertEqual(out, "## Summary\nA.")
+        self.assertNotIsInstance(out, actions.action_api.CutShort)
+        with patch.object(actions.local_llm, "model_downloaded", return_value=True), \
+                patch.object(actions.local_llm, "run_action", return_value=cut):
+            out = actions.process("You: hello", actions.ACTION_SUMMARIZE, model=actions.local_llm.QWEN_TINY_ID)
+        self.assertNotIsInstance(out, actions.action_api.CutShort)
+
+    def test_an_on_computer_answer_cut_inside_the_summary_is_not_kept(self):
+        with patch.object(actions.local_llm, "model_downloaded", return_value=True), \
+                patch.object(actions.local_llm, "run_action", return_value=actions.local_llm.CutText("## Summary\nA long sen")):
+            with self.assertRaises(actions.ActionError):
+                actions.process("You: hello", actions.ACTION_MEETING_NOTES, model=actions.local_llm.QWEN_TINY_ID)
+
     def test_an_engine_error_is_an_action_error(self):
         err = actions.action_api.ActionAPIError("Daily fair-use limit reached")
         with self.assertRaises(actions.ActionError) as cm:

@@ -321,9 +321,12 @@ def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_I
 
     if ACTION_MODELS[model].get("kind") == "local_llm" and local_llm.model_downloaded(model):
         try:
-            return local_llm.run_action(text, mode, source_lang=source_lang,
-                                        target_lang=target_lang, model_id=model,
-                                        vocab_block=vocab_block)
+            out = local_llm.run_action(text, mode, source_lang=source_lang,
+                                       target_lang=target_lang, model_id=model,
+                                       vocab_block=vocab_block)
+            if mode == ACTION_MEETING_NOTES:            # the on-computer model stopped at its limit: a CutShort
+                return _notes_result(out, getattr(out, "cut", False))
+            return out
         except local_llm.LocalModelLoadError as e:
             # A chosen model that won't load: say so (meetings show it with
             # Retry), never quietly swap in the built-in formatter.
@@ -365,20 +368,28 @@ def _drop_token(_delta):
 NOTES_CUT_MESSAGE = "The AI stopped before the notes were finished. Try again."
 
 
-def _notes_from_stream(call):
-    """Meeting notes through a streaming engine call (``call(info)``): a long meeting's notes take longer than any
-    whole-answer wait, so they are always streamed - the pieces are not shown, the finished text is returned. When the
-    model stopped at its token limit (or the connection dropped late) the text is trimmed to its last whole line and comes
-    back as a CutShort (a str with .cut), which the session says above the notes; stopped inside the Summary, the notes
-    are not worth keeping and it is an error (the notes page offers 'Write notes again')."""
-    info = {}
-    text = (call(info) or "").strip()
-    if not info.get("cut"):
+def _notes_result(text, cut):
+    """What an engine wrote as the meeting notes: without a wrapper (a code fence around it, 'Here are the notes:' in
+    front, 'Let me know ...' behind: notes_prompt.tidy_answer). When the model stopped at its token limit (or the
+    connection dropped late: ``cut``) the text is trimmed to its last whole line and comes back as a CutShort (a str with
+    .cut), which the session says above the notes; stopped inside the Summary, the notes are not worth keeping and it is
+    an error (the notes page offers 'Write notes again')."""
+    text = notes_prompt.tidy_answer((text or "").strip())
+    if not cut:
         return text
     kept = notes_prompt.finish_cut(text)
     if not notes_prompt.past_the_summary(kept):
         raise ActionError(NOTES_CUT_MESSAGE)
     return action_api.CutShort(kept)
+
+
+def _notes_from_stream(call):
+    """Meeting notes through a streaming engine call (``call(info)``): a long meeting's notes take longer than any
+    whole-answer wait, so they are always streamed - the pieces are not shown, the finished text is returned (see
+    _notes_result for a cut or wrapped answer)."""
+    info = {}
+    text = call(info)
+    return _notes_result(text, info.get("cut"))
 
 
 NO_ENGINE_MESSAGE = ("No AI engine is connected. Sign in to Gusan Pro, or add an "

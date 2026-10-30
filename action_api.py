@@ -189,9 +189,34 @@ _CUT_REASONS = frozenset(("length", "model_length", "content_filter", "max_token
 
 
 def _note_finish(info, reason):
-    """Remember in ``info`` (a dict the caller gave) that the model stopped before it was done (its token limit)."""
+    """Remember in ``info`` (a dict the caller gave) that the model stopped before it was done (its token limit). Returns
+    True when the stream gave a reason at all (the model said it was finished, in whatever way): a stream that ends without
+    one was cut (see _unfinished)."""
     if isinstance(info, dict) and str(reason or "") in _CUT_REASONS:
         info["cut"] = True
+    return bool(reason)
+
+
+def _unfinished(parts, info, ended):
+    """A stream ended with text but without ever saying the model was done (no finish reason, no [DONE]): a proxy or a
+    server that closed the connection early, so the last words may be half a word. ``info`` learns it is cut."""
+    if parts and not ended and isinstance(info, dict):
+        info["cut"] = True
+
+
+def _error_text(err):
+    if isinstance(err, dict):
+        err = err.get("message") or err.get("type") or err
+    return str(err)
+
+
+def _text_kept_after_error(parts, info):
+    """An error event in the middle of a stream. True when the text that already arrived is kept - the caller asked to be
+    told when an answer is cut (``info``), and it is flagged - else the caller raises."""
+    if parts and isinstance(info, dict):
+        info["cut"] = True
+        return True
+    return False
 
 
 class ThinkFilter:
@@ -653,24 +678,30 @@ def run_managed_action_stream(text, mode, token, on_token, source_lang="auto",
         return out
     parts = []
     think = ThinkFilter(template_opened)
+    ended = False
     try:
         for data in _sse_data_lines(resp):
             if data == "[DONE]":
+                ended = True
                 break
             try:
                 obj = json.loads(data)
             except Exception:
                 continue
             if obj.get("error"):
-                raise ActionAPIError(str(obj["error"]))
+                if _text_kept_after_error(parts, info):
+                    break
+                raise ActionAPIError(_error_text(obj["error"]))
             choice = (obj.get("choices") or [{}])[0]
-            _note_finish(info, choice.get("finish_reason"))
+            ended = _note_finish(info, choice.get("finish_reason")) or ended
             _emit(think.feed((choice.get("delta") or {}).get("content") or ""), parts, on_token)
     except requests.RequestException:
         _interrupted(parts, info)
+        ended = True                        # said already
     finally:
         _close(resp)                        # also stops the model upstream
     _emit(think.flush(), parts, on_token)
+    _unfinished(parts, info, ended)
     return _final(parts, think, template_opened)
 
 
@@ -941,8 +972,9 @@ def _stream_openai_compatible(text, mode, config, source_lang, target_lang, key,
         _json_or_error(resp)
     headers = getattr(resp, "headers", None)
     ctype = str(headers.get("Content-Type") or "").lower() if isinstance(headers, Mapping) else ""
-    if "json" in ctype and "event-stream" not in ctype:
+    if mode == "meeting_notes" and "json" in ctype and "event-stream" not in ctype:
         # A server that ignores "stream" answers in one JSON piece (the notes must not come back empty because of that).
+        # Only for the notes: a live answer that never streamed is as it always was.
         data = _json_or_error(resp)
         choice = (data.get("choices") or [{}])[0]
         _note_finish(info, choice.get("finish_reason"))
@@ -952,22 +984,33 @@ def _stream_openai_compatible(text, mode, config, source_lang, target_lang, key,
         return out
     parts = []
     think = ThinkFilter(template_opened)
+    ended = False
     try:
         for data in _sse_data_lines(resp):
             if data == "[DONE]":
+                ended = True
                 break
             try:
                 obj = json.loads(data)
-                _note_finish(info, obj["choices"][0].get("finish_reason"))
+            except Exception:
+                continue
+            if isinstance(obj, dict) and obj.get("error") and isinstance(info, dict):
+                if _text_kept_after_error(parts, info):
+                    break
+                raise ActionAPIError(_error_text(obj["error"]))
+            try:
+                ended = _note_finish(info, obj["choices"][0].get("finish_reason")) or ended
                 delta = think.feed(obj["choices"][0].get("delta", {}).get("content") or "")
             except Exception:
                 continue
             _emit(delta, parts, on_token)
     except requests.RequestException:
         _interrupted(parts, info)
+        ended = True
     finally:
         _close(resp)
     _emit(think.flush(), parts, on_token)
+    _unfinished(parts, info, ended)
     return _final(parts, think, template_opened)
 
 
@@ -991,11 +1034,19 @@ def _stream_gemini(text, mode, config, source_lang, target_lang, key, on_token, 
     if not (200 <= resp.status_code < 300):
         _json_or_error(resp)
     parts = []
+    ended = False
     try:
         for data in _sse_data_lines(resp):
             try:
                 obj = json.loads(data)
-                _note_finish(info, (obj.get("candidates") or [{}])[0].get("finishReason"))
+            except Exception:
+                continue
+            if isinstance(obj, dict) and obj.get("error") and isinstance(info, dict):
+                if _text_kept_after_error(parts, info):
+                    break
+                raise ActionAPIError(_error_text(obj["error"]))
+            try:
+                ended = _note_finish(info, (obj.get("candidates") or [{}])[0].get("finishReason")) or ended
                 deltas = [part.get("text") or "" for part in
                           obj.get("candidates", [{}])[0].get("content", {}).get("parts", [])]
             except Exception:
@@ -1006,8 +1057,10 @@ def _stream_gemini(text, mode, config, source_lang, target_lang, key, on_token, 
                     on_token(delta)
     except requests.RequestException:
         _interrupted(parts, info)
+        ended = True
     finally:
         _close(resp)
+    _unfinished(parts, info, ended)
     return "".join(parts).strip()
 
 
@@ -1036,25 +1089,34 @@ def _stream_anthropic(text, mode, config, source_lang, target_lang, key, on_toke
     if not (200 <= resp.status_code < 300):
         _json_or_error(resp)
     parts = []
+    ended = False
     try:
         for data in _sse_data_lines(resp):
             try:
                 obj = json.loads(data)
             except Exception:
                 continue
-            if obj.get("type") == "content_block_delta":
+            kind = obj.get("type") if isinstance(obj, dict) else None
+            if kind == "content_block_delta":
                 delta = (obj.get("delta") or {}).get("text") or ""
                 if delta:
                     parts.append(delta)
                     on_token(delta)
-            elif obj.get("type") == "message_delta":
-                _note_finish(info, (obj.get("delta") or {}).get("stop_reason"))
-            elif obj.get("type") == "message_stop":
+            elif kind == "message_delta":
+                ended = _note_finish(info, (obj.get("delta") or {}).get("stop_reason")) or ended
+            elif kind == "message_stop":
+                ended = True
                 break
+            elif kind == "error" and isinstance(info, dict):       # e.g. overloaded_error, in the middle of the answer
+                if _text_kept_after_error(parts, info):
+                    break
+                raise ActionAPIError(_error_text(obj.get("error")))
     except requests.RequestException:
         _interrupted(parts, info)
+        ended = True
     finally:
         _close(resp)
+    _unfinished(parts, info, ended)
     return "".join(parts).strip()
 
 

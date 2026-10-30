@@ -542,7 +542,8 @@ async function routesFor(live: boolean, smart: boolean, notes: boolean, messages
   if (notes) {
     const c = claudeRoute(CLAUDE_NOTES_MODEL, messages, maxTokens, ms, CLAUDE_NOTES_MS);
     const tail = [...mistral, ...gemini].map((r) => ({ ...r, capMs: NOTES_TAIL_MS }));
-    return [...openai(OPENAI_NOTES_MODEL, OPENAI_NOTES_MS), ...(c ? [c] : []), ...tail];
+    // 0.2: the notes now carry more figures, dates and names, and the default temperature (1.0) lets them drift
+    return [...openai(OPENAI_NOTES_MODEL, OPENAI_NOTES_MS, 0.2), ...(c ? [c] : []), ...tail];
   }
   if (!live && !smart) return [...mistral, ...openai(OPENAI_FAST_MODEL, OPENAI_SMART_MS), ...gemini];
   const fast = claudeRoute(CLAUDE_FAST_MODEL, messages, maxTokens, ms, smart ? CLAUDE_SMART_MS : 0);
