@@ -157,12 +157,15 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
-          pip install pytest pytest-xdist --quiet
+          pip install pytest pytest-xdist pytest-timeout --quiet
           python -m compileall -q -l .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m compileall -q ui
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pytest -q -n auto --maxprocesses 3 --dist loadfile tests_qt --ignore=tests_qt/test_gui_stall_budget.py 2>&1 | Tee-Object -FilePath qt_output.txt
+          # 180s per test: a modal that never closes used to hold this step until
+          # the 40-minute cap, with no test name. The thread method dumps the
+          # stack and exits (signal isn't available on Windows).
+          python -m pytest -q -n auto --maxprocesses 3 --dist loadfile --timeout=180 --timeout-method=thread tests_qt --ignore=tests_qt/test_gui_stall_budget.py 2>&1 | Tee-Object -FilePath qt_output.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pytest -q tests_qt/test_gui_stall_budget.py 2>&1 | Tee-Object -FilePath qt_stall_output.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
