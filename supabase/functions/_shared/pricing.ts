@@ -1,6 +1,37 @@
 // Pricing decisions shared by stripe-webhook, create-checkout and billing-portal.
 // Keep in step with pricing_policy.py (tests/test_pricing_policy.py).
 
+export const TERMS_URL = "https://gusan.aibuben.xyz/terms";
+// Checkbox text for every plan. Same sentence as pricing_policy.WITHDRAWAL_CONSENT.
+export const WITHDRAWAL_CONSENT =
+  "I agree to the Terms (https://gusan.aibuben.xyz/terms) and ask for Gusan Pro to start immediately. I understand I lose my 14-day right of withdrawal once access starts.";
+// end_behavior "release" (stripe-webhook): after 12 iterations the subscription
+// keeps billing this price every month until the customer cancels.
+export const YEARLY_BEFORE_PAY =
+  "12-month commitment: €9.99 is billed each month (€119.88 over the 12 months). After those 12 months, billing continues at €9.99 a month until you cancel.";
+
+export function checkoutExtras(plan: string): {
+  consent_collection: { terms_of_service: "required" };
+  custom_text: {
+    terms_of_service_acceptance: { message: string };
+    submit?: { message: string };
+  };
+} {
+  const custom_text: {
+    terms_of_service_acceptance: { message: string };
+    submit?: { message: string };
+  } = { terms_of_service_acceptance: { message: WITHDRAWAL_CONSENT } };
+  if (plan === "yearly") custom_text.submit = { message: YEARLY_BEFORE_PAY };
+  return { consent_collection: { terms_of_service: "required" }, custom_text };
+}
+
+export function missingTermsUrl(message: string): boolean {
+  const text = (message || "").toLowerCase();
+  if (!text.includes("terms of service")) return false;
+  return text.includes("url") || text.includes("dashboard") || text.includes("public") ||
+    text.includes("account settings");
+}
+
 export const LOOKUP_MONTHLY = "gusan_pro_monthly";
 export const LOOKUP_YEARLY = "gusan_pro_yearly_monthly";
 export const LOOKUP_LIFETIME = "gusan_pro_lifetime";

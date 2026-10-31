@@ -181,6 +181,9 @@ async function attachCommitment(sub: Stripe.Subscription, priceId: string): Prom
   if (!start) return null;
   // from_subscription copies one billing period. Stretch it to 12 iterations
   // unless a previous delivery already did (webhook retries).
+  // "release" is the default: when the 12th month ends, the subscription leaves
+  // the schedule and keeps billing €9.99 every month until the customer cancels.
+  // "cancel" is only set later, when they ask to stop at the end of the commitment.
   if (!phaseCoversCommitment(schedule.phases?.[0])) {
     schedule = await stripe.subscriptionSchedules.update(scheduleId, {
       end_behavior: schedule.end_behavior === "cancel" ? "cancel" : "release",

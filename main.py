@@ -4637,8 +4637,15 @@ class AppController(QObject):
             "signed_out": "Sign in again, then you can upgrade.",
             "unknown_plan": "That plan isn't available.",
             "unavailable": "Checkout couldn't be opened. Try again in a moment.",
+            "terms_url_required": (
+                "Checkout needs a Terms of Service URL saved in the Stripe account's "
+                "public details (https://gusan.aibuben.xyz/terms) before it can ask "
+                "you to agree. That isn't set yet."
+            ),
         }
         text = messages.get(problem, messages["unavailable"])
+        if problem == "terms_url_required" and isinstance(info, dict) and info.get("message"):
+            text = info["message"]
         if problem == "sold_out" and spots == 0:
             text = "The lifetime plan is sold out (0 of 200 left)."
         self.show_tray_hint("Gusan Pro", text)

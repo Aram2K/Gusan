@@ -22,7 +22,14 @@
 
 import Stripe from "https://esm.sh/stripe@16?target=deno";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { LOOKUP_LIFETIME, LOOKUP_MONTHLY, LOOKUP_YEARLY } from "../_shared/pricing.ts";
+import {
+  checkoutExtras,
+  LOOKUP_LIFETIME,
+  LOOKUP_MONTHLY,
+  LOOKUP_YEARLY,
+  missingTermsUrl,
+  YEARLY_BEFORE_PAY,
+} from "../_shared/pricing.ts";
 
 const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY") ?? "", {
   apiVersion: "2024-06-20",
@@ -49,6 +56,37 @@ const cors = {
 
 function json(obj: unknown, status = 200) {
   return new Response(JSON.stringify(obj), { status, headers: { ...cors, "Content-Type": "application/json" } });
+}
+
+function stripeMessage(err: unknown): string {
+  if (err && typeof err === "object" && "message" in err) return String((err as { message: unknown }).message);
+  return String(err ?? "");
+}
+
+// Stripe refuses consent_collection.terms_of_service = required until a Terms
+// of Service URL is saved under Settings → Public details.
+const TERMS_URL_MESSAGE =
+  "Stripe needs a Terms of Service URL in the account's public details (https://gusan.aibuben.xyz/terms) before Checkout can require the consent checkbox.";
+
+async function openCheckout(
+  supa: ReturnType<typeof createClient>,
+  plan: string,
+  params: Stripe.Checkout.SessionCreateParams,
+): Promise<Stripe.Checkout.Session | Response> {
+  try {
+    return await stripe.checkout.sessions.create(params);
+  } catch (err) {
+    const message = stripeMessage(err);
+    if (plan === "lifetime") {
+      await supa.rpc("release_own_lifetime_reservation").catch(() => {});
+    }
+    if (missingTermsUrl(message)) {
+      console.error("checkout needs a terms of service url", message);
+      return json({ error: "terms_url_required", message: TERMS_URL_MESSAGE }, 503);
+    }
+    console.error("checkout session", message);
+    return json({ error: "checkout_failed" }, 502);
+  }
 }
 
 async function priceForLookup(lookupKey: string): Promise<Stripe.Price> {
@@ -106,7 +144,7 @@ Deno.serve(async (req) => {
         spots_left: decision?.spots_left ?? 0,
       }, status);
     }
-    const session = await stripe.checkout.sessions.create({
+    const opened = await openCheckout(supa, plan, {
       mode: "payment",
       customer: customer || undefined,
       customer_email: customer ? undefined : (user.email ?? undefined),
@@ -115,12 +153,14 @@ Deno.serve(async (req) => {
       success_url: SUCCESS,
       cancel_url: CANCEL,
       metadata: { user_id: user.id, lookup_key: lookup, plan: "lifetime" },
+      ...checkoutExtras(plan),
     });
-    await supa.rpc("attach_lifetime_checkout", { p_session_id: session.id });
-    return json({ url: session.url, spots_left: decision.spots_left ?? null, plan: "lifetime" });
+    if (opened instanceof Response) return opened;
+    await supa.rpc("attach_lifetime_checkout", { p_session_id: opened.id });
+    return json({ url: opened.url, spots_left: decision.spots_left ?? null, plan: "lifetime" });
   }
 
-  const session = await stripe.checkout.sessions.create({
+  const opened = await openCheckout(supa, plan, {
     mode: "subscription",
     customer: customer || undefined,
     customer_email: customer ? undefined : (user.email ?? undefined),
@@ -132,6 +172,9 @@ Deno.serve(async (req) => {
     payment_method_collection: "always",
     metadata: { user_id: user.id, lookup_key: lookup, plan },
     subscription_data: {
+      // Invoice description. For yearly this is the same commitment sentence
+      // as custom_text.submit (end_behavior "release": billing continues).
+      ...(plan === "yearly" ? { description: YEARLY_BEFORE_PAY } : {}),
       metadata: {
         user_id: user.id,
         lookup_key: lookup,
@@ -139,6 +182,8 @@ Deno.serve(async (req) => {
         ...(plan === "yearly" ? { commitment_months: "12" } : {}),
       },
     },
+    ...checkoutExtras(plan),
   });
-  return json({ url: session.url, plan });
+  if (opened instanceof Response) return opened;
+  return json({ url: opened.url, plan });
 });

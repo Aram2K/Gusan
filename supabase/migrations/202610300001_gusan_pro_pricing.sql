@@ -423,6 +423,32 @@ $$;
 revoke all on function public.attach_lifetime_checkout(text) from public, anon;
 grant execute on function public.attach_lifetime_checkout(text) to authenticated;
 
+-- Drop the caller's own unpaid hold (Checkout failed, for example because
+-- Stripe has no Terms of Service URL yet). Never touches a granted purchase.
+create or replace function public.release_own_lifetime_reservation()
+returns boolean
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  uid uuid := (select auth.uid());
+  n int;
+begin
+  if uid is null then
+    return false;
+  end if;
+  update public.lifetime_purchases
+     set status = 'released'
+   where user_id = uid
+     and status = 'reserved';
+  get diagnostics n = row_count;
+  return n > 0;
+end;
+$$;
+revoke all on function public.release_own_lifetime_reservation() from public, anon;
+grant execute on function public.release_own_lifetime_reservation() to authenticated;
+
 create or replace function public.lifetime_spots_left()
 returns integer
 language sql

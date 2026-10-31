@@ -133,6 +133,9 @@ def create_checkout(token, plan, post=None, url=None):
         if reason not in ("sold_out", "already_lifetime"):
             reason = "sold_out"
         return None, reason, info
+    if payload.get("error") == "terms_url_required":
+        info["message"] = str(payload.get("message") or "")
+        return None, "terms_url_required", info
     logger.warning("checkout HTTP %s", resp.status_code)
     return None, "unavailable", info
 

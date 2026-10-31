@@ -31,11 +31,25 @@ DAILY_ACTION_CAP = 1000
 PRICE_LINE = "€15.99/mo, €9.99/mo for 12 months, or €199 once"
 CHECKOUT_BUTTON = "Continue to checkout"
 SIGN_IN_FIRST = "Sign in first, then choose a plan."
+TERMS_URL = "https://gusan.aibuben.xyz/terms"
+# Shown as the required Stripe Checkout consent checkbox (all plans).
+WITHDRAWAL_CONSENT = (
+    "I agree to the Terms (https://gusan.aibuben.xyz/terms) and ask for Gusan Pro "
+    "to start immediately. I understand I lose my 14-day right of withdrawal once access starts."
+)
+# The yearly schedule is created with end_behavior "release": after 12 monthly
+# iterations the subscription leaves the schedule and keeps billing €9.99 a
+# month until the customer cancels. It does not stop by itself.
+YEARLY_BEFORE_PAY = (
+    "12-month commitment: €9.99 is billed each month (€119.88 over the 12 months). "
+    "After those 12 months, billing continues at €9.99 a month until you cancel."
+)
 MONTHLY_NOTE = "€15.99 a month. Cancel anytime. Secure checkout by Stripe."
-YEARLY_NOTE = ("€9.99 a month, billed every month for 12 months. "
-               "You can cancel at the end of those 12 months, not before. "
-               "Secure checkout by Stripe.")
-LIFETIME_NOTE = "€199 once, for the first 200 people. Yours for good. Secure checkout by Stripe."
+YEARLY_NOTE = YEARLY_BEFORE_PAY + " " + WITHDRAWAL_CONSENT + " Secure checkout by Stripe."
+LIFETIME_NOTE = (
+    "€199 once, for the first 200 people. One-time digital content. "
+    + WITHDRAWAL_CONSENT + " Secure checkout by Stripe."
+)
 
 ALLOWANCE_MEETING_NOTES = "meeting_notes"
 ALLOWANCE_LIVE_SESSION = "live_session"
@@ -147,3 +161,30 @@ def live_session_decision(is_pro, open_session_id, sessions_this_month,
 
 def spots_left(granted, pending, cap=LIFETIME_CAP):
     return max(0, int(cap) - int(granted) - int(pending))
+
+
+def checkout_extras(plan):
+    """Fields added to every Stripe Checkout Session.
+
+    consent_collection.terms_of_service required shows a checkbox. Stripe
+    rejects that unless the account's public details include a Terms of
+    Service URL. The yearly plan also puts the commitment above the pay button
+    (custom_text.submit); that text matches end_behavior "release".
+    """
+    extras = {
+        "consent_collection": {"terms_of_service": "required"},
+        "custom_text": {
+            "terms_of_service_acceptance": {"message": WITHDRAWAL_CONSENT},
+        },
+    }
+    if plan == "yearly":
+        extras["custom_text"]["submit"] = {"message": YEARLY_BEFORE_PAY}
+    return extras
+
+
+def missing_terms_url(message):
+    """True when Stripe refused consent_collection because no ToS URL is saved."""
+    text = (message or "").lower()
+    if "terms of service" not in text:
+        return False
+    return any(word in text for word in ("url", "dashboard", "public", "account settings"))

@@ -88,8 +88,12 @@ class ProDialog(QDialog):
         plans = QVBoxLayout()
         plans.setSpacing(8)
         self.card_monthly = self._plan_card("Monthly", "€15.99", "/mo", None, "Cancel anytime", "monthly")
-        self.card_yearly = self._plan_card("Yearly", "€9.99", "/mo", "€15.99", "12-month commitment", "yearly")
-        self.card_lifetime = self._plan_card("Lifetime", "€199", " once", None, "First 200 people", "lifetime")
+        self.card_yearly = self._plan_card(
+            "Yearly", "€9.99", "/mo", "€15.99", "12-month commitment", "yearly",
+            legal=pricing_policy.YEARLY_NOTE)
+        self.card_lifetime = self._plan_card(
+            "Lifetime", "€199", " once", None, "First 200 people", "lifetime",
+            legal=pricing_policy.LIFETIME_NOTE)
         plans.addWidget(self.card_monthly)
         plans.addWidget(self.card_yearly)
         plans.addWidget(self.card_lifetime)
@@ -152,7 +156,7 @@ class ProDialog(QDialog):
         if badge is not None:
             badge.setText(f"{n} of 200 left" if n else "Sold out")
 
-    def _plan_card(self, name, price, per, original, badge, plan_id):
+    def _plan_card(self, name, price, per, original, badge, plan_id, legal=None):
         card = QFrame(self)
         card.setObjectName("cardFrame")
         card.setCursor(Qt.PointingHandCursor)
@@ -195,6 +199,12 @@ class ProDialog(QDialog):
             b = QLabel("billed monthly", card)
             b.setObjectName("subtitleLabel")
         v.addWidget(b, 0, Qt.AlignLeft)
+        if legal:
+            # Next to this plan: the same commitment / withdrawal wording Checkout shows.
+            leg = QLabel(legal, card)
+            leg.setWordWrap(True)
+            leg.setObjectName("subtitleLabel")
+            v.addWidget(leg)
 
         card.mousePressEvent = lambda _e, pid=plan_id: self._select_plan(pid)
         return card

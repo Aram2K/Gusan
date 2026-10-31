@@ -107,6 +107,59 @@ class TestFreeAllowances(unittest.TestCase):
         self.assertTrue(pp.live_session_decision(True, None, 40)["ok"])
 
 
+class TestCheckoutConsent(unittest.TestCase):
+    def test_every_plan_requires_the_withdrawal_checkbox(self):
+        for plan in ("monthly", "yearly", "lifetime"):
+            extra = pp.checkout_extras(plan)
+            self.assertEqual(extra["consent_collection"], {"terms_of_service": "required"})
+            message = extra["custom_text"]["terms_of_service_acceptance"]["message"]
+            self.assertEqual(message, pp.WITHDRAWAL_CONSENT)
+            self.assertIn("https://gusan.aibuben.xyz/terms", message)
+            self.assertIn("14-day right of withdrawal", message)
+            self.assertIn("start immediately", message)
+            self.assertNotIn("trial", message.lower())
+
+    def test_yearly_states_the_commitment_before_payment(self):
+        extra = pp.checkout_extras("yearly")
+        submit = extra["custom_text"]["submit"]["message"]
+        self.assertEqual(submit, pp.YEARLY_BEFORE_PAY)
+        self.assertIn("12-month commitment", submit)
+        self.assertIn("€9.99", submit)
+        self.assertIn("€119.88", submit)
+        self.assertIn("until you cancel", submit)
+        # end_behavior "release": it keeps billing; it does not stop after month 12.
+        self.assertIn("billing continues", submit)
+        self.assertNotIn("submit", pp.checkout_extras("monthly")["custom_text"])
+        self.assertNotIn("submit", pp.checkout_extras("lifetime")["custom_text"])
+
+    def test_the_upgrade_window_shows_the_same_wording(self):
+        self.assertIn(pp.YEARLY_BEFORE_PAY, pp.YEARLY_NOTE)
+        self.assertIn(pp.WITHDRAWAL_CONSENT, pp.YEARLY_NOTE)
+        self.assertIn(pp.WITHDRAWAL_CONSENT, pp.LIFETIME_NOTE)
+        self.assertIn("One-time digital content", pp.LIFETIME_NOTE)
+        self.assertNotIn("free", pp.YEARLY_NOTE.lower())
+
+    def test_a_missing_terms_url_is_recognised(self):
+        stripe = ("You must save a Terms of Service URL in your account settings "
+                  "before requiring customers to accept the terms of service.")
+        self.assertTrue(pp.missing_terms_url(stripe))
+        self.assertFalse(pp.missing_terms_url("No such price"))
+        self.assertFalse(pp.missing_terms_url("card was declined"))
+
+    def test_the_edge_function_sends_those_params(self):
+        shared = (ROOT / "supabase/functions/_shared/pricing.ts").read_text(encoding="utf-8")
+        src = (ROOT / "supabase/functions/create-checkout/index.ts").read_text(encoding="utf-8")
+        self.assertIn(pp.WITHDRAWAL_CONSENT, shared)
+        self.assertIn(pp.YEARLY_BEFORE_PAY, shared)
+        self.assertIn('terms_of_service: "required"', shared)
+        self.assertIn("checkoutExtras(plan)", src)
+        self.assertIn("terms_url_required", src)
+        self.assertIn("release_own_lifetime_reservation", src)
+        self.assertIn("description: YEARLY_BEFORE_PAY", src)
+        sql = (ROOT / "supabase/migrations/202610300001_gusan_pro_pricing.sql").read_text(encoding="utf-8")
+        self.assertIn("release_own_lifetime_reservation", sql)
+
+
 class TestCheckoutClient(unittest.TestCase):
     def test_checkout_refuses_anything_but_stripe_and_reports_the_cap(self):
         post = MagicMock(return_value=_resp(200, {"url": "https://checkout.stripe.com/c/pay/cs_test"}))
@@ -123,6 +176,15 @@ class TestCheckoutClient(unittest.TestCase):
         post = MagicMock(return_value=_resp(409, {"error": "sold_out", "spots_left": 0}))
         url, problem, info = quotas.create_checkout("tok", "lifetime", post=post, url="https://example.test/checkout")
         self.assertEqual((url, problem, info.get("spots_left")), (None, "sold_out", 0))
+
+        post = MagicMock(return_value=_resp(503, {
+            "error": "terms_url_required",
+            "message": "Stripe needs a Terms of Service URL",
+        }))
+        url, problem, info = quotas.create_checkout("tok", "monthly", post=post, url="https://example.test/checkout")
+        self.assertEqual(url, None)
+        self.assertEqual(problem, "terms_url_required")
+        self.assertIn("Terms of Service URL", info["message"])
 
     def test_allowance_status(self):
         self.assertEqual(quotas.allowance_from_status(402, {"error": "allowance_used", "allowance": "meeting_notes"}),
