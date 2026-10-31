@@ -300,13 +300,14 @@ def test_every_view_has_named_controls(shell, meetings_root):
 
 
 # ── Pro gate, consent, the session ───────────────────────────────────────────
-def test_free_record_shows_the_pro_window(shell, meetings_root):
-    win, app = shell("free")
+def test_free_record_starts(shell, meetings_root):
+    session = FakeSession()
+    win, app = shell("free", meeting_session=session)
     page = _open(win)
     page.list_view.start_card.record_btn.click()
-    assert ("_pro_upsell", "Meeting recording") in app.calls
-    assert getattr(app, "meeting_session", None) is None
-    assert page.current_view() == "list"
+    assert ("_pro_upsell", "Meeting recording") not in app.calls
+    assert any(c[0] == "start" for c in session.calls)
+    assert page.current_view() == "live"
 
 
 def test_consent_refused_never_starts(shell, meetings_root, monkeypatch):
@@ -540,9 +541,10 @@ def test_free_users_keep_notes_on_this_computer(shell, meetings_root):
     rail = page.list_view.rail
     assert rail.opt_local.radio.isChecked()
     rail.opt_cloud.radio.click()
-    assert ("_pro_upsell", "Meeting recording") in app.calls
-    assert rail.opt_local.radio.isChecked()
-    assert not any(c[:2] == ("set_setting", "meeting_notes_model") for c in app.calls)
+    assert ("set_setting", "meeting_notes_model", "managed") in app.calls
+    app.cfg["meeting_notes_model"] = "managed"
+    page.on_setting_changed("meeting_notes_model")
+    assert rail.opt_cloud.radio.isChecked()
 
 
 def test_copy_notice(shell, meetings_root):
@@ -679,9 +681,9 @@ def test_list_rows_search_and_notes(shell, meetings_root):
     assert more == ["Rewrite notes", "Identify speakers", "Rename", "Show in folder", "Delete"]
     nv.tabs.set_index(1, emit=True)
     assert nv.stack.currentWidget() is nv.transcript and "Hello team." in nv.transcript.toPlainText()
-    # Free: Continue recording is a Pro action.
+    # Free: Continue recording starts another part (recording is not Pro-only).
     nv.continue_btn.click()
-    assert ("_pro_upsell", "Meeting recording") in app.calls
+    assert ("_pro_upsell", "Meeting recording") not in app.calls
     nv.back_link.click()
     assert page.current_view() == "list"
     assert "Notes ready" not in ml.rows[0].accessibleName()

@@ -60,10 +60,10 @@ class TestShortcutGate(unittest.TestCase):
         tries = main.entitlements.FREE_SMART_ACTION_TRIES
         for tier, used, want in (
                 ("pro", 99, ([True], [], [])),                     # Pro: always
-                ("free", 0, ([True], [], [])),                     # Free with tries: starts
-                ("free", tries - 1, ([True], [], [])),             # (the try is counted at stop)
-                ("free", tries, ([], ["Smart Actions"], [])),      # none left: the Pro window
-                ("guest", 0, ([], [], [1]))):                      # guest: sign up for the tries
+                ("free", 0, ([True], [], [])),                     # Free: unlimited
+                ("free", tries - 1, ([True], [], [])),
+                ("free", tries, ([True], [], [])),                 # the old 5-try cap is gone
+                ("guest", 0, ([], [], [1]))):                      # guest: sign in first
             app = self._app(tier, used)
             self.assertEqual(self._press(app), want, (tier, used))
             self.assertFalse(app._smart_next)                      # only that one start
@@ -195,19 +195,16 @@ class TestStopImpl(unittest.TestCase):
         self.assertEqual(app.saved[0][1]["action"], SMART)
         self.assertEqual(app.counted, [])                           # Pro: nothing counted
 
-    def test_free_tries_are_counted_at_the_stop(self):
+    def test_free_smart_actions_are_not_counted(self):
         app = self._run(SMART, tier="free", used=1)
-        self.assertEqual((app.processed, app.counted), ([SMART], [1]))
+        self.assertEqual((app.processed, app.counted), ([SMART], []))
 
-    def test_tries_that_ran_out_meanwhile_paste_the_exact_words(self):
+    def test_a_guest_gets_their_exact_words(self):
         tries = main.entitlements.FREE_SMART_ACTION_TRIES
         app = self._run(SMART, tier="free", used=tries)
-        self.assertEqual(app.processed, [])
-        self.assertEqual(app.pastes, [("call David and book the room", {})])
-        self.assertEqual(app.hints, [("Free Smart Actions used up",
-                                      "Pasted your exact words. Pro has unlimited Smart Actions.")])
+        self.assertEqual(app.processed, [SMART])
         app = self._run(SMART, tier="guest")
-        self.assertEqual(app.hints, [("Sign up free for 5 Smart Actions", "Pasted your exact words.")])
+        self.assertEqual(app.hints, [("Sign in to use Smart Actions", "Pasted your exact words.")])
 
     def test_history_records_the_backend_that_really_transcribed(self):
         app = self._run(SMART, backend="managed")                   # Gusan Cloud for this take

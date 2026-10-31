@@ -363,18 +363,11 @@ def _copy(text):
 
 
 def plan_state(app):
-    """(tier, tries left, tries total): tier "pro" | "free" | "guest"; tries
-    left is an int for Free users (account_actions / entitlements), else None."""
+    """(tier, tries left, tries total). Smart Actions are unlimited for Free
+    and Pro, so tries left is None for both. Guests sign in first."""
     total = 5
     if _is_pro(app):
         return "pro", None, total
-    view = {}
-    try:
-        import account_actions
-        view = account_actions.account_view(getattr(app, "auth", None), _cfg(app))
-        total = int(view.get("smart_tries_total") or total)
-    except Exception:
-        logger.debug("account_view failed", exc_info=True)
     tier = None
     fn = getattr(app, "current_tier", None)
     if callable(fn):
@@ -383,22 +376,17 @@ def plan_state(app):
         except Exception:
             tier = None
     if tier not in ("free", "guest"):
-        tier = view.get("tier")
-    if tier not in ("free", "guest"):
         signed_in = bool(getattr(getattr(app, "auth", None), "is_authenticated", False))
         tier = "free" if signed_in else "guest"
     if tier == "guest":
         return "guest", None, total
-    left = view.get("smart_tries_left")
-    if not isinstance(left, int):
-        left = total
-    return "free", max(0, min(total, left)), total
+    return "free", None, total
 
 
 def can_use(app):
-    """Smart Actions can run now (Pro, or Free with tries left)."""
-    tier, left, _total = plan_state(app)
-    return tier == "pro" or (tier == "free" and bool(left))
+    """Smart Actions can run now (anyone signed in)."""
+    tier, _left, _total = plan_state(app)
+    return tier in ("pro", "free")
 
 
 # ── Recent: history entries that were Smart Actions ──────────────────────────
@@ -984,7 +972,7 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
         v = QVBoxLayout(self.state_guest)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(8)
-        v.addWidget(_text("5 free tries with an account", "muted", 12.5, 600, self.state_guest), 0, Qt.AlignRight)
+        v.addWidget(_text("Sign in to use Smart Actions", "muted", 12.5, 600, self.state_guest), 0, Qt.AlignRight)
         self.signup_button = Button("Sign up free", "primary", "s", parent=self.state_guest)
         self.signup_button.clicked.connect(self._sign_up)
         v.addWidget(self.signup_button, 0, Qt.AlignRight)
@@ -1179,13 +1167,12 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
         self.hero_set_button.setVisible(not hk)
         self.exact_keys.set_hotkey(dictation_hotkey(self.app))
         self.exact_label.setAccessibleName("%s %s" % (_keys_text(dictation_hotkey(self.app)), EXACT_TEXT))
-        self.state_pro.setVisible(tier == "pro")
+        # Free and Pro both have unlimited Smart Actions. The old try counter stays
+        # in the tree so a layout test can still find it, but it is not shown.
+        self.state_pro.setVisible(tier in ("pro", "free"))
         self.state_guest.setVisible(tier == "guest")
-        self.state_used.setVisible(tier == "free" and not left)
-        self.state_tries.setVisible(tier == "free" and bool(left))
-        if tier == "free" and left:
-            self.tries_label.setText("%d of %d free tries left" % (left, total))
-            self.pips.set_left(left)
+        self.state_used.setVisible(False)
+        self.state_tries.setVisible(False)
 
         if not self.shortcut.is_capturing():
             self.shortcut.set_hotkey(hk)

@@ -89,9 +89,9 @@ DELETE_ACCOUNT_URL = "https://hftcelxzfoubheqeoool.supabase.co/functions/v1/dele
 BILLING_PORTAL_URL = "https://hftcelxzfoubheqeoool.supabase.co/functions/v1/billing-portal"
 SUPPORT_EMAIL = "aibuben.xyz@gmail.com"
 
-# ── Monetization links (Stripe) ───────────────────────────────────────────────
-PRO_MONTHLY_URL = "https://buy.stripe.com/3cI5kC30N1oeari7rh0Ba00"
-PRO_ANNUAL_URL  = "https://buy.stripe.com/fZuaEW0SF4Aq1UMh1R0Ba01"
+# ── Monetization (Stripe) ─────────────────────────────────────────────────────
+# Checkout sessions are created by the create-checkout function (lookup keys,
+# no trial). The old payment links are not offered any more.
 # "Manage subscription" opens the Stripe Customer Portal already signed in via
 # the billing-portal function. This is Stripe's no-code login link (Settings →
 # Billing → Customer portal → Login link) - the fallback for an account the
@@ -739,21 +739,28 @@ def cloud_error_message(provider, status, body_text):
     return (f"{provider} error (HTTP {status}). {msg[:90]}").strip()
 
 
-def billing_portal_session(token, post=None):
+def billing_portal_session(token, post=None, action="portal"):
     """(url, problem) for the signed-in user's Stripe Customer Portal, from the
     billing-portal function. ``problem`` is "" on success, else "signed_out",
-    "no_customer" (no Stripe customer for this account) or "unavailable"."""
+    "no_customer" (no Stripe customer for this account) or "unavailable".
+
+    action "cancel" schedules cancellation (at the end of a 12-month
+    commitment, otherwise at the end of the current period) and returns
+    (None, "") when that was accepted — there is no page to open."""
     if not token:
         return None, "signed_out"
     if post is None:
         import requests
         post = requests.post
+    payload = {"action": action} if action == "cancel" else {}
     try:
-        resp = post(BILLING_PORTAL_URL, json={},
+        resp = post(BILLING_PORTAL_URL, json=payload,
                     headers={"Authorization": f"Bearer {token}"}, timeout=20)
     except Exception as e:
         logger.warning("Billing portal unreachable: %s", e)
         return None, "unavailable"
+    if action == "cancel" and resp.status_code == 200:
+        return None, ""
     if resp.status_code == 200:
         try:
             url = (resp.json() or {}).get("url") or ""
@@ -4429,19 +4436,51 @@ class AppController(QObject):
 
     def open_billing(self):
         """Settings → Account → Manage subscription (and the tray): the Stripe
-        Customer Portal, already signed in - cancel (a trial is then never
-        charged), change the card, download invoices."""
+        Customer Portal, already signed in - change the card, download invoices.
+        A yearly plan can only be cancelled at the end of its 12-month commitment."""
         if not self.auth.is_authenticated:
             self.show_auth_gate()
             return
         if getattr(self, "_billing_busy", False):
             return                              # a click is already on its way
+        self._billing_action = "portal"
+        end = getattr(self.auth, "commitment_ends_at", None)
+        if end and not getattr(self.auth, "cancels_at", None):
+            from datetime import datetime, timezone
+            try:
+                when = datetime.fromisoformat(str(end).replace("Z", "+00:00"))
+                active = when > datetime.now(timezone.utc)
+            except (TypeError, ValueError):
+                active = False
+            if active:
+                from ui.components import mini_prompt
+                import account_actions
+                shown = account_actions.format_date(end) or "the end of the 12 months"
+                choice = mini_prompt.choose(
+                    self._dialog_parent(), "Gusan Pro",
+                    f"Your yearly plan is a 12-month commitment, through {shown}. "
+                    "You can cancel it from that date, not before.",
+                    [("portal", "Card and invoices", "secondary"),
+                     ("cancel", "Cancel at end of commitment", "primary"),
+                     ("close", "Not now", "ghost")],
+                    default="portal", icon="crown")
+                if choice in (None, "", "close"):
+                    return
+                if choice == "cancel":
+                    self._billing_action = "cancel"
         self._billing_busy = True
         threading.Thread(target=self._open_billing_worker, daemon=True).start()
 
     def _open_billing_worker(self):
+        action = getattr(self, "_billing_action", "portal") or "portal"
         try:
-            url, problem = billing_portal_session(self.auth.get_access_token())
+            url, problem = billing_portal_session(self.auth.get_access_token(), action=action)
+            if action == "cancel" and not problem:
+                self.overlay.call_soon(
+                    self.show_tray_hint, "Gusan Pro",
+                    "Cancellation is set for the end of your 12-month commitment. "
+                    "You'll be billed each month until then.")
+                return
             if not url and problem != "signed_out" and STRIPE_PORTAL_URL:
                 url = STRIPE_PORTAL_URL         # Stripe's email-code login instead
             if url:
@@ -4548,33 +4587,108 @@ class AppController(QObject):
         else:
             clicked = mini_prompt.choose(
                 parent, f"{APP_NAME} Pro",
-                feat + "Upgrade to unlock Meetings, Smart Actions, and fast cloud transcription.",
-                [("monthly", "€7.99/mo", "secondary"), ("annual", "€59/yr", "primary"),
-                 ("cancel", "Maybe later", "ghost")],
-                default="annual", icon="crown")
+                feat + "Gusan Pro is unlimited cloud transcription, meeting notes and Live Assistant.",
+                [("monthly", "€15.99/mo", "secondary"), ("yearly", "€9.99/mo", "primary"),
+                 ("lifetime", "€199 once", "secondary"), ("cancel", "Maybe later", "ghost")],
+                default="yearly", icon="crown")
         if clicked == "signin":
             self.show_auth_gate()
-        elif clicked == "monthly":
-            webbrowser.open(self._checkout_url(PRO_MONTHLY_URL))
-        elif clicked == "annual":
-            webbrowser.open(self._checkout_url(PRO_ANNUAL_URL))
+        elif clicked in ("monthly", "yearly", "lifetime"):
+            self.open_checkout(clicked)
 
-    def _checkout_url(self, base):
-        """Append the signed-in user's id (+ email) to a Stripe payment link so
-        the webhook can link the resulting subscription to the right account."""
+    def open_checkout(self, plan):
+        """Open Stripe Checkout for monthly, yearly (12-month commitment) or lifetime."""
+        if not getattr(getattr(self, "auth", None), "is_authenticated", False):
+            self.show_auth_gate()
+            return
+        if getattr(self, "_checkout_busy", False):
+            return
+        self._checkout_busy = True
+
+        def work():
+            import quotas
+            token = None
+            try:
+                token = self.auth.get_access_token()
+            except Exception:
+                token = None
+            url, problem, info = quotas.create_checkout(token, plan)
+            try:
+                self.overlay.call_soon(self._checkout_ready, url, problem, info or {}, plan)
+            except Exception:
+                self._checkout_busy = False
+
+        threading.Thread(target=work, daemon=True, name="gusan-checkout").start()
+
+    def _checkout_ready(self, url, problem, info, plan):
+        self._checkout_busy = False
+        spots = info.get("spots_left") if isinstance(info, dict) else None
+        if url:
+            webbrowser.open(url)
+            try:
+                telemetry.track("checkout_opened", {"plan": plan}, self.cfg, APP_VERSION)
+            except Exception:
+                pass
+            self.watch_for_upgrade()
+            return
+        messages = {
+            "sold_out": "The lifetime plan is sold out.",
+            "already_lifetime": "This account already has lifetime Gusan Pro.",
+            "signed_out": "Sign in again, then you can upgrade.",
+            "unknown_plan": "That plan isn't available.",
+            "unavailable": "Checkout couldn't be opened. Try again in a moment.",
+        }
+        text = messages.get(problem, messages["unavailable"])
+        if problem == "sold_out" and spots == 0:
+            text = "The lifetime plan is sold out (0 of 200 left)."
+        self.show_tray_hint("Gusan Pro", text)
+
+    def lifetime_spots_left(self):
+        """How many lifetime spots are left, or None. Blocking; the Pro window calls it off the GUI thread."""
+        import quotas
+        token = None
         try:
-            uid = getattr(self.auth, "user_id", None)
-            if not uid:
-                return base
-            from urllib.parse import urlencode
-            params = {"client_reference_id": uid}
-            email = getattr(self.auth, "user_email", None)
-            if email:
-                params["prefilled_email"] = email
-            sep = "&" if "?" in base else "?"
-            return f"{base}{sep}{urlencode(params)}"
+            token = self.auth.get_access_token()
         except Exception:
-            return base
+            token = None
+        return quotas.lifetime_spots_left(token)
+
+    def claim_live_session(self):
+        """Take this month's free Live Assistant session (or resume the open one).
+
+        Pro is never blocked by the allowance. Returns {ok, reason, session_id}.
+        Blocking: one small RPC before Start."""
+        import quotas
+        token = None
+        try:
+            token = self.auth.get_access_token()
+        except Exception:
+            token = None
+        if not token:
+            return {"ok": False, "reason": "signed_out"}
+        result = quotas.begin_live_session(token)
+        if result.get("ok") and result.get("session_id"):
+            self._live_session_id = result["session_id"]
+        elif self.is_pro():
+            return {"ok": True, "reason": "pro", "session_id": getattr(self, "_live_session_id", "") or ""}
+        return result
+
+    def release_live_session(self):
+        """The Live Assistant session ended: the free allowance is spent."""
+        sid = getattr(self, "_live_session_id", None)
+        self._live_session_id = None
+        if not sid:
+            return
+
+        def work():
+            import quotas
+            try:
+                token = self.auth.get_access_token()
+            except Exception:
+                return
+            quotas.end_live_session(token, sid)
+
+        threading.Thread(target=work, daemon=True, name="gusan-live-session-end").start()
 
     def _on_tray_activated(self, reason):
         # Any direct click on the tray icon opens the app - single, double,
@@ -5956,12 +6070,11 @@ class AppController(QObject):
 
     def _on_smart_hotkey(self):
         """GUI thread: the Smart Actions shortcut. Starts ONE take that runs
-        as a Smart Action - Pro always; Free while tries are left (the try is
-        counted when it finishes, _stop_impl); Free with none left gets the
-        Pro window; a guest the sign-up sheet. Pressed while recording it
-        just stops the take, which keeps the kind it started with (so does
-        Alt+R). While a meeting records, only the quiet "paused" hint
-        (_on_hotkey) - never the Pro window or sign-up over a meeting."""
+        as a Smart Action. Signed-in people have unlimited Smart Actions (local
+        or their own key). A guest gets the sign-up sheet. Pressed while
+        recording it just stops the take, which keeps the kind it started with
+        (so does Alt+R). While a meeting records, only the quiet "paused" hint
+        (_on_hotkey) - never the sign-up sheet over a meeting."""
         was_rec = self.is_rec
         if not was_rec:
             if getattr(self, "_hotkeys_suspended", False) is True:
@@ -5970,11 +6083,8 @@ class AppController(QObject):
                 pass                # no take can start: _on_hotkey says why
             elif not self.is_pro():
                 auth_now, cfg_now = getattr(self, "auth", None), getattr(self, "cfg", None)
-                if entitlements.tier(auth_now, cfg_now) == entitlements.TIER_GUEST:
-                    self.show_auth_gate()       # signing up gives the free tries
-                    return
                 if not entitlements.can_use_smart_action(auth_now, cfg_now):
-                    self._pro_upsell("Smart Actions")
+                    self.show_auth_gate()
                     return
             self._smart_next = True
         try:
@@ -6714,6 +6824,20 @@ class AppController(QObject):
                     ((self.cfg.get("action_api_key") or "") or (self.cfg.get("google_api_key") or "")).strip())
                 if m_kind in ("rules", "managed") or (m_kind == "cloud" and not has_own_cloud_key):
                     action_model = actions.API_MANAGED_ID
+        # A free Live Assistant session (one a month) may use Gusan Cloud for
+        # its answers. The id is what the server checks. Local / privacy stays local.
+        sid = getattr(self, "_live_session_id", None)
+        if sid and not self.cfg.get("privacy_mode") and self.cfg.get("live_assist_writer") != "local":
+            token = action_config.get("_managed_token") if isinstance(action_config, dict) else None
+            if not token:
+                try:
+                    token = self.auth.get_access_token()
+                except Exception:
+                    token = None
+            if token:
+                action_config = {**self.cfg, "_managed_token": token, "_live_session_id": sid}
+                if not self.is_pro():
+                    action_model = actions.API_MANAGED_ID
         return action_model, action_config
 
     def _stop(self):
@@ -6872,30 +6996,16 @@ class AppController(QObject):
         action_mode = oneshot or actions.ACTION_TRANSCRIBE_ONLY
         output_text = text
 
-        # Smart Actions: Pro = unlimited; everyone else gets 5 free tries. The
-        # shortcut already checked at the press (_on_smart_hotkey); this is
-        # the backstop for tries that ran out meanwhile - then the exact words
-        # are pasted. A try is counted quietly (the counter is on the Smart
-        # Actions page).
+        # Smart Actions are unlimited once you're signed in. A guest (the
+        # shortcut already sent them to sign-in) gets their exact words.
         if action_mode != actions.ACTION_TRANSCRIBE_ONLY and not self.is_pro():
-            if entitlements.can_use_smart_action(self.auth, self.cfg):
-                entitlements.add_smart_action_use(self.auth)
-                # Pages redraw the tries counter (Smart Actions, Account & plan).
-                self.sig_auth_changed.emit()
-            else:
+            if not entitlements.can_use_smart_action(self.auth, self.cfg):
                 action_mode = actions.ACTION_TRANSCRIBE_ONLY
-                if entitlements.tier(self.auth, self.cfg) == entitlements.TIER_GUEST:
-                    self.overlay.call_soon(
-                        self.show_tray_hint,
-                        "Sign up free for 5 Smart Actions",
-                        "Pasted your exact words.",
-                    )
-                else:
-                    self.overlay.call_soon(
-                        self.show_tray_hint,
-                        "Free Smart Actions used up",
-                        "Pasted your exact words. Pro has unlimited Smart Actions.",
-                    )
+                self.overlay.call_soon(
+                    self.show_tray_hint,
+                    "Sign in to use Smart Actions",
+                    "Pasted your exact words.",
+                )
 
         pill_kind = None
         if action_mode != actions.ACTION_TRANSCRIBE_ONLY:
@@ -7567,9 +7677,10 @@ class AppController(QObject):
                 toast.hide_reminder()
             except RuntimeError:
                 pass
-        if not self.is_pro():
-            self._pro_upsell("Meeting recording")
-            if not self.is_pro():
+        if with_assist and not self.is_pro():
+            claimed = self.claim_live_session()
+            if not (isinstance(claimed, dict) and claimed.get("ok")):
+                self._pro_upsell("Live Assistant")
                 return False
         # The one place the meeting's words are cleaned (calendar_start_context): the
         # title, the people on the invite (you included - the notes say who is who)

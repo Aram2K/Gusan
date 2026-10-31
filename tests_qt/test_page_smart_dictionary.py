@@ -228,31 +228,25 @@ def test_free_with_tries_shows_the_shortcut_and_the_counter(pages, tries):
     assert page.hero_line.text() == "Press, say what you want, press again."
     assert page.exact_keys.accessibleName() == "Alt + R"          # the real dictation keys
     assert page.exact_label.text() == "pastes your exact words."
-    assert not page.state_tries.isHidden() and page.tries_label.text() == "4 of 5 free tries left"
-    assert page.state_used.isHidden() and page.state_pro.isHidden() and page.state_guest.isHidden()
+    assert not page.state_pro.isHidden()
+    assert page.state_tries.isHidden() and page.state_used.isHidden() and page.state_guest.isHidden()
     assert not settings(app) and not upsells(app)
 
 
-def test_tries_used_up_shows_one_upgrade(pages, tries):
+def test_free_smart_actions_stay_unlimited(pages, tries):
     tries["n"] = 0
     app = live_app("free")
     page = pages("smart_actions", app)
-    assert not page.state_used.isHidden() and page.state_tries.isHidden()
+    assert not page.state_pro.isHidden() and page.state_used.isHidden() and page.state_tries.isHidden()
     assert page.hero_keys.keys() == ["Alt", "S"]                  # the shortcut is still shown
-    page.upgrade_button.click()
-    assert upsells(app) == [("_pro_upsell", "Smart Actions")]
-    assert not settings(app)
 
 
-def test_refresh_account_rereads_the_tries(pages, tries):
+def test_refresh_account_keeps_free_unlimited(pages, tries):
     app = live_app("free")
     page = pages("smart_actions", app)
-    tries["n"] = 2
-    page.refresh_account()
-    assert page.tries_label.text() == "2 of 5 free tries left"
     tries["n"] = 0
     page.refresh_account()
-    assert not page.state_used.isHidden()
+    assert not page.state_pro.isHidden() and page.state_used.isHidden()
 
 
 def test_guest_signs_up_and_pro_is_unlimited(pages, tries):

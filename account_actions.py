@@ -13,10 +13,10 @@ Integration notes for Wave 4
   shown: False for every guest), guest, name, email, initial, tier
   ("guest" | "free" | "pro"), badge ("GUEST" | "FREE" | "PRO"), pro, plan,
   plan_label ("Monthly" | "Annual" | "Trial" | "Admin" | "Free" | ""),
-  on_trial, trial_days_left, plan_line ("Annual · renews 4 Oct 2027",
-  "Annual · ends 4 Oct 2027", "Pro trial · 2 days left", "Free"),
-  smart_tries_left / smart_tries_total / smart_text ("4 of 5 left",
-  "Unlimited", "Sign up to try them"), is_admin, admin_tier, and buttons
+  on_trial, trial_days_left,   plan_line ("Annual · renews 4 Oct 2027",
+  "Annual · ends 4 Oct 2027", "Yearly · committed until 4 Oct 2027", "Free"),
+  smart_tries_left / smart_tries_total / smart_text ("Unlimited",
+  "Sign in to use them"), is_admin, admin_tier, and buttons
   {sign_in, sign_out, upgrade, manage, delete, admin}.
 * Buttons call the controller as they are: sign_in -> app.show_auth_gate(),
   sign_out -> app.sign_out(), upgrade -> app._pro_upsell(), manage ->
@@ -51,7 +51,10 @@ DELETE_WORD = "DELETE"
 FEEDBACK_MAX_IMAGES = 4
 FEEDBACK_MAX_IMAGE_BYTES = 6_000_000
 
-_PLAN_LABELS = {"monthly": "Monthly", "annual": "Annual", "trial": "Trial", "admin": "Admin"}
+_PLAN_LABELS = {
+    "monthly": "Monthly", "annual": "Annual", "yearly": "Yearly",
+    "lifetime": "Lifetime", "admin": "Admin",
+}
 
 # ── what a guest (and anyone else) is called and offered: ONE place ──────────
 # The sidebar card, the tray menu, Account & plan, the Settings link and the Pro
@@ -61,7 +64,7 @@ GUEST_BADGE = "Guest"                    # the tray's account line; the pill its
 SIGN_IN_UP = "Sign in / Sign up"         # the guest's one action (blue); opens the sign-in sheet
 SIGN_IN_UP_A11Y = "Sign in or sign up"   # what a screen reader says for it
 UPGRADE = "Upgrade to Pro"               # Free only (violet)
-SIGN_IN_FIRST = "Sign in first, then try Pro free for 3 days."   # the guest's line where Free sees the price
+SIGN_IN_FIRST = "Sign in first, then choose a plan."   # the guest's line where Free sees the price
 SIGN_IN_TO_UPGRADE = "Sign in to upgrade"   # a guest's button in the Pro window: sign-in comes first, then checkout
 
 
@@ -100,20 +103,24 @@ def plan_label(plan):
 
 
 def _on_trial(auth, pro):
-    if not pro or auth is None:
-        return False
-    return (getattr(auth, "plan", None) == "trial"
-            or getattr(auth, "subscription_status", None) == "trialing")
+    # Trials are gone. A stale "trialing" status must not paint a trial banner.
+    return False
 
 
 def _plan_line(auth, pro, signed_in, on_trial, days, plan):
     if not pro:
         return "Free" if signed_in else ""
-    if on_trial:
-        return f"Pro trial · {days} day{'' if days == 1 else 's'} left"
     label = plan_label(plan)
     if plan == "admin":
         return "Admin"
+    if plan == "lifetime":
+        return "Lifetime"
+    commitment = format_date(getattr(auth, "commitment_ends_at", None))
+    cancels = format_date(getattr(auth, "cancels_at", None)) if getattr(auth, "cancels_at", None) else ""
+    if plan == "yearly" and commitment:
+        if cancels or getattr(auth, "cancel_at_period_end", False):
+            return f"Yearly · ends {cancels or commitment}"
+        return f"Yearly · committed until {commitment}"
     when = format_date(getattr(auth, "period_end", None))
     if label and when:
         verb = "ends" if getattr(auth, "cancel_at_period_end", False) else "renews"
@@ -144,18 +151,10 @@ def account_view(auth, cfg=None, *, now=None, smart_remaining=None):
     days = trial_days_left(auth, now) if on_trial else 0
 
     total = entitlements.FREE_SMART_ACTION_TRIES
-    if pro:
+    if pro or (signed_in and not guest):
         left, smart_text = None, "Unlimited"
-    elif not signed_in or guest:
-        left, smart_text = None, "Sign up to try them"
     else:
-        if smart_remaining is None:
-            try:
-                smart_remaining = entitlements.smart_actions_remaining(auth, cfg)
-            except Exception:
-                smart_remaining = total
-        left = max(0, min(total, int(smart_remaining)))
-        smart_text = f"{left} of {total} left"
+        left, smart_text = None, "Sign in to use them"
 
     is_admin = entitlements.is_super_admin(auth)
     real_plan = str(plan or "").lower()
@@ -182,8 +181,10 @@ def account_view(auth, cfg=None, *, now=None, smart_remaining=None):
             "sign_in": not signed_in,
             "sign_out": signed_in,
             "upgrade": not pro and not guest,   # Free only: a guest's one action is sign_in
-            # Only a Stripe subscription has a portal (a trial is one too).
-            "manage": signed_in and pro and real_plan in ("monthly", "annual"),
+            # A Stripe subscription (monthly, the yearly commitment, or a legacy
+            # annual plan) has a portal. Lifetime is a one-time payment: receipts
+            # live there too once a customer exists, so it is included.
+            "manage": signed_in and pro and real_plan in ("monthly", "annual", "yearly", "lifetime"),
             "delete": signed_in,
             "admin": is_admin,
         },
