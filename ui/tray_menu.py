@@ -815,12 +815,9 @@ class TrayMenu(QObject):
             _call(self.app, "_on_hotkey")
 
     def record_meeting(self):
-        if self._pro():
-            # The Meetings page's start card (it switches to the live view by
-            # itself while a meeting records) - not the classic window.
-            _call(self.app, "show_main", "meetings")
-        else:
-            _call(self.app, "_pro_upsell", FEATURE_MEETING)
+        # Recording is free. The Meetings page starts it (and asks to upgrade
+        # only when the month's cloud note is already used).
+        _call(self.app, "show_main", "meetings")
 
     def live_assistant(self):
         # The card opens for everyone (Free and guests too); it asks for Pro

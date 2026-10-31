@@ -699,11 +699,11 @@ class TestSmartActionsShortcut(unittest.TestCase):
         self.assertFalse(app._smart_next)                # ... and only that start
         self.assertEqual(app.upsells, [])
 
-    def test_free_without_tries_gets_the_pro_window(self):
+    def test_free_smart_actions_start_even_after_the_old_try_count(self):
         app = self._app(pro=False)
         with mock.patch.object(main.entitlements, "smart_actions_used", lambda auth=None: 5):
             main.AppController._on_smart_hotkey(app)
-        self.assertEqual((app.presses, app.upsells, app.gates), ([], ["Smart Actions"], []))
+        self.assertEqual((app.presses, app.upsells, app.gates), ([True], [], []))
 
     def test_free_with_tries_starts(self):
         app = self._app(pro=False)

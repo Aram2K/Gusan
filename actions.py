@@ -242,9 +242,13 @@ def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_I
                     text, ACTION_SMART_AUTO, token,
                     source_lang=source_lang, target_lang=target_lang,
                     vocab_block=vocab_block,
+                    session_id=(config or {}).get("_live_session_id") or "",
+                    note_ref=(config or {}).get("_note_ref") or "",
                 )
             except action_api.ActionAPIError as e:
-                raise ActionError(str(e)) from e
+                err = ActionError(str(e))
+                err.code = getattr(e, "code", "") or ""
+                raise err from e
 
         # Cloud engine: let API errors surface clearly (missing key, bad key,
         # network). We do NOT silently fall back to rule-based - the user
@@ -298,9 +302,14 @@ def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_I
                 return action_api.run_managed_action(
                     text, mode, token, source_lang=source_lang, target_lang=target_lang,
                     vocab_block=vocab_block,
-                    image_b64=(config or {}).get("_image_png_b64"))
+                    image_b64=(config or {}).get("_image_png_b64"),
+                    session_id=(config or {}).get("_live_session_id") or "",
+                    note_ref=(config or {}).get("_note_ref") or "",
+                )
             except action_api.ActionAPIError as e:
-                raise ActionError(str(e)) from e
+                err = ActionError(str(e))
+                err.code = getattr(e, "code", "") or ""
+                raise err from e
 
     if ACTION_MODELS[model].get("kind") == "cloud":
         if not config:
@@ -421,9 +430,14 @@ def process_stream(text, mode, on_token, source_lang="auto", target_lang="en",
                 text, mode, token, on_token, source_lang=source_lang,
                 target_lang=target_lang, vocab_block=vocab_block,
                 image_b64=(config or {}).get("_image_png_b64"),
-                image_status=(config or {}).get("_image_status"))
+                image_status=(config or {}).get("_image_status"),
+                session_id=(config or {}).get("_live_session_id") or "",
+                note_ref=(config or {}).get("_note_ref") or "",
+            )
     except (local_llm.LocalLLMError, action_api.ActionAPIError) as e:
-        raise ActionError(str(e)) from e
+        err = ActionError(str(e))
+        err.code = getattr(e, "code", "") or ""
+        raise err from e
     raise ActionError(NO_ENGINE_MESSAGE)
 
 
@@ -469,7 +483,8 @@ def warm_up(model, config):
         if (config or {}).get("privacy_mode"):
             return
         if kind == "managed":
-            action_api.warm_up_managed((config or {}).get("_managed_token"))
+            action_api.warm_up_managed((config or {}).get("_managed_token"),
+                                       session_id=(config or {}).get("_live_session_id") or "")
         elif kind == "cloud" and config:
             action_api.warm_up(cloud_api_config(model, config))
     except Exception:

@@ -758,23 +758,6 @@ class MeetingReminder(QWidget):
         m = self._meeting
         if m is None or self._upselling:
             return
-        if not self._is_pro():
-            self._upselling = True
-            try:
-                self._hide_quietly()
-                _call(self.app, "_pro_upsell", FEATURE_ASSIST if with_assist else FEATURE_RECORD)
-            finally:
-                self._upselling = False
-            if self._is_pro():
-                self._finish("record")
-                self.record.emit(m, bool(with_assist))
-            elif self.still_due():
-                self.refresh_account()
-                self._update_when()
-                self._show_now()
-            else:
-                self._finish("expired")
-            return
         self._finish("record")
         self.record.emit(m, bool(with_assist))
 

@@ -576,12 +576,13 @@ class MeetingsPage(QWidget):
 
     # ── recording ──
     def record(self):
-        """Record a meeting: Pro gate -> consent notice -> session.start."""
+        """Record a meeting: consent notice -> session.start.
+
+        Recording is free. A cloud meeting note is metered (one a month) when
+        the notes engine is Gusan Cloud; the server says so, and the app asks
+        to upgrade."""
         card = self.list_view.start_card
         card.show_error("")
-        if not self.is_pro():
-            self.call("_pro_upsell", UPSELL_RECORD)
-            return False
         s = self.session()
         if s is not None and getattr(s, "phase", "") in ("recording", "paused"):
             self.show_live()
@@ -2789,13 +2790,17 @@ class MeetingRail(SettingsRail):
         if local is None:
             act = cfg.get("action_model") or ""
             local = act if act in writers else LOCAL_DEFAULT
-        if not self.page.is_pro():
+        auth = getattr(self.page.app, "auth", None)
+        signed = bool(auth is not None and getattr(auth, "is_authenticated", False))
+        if not self.page.is_pro() and not signed:
             return "local", local
         if val == MANAGED:
             return "cloud", local
         if val in writers:
             return "local", val
-        return "cloud", local           # Pro default: Gusan Cloud (meeting_session.default_engine_id)
+        if self.page.is_pro():
+            return "cloud", local           # Pro default: Gusan Cloud (meeting_session.default_engine_id)
+        return "local", local
 
     def sync_notes_by(self):
         choice, local = self.notes_choice()
@@ -2859,7 +2864,9 @@ class MeetingRail(SettingsRail):
             self.page.set_setting("meeting_language", code)
 
     def _pick_cloud(self):
-        if not self.page.is_pro():
+        auth = getattr(self.page.app, "auth", None)
+        signed = bool(auth is not None and getattr(auth, "is_authenticated", False))
+        if not self.page.is_pro() and not signed:
             self.page.call("_pro_upsell", UPSELL_RECORD)
             self.sync_notes_by()
             return

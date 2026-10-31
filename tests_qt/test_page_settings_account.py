@@ -860,8 +860,8 @@ def test_free_account(env, monkeypatch):
     assert acct.plan_name.text() == "Free"
     assert [r.accessibleName() for r in acct.feature_rows] == [
         "Meetings with AI notes", "Live Assistant", "Unlimited Smart Actions", "Gusan Cloud"]
-    assert acct.usage_text.text() == "4 of 5 left"
-    assert acct.tries_bar.accessibleName() == "4 of 5 Smart Action tries left"
+    assert acct.usage_text.text() == "Unlimited"
+    assert acct.tries_bar is None
     assert "manage" not in acct.buttons
     acct.buttons["upgrade"].click()
     assert ("_pro_upsell", None) in app.calls
@@ -883,13 +883,13 @@ def test_pro_account(env):
     assert ("open_billing",) in app.calls
 
 
-def test_pro_trial_account_has_no_empty_footer(env):
+def test_a_stale_trial_has_no_empty_footer(env):
     from ui.components import Divider
     win, app = env.build("pro")
     app.auth.plan = "trial"
     app.auth.subscription_status = "trialing"
     acct = win.open("account")
-    assert acct.plan_sub.text().startswith("Pro trial")
+    assert acct.plan_sub.text() == "Pro"                            # trials are no longer shown
     assert "manage" not in acct.buttons and "upgrade" not in acct.buttons
     assert len(acct.plan_card.findChildren(Divider)) == 1           # only the one under the plan name
 

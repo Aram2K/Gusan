@@ -164,10 +164,6 @@ class MeetingDetailDialog(QDialog):
     def _resume(self):
         if not self.app:
             return
-        if hasattr(self.app, "is_pro") and not self.app.is_pro():
-            if hasattr(self.app, "_pro_upsell"):
-                self.app._pro_upsell("Meeting recording")
-            return
         mw = getattr(self.app, "meetings_win", None)
         if mw is None:
             return

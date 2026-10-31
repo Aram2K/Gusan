@@ -507,8 +507,8 @@ def test_a_calendar_reminder_is_the_toast(ctl, monkeypatch):
         assert ctl._calendar_busy() is True                      # one toast at a time
         ctl._on_calendar_remind(dict(m, id="ev2"))
         assert ctl._reminder is toast                            # reused
-        assert ctl.record_from_calendar(m) is False              # a guest: the Pro window
-        assert upsells == ["Meeting recording"]
+        assert ctl.record_from_calendar(m) is False              # no session on this stand-in
+        assert upsells == []
         assert not toast.isVisible()
         assert ctl.meeting_session.is_busy is False
         assert ctl._calendar_busy() is False
@@ -751,13 +751,14 @@ def test_record_from_calendar_without_a_session_or_while_busy(ctl, cal_flow, mon
     assert cal_flow["main"] == [("meetings", {})] and s.calls == []         # one at a time: the live view
 
 
-def test_record_from_calendar_pro_gate_and_consent_come_first(ctl, cal_flow, monkeypatch):
+def test_record_from_calendar_asks_for_a_live_session_then_consent(ctl, cal_flow, monkeypatch):
     s = cal_flow["session"]()
     asked = []
     monkeypatch.setattr(ctl, "is_pro", lambda: False)
     monkeypatch.setattr(ctl, "_pro_upsell", lambda feature=None: asked.append(feature))
+    monkeypatch.setattr(ctl, "claim_live_session", lambda: {"ok": False, "reason": "allowance_used"})
     assert ctl.record_from_calendar(_cal_meeting(), with_assist=True) is False
-    assert asked == ["Meeting recording"] and s.calls == [] and cal_flow["tracked"] == []
+    assert asked == ["Live Assistant"] and s.calls == [] and cal_flow["tracked"] == []
     monkeypatch.setattr(ctl, "is_pro", lambda: True)
     import ui.recording_prompts as rp
     monkeypatch.setattr(rp, "ensure_recording_consent", lambda parent, app: False)    # the notice was refused

@@ -1129,11 +1129,7 @@ class Settings(QDialog):
             self.cfg_working["backend"] = "local"
 
     def _launch_smart_meeting(self):
-        # Meeting recording is Pro-only - prompt to upgrade instead of launching.
-        if not self._is_pro():
-            if self.app and hasattr(self.app, "_pro_upsell"):
-                self.app._pro_upsell("Meeting recording")
-            return
+        # Recording is free. Cloud notes are metered on the server.
         self._save_general_configs()
         if self.app:
             # Keys owned by live UI (the Live Assistance overlay writes them
@@ -2385,7 +2381,7 @@ class Settings(QDialog):
             self._smart_pro_badge.setVisible(True)
         # Guest nudge: signing up is what grants the 5 free Smart Action trials.
         self._smart_guest_hint = QLabel(
-            "Sign up free to get 5 Smart Action trials.", self.card_smart)
+            "Sign in to use Smart Actions.", self.card_smart)
         self._smart_guest_hint.setStyleSheet(
             "color: #7c3aed; font-size: 12px; font-weight: 600; background: transparent;")
         self._smart_guest_hint.setVisible(False)
@@ -4104,7 +4100,7 @@ class Settings(QDialog):
         self._acct_perks = QLabel(
             "<div style='font-size:11px; line-height:150%;'>"
             "<b>Gusan Pro</b> includes:<br>"
-            "<span style='color:#a855f7;font-weight:800'>&#10003;</span>&nbsp; <b>Unlimited Smart Actions</b> (fair use) - rewrite, translate, summarize and draft emails by voice<br>"
+            "<span style='color:#a855f7;font-weight:800'>&#10003;</span>&nbsp; <b>Unlimited Smart Actions</b> - rewrite, translate, summarize and draft emails by voice<br>"
             "<span style='color:#a855f7;font-weight:800'>&#10003;</span>&nbsp; <b>Smart meeting recording</b> with AI-generated notes and summaries<br>"
             "<span style='color:#a855f7;font-weight:800'>&#10003;</span>&nbsp; <b>Fast cloud transcription</b> - no setup, no API key, no timeouts<br>"
             "<span style='color:#a855f7;font-weight:800'>&#10003;</span>&nbsp; <b>Priority access</b> to new models, plus direct support"

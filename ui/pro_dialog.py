@@ -1,13 +1,12 @@
 # Interactive "Go Pro" upgrade dialog - benefits + plan picker + checkout.
 
-import webbrowser
-
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame
 )
 
 import account_actions
+import pricing_policy
 
 
 class ProDialog(QDialog):
@@ -19,7 +18,7 @@ class ProDialog(QDialog):
         # opens over it (never behind it).
         super().__init__(parent)
         self.app = main_app
-        self._plan = "annual"  # default to the best-value plan
+        self._plan = "yearly"  # default to the committed yearly price
         self.setWindowTitle("Gusan Pro")
         self.setMinimumWidth(440)
         self.setSizeGripEnabled(True)
@@ -48,7 +47,7 @@ class ProDialog(QDialog):
         root.addWidget(title)
 
         if feature:
-            sub = QLabel(f"{feature} is a Pro feature.", self)
+            sub = QLabel(self._feature_line(feature), self)
             sub.setAlignment(Qt.AlignCenter)
             sub.setObjectName("subtitleLabel")
             sub.setWordWrap(True)
@@ -86,16 +85,23 @@ class ProDialog(QDialog):
         root.addWidget(card)
 
         # ── Plan picker ──
-        plans = QHBoxLayout()
-        plans.setSpacing(10)
-        self.card_monthly = self._plan_card("Monthly", "€7.99", "/mo", None, None, "monthly")
-        self.card_annual = self._plan_card("Annual", "€59", "/yr", "€96", "Save 38%", "annual")
+        plans = QVBoxLayout()
+        plans.setSpacing(8)
+        self.card_monthly = self._plan_card("Monthly", "€15.99", "/mo", None, "Cancel anytime", "monthly")
+        self.card_yearly = self._plan_card(
+            "Yearly", "€9.99", "/mo", "€15.99", "12-month commitment", "yearly",
+            legal=pricing_policy.YEARLY_NOTE)
+        self.card_lifetime = self._plan_card(
+            "Lifetime", "€199", " once", None, "First 200 people", "lifetime",
+            legal=pricing_policy.LIFETIME_NOTE)
         plans.addWidget(self.card_monthly)
-        plans.addWidget(self.card_annual)
+        plans.addWidget(self.card_yearly)
+        plans.addWidget(self.card_lifetime)
         root.addLayout(plans)
+        self.spots_label = self.card_lifetime.findChild(QLabel, "planBadge")
 
         # ── CTA ──
-        self.btn_go = QPushButton("Start 3-day free trial", self)
+        self.btn_go = QPushButton(pricing_policy.CHECKOUT_BUTTON, self)
         self.btn_go.setObjectName("primaryButton")
         self.btn_go.setMinimumHeight(46)
         self.btn_go.clicked.connect(self._go)
@@ -113,10 +119,44 @@ class ProDialog(QDialog):
         later.clicked.connect(self.reject)
         root.addWidget(later, alignment=Qt.AlignCenter)
 
-        self._select_plan("annual")
+        self._select_plan("yearly")
         self._refresh_note()
+        self._ask_spots()
 
-    def _plan_card(self, name, price, per, original, badge, plan_id):
+    def _feature_line(self, feature):
+        if feature == "Meeting notes":
+            return "You've used this month's free cloud meeting note."
+        if feature == "Live Assistant session":
+            return "You've used this month's free Live Assistant session."
+        return f"{feature} is a Pro feature."
+
+    def _ask_spots(self):
+        fn = getattr(self.app, "lifetime_spots_left", None) if self.app else None
+        if not callable(fn):
+            return
+        from PySide6.QtCore import QThread, Signal
+
+        class _Fetch(QThread):
+            got = Signal(object)
+
+            def run(self):
+                try:
+                    self.got.emit(fn())
+                except Exception:
+                    self.got.emit(None)
+
+        self._spots_thread = _Fetch(self)
+        self._spots_thread.got.connect(self._show_spots)
+        self._spots_thread.start()
+
+    def _show_spots(self, n):
+        if not isinstance(n, int):
+            return
+        badge = getattr(self, "spots_label", None)
+        if badge is not None:
+            badge.setText(f"{n} of 200 left" if n else "Sold out")
+
+    def _plan_card(self, name, price, per, original, badge, plan_id, legal=None):
         card = QFrame(self)
         card.setObjectName("cardFrame")
         card.setCursor(Qt.PointingHandCursor)
@@ -142,7 +182,7 @@ class ProDialog(QDialog):
         p.setStyleSheet("font-size: 30px; font-weight: 800; color: #0f172a;")
         # Never let the layout squeeze the price below its glyph height
         # (30px font needs ~42px with ascenders/descenders) - that's what
-        # was cutting the bottom off "€7.99".
+        # was cutting the bottom off the price.
         p.setMinimumHeight(42)
         prow.addWidget(p)
         u = QLabel(per, card)
@@ -154,18 +194,25 @@ class ProDialog(QDialog):
         # Bottom slot, aligned across both cards: a "Save" pill or a plain note.
         if badge:
             b = QLabel(badge, card)
-            b.setObjectName("proBadge")
+            b.setObjectName("planBadge" if plan_id == "lifetime" else "proBadge")
         else:
             b = QLabel("billed monthly", card)
             b.setObjectName("subtitleLabel")
         v.addWidget(b, 0, Qt.AlignLeft)
+        if legal:
+            # Next to this plan: the same commitment / withdrawal wording Checkout shows.
+            leg = QLabel(legal, card)
+            leg.setWordWrap(True)
+            leg.setObjectName("subtitleLabel")
+            v.addWidget(leg)
 
         card.mousePressEvent = lambda _e, pid=plan_id: self._select_plan(pid)
         return card
 
     def _select_plan(self, plan_id):
         self._plan = plan_id
-        for card, pid in ((self.card_monthly, "monthly"), (self.card_annual, "annual")):
+        for card, pid in ((self.card_monthly, "monthly"), (self.card_yearly, "yearly"),
+                          (self.card_lifetime, "lifetime")):
             selected = (pid == plan_id)
             card.setStyleSheet(
                 "QFrame#cardFrame { border: 2px solid %s; border-radius: 12px; background: %s; }"
@@ -174,6 +221,8 @@ class ProDialog(QDialog):
                     "#faf5ff" if selected else "rgba(255, 255, 255, 200)",
                 )
             )
+        if getattr(self, "note", None) is not None:
+            self._refresh_note()
 
     def _is_guest(self):
         """Not signed in - or a super admin previewing Guest (signed in underneath):
@@ -188,18 +237,23 @@ class ProDialog(QDialog):
 
     def _refresh_note(self):
         if self._is_guest():
-            # Honest first step: sign in (or sign up), then the trial. A blue button - the app's
-            # sign-in colour - because that is what it does now; the purple one starts the trial.
+            # Sign in first: a subscription has to belong to an account. The purple
+            # button is checkout, so this one stays the app's sign-in colour.
             self.btn_go.setText(account_actions.SIGN_IN_TO_UPGRADE)
             self.btn_go.setStyleSheet("font-size: 15px; font-weight: 700;")
             self.note.setText(account_actions.SIGN_IN_FIRST)
         else:
-            self.btn_go.setText("Start 3-day free trial")
+            self.btn_go.setText(pricing_policy.CHECKOUT_BUTTON)
             self.btn_go.setStyleSheet(
                 "font-size: 15px; font-weight: 700;"
                 "background-color: #a855f7; border-color: #9333ea;"
             )
-            self.note.setText("3 days free, then your plan. Cancel anytime before it ends - no charge. Secure checkout by Stripe.")
+            notes = {
+                "monthly": pricing_policy.MONTHLY_NOTE,
+                "yearly": pricing_policy.YEARLY_NOTE,
+                "lifetime": pricing_policy.LIFETIME_NOTE,
+            }
+            self.note.setText(notes.get(self._plan, pricing_policy.MONTHLY_NOTE))
 
     def _go(self):
         if not self.app:
@@ -210,16 +264,6 @@ class ProDialog(QDialog):
             if hasattr(self.app, "show_auth_gate"):
                 self.app.show_auth_gate()
             return
-        import main as m
-        url = m.PRO_ANNUAL_URL if self._plan == "annual" else m.PRO_MONTHLY_URL
-        if hasattr(self.app, "_checkout_url"):
-            url = self.app._checkout_url(url)
-        webbrowser.open(url)
-        try:
-            import telemetry
-            telemetry.track("checkout_opened", {"plan": self._plan}, self.app.cfg, m.APP_VERSION)
-        except Exception:
-            pass
-        if hasattr(self.app, "watch_for_upgrade"):
-            self.app.watch_for_upgrade()  # unlock Pro as soon as Stripe confirms
+        if hasattr(self.app, "open_checkout"):
+            self.app.open_checkout(self._plan)
         self.accept()

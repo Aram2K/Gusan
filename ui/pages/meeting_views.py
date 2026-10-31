@@ -1971,9 +1971,6 @@ class NotesView(QWidget):
     def continue_recording(self):
         if not self.folder:
             return
-        if not self.page.is_pro():
-            self.page.call("_pro_upsell", UPSELL_RECORD)
-            return
         if not self.page.ensure_consent():
             return
         s = self.page.session(create=True)

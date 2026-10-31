@@ -2045,6 +2045,22 @@ class MeetingCore:
             # (which used to strand the whole recording).
             engine, engine_config = self.app._resolve_action_engine(
                 action_model=self._effective_notes_engine())
+            # Signed-in Free can spend their one cloud meeting note. The server
+            # counts it (note_ref is this meeting, so a retry does not take another).
+            if engine == actions.API_MANAGED_ID and not (engine_config or {}).get("_managed_token"):
+                token = None
+                auth = getattr(self.app, "auth", None)
+                if auth is not None and getattr(auth, "is_authenticated", False):
+                    try:
+                        token = auth.get_access_token()
+                    except Exception:
+                        token = None
+                if token:
+                    engine_config = dict(engine_config or {})
+                    engine_config["_managed_token"] = token
+            if engine == actions.API_MANAGED_ID and engine_config is not None:
+                engine_config = dict(engine_config)
+                engine_config["_note_ref"] = str(getattr(self, "_meeting_dir", "") or "")
             info = actions.ACTION_MODELS.get(engine, {})
             kind = info.get("kind")
             # Key check is PROVIDER-aware: a Google key only counts for the
@@ -2066,17 +2082,40 @@ class MeetingCore:
             # header (and its agenda bullets) goes only to an AI engine.
             note_context = self._notes_input(with_invite=used != actions.RULE_BASED_ID)
             self._emit_status("Writing notes…")
-            notes = actions.process(
-                note_context,
-                actions.ACTION_MEETING_NOTES,
-                source_lang=self._final_lang or "auto",
-                target_lang="en",
-                model=engine,
-                config=engine_config,
-            )
+            self._allowance_used = False
+            try:
+                notes = actions.process(
+                    note_context,
+                    actions.ACTION_MEETING_NOTES,
+                    source_lang=self._final_lang or "auto",
+                    target_lang="en",
+                    model=engine,
+                    config=engine_config,
+                )
+            except actions.ActionError as e:
+                if getattr(e, "code", "") != "allowance_used":
+                    raise
+                # The month's cloud note is spent. Say so, and still write notes
+                # with the built-in formatter so the recording isn't left blank.
+                self._allowance_used = True
+                downgraded_from = downgraded_from or "Gusan Cloud"
+                notes = actions.process(
+                    self._notes_input(with_invite=False),
+                    actions.ACTION_MEETING_NOTES,
+                    source_lang=self._final_lang or "auto",
+                    target_lang="en",
+                    model=actions.RULE_BASED_ID,
+                    config=engine_config,
+                )
+                used = actions.RULE_BASED_ID
             self._summary_downgraded = bool(downgraded_from)
             self._notes_notice = ""
-            if downgraded_from:
+            if getattr(self, "_allowance_used", False):
+                self._notes_notice = ("You've used this month's free cloud meeting note. "
+                                      "These notes come from the built-in formatter. "
+                                      "Gusan Pro includes unlimited cloud notes.")
+                downgraded_from = ""
+            elif downgraded_from:
                 reason = ("sign in with a Pro account to use it" if kind == "managed"
                           else "add its API key to use it")
                 # Shown above the notes and kept in meta - never written into
@@ -2220,6 +2259,14 @@ class MeetingCore:
 
         telemetry.track("meeting_notes_completed", {"minutes": self._meeting_minutes},
                         self._cfg(), APP_VERSION)
+        if getattr(self, "_allowance_used", False) and self.app is not None:
+            self._allowance_used = False
+            upsell = getattr(self.app, "_pro_upsell", None)
+            if callable(upsell):
+                try:
+                    upsell("Meeting notes")
+                except Exception:
+                    logger.debug("upgrade prompt failed", exc_info=True)
         self._emit_state()
         self.finished.emit(folder, notes, "")
         self._queue_speaker_pass()              # notes first, the people on the call after

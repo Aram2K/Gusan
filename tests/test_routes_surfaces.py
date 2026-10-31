@@ -335,8 +335,8 @@ class TestProWindow(unittest.TestCase):
         self.assertIn("Sign in first", text)
         self.assertNotIn("Upgrade", text)                      # no price buttons, no upgrade wording
         text, keys, labels = self._fallback(guest=False)
-        self.assertEqual(keys, ["monthly", "annual", "cancel"])
-        self.assertIn("Upgrade to unlock", text)
+        self.assertEqual(keys, ["monthly", "yearly", "lifetime", "cancel"])
+        self.assertIn("Gusan Pro", text)
 
     def test_it_opens_over_the_window_while_the_window_is_up(self):
         win = SimpleNamespace(isVisible=lambda: True, isMinimized=lambda: False)
@@ -534,14 +534,10 @@ class TestCalendarReminder(unittest.TestCase):
         self.assertIs(app.recorder.fast_live_chunks, False)
         app._ensure_live_assist.assert_not_called()
 
-    def test_free_users_get_the_pro_window_and_nothing_records(self):
+    def test_free_users_can_record(self):
         app = calendar_app(pro=False)
-        self.assertFalse(app.record_from_calendar(MEETING))
-        self.assertEqual(app.upsells, ["Meeting recording"])
-        self.assertEqual(app.started, [])
-        # Upgraded right there: it records.
-        app._pro_upsell = lambda feature=None: app.plan.update(pro=True)
         self.assertTrue(app.record_from_calendar(MEETING))
+        self.assertEqual(app.upsells, [])
         self.assertEqual(len(app.started), 1)
 
     def test_no_consent_or_busy_or_refused(self):
@@ -627,7 +623,7 @@ class TestCopy(unittest.TestCase):
     def test_no_per_use_smart_action_notice(self):
         src = open(os.path.join(ROOT, "main.py"), encoding="utf-8").read()
         self.assertNotIn("free Smart Action(s) left", src)
-        self.assertIn("entitlements.add_smart_action_use(self.auth)", src)   # still counted
+        self.assertNotIn("entitlements.add_smart_action_use(self.auth)", src)
 
     def test_hotkey_capture_is_exported(self):
         src = open(os.path.join(ROOT, "ui", "components", "__init__.py"), encoding="utf-8").read()
