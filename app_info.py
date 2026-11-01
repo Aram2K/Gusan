@@ -5,9 +5,10 @@ without loading main.py (which builds the whole controller).
 
 The product is called Gusan. Everything that existing installs depend on
 keeps the old technical names and does NOT come from here: the data folder
-"Transcribe" and keyring service "TranscribeApp" (storage.py), the
-TranscribeApp.exe / TranscribeApp-Windows-Setup.exe file names, the
-single-instance port and its b"transcribe-ok" handshake (main.py).
+"Transcribe" and keyring service "TranscribeApp" (storage.py), the installed
+TranscribeApp.exe, the installer AppId, and the single-instance port and its
+b"transcribe-ok" handshake (main.py). Downloads are also published under
+Gusan-* names; the TranscribeApp-* download names stay as identical copies.
 """
 
 import sys

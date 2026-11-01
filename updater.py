@@ -3,10 +3,12 @@ controller and Settings › Updates & about.
 
 Kept exactly, because every 1.9.x install updates through them: RELEASES_API
 (latest release), tags "vX.Y.Z", and the asset TranscribeApp-Windows-Setup.exe
-(+ its .sha256, which build.yml publishes next to it). The GitHub repo was
-renamed from Aram2K/transcribe-app to Aram2K/Gusan: older installs still ask the
-old address, which GitHub redirects, so a repo named transcribe-app must never
-be created again.
+(+ its .sha256, which build.yml publishes next to it). From 2.1.1 the same
+bytes are also published as Gusan-Windows-Setup.exe; this build downloads that
+name, and still accepts the old one when a release has only that. The GitHub
+repo was renamed from Aram2K/transcribe-app to Aram2K/Gusan: older installs
+still ask the old address, which GitHub redirects, so a repo named
+transcribe-app must never be created again.
 
 Integration notes for Wave 4
 ----------------------------
@@ -106,7 +108,10 @@ PROJECT_GITHUB_URL = "https://github.com/Aram2K/Gusan"
 RELEASES_URL = "https://github.com/Aram2K/Gusan/releases/latest"
 RELEASES_API = "https://api.github.com/repos/Aram2K/Gusan/releases/latest"
 RELEASES_MANIFEST_URL = "https://github.com/Aram2K/Gusan/releases/latest/download/update-manifest.json"
-INSTALLER_NAME = "TranscribeApp-Windows-Setup.exe"      # never rename: 1.9.x downloads this
+# What this build downloads. The legacy name stays on the release, byte for
+# byte the same file, because 1.9 through 2.1.0 ask for it by name.
+INSTALLER_NAME = "Gusan-Windows-Setup.exe"
+LEGACY_INSTALLER_NAME = "TranscribeApp-Windows-Setup.exe"
 APP_ID = "{8E3B7C8A-9D54-4F61-9F6C-2E8C7F0A1B23}"       # installer.iss AppId (never changes)
 
 AVAILABLE, LATEST, ERROR, DISMISSED = "available", "latest", "error", "dismissed"
@@ -144,7 +149,12 @@ INSTALL_ARGS = ("/SILENT", "/SP-", "/SUPPRESSMSGBOXES", "/NOCANCEL", "/NORESTART
                 "/NORESTARTAPPLICATIONS", '/MERGETASKS="!startup"')
 # How long the watcher waits for Setup before it reopens Gusan anyway - it never stays gone.
 RELAUNCH_TIMEOUT_MIN = 20
-SETUP_PROCESS_PATTERN = "TranscribeApp-Windows-Setup*"      # Setup (and its Inno copy) as Task Manager names them
+# Setup's process name is the download's file name (and the .tmp Inno unpacks).
+# This build launches Gusan-Windows-Setup.exe. An older copy, or the legacy
+# file on the same release, is still TranscribeApp-Windows-Setup.exe. Neither
+# pattern matches TranscribeApp.exe, the installed app.
+SETUP_PROCESS_PATTERNS = ("Gusan-Windows-Setup*", "TranscribeApp-Windows-Setup*")
+SETUP_PROCESS_PATTERN = ",".join(SETUP_PROCESS_PATTERNS)
 
 # "v2.0.1", "2.0", "v2.0.0-beta.1": digits, then an optional suffix of words split by single dots or
 # dashes (never ".." and never a line break: `$` alone lets "v2.0.1\n" through, so valid_tag uses fullmatch).
@@ -278,6 +288,44 @@ def asset_url(data, wanted_name):
     return None
 
 
+def manifest_installer(manifest):
+    """The Windows installer this build should download.
+
+    2.1.1 manifests put the Gusan-named file under windows.gusan.installer and
+    leave windows.installer as TranscribeApp-Windows-Setup.exe, which is what
+    already-shipped updaters read. A manifest without the Gusan block (every
+    release before 2.1.1) falls back to windows.installer."""
+    windows = manifest.get("windows") if isinstance(manifest, dict) else None
+    if not isinstance(windows, dict):
+        return {}
+    gusan = windows.get("gusan")
+    if isinstance(gusan, dict):
+        branded = gusan.get("installer")
+        if isinstance(branded, dict) and branded.get("url"):
+            return branded
+    installer = windows.get("installer") or {}
+    return installer if isinstance(installer, dict) else {}
+
+
+def pick_release_installer(data):
+    """(url, asset name) from a GitHub release. Gusan-Windows-Setup.exe first,
+    then the legacy TranscribeApp name, then any other *-Setup.exe."""
+    assets = data.get("assets") if isinstance(data, dict) else None
+    if not isinstance(assets, list):
+        assets = []
+    payload = {"assets": assets}
+    for name in (INSTALLER_NAME, LEGACY_INSTALLER_NAME):
+        url = asset_url(payload, name)
+        if url:
+            return url, name.lower()
+    for asset in assets:
+        name = str(asset.get("name") or "")
+        lower = name.lower()
+        if "setup" in lower and lower.endswith(".exe"):
+            return asset.get("browser_download_url"), lower
+    return None, ""
+
+
 def update_info_from_manifest(manifest, current=APP_VERSION, dismissed=""):
     tag = manifest.get("tag") or f"v{manifest.get('version', '')}"
     version = manifest.get("version") or tag
@@ -285,7 +333,7 @@ def update_info_from_manifest(manifest, current=APP_VERSION, dismissed=""):
         return None
     if dismissed and dismissed == tag:
         return None
-    installer = manifest.get("windows", {}).get("installer", {})
+    installer = manifest_installer(manifest)
     return {
         "tag": tag,
         "installer_url": installer.get("url"),
@@ -303,19 +351,7 @@ def update_info_from_release(data, current=APP_VERSION, dismissed=""):
         return None
     if dismissed and dismissed == latest:
         return None
-    installer_url = None
-    installer_name = ""
-    preferred = asset_url(data, INSTALLER_NAME)
-    if preferred:
-        installer_url = preferred
-        installer_name = INSTALLER_NAME.lower()
-    else:
-        for asset in data.get("assets", []):
-            name = asset.get("name", "").lower()
-            if "setup" in name and name.endswith(".exe"):
-                installer_url = asset.get("browser_download_url")
-                installer_name = name
-                break
+    installer_url, installer_name = pick_release_installer(data)
     checksum_url = None
     if installer_name:
         checksum_url = (asset_url(data, f"{installer_name}.sha256")
@@ -493,7 +529,7 @@ def _progress(on_progress, done, total):
 
 
 # ── "Install updates when I quit": one download per release, kept ────────────
-CACHE_DIR_NAME = "gusan-update"         # %TEMP%\gusan-update\<tag>\TranscribeApp-Windows-Setup.exe
+CACHE_DIR_NAME = "gusan-update"         # %TEMP%\gusan-update\<tag>\<INSTALLER_NAME>
 LOGS_DIR_NAME = "logs"                  # %TEMP%\gusan-update\logs\<attempt>.log (new_log_path)
 
 # The installers THIS run has checked against their published sha256: normalised path -> sha256. Kept in
@@ -884,15 +920,22 @@ def install_finished(log_path):
         return True
 
 
+def _setup_prefixes():
+    """File-name prefixes of a running Setup (the pattern without its trailing *)."""
+    return tuple(pattern.rstrip("*").lower() for pattern in SETUP_PROCESS_PATTERNS)
+
+
 def setup_running():
     """Is a Gusan Setup process alive right now? True / False, None when that can't be told (no
     psutil, no access). Setup shows up in Task Manager under the installer's name (the copy it
-    unpacks to %TEMP% too), which is also what the watcher looks for."""
+    unpacks to %TEMP% too), which is also what the watcher looks for. Both the Gusan download
+    name and the legacy TranscribeApp download name count; the installed TranscribeApp.exe does not."""
     try:
         import psutil
-        prefix = SETUP_PROCESS_PATTERN.rstrip("*").lower()
+        prefixes = _setup_prefixes()
         for proc in psutil.process_iter(["name"]):
-            if (proc.info.get("name") or "").lower().startswith(prefix):
+            name = (proc.info.get("name") or "").lower()
+            if any(name.startswith(prefix) for prefix in prefixes):
                 return True
         return False
     except Exception:
@@ -944,7 +987,7 @@ def _powershell():
 RELAUNCH_SCRIPT = (
     "$log = $env:GUSAN_RELAUNCH_LOG; "
     "$exe = $env:GUSAN_RELAUNCH_EXE; "
-    "$setup = $env:GUSAN_RELAUNCH_SETUP; "
+    "$setups = @($env:GUSAN_RELAUNCH_SETUP -split ','); "
     "$minutes = [double]$env:GUSAN_RELAUNCH_MINUTES; "
     "$oldpid = [int]$env:GUSAN_RELAUNCH_PID; "
     "$end = [DateTime]::UtcNow.AddMinutes($minutes); "
@@ -952,7 +995,7 @@ RELAUNCH_SCRIPT = (
     "do { "
     "Start-Sleep -Seconds 2; "
     "$done = $false; "
-    "if (@(Get-Process -Name $setup -ErrorAction SilentlyContinue).Count -eq 0) { $gone++ } else { $gone = 0 }; "
+    "if (@(Get-Process -Name $setups -ErrorAction SilentlyContinue).Count -eq 0) { $gone++ } else { $gone = 0 }; "
     "if ($gone -ge 3) { $done = $true }; "
     "if ((Test-Path -LiteralPath $log) -and "
     "(Select-String -LiteralPath $log -SimpleMatch 'Log closed.' -Quiet -ErrorAction SilentlyContinue)) { $done = $true } "

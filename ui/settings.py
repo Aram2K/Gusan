@@ -4866,11 +4866,12 @@ class Settings(QDialog):
                         
                         try:
                             # Construct the setup url
-                            setup_url = f"{PROJECT_GITHUB_URL}/releases/download/{tag}/TranscribeApp-Windows-Setup.exe"
+                            import updater
+                            setup_url = updater.installer_url(tag)
                             
                             # Create a temporary directory in the workspace or standard temp
                             temp_dir = tempfile.gettempdir()
-                            dest_path = os.path.join(temp_dir, "TranscribeApp-Windows-Setup.exe")
+                            dest_path = os.path.join(temp_dir, updater.INSTALLER_NAME)
                             
                             # Fetch the installer
                             req = urllib.request.Request(
