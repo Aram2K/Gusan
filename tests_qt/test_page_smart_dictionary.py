@@ -327,13 +327,14 @@ def test_try_it_opens_a_practice_box(pages, tries):
     assert not other.practicing() and not other.paper.isHidden()
 
 
-def test_try_it_without_tries_opens_the_pro_window(pages, tries):
+def test_try_it_without_tries_still_opens_the_practice_box(pages, tries):
+    """Free Smart Actions are not counted. Zero on the old counter does not open Pro."""
     tries["n"] = 0
     app = live_app("free")
     page = pages("smart_actions", app)
     page.example("Email").try_button.click()
-    assert upsells(app) == [("_pro_upsell", "Smart Actions")]
-    assert not page.example("Email").practicing()
+    assert upsells(app) == []
+    assert page.example("Email").practicing()
     assert not settings(app)
 
 

@@ -1531,8 +1531,8 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
 
     # ── actions ──
     def _gate(self):
-        """Smart Actions can't run: guests sign up (an account brings the free
-        tries), Free users with none left see the Pro window."""
+        """Smart Actions can't run: a guest is asked to sign in. Signed-in
+        Free and Pro are not counted and are not sent to the Pro window."""
         if plan_state(self.app)[0] == "guest":
             self._sign_up()
         else:

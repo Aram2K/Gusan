@@ -134,27 +134,41 @@ class ProDialog(QDialog):
         fn = getattr(self.app, "lifetime_spots_left", None) if self.app else None
         if not callable(fn):
             return
-        from PySide6.QtCore import QThread, Signal
+        # A daemon thread, not a QThread parented to this window. Closing the
+        # window while the request is in flight must not destroy a running
+        # thread: Qt aborts the process ("QThread: Destroyed while thread is
+        # still running"), which is what froze the offscreen test run.
+        from PySide6.QtCore import QObject, Signal
+        import threading
 
-        class _Fetch(QThread):
+        class _Bridge(QObject):
             got = Signal(object)
 
-            def run(self):
-                try:
-                    self.got.emit(fn())
-                except Exception:
-                    self.got.emit(None)
+        bridge = _Bridge()
+        bridge.got.connect(self._show_spots)
+        self._spots_bridge = bridge
 
-        self._spots_thread = _Fetch(self)
-        self._spots_thread.got.connect(self._show_spots)
-        self._spots_thread.start()
+        def work():
+            try:
+                value = fn()
+            except Exception:
+                value = None
+            # Queued to the GUI thread. deleteLater from here is posted there too,
+            # so the bridge outlives the emit even if this window is already gone.
+            bridge.got.emit(value)
+            bridge.deleteLater()
+
+        threading.Thread(target=work, daemon=True, name="gusan-lifetime-spots").start()
 
     def _show_spots(self, n):
         if not isinstance(n, int):
             return
-        badge = getattr(self, "spots_label", None)
-        if badge is not None:
-            badge.setText(f"{n} of 200 left" if n else "Sold out")
+        try:
+            badge = getattr(self, "spots_label", None)
+            if badge is not None:
+                badge.setText(f"{n} of 200 left" if n else "Sold out")
+        except RuntimeError:
+            return  # the window was closed before the answer arrived
 
     def _plan_card(self, name, price, per, original, badge, plan_id, legal=None):
         card = QFrame(self)

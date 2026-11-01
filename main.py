@@ -7673,10 +7673,12 @@ class AppController(QObject):
 
     def record_from_calendar(self, meeting, with_assist=False):
         """Record a Google Calendar meeting (the reminder's Record / Record +
-        Live Assistant): Pro gate, the one-time consent notice, then the
-        meeting session starts with the meeting's title, people and event id
-        and the Meetings page shows it live. ``with_assist`` also opens the
-        Live Assistant card. Returns True when the recording started."""
+        Live Assistant): the one-time consent notice, then the meeting session
+        starts with the meeting's title, people and event id and the Meetings
+        page shows it live. Recording is free. Record + Live Assistant on a
+        free plan spends this month's one Live Assistant session first.
+        ``with_assist`` also opens the Live Assistant card. Returns True when
+        the recording started."""
         m = dict(meeting or {})
         toast = getattr(self, "_reminder", None)
         if toast is not None:

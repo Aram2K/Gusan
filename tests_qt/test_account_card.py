@@ -312,6 +312,29 @@ def test_the_pro_window_for_free_checks_out_without_a_trial(qapp):
     dlg.deleteLater()
 
 
+def test_closing_the_pro_window_does_not_wait_on_the_spots_fetch(qapp):
+    """The lifetime-spots request must not be a QThread owned by the window.
+
+    Destroying that thread while the request is still running aborts the
+    process, which hung the offscreen suite."""
+    import threading
+    import time
+    gate = threading.Event()
+    app = make_stub_app("free")
+
+    def spots():
+        gate.wait(5)
+        return 7
+
+    app.lifetime_spots_left = spots
+    started = time.monotonic()
+    dlg = _pro_dialog(app)
+    dlg.deleteLater()
+    QApplication.processEvents()
+    assert time.monotonic() - started < 2
+    gate.set()
+
+
 # ── the pages that name a person ──
 def test_the_example_email_sign_off_is_never_a_guests_profile(build):
     from ui.pages import live_assistant, smart_actions
