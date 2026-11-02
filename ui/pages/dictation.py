@@ -69,6 +69,7 @@ from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QCheckBox, QComboB
                                QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout, QLabel, QMenu, QPlainTextEdit,
                                QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
+import hotkeys
 from ui import privacy_prompt, theme
 from ui.components import (Button, Card, Divider, IconButton, Keycaps, PageHeader, SettingRow, SettingsRail,
                            Toggle, icons, label, mini_prompt, row_actions)
@@ -97,7 +98,7 @@ UPSELL_CLOUD = "Fast cloud transcription"
 
 # The quiet line under the practice box (D7).
 SMART_HOTKEY_KEY = "smart_actions_hotkey"
-SMART_HOTKEY_DEFAULT = "alt+s"                 # main.DEFAULT (D2)
+SMART_HOTKEY_DEFAULT = hotkeys.SMART_ACTIONS_DEFAULT                 # main.DEFAULT (D2)
 SMART_LINE = "For emails, lists and translations press"
 SMART_LINE_NO_KEY = "For emails, lists and translations, use"
 SMART_LINK = "Smart Actions"
@@ -588,7 +589,7 @@ class DictationPage(QWidget):
         lcol = QVBoxLayout()
         lcol.setContentsMargins(0, 0, 0, 0)
         lcol.setSpacing(20)
-        self.hero_keys = H.HeroKeys(H.cfg_of(self.app).get("hotkey", "alt+r"), 76, 31, card, max_width=236)
+        self.hero_keys = H.HeroKeys(H.cfg_of(self.app).get("hotkey", hotkeys.DICTATION_DEFAULT), 76, 31, card, max_width=236)
         lcol.addWidget(self.hero_keys, 0, Qt.AlignLeft)
         self.hero_caption = H.text_label("Press to talk.\nPress again to paste.", 20, 600, "ink", display=True,
                                          parent=card)
@@ -715,7 +716,7 @@ class DictationPage(QWidget):
     def _build_rail(self):
         cfg = H.cfg_of(self.app)
         rail = SettingsRail("Dictation settings", icon="gear", parent=self)
-        self.shortcut = HotkeyCaptureButton(cfg.get("hotkey", "alt+r"), accessible_name="Dictation shortcut")
+        self.shortcut = HotkeyCaptureButton(cfg.get("hotkey", hotkeys.DICTATION_DEFAULT), accessible_name="Dictation shortcut")
         self.shortcut.captured.connect(self._on_hotkey_captured)
         self.shortcut.refused.connect(self._show_shortcut_problem)
         self.shortcut.capturing_changed.connect(self._on_capturing)
@@ -823,7 +824,7 @@ class DictationPage(QWidget):
         cfg = H.cfg_of(self.app)
         self._syncing = True
         try:
-            hk = cfg.get("hotkey", "alt+r")
+            hk = cfg.get("hotkey", hotkeys.DICTATION_DEFAULT)
             self.hero_keys.set_hotkey(hk)
             if not self.shortcut.is_capturing():
                 self.shortcut.set_hotkey(hk)
@@ -1026,7 +1027,7 @@ class DictationPage(QWidget):
 
     def _on_hotkey_captured(self, combo):
         cfg = H.cfg_of(self.app)
-        old = cfg.get("hotkey", "alt+r")
+        old = cfg.get("hotkey", hotkeys.DICTATION_DEFAULT)
         ok = H.call(self.app, "set_setting", "hotkey", combo)
         if ok:
             self._show_shortcut_problem("")

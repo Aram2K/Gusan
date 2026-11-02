@@ -69,6 +69,7 @@ import diarization_proc
 import chunk_pipeline
 import recorder_tracks
 import speech_hy                 # Qt-free: the local Armenian speech model (sherpa-onnx is imported only when it loads)
+import mac_permissions           # Qt-free: Microphone / Accessibility / Input Monitoring on a Mac (no-op elsewhere)
 
 # ── Name and version ──────────────────────────────────────────────────────────
 # Defined in app_info.py (no Qt) so pages and services can read them without
@@ -125,10 +126,10 @@ ANALYTICS_CONSENT_PATH = storage.path_for("analytics_consent.accepted")
 ANALYTICS_DECLINED_PATH = storage.path_for("analytics_consent.declined")
 
 # The Smart Actions shortcut a new (or schema-2) config gets (D2).
-SMART_ACTIONS_HOTKEY_DEFAULT = "alt+s"
+SMART_ACTIONS_HOTKEY_DEFAULT = hotkeys.SMART_ACTIONS_DEFAULT
 
 DEFAULT = {
-    "hotkey":        "alt+r",
+    "hotkey":        hotkeys.DICTATION_DEFAULT,
     "whisper_model": "base",
     # Free the speech / local AI model after this many idle minutes (0 = keep
     # it loaded). Whisper reloads in ~4-9 s on CPU, so it waits longer; the
@@ -290,7 +291,7 @@ DEFAULT = {
     "meeting_language": "",               # "" = the dictation language
     "meeting_notes_model": "",            # "" = action_model (meeting_session picks a real engine)
     "meeting_consent_reminder": True,     # the consent line on the Meetings start card
-    # The Smart Actions shortcut: one take runs as a Smart Action (Option+S
+    # The Smart Actions shortcut: one take runs as a Smart Action (Control+S
     # on a Mac). "" = not set (Alt+S was another shortcut's at migration).
     "smart_actions_hotkey": SMART_ACTIONS_HOTKEY_DEFAULT,
     # What transcribes a Smart Action: "" = same as Dictation | "cloud" =
@@ -3780,6 +3781,7 @@ class AppController(QObject):
     sig_gpu_done = Signal(str, str)     # GPU download: state ("ok"/"gpu_failed"/"failed"/"cancelled"), message
     sig_gpu_wait = Signal(str, str, float)  # a local transcription made the user wait: context, model, seconds
     sig_gpu_runtime_failed = Signal(str)  # the GPU failed while transcribing (worker thread)
+    sig_mac_permissions = Signal(str)   # macOS blocked "hotkey" / "paste" (any thread) -> the permissions guide
     sig_setting_changed = Signal(str)   # set_setting changed this config key (GUI thread)
     # A dictation, meeting or transcript was saved, or history was cleared
     # (GUI thread) - Home, Dictation, Smart Actions refresh their lists on it.
@@ -4001,6 +4003,7 @@ class AppController(QObject):
         self.sig_gpu_done.connect(self._on_gpu_done, Qt.QueuedConnection)
         self.sig_gpu_wait.connect(self._on_gpu_wait, Qt.QueuedConnection)
         self.sig_gpu_runtime_failed.connect(self._on_gpu_runtime_failed, Qt.QueuedConnection)
+        self.sig_mac_permissions.connect(self._on_mac_permissions_needed, Qt.QueuedConnection)
         self.recorder.on_cuda_failed = self.sig_gpu_runtime_failed.emit
         # Every minute: free a speech / local AI model that sits unused.
         self._idle_timer = QTimer(self)
@@ -4053,8 +4056,11 @@ class AppController(QObject):
             QTimer.singleShot(500, self.show_onboarding)
 
         # macOS needs explicit permission grants (mic / Accessibility / Input
-        # Monitoring) or dictation looks silently broken. One-time guided setup.
-        if sys.platform == "darwin" and not self.cfg.get("macos_perms_guide_shown", False):
+        # Monitoring) or dictation looks silently broken. The guide on the
+        # first launch, and again at every launch while one the hotkey or
+        # pasting needs is off (an update can also make macOS forget them).
+        if sys.platform == "darwin" and (not self.cfg.get("macos_perms_guide_shown", False)
+                                         or self._mac_permissions_need_attention()):
             QTimer.singleShot(1200, self.show_macos_permissions_guide)
 
         # If a previous session already detected an update, say so at startup
@@ -5741,64 +5747,193 @@ class AppController(QObject):
             self.cfg["rename_note_pending"] = False
             self.schedule_config_save()
 
+    def _mac_permissions_need_attention(self):
+        """macOS: True while the hotkey or pasting can't work (Accessibility /
+        Input Monitoring off) or the microphone was refused. Never elsewhere."""
+        if sys.platform != "darwin":
+            return False
+        st = mac_permissions.status()
+        return mac_permissions.hotkeys_blocked(st) or st.get(mac_permissions.MICROPHONE) is False
+
+    def _on_mac_permissions_needed(self, reason):
+        """sig_mac_permissions (GUI thread): the hotkey or a paste was blocked
+        by macOS. The guide, unless the user closed it this session - then one
+        notification that opens it."""
+        if reason == "paste":
+            msg = (f"Your text is on the clipboard: press {hotkeys.display('cmd+v')} to paste it. "
+                   f"Click here to let {APP_NAME} paste for you.")
+            title = f"{APP_NAME} couldn't paste"
+        else:
+            msg = (f"macOS is blocking {self._hotkey_text()}. "
+                   "Click here to turn on the two switches it needs.")
+            title = f"{APP_NAME} can't hear your shortcut"
+        if getattr(self, "_perm_guide_dismissed", False):
+            self.show_tray_hint(title, msg, on_click=self.show_macos_permissions_guide)
+            return
+        if reason == "paste":
+            self.show_tray_hint(title, msg, on_click=self.show_macos_permissions_guide)
+        self.show_macos_permissions_guide()
+
+    def _hotkey_text(self):
+        """The dictation shortcut as the guide writes it ("⌃ R")."""
+        return hotkeys.display(self.cfg.get("hotkey", "")) or "your shortcut"
+
+    def restart_for_permissions(self):
+        """Quit and reopen the installed app (macOS applies a new Input
+        Monitoring grant only to a fresh launch). False when it can't (run
+        from source): the guide then says to reopen it by hand."""
+        if not mac_permissions.relaunch_after_exit():
+            return False
+        self.quit_app()
+        return True
+
     def show_macos_permissions_guide(self):
-        """macOS only: a one-time walkthrough of the three permissions the app
-        needs (Microphone for dictation, Accessibility for auto-paste, Input
-        Monitoring for the global hotkey), with buttons that deep-link straight
-        into the right System Settings pane. Without these grants the app looks
-        silently broken on a Mac."""
+        """macOS only: the three permissions the app needs (Microphone for
+        dictation, Accessibility to paste, Input Monitoring for the global
+        hotkey), each with its live state and one button. The button asks macOS
+        for it, which puts Gusan in the System Settings list, and opens that
+        pane: the user only flips the switch. The states refresh every second,
+        so coming back from System Settings shows the result; the hotkeys are
+        registered again the moment they can work. Shown on the first launch,
+        at every launch while something is off, when macOS blocks the hotkey
+        or a paste, and from Settings › General. One window at a time."""
         if sys.platform != "darwin":
             return
+        open_one = getattr(self, "_perm_guide", None)
+        if open_one is not None:
+            try:
+                open_one.show(); open_one.raise_(); open_one.activateWindow()
+                return
+            except RuntimeError:
+                self._perm_guide = None              # deleted underneath
         from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
                                        QLabel, QPushButton)
-        import subprocess
+
+        P = mac_permissions
+        rows_spec = (
+            (P.MICROPHONE, "Microphone", "Hear your voice when you dictate or record a meeting."),
+            (P.ACCESSIBILITY, "Accessibility", "Paste your words where your cursor is, and use the shortcut."),
+            (P.INPUT_MONITORING, "Input Monitoring", f"Hear {self._hotkey_text()} from any app."),
+        )
+        from_source = P.app_bundle() is None
+        who = APP_NAME if not from_source else "the app you started Gusan from (Terminal, say)"
 
         dlg = QDialog()
-        dlg.setWindowTitle("Set up macOS permissions")
+        dlg.setWindowTitle(f"Let {APP_NAME} work on your Mac")
+        dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+        dlg.setMinimumWidth(460)
         if hasattr(self, "style_content"):
             dlg.setStyleSheet(self.style_content)
         lay = QVBoxLayout(dlg)
         lay.setContentsMargins(24, 20, 24, 20)
-        lay.setSpacing(10)
-        title = QLabel("Three quick permissions", dlg)
+        lay.setSpacing(12)
+        title = QLabel(f"Let {APP_NAME} work on your Mac", dlg)
         title.setStyleSheet("font-size: 17px; font-weight: 700; color: #0f172a;")
         lay.addWidget(title)
         sub = QLabel(
-            "macOS requires your explicit approval for each of these. "
-            "Grant them once and dictation just works.", dlg)
+            f"macOS asks you to switch these on once. Click <b>Turn on</b>: System Settings opens "
+            f"with {who} already in the list. Flip its switch, then come back here.", dlg)
         sub.setWordWrap(True)
         sub.setStyleSheet("color: #475569;")
         lay.addWidget(sub)
 
-        perms = (
-            ("Microphone", "Hear your voice for dictation.",
-             "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"),
-            ("Accessibility", "Paste the finished text into the app you're using.",
-             "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"),
-            ("Input Monitoring", "Detect the global dictation hotkey.",
-             "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"),
-        )
-        for name, why, url in perms:
+        chips, buttons = {}, {}
+        for key, name, why in rows_spec:
             row = QHBoxLayout()
             row.setSpacing(10)
             txt = QLabel(f"<b>{name}</b><br><span style='color:#64748b'>{why}</span>", dlg)
             txt.setWordWrap(True)
             row.addWidget(txt, 1)
-            btn = QPushButton("Open Settings", dlg)
+            chip = QLabel(dlg)
+            row.addWidget(chip, 0, Qt.AlignVCenter)
+            btn = QPushButton("Turn on", dlg)
             btn.setObjectName("secondaryButton")
-            btn.clicked.connect(lambda _=False, u=url: subprocess.Popen(["open", u]))
-            row.addWidget(btn, 0)
+            btn.clicked.connect(lambda _=False, k=key: P.request(k))
+            row.addWidget(btn, 0, Qt.AlignVCenter)
+            chips[key], buttons[key] = chip, btn
             lay.addLayout(row)
 
-        done = QPushButton("Done - I've granted them", dlg)
-        done.setObjectName("primaryButton")
+        note = QLabel(dlg)
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        foot = QHBoxLayout()
+        foot.addStretch(1)
+        restart = QPushButton(f"Restart {APP_NAME}", dlg)
+        restart.setObjectName("primaryButton")
+        restart.setMinimumHeight(38)
+        restart.clicked.connect(lambda: (dlg.close(), self.restart_for_permissions()))
+        done = QPushButton("Later", dlg)
+        done.setObjectName("secondaryButton")
         done.setMinimumHeight(38)
-        done.clicked.connect(dlg.accept)
-        lay.addWidget(done)
+        done.clicked.connect(dlg.close)
+        foot.addWidget(done)
+        foot.addWidget(restart)
+        lay.addLayout(foot)
 
-        dlg.exec()
-        self.cfg["macos_perms_guide_shown"] = True
-        self.save_config()
+        CHIP = "padding: 2px 8px; border-radius: 9px; font-size: 12px; font-weight: 600; "
+        state = {"last": None, "needs_restart": False}
+
+        def refresh():
+            st = P.status()
+            for key, _n, _w in rows_spec:
+                on = st.get(key)
+                if on is True:
+                    chips[key].setText("✓ On")
+                    chips[key].setStyleSheet(CHIP + "color: #15803d; background: #dcfce7;")
+                elif on is False:
+                    chips[key].setText("Off")
+                    chips[key].setStyleSheet(CHIP + "color: #b91c1c; background: #fee2e2;")
+                else:
+                    chips[key].setText("Not on yet")
+                    chips[key].setStyleSheet(CHIP + "color: #475569; background: #f1f5f9;")
+                buttons[key].setVisible(on is not True)
+            last = state["last"]
+            if last is not None:
+                newly = [k for k in P.ALL if st.get(k) is True and last.get(k) is not True]
+                if P.ACCESSIBILITY in newly or P.INPUT_MONITORING in newly:
+                    self.apply_tray_bindings()       # the listener started deaf: start it again
+                if P.INPUT_MONITORING in newly:
+                    state["needs_restart"] = True    # macOS applies it to a fresh launch only
+            state["last"] = st
+            blocked = P.hotkeys_blocked(st)
+            if state["needs_restart"] and not blocked:
+                if from_source:
+                    note.setText(f"Almost done: quit {APP_NAME} and the app you started it from, "
+                                 "then open them again so macOS applies the change.")
+                else:
+                    note.setText(f"Almost done: restart {APP_NAME} so macOS applies the change.")
+                note.setStyleSheet("color: #b45309;")
+            elif not P.missing(st):
+                note.setText(f"All set. Press {self._hotkey_text()} in any app to dictate.")
+                note.setStyleSheet("color: #15803d; font-weight: 600;")
+            elif blocked:
+                note.setText("Until Accessibility and Input Monitoring are on, the shortcut does nothing.")
+                note.setStyleSheet("color: #64748b;")
+            else:
+                note.setText(f"The microphone is asked for the first time {APP_NAME} records.")
+                note.setStyleSheet("color: #64748b;")
+            restart.setVisible(state["needs_restart"] and not from_source)
+            done.setText("Done" if not P.missing(st) or state["needs_restart"] else "Later")
+
+        timer = QTimer(dlg)
+        timer.setInterval(1000)
+        timer.timeout.connect(refresh)
+
+        def closed(_res=None):
+            timer.stop()
+            self._perm_guide = None
+            if P.missing():
+                self._perm_guide_dismissed = True    # this session: notifications, not the window
+            self.cfg["macos_perms_guide_shown"] = True
+            self.save_config()
+
+        dlg.finished.connect(closed)
+        refresh()
+        timer.start()
+        self._perm_guide = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def show_auth_gate(self):
         """Sign in / create an account (ui/auth_sheet.py): one sheet, brought
@@ -5978,6 +6113,11 @@ class AppController(QObject):
         except Exception as e:
             logger.warning("Could not register hotkey %s: %s", hotkey, e)
             return False
+        if sys.platform == "darwin" and mac_permissions.hotkeys_blocked():
+            # Registered, but macOS won't deliver a single key to it: say so
+            # instead of a shortcut that silently does nothing.
+            logger.warning("Hotkey %s: macOS Accessibility / Input Monitoring is off", hotkey)
+            self.sig_mac_permissions.emit("hotkey")
         return True
 
     def _setup_assist_hotkey(self, hotkey):
@@ -6043,7 +6183,7 @@ class AppController(QObject):
 
     def _setup_smart_hotkey(self, hotkey):
         """Third global hotkey, the Smart Actions shortcut (default Alt+S,
-        Option+S on a Mac): ONE take runs as a Smart Action (Alt+R always
+        Control+S on a Mac): ONE take runs as a Smart Action (Alt+R always
         pastes the exact words). Keyboard only, never on the dictation's or
         the Live Assistant's keys; kept apart from both, like the Live
         Assistant's. True when it registered."""
@@ -6237,7 +6377,7 @@ class AppController(QObject):
                     body = ("Smart Actions are paused while a meeting is recording. "
                             "Stop the meeting to use them again.")
                 else:
-                    body = (f"{hotkeys.display(self.cfg.get('hotkey', 'alt+r'))} dictation is paused while a "
+                    body = (f"{hotkeys.display(self.cfg.get("hotkey", hotkeys.DICTATION_DEFAULT))} dictation is paused while a "
                             "meeting is recording so the two don't mix. Stop the meeting to dictate again.")
                 self.show_tray_hint("Meeting Recording Active", body)
                 return
@@ -6779,14 +6919,21 @@ class AppController(QObject):
             pyperclip.copy(text)
 
         pasted = False
-        try:
-            from pynput.keyboard import Key
-            mod = Key.cmd if sys.platform == "darwin" else Key.ctrl
-            self.kbd.press(mod); self.kbd.press("v")
-            self.kbd.release("v"); self.kbd.release(mod)
-            pasted = True
-        except Exception as e:
-            logger.warning("[Paste] %s", e)
+        if sys.platform == "darwin" and mac_permissions.accessibility_granted() is False:
+            # macOS drops the Cmd+V silently without Accessibility, and the
+            # restore below would then take the text away too. Leave it on the
+            # clipboard (pasted stays False) and say how to fix it.
+            logger.warning("[Paste] macOS Accessibility is off - text left on the clipboard")
+            self.sig_mac_permissions.emit("paste")
+        else:
+            try:
+                from pynput.keyboard import Key
+                mod = Key.cmd if sys.platform == "darwin" else Key.ctrl
+                self.kbd.press(mod); self.kbd.press("v")
+                self.kbd.release("v"); self.kbd.release(mod)
+                pasted = True
+            except Exception as e:
+                logger.warning("[Paste] %s", e)
 
         if self.should_restore_clipboard(
                 pasted, cfg.get("restore_clipboard", True), prev_was_text, True):

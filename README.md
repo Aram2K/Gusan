@@ -35,7 +35,7 @@ Speech is turned into text on your computer by default.
 | 🕶 **Live Assistant** `Ctrl+Alt+A` · Pro | A private copilot over your calls: live transcript, answers the moment you're asked something, aware of your screen. On a Mac it hears your microphone only. |
 | 📄 **Audio to text** | Drop an audio or video file of any length. Get a transcript with speakers and timestamps, and a Word file if you want one. |
 
-Also: mixed languages in one sentence · a dictionary for names and terms · your recent dictations, meetings and files on the Home page · a tray icon · start at login. (On a Mac, `Alt` is `Option`.)
+Also: mixed languages in one sentence · a dictionary for names and terms · your recent dictations, meetings and files on the Home page · a tray icon · start at login. (On a Mac, Dictation is `Control+R` and Smart Actions `Control+S`; elsewhere `Alt` is `Option`.)
 
 ## Private by default
 

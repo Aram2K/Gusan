@@ -31,7 +31,7 @@ Integration notes for Wave 4
      input_device_index      already in DEFAULT: an int PyAudio index (default
                              host API) or None for the default microphone.
    Read only: hotkey, smart_actions_hotkey (the Smart Actions page's key,
-   default "alt+s", "" = none set; SMART_SHORTCUT_KEYS) and
+   default "alt+s" ("ctrl+s" on a Mac), "" = none set; SMART_SHORTCUT_KEYS) and
    live_assist_hotkey, listed in that order (Dictate, Smart Actions, Live
    Assistant). A shortcut row opens its page with focus="hotkey": Dictation
    and Smart Actions put the keyboard focus on their shortcut control; Live
@@ -103,6 +103,7 @@ import api_keys
 import engine_choice
 import hardware
 import history_actions
+import hotkeys
 import speech_hy
 import updater
 from app_info import APP_NAME, APP_VERSION
@@ -133,8 +134,8 @@ SHOW_APP_LOOK = False
 SMART_SHORTCUT_KEYS = ("smart_actions_hotkey",)        # ui/pages/smart_actions.py HOTKEY_KEY
 # (cfg keys, icon, name, route, link text, default hotkey)
 SHORTCUTS = (
-    (("hotkey",), "mic", "Dictate", "dictation", "Dictation", "alt+r"),
-    (SMART_SHORTCUT_KEYS, "wand", "Smart Actions", "smart_actions", "Smart Actions", "alt+s"),
+    (("hotkey",), "mic", "Dictate", "dictation", "Dictation", hotkeys.DICTATION_DEFAULT),
+    (SMART_SHORTCUT_KEYS, "wand", "Smart Actions", "smart_actions", "Smart Actions", hotkeys.SMART_ACTIONS_DEFAULT),
     (("live_assist_hotkey",), "incognito", "Live Assistant", "live_assistant", "Live Assistant", "ctrl+alt+a"),
 )
 SMART_SPEECH_KEY = engine_choice.SMART_SPEECH_KEY      # Smart Actions' "Transcribes with"
@@ -2372,6 +2373,15 @@ class SettingsPage(QWidget):
         else:
             self.seg_look.hide()             # built (app_theme is kept), never shown
         rows.append(self._row("Notify me when notes or transcripts are ready", self.t_notify))
+        self.row_mac_perms = None
+        if IS_MAC:
+            # The macOS permissions guide (main.py), whenever the shortcut or
+            # pasting stops working - not only on the first launch.
+            b = Button("Check", "secondary", "s", parent=self)
+            b.clicked.connect(lambda: call(self.app, "show_macos_permissions_guide"))
+            self.row_mac_perms = self._row("Mac permissions", b,
+                                           hint="Microphone, Accessibility and Input Monitoring")
+            rows.append(self.row_mac_perms)
         inner.addWidget(self._group(rows))
         blk, bv = self._block("Shortcuts", parent=sec)
         self.shortcut_rows = []

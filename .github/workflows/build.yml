@@ -383,11 +383,17 @@ jobs:
           /opt/homebrew/bin/python3.11 -m pip install --upgrade pip
           /opt/homebrew/bin/python3.11 -m pip install -r requirements.txt pyinstaller==6.22.3 --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
 
+      # The Gusan logo as the Mac app icon. Without --icon PyInstaller gives
+      # the bundle its own Python icon, which Launchpad and the Dock showed.
+      - name: Generate app icon
+        run: /opt/homebrew/bin/python3.11 installer/make_icns.py
+
       - name: Build .app
         run: |
           /opt/homebrew/bin/python3.11 -m PyInstaller \
             --onedir --windowed \
             --name TranscribeApp \
+            --icon assets/icon.icns \
             --add-data "config.example.json:." \
             --add-data "history.py:." \
             --add-data "assets:assets" \
@@ -441,7 +447,23 @@ jobs:
           plist_set NSAppleEventsUsageDescription "Gusan pastes transcribed text into the focused window via simulated keystrokes."
           # Surface the global-hotkey requirement so macOS shows a clear
           # prompt under Privacy & Security → Accessibility.
-          plist_set NSInputMonitoringUsageDescription "Gusan needs to listen for your global hotkey (default: Option+R) so you can start dictation from any app."
+          plist_set NSInputMonitoringUsageDescription "Gusan needs to listen for your global hotkey (default: Control+R) so you can start dictation from any app."
+          # Launchpad, the Dock, Spotlight and Finder show the bundle's FILE
+          # name (TranscribeApp) unless the app ships a localized name, and
+          # CFBundleDisplayName alone is not one. With LSHasLocalizedDisplayName
+          # and an InfoPlist.strings they show "Gusan" while the file, its
+          # executable and the bundle id stay TranscribeApp (RELEASING.md).
+          # Other languages fall back to the development region, en.
+          # (Finder still shows the file name when "Show all filename
+          # extensions" is on: that is macOS, not the bundle.)
+          plist_set CFBundleDevelopmentRegion "en"
+          /usr/libexec/PlistBuddy -c "Delete :LSHasLocalizedDisplayName" "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :LSHasLocalizedDisplayName bool true" "$PLIST"
+          for lproj in en.lproj Base.lproj; do
+            mkdir -p "dist/TranscribeApp.app/Contents/Resources/$lproj"
+            printf '"CFBundleDisplayName" = "Gusan";\n"CFBundleName" = "Gusan";\n' \
+              > "dist/TranscribeApp.app/Contents/Resources/$lproj/InfoPlist.strings"
+          done
           plutil -lint "$PLIST"
           plutil -p "$PLIST"
 

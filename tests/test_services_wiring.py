@@ -71,7 +71,7 @@ class TestConfigMigration(unittest.TestCase):
         c = self._load({"language": "multi"})
         self.assertEqual(c["file_language"], "multi")
         self.assertEqual(c["config_schema_version"], 3)
-        self.assertEqual(c["smart_actions_hotkey"], "alt+s")      # the Smart Actions shortcut
+        self.assertEqual(c["smart_actions_hotkey"], main.hotkeys.SMART_ACTIONS_DEFAULT)  # the Smart Actions shortcut
 
     def test_a_2_0_config_is_left_alone(self):
         c = self._load({"language": "ru", "config_schema_version": 2})

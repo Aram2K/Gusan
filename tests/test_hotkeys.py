@@ -41,6 +41,31 @@ class TestCombine(unittest.TestCase):
             self.assertEqual(hotkeys.combine("f9", mac=mac), ("f9", None))
 
 
+class TestDefaults(unittest.TestCase):
+    """A new install's shortcuts: Control on a Mac (Option + a letter types a
+    character there), Alt elsewhere."""
+
+    def _defaults(self, platform):
+        import importlib
+        with mock.patch.object(sys, "platform", platform):
+            mod = importlib.reload(hotkeys)
+            out = (mod.DICTATION_DEFAULT, mod.SMART_ACTIONS_DEFAULT)
+        importlib.reload(hotkeys)                 # back to this machine's
+        return out
+
+    def test_mac_uses_control(self):
+        self.assertEqual(self._defaults("darwin"), ("ctrl+r", "ctrl+s"))
+
+    def test_windows_and_linux_keep_alt(self):
+        for platform in ("win32", "linux"):
+            self.assertEqual(self._defaults(platform), ("alt+r", "alt+s"), platform)
+
+    def test_defaults_are_never_bare_keys(self):
+        for platform in ("darwin", "win32"):
+            for hk in self._defaults(platform):
+                self.assertFalse(hotkeys.is_bare_typing_key(hk), hk)
+
+
 class TestDisplay(unittest.TestCase):
     def test_mac_uses_symbols_in_apples_order(self):
         self.assertEqual(hotkeys.display("alt+r", mac=True), "⌥ R")

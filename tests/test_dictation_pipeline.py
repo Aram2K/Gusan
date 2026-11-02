@@ -132,7 +132,7 @@ class TestNewConfigDefaults(unittest.TestCase):
         self.assertEqual(main.DEFAULT["config_schema_version"], 3)
 
     def test_smart_actions_defaults(self):
-        self.assertEqual(main.DEFAULT["smart_actions_hotkey"], "alt+s")
+        self.assertEqual(main.DEFAULT["smart_actions_hotkey"], main.hotkeys.SMART_ACTIONS_DEFAULT)  # ctrl+s on a Mac
         self.assertEqual(main.DEFAULT["smart_actions_speech_model"], "")     # same as Dictation
         self.assertEqual(main.DEFAULT["output_action"], "transcribe_only")  # 1.9.x key, kept
 

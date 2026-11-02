@@ -103,6 +103,7 @@ from PySide6.QtGui import QAction, QColor, QFontMetricsF, QLinearGradient, QPain
 from PySide6.QtWidgets import QApplication, QMenu, QProxyStyle, QStyle, QStyleFactory, QStyleOptionMenuItem
 
 import account_actions
+import hotkeys
 from app_info import APP_NAME, APP_VERSION
 from ui import theme
 from ui.components import icons
@@ -638,7 +639,7 @@ class TrayMenu(QObject):
 
     def refresh_hotkeys(self):
         cfg = self._cfg()
-        self._set_hint("dictate", hotkey_hint(cfg.get("hotkey", "alt+r")))
+        self._set_hint("dictate", hotkey_hint(cfg.get("hotkey", hotkeys.DICTATION_DEFAULT)))
         if hasattr(self.app, "_registered_assist_hotkey"):
             hk = getattr(self.app, "_registered_assist_hotkey", None) or ""
             if not hk and getattr(self.app, "_assist_listener", None) is not None:

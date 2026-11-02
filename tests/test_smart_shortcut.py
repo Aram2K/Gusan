@@ -230,17 +230,18 @@ class TestMigration(unittest.TestCase):
 
     def test_an_early_2_0_config_gets_alt_s(self):
         c = self._load({"config_schema_version": 2, "smart_actions_hotkey": ""})
-        self.assertEqual(c["smart_actions_hotkey"], "alt+s")
+        self.assertEqual(c["smart_actions_hotkey"], main.hotkeys.SMART_ACTIONS_DEFAULT)
         self.assertEqual(c["config_schema_version"], 3)
 
     def test_a_1_9_config_gets_alt_s(self):
-        self.assertEqual(self._load({"language": "en"})["smart_actions_hotkey"], "alt+s")
+        self.assertEqual(self._load({"language": "en"})["smart_actions_hotkey"], main.hotkeys.SMART_ACTIONS_DEFAULT)
 
     def test_alt_s_taken_by_another_shortcut_stays_unset(self):
-        for disk in ({"config_schema_version": 2, "smart_actions_hotkey": "", "hotkey": "Alt+S"},
+        SMART = main.hotkeys.SMART_ACTIONS_DEFAULT                  # "ctrl+s" on a Mac
+        for disk in ({"config_schema_version": 2, "smart_actions_hotkey": "", "hotkey": SMART.upper()},
                      {"config_schema_version": 2, "smart_actions_hotkey": "",
-                      "live_assist_hotkey": "alt+s"},
-                     {"hotkey": "alt+s"}):                          # 1.9.x, no key at all
+                      "live_assist_hotkey": SMART},
+                     {"hotkey": SMART}):                              # 1.9.x, no key at all
             self.assertEqual(self._load(disk)["smart_actions_hotkey"], "", disk)
 
     def test_a_chosen_shortcut_is_kept_and_schema_3_is_left_alone(self):

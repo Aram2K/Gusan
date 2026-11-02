@@ -18,8 +18,9 @@ dist/
 build/
 *.spec
 
-# CI-generated icon
+# CI-generated icons
 assets/icon.ico
+assets/icon.icns
 
 # Supabase CLI local state
 supabase/.temp/
