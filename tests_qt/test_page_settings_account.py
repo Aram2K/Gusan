@@ -213,14 +213,15 @@ def test_every_view_builds_without_an_error_card(env, tier):
 
 def test_plain_stub_app_without_services_degrades(env):
     """The Wave 1 stub (no set_settings, no downloads, no recorder): no error card,
-    the current model shows In use, Download is disabled, toggles still apply."""
+    the current model is selected, no download / remove button, toggles still apply."""
     from ui.shell import ErrorPage
     win, app = env.build("free", rich=False)
     page = _settings(win, section="speech")
     assert not isinstance(page, ErrorPage)
-    card = page.model_cards["base"]                    # the stub's whisper_model
-    assert card.is_selected() and "remove" in card.buttons
-    assert not page.model_cards["small"].buttons["download"].isEnabled()
+    card = page.speech_card
+    assert card.combo.currentData() == "base"          # the stub's whisper_model
+    assert card.status.text().startswith("On this computer")
+    assert not card.action.isVisibleTo(card)           # nothing to download or remove with
     page.t_notify.click()
     assert ("set_setting", "notify_when_ready", False) in app.calls
     acct = win.open("account")
@@ -406,24 +407,46 @@ def test_microphone_picker_and_level(env):
 
 
 # ── Speech & AI ──
-def test_model_cards_reflect_the_shared_downloads(env):
+def _rows(box):
+    return [box.itemData(i) for i in range(box.count()) if not box.is_heading(i)]
+
+
+def _pick(card, value):
+    """Pick a row of a card's Model list the way the open list does."""
+    i = card.combo.findData(value)
+    assert i >= 0, value
+    card.combo.setCurrentIndex(i)
+    _spin()
+
+
+def _runs_on(card, source):
+    """Click one of a card's "Runs on" segments."""
+    card.runs_on._on_clicked(card.sources.index(source))
+    _spin()
+
+
+def test_speech_card_reflects_the_shared_downloads(env):
+    from ui.components.model_combo import MARK_DOWNLOAD, MARK_ROLE
     win, app = env.build("free")
     page = _settings(win)
-    small, base, turbo = page.model_cards["small"], page.model_cards["base"], page.model_cards["large-v3-turbo"]
-    assert small.is_selected() and "remove" in small.buttons
-    assert page.cards_row.recommended() is small                   # Best for your computer
-    assert page.cards_row.ribbon.isVisibleTo(page.cards_row)
-    assert turbo.note.text() == "A little slower here"
-    assert small.model_label.text().replace(" ", " ") == "Whisper Small · 460 MB"
+    card = page.speech_card
+    assert card.source() == "local" and card.combo.currentData() == "small"
+    assert card.status.text() == "On this computer · 460 MB"        # small is Best for this computer
+    assert card.action.text() == "Remove"
     assert page.hw_trail.text() == "This computer: i7-1260P · 16 GB"
-    base.buttons["download"].click()
+    base = card.combo.findData("base")
+    assert card.combo.itemData(base, MARK_ROLE) == MARK_DOWNLOAD       # not on this computer
+    assert not card.combo.itemData(card.combo.findData("small"), MARK_ROLE)
+    env.answers.append("go")
+    _pick(card, "base")
+    assert env.asked[-1]["title"] == "Download Fast?"
     assert ("start", "base") in app.downloads.calls
-    _spin()
-    assert base.progress is not None                                 # downloading state
+    assert card.combo.currentData() == "small"                          # used once it's here
     app.downloads.finish("base")
     _spin()
-    assert app.cfg["whisper_model"] == "base" and app.cfg["backend"] == "local"   # used once it's here
-    assert page.model_cards["base"].is_selected()
+    assert app.cfg["whisper_model"] == "base" and app.cfg["backend"] == "local"
+    assert card.combo.currentData() == "base"
+    assert "Best for your computer: Balanced" in card.status.text()
 
 
 def test_downloads_that_appear_later_are_heard_once(env):
@@ -433,32 +456,38 @@ def test_downloads_that_appear_later_are_heard_once(env):
     dl = app.downloads
     del app.downloads
     page = _settings(win, section="speech")
-    assert not page.model_cards["base"].buttons["download"].isEnabled()
+    card = page.speech_card
+    assert not card.action.isVisibleTo(card)
     app.downloads = dl
     win.open("settings")
     win.open("settings")
     _spin()
-    base = page.model_cards["base"]
-    assert base.buttons["download"].isEnabled()
-    base.buttons["download"].click()
-    _spin()
-    assert base.progress is not None
+    page._refresh_models()
+    assert card.action.text() == "Remove"
+    env.answers.append("go")
+    _pick(card, "base")
+    assert ("start", "base") in dl.calls
     hits = []
-    base._set_progress = hits.append
+    real = page._speech_status
+    page._speech_status = lambda: (hits.append(1), real())[1]
     dl.progress.emit("base", 40, 40, 100)
-    assert hits == [40]
+    assert hits == [1]                                              # heard once
+    app.cfg["whisper_model"] = "base"                               # its line is the one shown
+    dl.progress.emit("base", 40, 40, 100)
+    assert card.status.text() == "Downloading Fast… 40%"
     dl.progress.emit("base", 0, 0, 0)                               # size not known yet
-    assert hits == [40, None]                                       # indeterminate, not "0%"
+    assert card.status.text() == "Downloading Fast…"                # no "0%"
 
 
 def test_use_and_remove_a_model(env):
     win, app = env.build("free")
     app.downloads.states["base"] = "ready"
     page = _settings(win)
-    page.model_cards["base"].buttons["use"].click()
+    card = page.speech_card
+    _pick(card, "base")                                              # on disk: no question
     assert app.cfg["whisper_model"] == "base"
     env.answers.append("remove")
-    page.model_cards["base"].buttons["remove"].click()
+    card.action.click()
     assert env.asked[-1]["title"] == "Remove Fast?"
     assert ("remove", "base") in app.downloads.calls
     app.downloads.states["base"] = "missing"
@@ -466,7 +495,7 @@ def test_use_and_remove_a_model(env):
     _spin()
     assert app.cfg["whisper_model"] == "small"                       # moved to a model on disk
     env.answers.append(None)                                         # Cancel
-    page.model_cards["small"].buttons["remove"].click()
+    card.action.click()
     assert ("remove", "small") not in app.downloads.calls
 
 
@@ -489,70 +518,75 @@ def test_removing_the_smart_actions_speech_model_resets_it(env):
     assert app.cfg["smart_actions_speech_model"] == "medium"
 
 
-def test_more_sizes_tiles(env):
+def test_every_speech_model_is_one_list(env):
     win, app = env.build("free")
     page = _settings(win)
-    tiny = page.size_tiles["tiny"]
-    assert tiny.accessibleName() == "Download Lightest (Whisper Tiny, 75 MB)"
-    tiny.click()
+    card = page.speech_card
+    assert _rows(card.combo)[:len(hardware.SPEECH_MODEL_IDS)] == list(hardware.SPEECH_MODEL_IDS)
+    env.answers.append(None)                                         # Not now
+    _pick(card, "tiny")
+    assert ("start", "tiny") not in app.downloads.calls
+    env.answers.append("go")
+    _pick(card, "tiny")
     assert ("start", "tiny") in app.downloads.calls
-    page.more_button.click()
-    assert not page.tiles_row.isVisibleTo(page)
 
 
-def test_pro_sees_offline_backup_and_cloud_selected(env):
+def test_pro_sees_cloud_selected(env):
     win, app = env.build("pro")
     page = _settings(win)
-    assert page.speech_tiles["cloud"].isChecked()
-    assert page.writer_tiles["cloud"].isChecked()
-    assert page.writer_tiles["cloud"].hints() == ["DeepSeek V4.1 Flash", "Mistral Small for meeting notes"]
-    from PySide6.QtWidgets import QLabel
-    texts = [lb.text() for lb in page.model_cards["small"].action.findChildren(QLabel)]
-    assert "Offline backup" in texts
-    assert page.writer_sizes["qwen_tiny"].is_selected()
+    assert page.speech_card.source() == "cloud"
+    assert page.speech_card.combo.currentData() == "cloud"
+    assert page.speech_card.status.text() == "Nothing to download. Gusan Cloud picks the model."
+    assert page.writer_card.source() == "cloud"
+    assert page.writer_card.combo.currentText().startswith("DeepSeek V4.1 Flash")
+    assert page.writer_card.status.text() == "Mistral Small writes meeting notes. Nothing to download."
 
 
 def test_speech_runs_on_free_user_gets_the_pro_window(env):
     win, app = env.build("free")
     page = _settings(win)
-    assert page.speech_tiles["local"].isChecked()
-    assert page.speech_tiles["local"].hints() == ["Whisper Small · Local · Balanced"]
-    assert page.speech_tiles["cloud"].pro_tag is not None
-    page.speech_tiles["cloud"].click()
+    card = page.speech_card
+    assert card.source() == "local" and card.combo.currentData() == "small"
+    _runs_on(card, "cloud")
     assert ("_pro_upsell", "Fast cloud transcription") in app.calls
     assert app.cfg["backend"] == "local"
-    assert page.speech_tiles["local"].isChecked() and not page.speech_tiles["cloud"].isChecked()
-    page.writer_tiles["cloud"].click()
+    assert card.source() == "local"                                  # back to what is set
+    _runs_on(page.writer_card, "cloud")
     assert ("_pro_upsell", "Smart Actions") in app.calls
+    assert page.writer_card.source() == "local"
 
 
 def test_pro_switches_speech_and_writer(env):
     win, app = env.build("pro", backend="local")
     page = _settings(win)
-    page.speech_tiles["cloud"].click()
+    _runs_on(page.speech_card, "cloud")
     assert app.cfg["backend"] == "managed"
-    page.writer_tiles["local"].click()                               # Small is on disk
+    _runs_on(page.writer_card, "local")                              # Small is on disk
     assert app.cfg["action_model"] == "qwen_tiny"
-    assert page.writer_tiles["local"].isChecked()
+    assert page.writer_card.source() == "local"
+    assert page.writer_card.combo.currentData() == "qwen_tiny"
 
 
 def test_writer_sizes_download_then_use(env):
     win, app = env.build("free")
     page = _settings(win)
-    page.writer_sizes["qwen_3b"].click()
+    card = page.writer_card
+    assert _rows(card.combo) == list(hardware.LOCAL_AI_MODEL_IDS)
+    env.answers.append("go")
+    _pick(card, "qwen_3b")
     assert ("start", "qwen_3b") in app.downloads.calls
     app.downloads.finish("qwen_3b")
     _spin()
     assert app.cfg["action_model"] == "qwen_3b"
-    assert page.writer_sizes["qwen_3b"].is_selected()
+    assert card.combo.currentData() == "qwen_3b"
 
 
 def test_privacy_mode_asks_before_cloud(env):
     win, app = env.build("pro", backend="local", privacy_mode=True)
     page = _settings(win)
-    assert page.speech_tiles["cloud"].hints() == ["Off while Privacy mode is on"]
+    assert "Privacy mode is on" in page.speech_card.status.text()
     env.answers.append("off")
-    page.speech_tiles["cloud"].click()
+    _runs_on(page.speech_card, "cloud")
     assert env.asked[-1]["title"] == "Turn off Privacy mode?"
     assert app.cfg["privacy_mode"] is False and app.cfg["backend"] == "managed"
 
@@ -560,7 +594,7 @@ def test_privacy_mode_asks_before_cloud(env):
 def test_own_key_without_a_key_opens_the_key_row(env):
     win, app = env.build("free")
     page = _settings(win)
-    page.speech_tiles["own_key"].click()
+    _runs_on(page.speech_card, "own_key")
     row = page.key_rows["mistral_api_key"]
     assert row.is_editing()
     assert app.cfg["backend"] == "local"
@@ -569,13 +603,14 @@ def test_own_key_without_a_key_opens_the_key_row(env):
     _spin()
     assert app.cfg["mistral_api_key"] == "mk-test-key-0000-abc"
     assert app.cfg["backend"] == "mistral"
-    assert page.speech_tiles["own_key"].isChecked()
+    assert page.speech_card.source() == "own_key"
+    assert page.speech_card.combo.currentData() == "own:mistral"
 
 
 def test_own_key_cancelled_then_saved_later_keeps_speech(env):
     win, app = env.build("free")
     page = _settings(win)
-    page.speech_tiles["own_key"].click()
+    _runs_on(page.speech_card, "own_key")
     row = page.key_rows["mistral_api_key"]
     row.cancel_button.click()
     row.add_button.click()
@@ -626,7 +661,7 @@ def test_more_options_writer_with_own_key(env):
     assert panel.row_base.isVisibleTo(panel)
     panel.use_button.click()
     assert app.cfg["action_model"] == "api_openai_compatible"
-    assert page.writer_tiles["own_key"].isChecked()
+    assert page.writer_card.source() == "own_key"
 
 
 def test_gpu_card_only_for_nvidia(env):
@@ -847,7 +882,7 @@ def test_on_setting_changed_redraws(env):
     page.on_setting_changed("save_history")
     _spin()
     assert not page.t_history.isChecked()
-    assert page.model_cards["large-v3-turbo"].is_selected()
+    assert page.speech_card.combo.currentData() == "large-v3-turbo"
     page.on_setting_changed("not_a_setting_we_show")             # ignored, no error
 
 

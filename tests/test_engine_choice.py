@@ -788,5 +788,58 @@ class TestArmenianModelHints(unittest.TestCase):
                                              False, None, False), "")
 
 
+
+class TestDictationSpeechPicker(unittest.TestCase):
+    """The Dictation page's Model list and Settings' Speech card: one choice."""
+
+    def test_every_choice_is_listed_in_its_group(self):
+        rows = ec.dictation_speech_rows({"mistral_api_key": "k"}, pro=False)
+        values = [r["value"] for r in rows]
+        self.assertEqual(values[:6], ["tiny", "base", "small", "medium", "large-v3-turbo", "large-v3"])
+        self.assertEqual(values[-3:], ["cloud", "own:mistral", "own:google"])
+        cloud = rows[values.index("cloud")]
+        self.assertEqual((cloud["group"], cloud["tags"]), (ec.GROUP_GUSAN_CLOUD, ("cloud", "pro")))
+        self.assertEqual(rows[values.index("own:google")]["note"], "Add your key first")
+        self.assertNotEqual(rows[values.index("own:mistral")]["note"], "Add your key first")
+
+    def test_a_source_keeps_its_group_only(self):
+        self.assertEqual([r["value"] for r in ec.dictation_speech_rows({}, source="cloud")], ["cloud"])
+        self.assertEqual([r["value"] for r in ec.dictation_speech_rows({}, source="own_key")],
+                         ["own:mistral", "own:google"])
+
+    def test_value_follows_the_settings(self):
+        self.assertEqual(ec.dictation_speech_value({"whisper_model": "small"}), "small")
+        self.assertEqual(ec.dictation_speech_value({"backend": "managed"}), "cloud")
+        self.assertEqual(ec.dictation_speech_value({"backend": "google"}), "own:google")
+        self.assertEqual(ec.dictation_speech_value({"backend": "managed", "privacy_mode": True,
+                                                    "whisper_model": "base"}), "base")
+
+    def test_a_pick_writes_what_speech_runs_on_writes(self):
+        self.assertEqual(ec.set_dictation_speech({}, "medium")["changes"],
+                         {"backend": "local", "whisper_model": "medium"})
+        self.assertEqual(ec.set_dictation_speech({}, "cloud", pro=False)["problem"], "pro")
+        self.assertEqual(ec.set_dictation_speech({}, "cloud", pro=True)["changes"]["backend"], "managed")
+        self.assertEqual(ec.set_dictation_speech({}, "own:google")["problem"], "needs_key")
+        self.assertEqual(ec.set_dictation_speech({"mistral_api_key": "k"}, "own:mistral")["changes"]["backend"],
+                         "mistral")
+        self.assertEqual(ec.set_dictation_speech({}, "small", downloaded=lambda m: False)["problem"],
+                         "needs_download")
+
+
+class TestWriterPicker(unittest.TestCase):
+    def test_rows_per_choice(self):
+        self.assertEqual([r["value"] for r in ec.writer_rows({}, choice="cloud")], ["cloud"])
+        self.assertEqual([r["value"] for r in ec.writer_rows({}, choice="local")], list(ec.hardware.LOCAL_AI_INFO))
+        self.assertEqual(ec.writer_rows({}, choice="own_key"), [])             # no key saved: nothing to list
+        own = ec.writer_rows({"mistral_api_key": "k"}, choice="own_key")
+        self.assertTrue(own and all(r["value"].startswith("own:" + actions.API_MISTRAL_ID + ":") for r in own))
+
+    def test_value_round_trips(self):
+        self.assertEqual(ec.parse_writer_value("cloud"), ("cloud", None, None))
+        self.assertEqual(ec.parse_writer_value("qwen_3b"), ("local", None, "qwen_3b"))
+        self.assertEqual(ec.parse_writer_value("own:api_mistral:mistral-small-latest"),
+                         ("own_key", "api_mistral", "mistral-small-latest"))
+        self.assertEqual(ec.writer_value({"action_model": "qwen_3b"}), "qwen_3b")
+
 if __name__ == "__main__":
     unittest.main()

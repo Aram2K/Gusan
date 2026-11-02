@@ -734,6 +734,139 @@ def set_smart_speech(app_or_cfg, value, *, pro=None, downloaded=None, turn_off_p
     return _outcome({SMART_SPEECH_KEY: value})
 
 
+# ── Dictation's speech model (one list for the Dictation page and Settings) ──
+# The Dictation page's "Model" picker and Settings › Speech & AI's Speech card write the SAME
+# settings (backend, whisper_model, managed_provider): one choice for dictation and meetings.
+# A picker value is a Whisper id (or the Armenian model's), "cloud" (Gusan Cloud) or
+# "own:mistral" / "own:google" (your own key). Qt-free.
+DICTATION_CLOUD = "cloud"
+DICTATION_OWN_MISTRAL, DICTATION_OWN_GOOGLE = "own:mistral", "own:google"
+DICTATION_OWN = {DICTATION_OWN_MISTRAL: "mistral", DICTATION_OWN_GOOGLE: "google"}
+# The source each picker value belongs to (Settings' "Runs on").
+SPEECH_SOURCES = ("local", "cloud", "own_key")
+
+
+def dictation_speech_value(cfg):
+    """The picker value of what dictation uses now (speech_choice + the model)."""
+    cfg = cfg or {}
+    choice = speech_choice(cfg)
+    if choice == "cloud":
+        return DICTATION_CLOUD
+    if choice == "own_key":
+        return DICTATION_OWN_GOOGLE if cfg.get("backend") == "google" else DICTATION_OWN_MISTRAL
+    return str(cfg.get("whisper_model") or "base")
+
+
+def dictation_speech_source(value):
+    """"local" | "cloud" | "own_key" for a picker value."""
+    value = str(value or "")
+    if value == DICTATION_CLOUD:
+        return "cloud"
+    if value in DICTATION_OWN:
+        return "own_key"
+    return "local"
+
+
+def dictation_speech_rows(cfg=None, pro=None, source=None):
+    """The rows of the dictation speech pickers (speech_row dicts): under "On this computer"
+    every Whisper model and, while listed, the Armenian model; under "Gusan Cloud" its Fast
+    profile (CLOUD, PRO); under "Your own key" Mistral and Google Gemini (CLOUD), each with a
+    muted "Add your key first" while that key isn't saved. ``source`` keeps one group only
+    (Settings' card shows the group "Runs on" picked)."""
+    cfg = cfg or {}
+    _c, pro, _signed = _context(cfg, pro)
+    show_pro = pro_chip(pro)
+    rows = []
+    if source in (None, "local"):
+        rows += _local_rows()
+    if source in (None, "cloud"):
+        name = CLOUD_PROFILE_NAMES[CLOUD_FAST]
+        rows.append(speech_row(DICTATION_CLOUD, name, "cloud", GROUP_GUSAN_CLOUD,
+                               note=CLOUD_PROFILE_NOTES[CLOUD_FAST], pro=True, model=name,
+                               show_pro=show_pro))
+    if source in (None, "own_key"):
+        for value, plain, field, mid in (
+                (DICTATION_OWN_MISTRAL, "Mistral", "mistral_api_key",
+                 normalize_mistral_model(cfg.get("mistral_stt_model", MISTRAL_STT_DEFAULT))),
+                (DICTATION_OWN_GOOGLE, "Google Gemini", "google_api_key",
+                 str(cfg.get("google_stt_model") or GOOGLE_STT_DEFAULT))):
+            name = model_display_name(mid)
+            has_key = bool((cfg.get(field) or "").strip())
+            rows.append(speech_row(value, name, "own_key", GROUP_OWN_KEY, detail=OWN_KEY_OWNER[plain],
+                                   note=MODEL_NOTES.get(mid, "") if has_key else "Add your key first",
+                                   model=name, plain=plain))
+    return rows
+
+
+def set_dictation_speech(app_or_cfg, value, *, pro=None, downloaded=None, turn_off_privacy=False):
+    """The config changes for a dictation speech pick: set_speech_source for the value's source
+    (same return shape: problems "pro", "privacy_mode", "needs_key", "needs_download",
+    "unknown")."""
+    value = str(value or "").strip()
+    source = dictation_speech_source(value)
+    if source == "local":
+        return set_speech_source(app_or_cfg, "local", model=value or None, pro=pro,
+                                 downloaded=downloaded, turn_off_privacy=turn_off_privacy)
+    if source == "cloud":
+        return set_speech_source(app_or_cfg, "cloud", pro=pro, turn_off_privacy=turn_off_privacy)
+    return set_speech_source(app_or_cfg, "own_key", provider=DICTATION_OWN[value], pro=pro,
+                             turn_off_privacy=turn_off_privacy)
+
+
+# ── the AI writer's model list (Settings › Speech & AI › AI writer) ──────────
+# Values: "cloud" (Gusan Cloud), a local_llm id, or "own:<provider id>:<model id>".
+WRITER_OWN_PREFIX = "own:"
+
+
+def writer_value(cfg):
+    """The picker value of the AI writer set now."""
+    cfg = cfg or {}
+    choice = writer_choice(cfg)
+    if choice == "cloud":
+        return "cloud"
+    if choice == "own_key":
+        pid = _norm_provider(cfg.get("action_model"))
+        return f"{WRITER_OWN_PREFIX}{pid}:{writer_model_for(pid, cfg)}"
+    return local_writer(cfg)
+
+
+def parse_writer_value(value):
+    """(choice, provider id, model id) of a picker value."""
+    value = str(value or "")
+    if value == "cloud":
+        return "cloud", None, None
+    if value.startswith(WRITER_OWN_PREFIX):
+        pid, _, mid = value[len(WRITER_OWN_PREFIX):].partition(":")
+        return "own_key", pid, mid or None
+    return "local", None, value or None
+
+
+def writer_rows(cfg=None, pro=None, choice=None):
+    """The AI writer picker's rows (speech_row dicts) for ``choice`` ("cloud" | "local" |
+    "own_key"; None = all): Gusan Cloud's model (CLOUD, PRO); every local model (LOCAL, its plain
+    size word under it); and, per provider whose key is saved, its models (CLOUD)."""
+    cfg = cfg or {}
+    _c, pro, _signed = _context(cfg, pro)
+    rows = []
+    if choice in (None, "cloud"):
+        rows.append(speech_row("cloud", CLOUD_SMART_MODEL, "cloud", GROUP_GUSAN_CLOUD,
+                               note=f"{CLOUD_WRITER_MODEL} for meeting notes", pro=True,
+                               show_pro=pro_chip(pro)))
+    if choice in (None, "local"):
+        for mid, info in hardware.LOCAL_AI_INFO.items():
+            rows.append(speech_row(mid, info.real, "local", GROUP_THIS_COMPUTER, note=info.plain,
+                                   model=info.real, plain=info.plain))
+    if choice in (None, "own_key"):
+        for pid, info in WRITER_PROVIDERS.items():
+            if not actions.engine_has_key(pid, cfg):
+                continue
+            for mid, name, note in writer_models(pid):
+                rows.append(speech_row(f"{WRITER_OWN_PREFIX}{pid}:{mid}", name, "own_key", GROUP_OWN_KEY,
+                                       detail=f"your {info['name']} key", note=note, model=name,
+                                       plain=info["name"]))
+    return rows
+
+
 # ── Live Assistant's speech model ────────────────────────────────────────────
 # What a live call's pieces (and, for a model on this computer, the re-read after Stop) are
 # transcribed with. Qt-free; main.AudioRecorder.start_recording(speech=...) takes

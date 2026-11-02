@@ -111,6 +111,7 @@ from ui import hy_model, theme
 from ui.components import (Avatar, Button, Card, Chip, Divider, IconButton, IconTile, Keycap, NavItem,
                            PageHeader, Segmented, SettingRow, Toggle, icons, label, mini_prompt)
 from ui.components.badges import ProTag
+from ui.components.model_combo import MARK_DOWNLOAD, PlainNameCombo
 from ui.components.controls import keycap_labels
 
 logger = logging.getLogger("transcribe")
@@ -150,6 +151,12 @@ WHAT_WE_COLLECT = ("Anonymous: which features you use, the app version, your sys
 SPEECH_KEYS = (("mistral_api_key", "Mistral"), ("google_api_key", "Google Gemini"))
 # The Gusan Cloud writer tile: Smart Actions and Live Assistant share one model.
 CLOUD_WRITER_HINTS = (engine_choice.CLOUD_SMART_MODEL, "%s for meeting notes" % engine_choice.CLOUD_WRITER_MODEL)
+# Speech & AI's two cards: "Runs on" (where the model runs) in each card's order.
+SPEECH_SOURCES_UI = (("local", engine_choice.THIS_COMPUTER), ("cloud", engine_choice.GUSAN_CLOUD),
+                     ("own_key", engine_choice.OWN_KEY))
+WRITER_SOURCES_UI = (("cloud", engine_choice.GUSAN_CLOUD), ("local", engine_choice.THIS_COMPUTER),
+                     ("own_key", engine_choice.OWN_KEY))
+PAUSED_TEXT = "Off while Privacy mode is on"
 
 # Settings keys whose change redraws something here (anything else is ignored).
 _WATCHED = {
@@ -1671,6 +1678,95 @@ class WriterSize(_Painted):
         return self._sel
 
 
+class EngineCard(Card):
+    """One of Speech & AI's two cards (Speech, AI writer), both in one format: the title and what
+    it is for (the hardware on the right); "Runs on" - where the model runs - and "Model" - the
+    model, as the pickers list it (real names, LOCAL / CLOUD / PRO chips, a download icon on one
+    that is not on this computer); one status line with its one action under them. The page
+    fills it (fill / set_source / set_status) and reads runs_on.changed / combo picks."""
+    LABEL_W = 76
+    COMBO_W = 320
+
+    action_clicked = Signal()
+
+    def __init__(self, title, sub, sources, parent=None):
+        super().__init__(parent, pad=(22, 18), gap=12)
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        self.title = text_label(title, 15, 700, parent=self)
+        head.addWidget(self.title, 0, Qt.AlignVCenter)
+        head.addStretch(1)
+        self.trail = text_label("", 12.5, role="muted", parent=self)
+        head.addWidget(self.trail, 0, Qt.AlignVCenter)
+        self.add(head)
+        self.sub = text_label(sub, 12.5, role="muted", parent=self, wrap=True)
+        self.add(self.sub)
+        self.sources = tuple(k for k, _n in sources)
+        self.runs_on = Segmented([n for _k, n in sources], 0, "%s runs on" % title, size="s", parent=self)
+        self.add(self._row("Runs on", self.runs_on))
+        self.combo = PlainNameCombo(self)
+        self.combo.setAccessibleName("%s model" % title)
+        self.combo.setFont(theme.font(13.5))
+        self.combo.setCursor(Qt.PointingHandCursor)
+        self.combo.setFixedWidth(self.COMBO_W)
+        self.combo.enable_row_marks()
+        self.add(self._row("Model", self.combo))
+        status = QHBoxLayout()
+        status.setContentsMargins(self.LABEL_W + 12, 0, 0, 0)
+        status.setSpacing(10)
+        self.status = text_label("", 12.5, role="muted", parent=self, wrap=True)
+        status.addWidget(self.status, 1, Qt.AlignVCenter)
+        self.action = Button("", "link", "s", parent=self)
+        self.action.setAccessibleName("%s model action" % title)
+        self.action.clicked.connect(self.action_clicked.emit)
+        self.action.hide()
+        status.addWidget(self.action, 0, Qt.AlignVCenter)
+        self.add(status)
+        self.extra = QVBoxLayout()           # the NVIDIA card under Speech
+        self.extra.setContentsMargins(0, 0, 0, 0)
+        self.add(self.extra)
+
+    def _row(self, name, widget):
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        lb = text_label(name, 13.5, 600, parent=self)
+        lb.setFixedWidth(self.LABEL_W)
+        row.addWidget(lb, 0, Qt.AlignVCenter)
+        row.addWidget(widget, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        row.addStretch(1)
+        return row
+
+    def source(self):
+        return self.sources[self.runs_on.index()]
+
+    def set_source(self, key):
+        if key in self.sources and self.runs_on.index() != self.sources.index(key):
+            self.runs_on.blockSignals(True)
+            self.runs_on.set_index(self.sources.index(key))
+            self.runs_on.blockSignals(False)
+
+    def fill(self, rows, value):
+        """The rows, with ``value`` selected (what is really set; nothing when it isn't listed)."""
+        box = self.combo
+        box.blockSignals(True)
+        try:
+            box.fill_rows(rows)
+            idx = box.findData(value)
+            box.setCurrentIndex(idx if idx >= 0 else -1)
+        finally:
+            box.blockSignals(False)
+
+    def set_status(self, text, action="", tone="muted"):
+        self.status.setText(text)
+        self.status.setProperty("textRole", tone)
+        self.status.style().unpolish(self.status)
+        self.status.style().polish(self.status)
+        self.action.setText(action)
+        self.action.setAccessibleName("%s: %s" % (action, self.title.text()) if action
+                                      else "%s model action" % self.title.text())
+        self.action.setVisible(bool(action))
+
+
 class KeyRow(QFrame):
     """One of 'My API keys': the key shown masked (Key ending 4f2), Replace /
     Remove / Add key, and an inline editor that tests the key as it is pasted."""
@@ -2566,111 +2662,30 @@ class SettingsPage(QWidget):
         sec, v = self._section("speech", "Speech & AI", gap=14)
         inner = QVBoxLayout()
         inner.setSpacing(30)
-        self.hw_trail = text_label("", 12.5, role="muted", parent=sec)
-        blk, bv = self._block("Speech model", trail=self.hw_trail, parent=sec)
-        self.cards_row = CardsRow(parent=blk)
-        self.model_cards = {}
-        for mid in hardware.MAIN_SPEECH_MODELS:
-            card = ModelCard(mid)
-            card.download.connect(self._model_download)
-            card.use.connect(self._model_use)
-            card.remove.connect(self._model_remove)
-            self.cards_row.add(card)
-            self.model_cards[mid] = card
-        bv.addWidget(self.cards_row)
-        more = QVBoxLayout()
-        more.setContentsMargins(0, 6, 0, 0)
-        more.setSpacing(8)
-        self.more_button = trailing_icon(Button("More sizes", "link", "m", icon="chev_d", parent=blk))
-        self.more_button.setIconSize(QSize(14, 14))
-        self.more_button.setFixedHeight(20)
-        self.more_button.clicked.connect(lambda _=False: self._toggle_more())
-        more.addWidget(self.more_button, 0, Qt.AlignLeft | Qt.AlignAbsolute)
-        self.tiles_row = CardsRow(top=12, parent=blk)
-        self.tiles_row.set_recommended(None, room=False)
-        self.size_tiles = {}
-        for mid in hardware.MORE_SPEECH_MODELS:
-            t = SizeTile(mid)
-            t.activated.connect(self._tile_clicked)
-            t.remove.connect(self._model_remove)
-            self.tiles_row.add(t)
-            self.size_tiles[mid] = t
-        more.addWidget(self.tiles_row)
-        bv.addLayout(more)
-        # The Armenian model: its own wide card under the sizes (hidden until it is available).
-        self.hy_card = ArmenianCard(blk)
-        self.hy_card.download.connect(self._hy_download)
-        self.hy_card.cancel.connect(self._hy_cancel)
-        self.hy_card.use.connect(lambda: self._model_use(hardware.HY_MODEL_ID))
-        self.hy_card.remove.connect(lambda: self._model_remove(hardware.HY_MODEL_ID))
-        self.hy_card.hide()
-        bv.addWidget(self.hy_card)
-        self.gpu_card = GpuCard(blk)
+        # Two cards in one format: Speech (dictation and meetings) and the AI writer.
+        self.speech_card = EngineCard("Speech", "Dictation and meetings.", SPEECH_SOURCES_UI, parent=sec)
+        self.hw_trail = self.speech_card.trail
+        self.speech_card.runs_on.changed.connect(self._speech_source_clicked)
+        self.speech_card.combo.currentIndexChanged.connect(self._speech_model_picked)
+        self.speech_card.action_clicked.connect(self._speech_action)
+        self.gpu_card = GpuCard(self.speech_card)
         self.gpu_card.start.connect(self._gpu_start)
         self.gpu_card.cancel.connect(lambda: call(self.app, "cancel_gpu_download"))
         self.gpu_card.retry.connect(self._gpu_retry)
         self.gpu_card.remove.connect(self._gpu_remove)
         self.gpu_card.hide()
-        bv.addWidget(self.gpu_card)
-        self._more_open = True
-        self._sync_more()
-        inner.addWidget(blk)
+        self.speech_card.extra.addWidget(self.gpu_card)
+        inner.addWidget(self.speech_card)
 
-        two = QBoxLayout(QBoxLayout.LeftToRight)       # top to bottom in a narrow window
-        two.setSpacing(20)
-        self.speech_two = two
-        left, lv = self._block("Speech runs on", sub="Dictation and meetings.", parent=sec)
-        tiles = QVBoxLayout()
-        tiles.setSpacing(8)
-        self.speech_tiles = {
-            "local": OptionTile("Speech runs on", engine_choice.THIS_COMPUTER),
-            "cloud": OptionTile("Speech runs on", engine_choice.GUSAN_CLOUD, pro=True),
-            "own_key": OptionTile("Speech runs on", engine_choice.OWN_KEY),
-        }
-        for k, t in self.speech_tiles.items():
-            t.clicked.connect(lambda _=False, s=k: self._speech_pick(s))
-            tiles.addWidget(t)
-        self.speech_provider = Segmented(["Mistral", "Google Gemini"], 0, "Speech key", size="s")
-        self.speech_provider.changed.connect(
-            lambda i: self._speech_pick("own_key", provider=("mistral", "google")[i]))
-        holder = QWidget()
-        hl = QHBoxLayout(holder)
-        hl.setContentsMargins(0, 8, 0, 0)
-        hl.addWidget(self.speech_provider)
-        hl.addStretch(1)
-        self.speech_provider_box = holder
-        self.speech_tiles["own_key"].set_extra(holder)
-        lv.addLayout(tiles)
-        two.addWidget(left, 1, Qt.AlignTop)
-
-        right, rv = self._block("AI writer", sub="Smart Actions, meeting notes and Live Assistant.", parent=sec)
-        wtiles = QVBoxLayout()
-        wtiles.setSpacing(8)
-        self.writer_tiles = {
-            "cloud": OptionTile("AI writer", engine_choice.GUSAN_CLOUD, pro=True),
-            "local": OptionTile("AI writer", engine_choice.THIS_COMPUTER),
-            "own_key": OptionTile("AI writer", engine_choice.OWN_KEY),
-        }
-        self.writer_tiles["cloud"].set_hints(list(CLOUD_WRITER_HINTS))
-        grid_w = QWidget()
-        grid = QGridLayout(grid_w)
-        grid.setContentsMargins(0, 8, 0, 0)
-        grid.setHorizontalSpacing(6)
-        grid.setVerticalSpacing(6)
-        self.writer_sizes = {}
-        for i, mid in enumerate(hardware.LOCAL_AI_MODEL_IDS):
-            ws = WriterSize(mid)
-            ws.activated.connect(self._writer_size_clicked)
-            ws.remove.connect(self._model_remove)
-            grid.addWidget(ws, i // 2, i % 2)
-            self.writer_sizes[mid] = ws
-        self.writer_tiles["local"].set_extra(grid_w)
-        for k, t in self.writer_tiles.items():
-            t.clicked.connect(lambda _=False, c=k: self._writer_pick(c))
-            wtiles.addWidget(t)
-        rv.addLayout(wtiles)
-        two.addWidget(right, 1, Qt.AlignTop)
-        inner.addLayout(two)
+        self.writer_card = EngineCard("AI writer", "Smart Actions, meeting notes and Live Assistant.",
+                                      WRITER_SOURCES_UI, parent=sec)
+        self.writer_card.runs_on.changed.connect(self._writer_source_clicked)
+        self.writer_card.combo.currentIndexChanged.connect(self._writer_model_picked)
+        self.writer_card.action_clicked.connect(self._writer_action)
+        inner.addWidget(self.writer_card)
+        self._speech_action_fn = self._writer_action_fn = None
+        self._model_errors = {}
+        self._progress = {}                   # model id -> the last percent heard (None = size unknown)
 
         kblk, kv = self._block("My API keys", parent=sec)
         self.key_rows = {}
@@ -2696,15 +2711,6 @@ class SettingsPage(QWidget):
         inner.addWidget(kblk)
         v.addLayout(inner)
         self._layout_speech_columns()
-
-    def _toggle_more(self):
-        self._more_open = not self._more_open
-        self._sync_more()
-
-    def _sync_more(self):
-        self.tiles_row.setVisible(self._more_open)
-        self.more_button.setIcon(icons.icon("chev_d" if self._more_open else "chev_r", 14, "blue-tx", sw=2))
-        self.more_button.setAccessibleDescription("Expanded" if self._more_open else "Collapsed")
 
     def _toggle_more_options(self, show=None):
         show = (not self.writer_panel.isVisible()) if show is None else bool(show)
@@ -2753,78 +2759,79 @@ class SettingsPage(QWidget):
         return getattr(rec, "model", None)
 
     def _refresh_models(self):
-        cfg = self.cfg
-        dl = self._dl()
-        sel = cfg.get("whisper_model") or hardware.DEFAULT_SPEECH_MODEL
-        speech = self._speech_now()
-        in_use = "In use" if speech.get("kind") == "local" else "Offline backup"
-        on_gpu = bool(self._hardware is not None and getattr(self._hardware, "on_gpu", False))
-        for mid, card in self.model_cards.items():
-            st = self._state(mid)
-            if st == "unknown":
-                st = "ready" if mid == sel else "missing"
-            prog = None
-            err = ""
-            removing = False
-            if dl is not None:
-                try:
-                    p = dl.progress_of(mid)
-                    prog = p[0] if p and (p[2] or p[0]) else None
-                    err = dl.error(mid) or ""
-                    removing = bool(dl.is_removing(mid))
-                except Exception:
-                    pass
-            card.set_state(st, selected=(mid == sel), in_use_text=in_use, pct=prog, error=err,
-                           removing=removing, enabled=dl is not None)
-            card.set_note("A little slower here" if hardware.slower_here(mid, on_gpu) else "")
-        for mid, tile in self.size_tiles.items():
-            st = self._state(mid)
-            if st == "unknown":
-                st = "ready" if mid == sel else "missing"
-            prog = None
-            removing = False
-            if dl is not None:
-                try:
-                    p = dl.progress_of(mid)
-                    prog = p[0] if p and (p[2] or p[0]) else None
-                    removing = bool(dl.is_removing(mid))
-                except Exception:
-                    pass
-            tile.set_state(st, selected=(mid == sel), pct=prog, removing=removing, enabled=dl is not None)
-        self._refresh_hy()
-        rec = self._recommended()
-        if rec in self.model_cards:
-            self.cards_row.set_recommended(self.model_cards[rec])
-            self.tiles_row.set_recommended(None, room=False)
-        elif rec in self.size_tiles and self._more_open:
-            self.cards_row.set_recommended(None)
-            self.tiles_row.set_recommended(self.size_tiles[rec], room=True)
-        else:
-            self.cards_row.set_recommended(None)
-            self.tiles_row.set_recommended(None, room=False)
-        for mid, card in self.model_cards.items():
-            card.setAccessibleDescription("Best for your computer" if mid == rec else "")
+        """The two cards' model lists, download icons and status lines (after a download, a
+        removal, the hardware scan)."""
+        if "speech" not in self._built:
+            return
+        self._refresh_speech_choice()
+        self._refresh_writer()
 
-    def _refresh_hy(self):
-        """The Armenian model's card: hidden while it isn't listed, else its state from the downloads."""
-        card = getattr(self, "hy_card", None)
-        if card is None:
-            return
-        shown = hy_model.state(self.app) != "hidden"
-        card.setVisible(shown)
-        if not shown:
-            return
+    def _model_progress(self, mid):
+        """A running download's percent, or None (not running / size not known yet)."""
+        if mid in self._progress:
+            return self._progress[mid]
         dl = self._dl()
-        st = hy_model.state(self.app)
-        sel = str(self.cfg.get("whisper_model") or "") == hardware.HY_MODEL_ID
-        removing = False
-        if dl is not None:
+        if dl is None:
+            return None
+        if mid == hardware.HY_MODEL_ID:
+            return hy_model.percent(self.app)
+        try:
+            p = dl.progress_of(mid)
+            return int(p[0]) if p and (p[2] or p[0]) else None
+        except Exception:
+            return None
+
+    def _speech_model_state(self, mid):
+        """"ready" | "missing" | "downloading" | "failed" for a speech model (the Armenian one
+        through hy_model). Unknown (no downloads yet): the model in use counts as here."""
+        if mid == hardware.HY_MODEL_ID:
+            st = hy_model.state(self.app)
+            return "missing" if st == "hidden" else st
+        st = self._state(mid)
+        if st == "unknown":
+            st = "ready" if mid == (self.cfg.get("whisper_model") or hardware.DEFAULT_SPEECH_MODEL) else "missing"
+        return st
+
+    def _writer_model_state(self, mid):
+        st = self._state(mid)
+        if st == "unknown":
             try:
-                removing = bool(dl.is_removing(hardware.HY_MODEL_ID))
+                import local_llm
+                st = "ready" if local_llm.model_downloaded(mid) else "missing"
             except Exception:
-                removing = False
-        card.set_state(st, selected=sel, pct=hy_model.percent(self.app), error=hy_model.failure(self.app),
-                       removing=removing, enabled=dl is not None)
+                st = "missing"
+        return st
+
+    def _mark_rows(self, card, state_of, info_of):
+        box = card.combo
+        for i in range(box.count()):
+            if box.is_heading(i):
+                continue
+            value = str(box.itemData(i) or "")
+            info = info_of(value)
+            mark, note = "", ""
+            if info is not None and state_of(value) in ("missing", "failed"):
+                mark, note = MARK_DOWNLOAD, info.size
+            box.set_choice_mark(i, mark, note)
+
+    def _download_status(self, mid, info, st, ready_text):
+        """(text, action, tone) for a local model's status line. No downloads service (an early
+        start, a test stub): the line only, no button."""
+        text, action, tone = self._download_line(mid, info, st, ready_text)
+        return (text, action if self._dl() is not None else "", tone)
+
+    def _download_line(self, mid, info, st, ready_text):
+        if st != "downloading":
+            self._progress.pop(mid, None)
+        if st == "downloading":
+            pct = self._model_progress(mid)
+            text = "Downloading %s…%s" % (info.plain, (" %d%%" % pct) if pct is not None else "")
+            return text, ("Cancel" if mid == hardware.HY_MODEL_ID else ""), "muted"
+        if st == "failed":
+            return self._model_errors.get(mid) or "The download didn't finish.", "Try again", "muted"
+        if st == "missing":
+            return "Not on this computer yet · %s" % info.size, "Download", "muted"
+        return ready_text, "Remove", "muted"
 
     def _hy_download(self):
         """Download the Armenian model and use it when it is on this computer (like a Whisper card).
@@ -2917,10 +2924,8 @@ class SettingsPage(QWidget):
                 apply_settings(self.app, {engine_choice.LIVE_SPEECH_KEY: engine_choice.LIVE_SPEECH_AUTO})
             if name == str(cfg.get(engine_choice.FILE_KEY) or ""):
                 apply_settings(self.app, {engine_choice.FILE_KEY: engine_choice.FILE_AUTO})
-        if not ok and msg and "speech" in self._built and name in self.model_cards:
-            self.model_cards[name].set_note(msg)
-        if not ok and msg and "speech" in self._built and hardware.HY_MODEL_ID == name:
-            self.hy_card.sub.setText(msg)
+        if not ok and msg and "speech" in self._built:
+            self._model_errors[name] = msg            # the card's status line says it
         self._queue_refresh()
 
     def _on_finished(self, name, state, msg):
@@ -2934,21 +2939,13 @@ class SettingsPage(QWidget):
     def _on_progress(self, name, pct, _done=0, total=0):
         if "speech" not in self._built:
             return
-        # total 0 = the size isn't known yet: draw it indeterminate, not "0%".
-        pct = None if (not total and not pct) else int(pct or 0)
-        text = "…" if pct is None else "%d%%" % pct
-        if name in self.model_cards:
-            self.model_cards[name]._set_progress(pct)
-        elif name == hardware.HY_MODEL_ID:
-            self.hy_card._set_progress(pct)
-        elif name in self.size_tiles:
-            tile = self.size_tiles[name]
-            if tile._state[0] == "downloading":
-                tile.trail.setText(text)
-        elif name in self.writer_sizes:
-            ws = self.writer_sizes[name]
-            if ws._state == "downloading":
-                ws.mark.setText(text)
+        # The status line of the card whose model downloads ("Downloading Balanced… 45%").
+        # total 0 = the size isn't known yet: no percent, not "0%".
+        self._progress[name] = None if (not total and not pct) else int(pct or 0)
+        if name == (self.cfg.get("whisper_model") or "") or name in self._pending_use:
+            self._speech_status()
+        if name == engine_choice.local_writer(self.cfg) or name in self._pending_use:
+            self._writer_status()
 
     # speech source
     def _speech_pick(self, source, provider=None, turn_off_privacy=False):
@@ -3062,68 +3059,179 @@ class SettingsPage(QWidget):
     def _writer_size_clicked(self, mid):
         self._writer_local(mid)
 
+    # ── the two cards ──
+    def _speech_source_clicked(self, i):
+        src = self.speech_card.sources[i]
+        if src != engine_choice.speech_choice(self.cfg):
+            self._speech_pick(src)              # asks (Pro, Privacy mode, a key) and redraws
+        self._refresh_speech_choice()           # a refused pick: back to what is set
+
+    def _speech_model_picked(self, _i):
+        value = str(self.speech_card.combo.currentData() or "")
+        self._refresh_speech_choice()           # what is really set, until the pick applies
+        if not value:
+            return
+        src = engine_choice.dictation_speech_source(value)
+        if src == "cloud":
+            self._speech_pick("cloud")
+        elif src == "own_key":
+            self._speech_pick("own_key", provider=engine_choice.DICTATION_OWN[value])
+        else:
+            st = self._speech_model_state(value)
+            if st in ("missing", "failed"):
+                if self._confirm_download(value):
+                    self._model_download(value)
+            elif st == "downloading":
+                self._pending_use[value] = "speech"
+            else:
+                self._model_use(value)
+
+    def _confirm_download(self, mid):
+        i = hardware.info(mid)
+        if i is None:
+            return False
+        return ask(self, "Download %s?" % i.plain, "%s · %s. It works offline." % (i.real, i.size),
+                   [("cancel", "Not now", "ghost"), ("go", "Download", "primary")]) == "go"
+
+    def _speech_action(self):
+        fn = self._speech_action_fn
+        if fn is not None:
+            fn()
+
     def _refresh_speech_choice(self):
         cfg = self.cfg
-        speech = self._speech_now()
-        kind = speech.get("kind")
-        privacy = bool(cfg.get("privacy_mode"))
-        sel = cfg.get("whisper_model") or hardware.DEFAULT_SPEECH_MODEL
-        local = engine_choice._local_speech("dictation", sel)
-        for k, t in self.speech_tiles.items():
-            t.setChecked(k == kind)
-            t.set_paused(privacy and k != "local")
-        # The real model name and where it runs, as the pickers say it ("Whisper Small · Local").
-        self.speech_tiles["local"].set_hints(["%s · %s" % (local["tagged"], local["plain"])])
-        cloud = engine_choice.CLOUD_SPEECH_MODELS.get(str(cfg.get("managed_provider") or "gemini").lower(),
-                                                      hardware.CLOUD_SPEECH_MODEL)
-        self.speech_tiles["cloud"].set_hints(["Off while Privacy mode is on" if privacy else
-                                              "%s · nothing to download"
-                                              % engine_choice.tagged_name(cloud, "cloud")])
-        if privacy:
-            own = "Off while Privacy mode is on"
-        elif kind == "own_key":
-            own = speech.get("tagged") or "%s · %s" % (speech.get("plain"), speech.get("model_name"))
+        card = self.speech_card
+        src = engine_choice.speech_choice(cfg)
+        card.set_source(src)
+        rows = engine_choice.dictation_speech_rows(cfg, is_pro(self.app), source=src)
+        card.fill(rows, engine_choice.dictation_speech_value(cfg))
+        if src == "local":
+            self._mark_rows(card, self._speech_model_state, hardware.info)
+        self._speech_status()
+
+    def _speech_status(self):
+        cfg = self.cfg
+        src = engine_choice.speech_choice(cfg)
+        fn, action = None, ""
+        if src == "cloud":
+            text = "Nothing to download. Gusan Cloud picks the model."
+        elif src == "own_key":
+            speech = self._speech_now()
+            field = "google_api_key" if cfg.get("backend") == "google" else "mistral_api_key"
+            text = "Uses %s." % engine_choice.owner_phrase(speech.get("plain"))
+            action = "Change key"
+
+            def fn():
+                self.open_key_editor(field)
         else:
-            own = "Mistral or Google Gemini"
-        self.speech_tiles["own_key"].set_hints([own])
-        both = bool((cfg.get("mistral_api_key") or "").strip() and (cfg.get("google_api_key") or "").strip())
-        self.speech_provider_box.setVisible(kind == "own_key" and both)
-        self.speech_provider.set_index(1 if cfg.get("backend") == "google" else 0)
+            sel = cfg.get("whisper_model") or hardware.DEFAULT_SPEECH_MODEL
+            info = hardware.info(sel)
+            if info is None:
+                card_text = ""
+            else:
+                st = self._speech_model_state(sel)
+                on_gpu = bool(self._hardware is not None and getattr(self._hardware, "on_gpu", False))
+                ready = "On this computer · %s" % info.size
+                if hardware.slower_here(sel, on_gpu):
+                    ready += " · a little slower here"
+                rec = self._recommended()
+                if rec and rec != sel and hardware.info(rec) is not None:
+                    ready += " · Best for your computer: %s" % hardware.info(rec).plain
+                card_text, action, _tone = self._download_status(sel, info, st, ready)
+                if action == "Remove":
+                    def fn():
+                        self._model_remove(sel)
+                elif action == "Cancel":
+                    fn = self._hy_cancel
+                elif action:
+                    def fn():
+                        self._model_download(sel)
+            text = card_text
+            if cfg.get("privacy_mode"):
+                text = (text + "\n" if text else "") + "Privacy mode is on: speech stays on this computer."
+        self._speech_action_fn = fn
+        self.speech_card.set_status(text, action)
+
+    def _writer_kind(self):
+        kind = (self._writer_now() or {}).get("kind")
+        return kind if kind in ("cloud", "own_key") else "local"
+
+    def _writer_source_clicked(self, i):
+        choice = self.writer_card.sources[i]
+        if choice != self._writer_kind():
+            self._writer_pick(choice)
+        self._refresh_writer()
+
+    def _writer_model_picked(self, _i):
+        value = str(self.writer_card.combo.currentData() or "")
+        self._refresh_writer()
+        if not value:
+            return
+        choice, pid, mid = engine_choice.parse_writer_value(value)
+        if choice == "cloud":
+            self._writer_pick("cloud")
+        elif choice == "own_key":
+            self._writer_own_key(pid, mid, None)
+        else:
+            st = self._writer_model_state(mid)
+            if st in ("missing", "failed"):
+                i = hardware.LOCAL_AI_INFO.get(mid)
+                if i is not None and ask(self, "Download %s?" % i.real, "%s · %s. It works offline." % (i.plain, i.size),
+                                         [("cancel", "Cancel", "ghost"), ("go", "Download", "primary")]) == "go":
+                    self._model_download(mid, use_as="writer")
+            elif st == "downloading":
+                self._pending_use[mid] = "writer"
+            else:
+                self._writer_local(mid)
+
+    def _writer_action(self):
+        fn = self._writer_action_fn
+        if fn is not None:
+            fn()
 
     def _refresh_writer(self):
         cfg = self.cfg
+        card = self.writer_card
+        kind = self._writer_kind()
+        card.set_source(kind)
+        # The row of what really writes (runs_on: a Pro default writes on Gusan Cloud too).
+        value = {"cloud": "cloud", "local": engine_choice.local_writer(cfg)}.get(kind) or engine_choice.writer_value(cfg)
+        card.fill(engine_choice.writer_rows(cfg, is_pro(self.app), choice=kind), value)
+        if kind == "local":
+            self._mark_rows(card, self._writer_model_state, hardware.LOCAL_AI_INFO.get)
+        self._writer_status()
+
+    def _writer_status(self):
+        cfg = self.cfg
         now = self._writer_now() or {}
         kind = now.get("kind")
-        tile = {"cloud": "cloud", "own_key": "own_key"}.get(kind, "local")
-        privacy = bool(cfg.get("privacy_mode"))
-        for k, t in self.writer_tiles.items():
-            t.setChecked(k == tile)
-            t.set_paused(privacy and k != "local")
-        if privacy:
-            self.writer_tiles["cloud"].set_hints(["Off while Privacy mode is on"])
+        fn, action = None, ""
+        if cfg.get("privacy_mode") and engine_choice.writer_choice(cfg) != "local":
+            text = PAUSED_TEXT + ". The built-in rules write until then."
+        elif kind == "cloud":
+            text = "%s writes meeting notes. Nothing to download." % engine_choice.CLOUD_WRITER_MODEL
+        elif kind == "own_key":
+            text = "Uses your %s key." % (now.get("plain") or "own")
+            action = "More options"
+
+            def fn():
+                self._toggle_more_options(True)
+                self._scroll_to_widget(self.writer_panel)
+        elif kind == "local":
+            mid = engine_choice.local_writer(cfg)
+            info = hardware.LOCAL_AI_INFO.get(mid)
+            text, action, _tone = self._download_status(mid, info, self._writer_model_state(mid),
+                                                        "On this computer · %s · works offline" % info.size)
+            if action == "Remove":
+                def fn():
+                    self._model_remove(mid)
+            elif action:
+                def fn():
+                    self._model_download(mid, use_as="writer")
         else:
-            self.writer_tiles["cloud"].set_hints(list(CLOUD_WRITER_HINTS))
-        self.writer_tiles["local"].set_hints(["Works offline"])
-        self.writer_tiles["own_key"].set_hints(["Off while Privacy mode is on" if privacy else self._own_key_hint(cfg)])
-        # The local writer stays marked while the cloud writes: it is the offline backup.
-        local_sel = engine_choice.local_writer(cfg)
-        dl = self._dl()
-        for mid, ws in self.writer_sizes.items():
-            st = self._state(mid)
-            if st == "unknown":
-                try:
-                    import local_llm
-                    st = "ready" if local_llm.model_downloaded(mid) else "missing"
-                except Exception:
-                    st = "missing"
-            pct = None
-            if dl is not None and st == "downloading":
-                try:
-                    p = dl.progress_of(mid)
-                    pct = p[0] if p and (p[2] or p[0]) else None
-                except Exception:
-                    pct = None
-            ws.set_state(st, selected=(mid == local_sel), pct=pct)
+            text = "No AI model yet: the built-in rules write. Pick a model to download it."
+        self._writer_action_fn = fn
+        self.writer_card.set_status(text, action)
 
     def _own_key_hint(self, cfg):
         import actions
@@ -3886,7 +3994,7 @@ class SettingsPage(QWidget):
         target = None
         if "speech" in self._built:
             target = {"gpu": self.gpu_card, "keys": self.keys_block, "api_keys": self.keys_block,
-                      "models": self.cards_row, "writer": self.writer_tiles["local"]}.get(focus)
+                      "models": self.speech_card, "writer": self.writer_card}.get(focus)
         self._jump_target = (sid, target)
         self._jump_to()
         # Freshly built sections can still grow while they are polished and

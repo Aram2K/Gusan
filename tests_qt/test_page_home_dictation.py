@@ -619,7 +619,7 @@ def test_dictation_builds_for_every_plan(dict_page, tier):
     # What the board shows; "Languages you mix" (Wave 4: taken over from the
     # retired Settings window) sits under Language, shown only for Mixed languages.
     rail_rows = [r.label.text() for r in page.rail.rows() if not r.isHidden()]
-    assert rail_rows == ["Shortcut", "Language", "Clean up mistakes", "Remove filler words", "Put my clipboard back",
+    assert rail_rows == ["Shortcut", "Language", "Model", "Clean up mistakes", "Remove filler words", "Put my clipboard back",
                          "Dictation bar look", "Hide bar in screen shares", "Gusan Cloud speech"]
     assert [r.label.text() for r in page.rail.rows()][2] == "Languages you mix"
     assert page.row_mix.isHidden()
@@ -1064,3 +1064,80 @@ def test_hotkey_capture_button(qapp, made):
 
     btn.set_hotkey("")
     assert not btn.empty_label.isHidden() and btn.keys.isHidden()
+
+
+# ── Dictation › Model (the same choice as Settings › Speech & AI › Speech) ──
+class ModelDownloads(QObject):
+    state_changed = Signal(str, str)
+    progress = Signal(str, int, int, int)
+    finished = Signal(str, str, str)
+
+    def __init__(self, ready=("small",)):
+        super().__init__()
+        self.states = {m: "ready" for m in ready}
+        self.started = []
+
+    def state(self, name):
+        return self.states.get(name, "missing")
+
+    def progress_of(self, name):
+        return None
+
+    def start(self, name):
+        self.started.append(name)
+        self.states[name] = "downloading"
+        return True
+
+
+def _model_pick(page, value):
+    box = page.model_combo
+    i = box.findData(value)
+    assert i >= 0, value
+    box.setCurrentIndex(i)
+    QApplication.processEvents()
+
+
+def test_dictation_model_lists_every_choice_and_follows_settings(dict_page):
+    import hardware
+    from ui.components.model_combo import MARK_DOWNLOAD, MARK_ROLE
+    page, app, _ = dict_page()
+    app.downloads = ModelDownloads()
+    page.sync_from_cfg()
+    box = page.model_combo
+    assert box.accessibleName() == "Speech model"
+    values = [box.itemData(i) for i in range(box.count()) if not box.is_heading(i)]
+    assert values[:len(hardware.SPEECH_MODEL_IDS)] == list(hardware.SPEECH_MODEL_IDS)
+    assert values[-3:] == ["cloud", "own:mistral", "own:google"]
+    assert box.currentData() == "small"
+    assert box.itemData(box.findData("base"), MARK_ROLE) == MARK_DOWNLOAD
+    app.cfg["whisper_model"] = "base"
+    app.downloads.states["base"] = "ready"
+    page.on_setting_changed("whisper_model")                   # changed in Settings
+    assert box.currentData() == "base"
+
+
+def test_dictation_model_pick_applies_downloads_or_asks(dict_page, monkeypatch):
+    from ui.pages import dictation
+    page, app, _ = dict_page()
+    app.downloads = ModelDownloads(ready=("small", "base"))
+    page.on_open()                                             # connects the downloads service
+    page.sync_from_cfg()
+    _model_pick(page, "base")                                  # on this computer: applies
+    assert ("set_settings", {"backend": "local", "whisper_model": "base"}) in app.calls
+    asked = []
+    monkeypatch.setattr(dictation.mini_prompt, "confirm_download",
+                        lambda *a, **k: asked.append(a[1:]) or True)
+    _model_pick(page, "medium")                                # not here: asks, downloads, then uses it
+    assert asked and asked[-1][0] == "Accurate"
+    assert app.downloads.started == ["medium"]
+    app.downloads.states["medium"] = "ready"
+    app.downloads.finished.emit("medium", "ready", "")
+    QApplication.processEvents()
+    assert ("set_settings", {"backend": "local", "whisper_model": "medium"}) in app.calls
+
+
+def test_dictation_model_cloud_needs_pro(dict_page):
+    page, app, _ = dict_page("free")
+    _model_pick(page, "cloud")
+    assert ("_pro_upsell", "Fast cloud transcription") in app.calls
+    assert page.model_combo.currentData() == "small"           # back to what is set
