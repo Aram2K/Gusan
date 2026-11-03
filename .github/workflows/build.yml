@@ -321,11 +321,18 @@ jobs:
           }
           & $iscc /DMyAppVersion="${{ steps.version.outputs.version }}" installer\installer.iss
           Move-Item installer\TranscribeApp-Setup.exe TranscribeApp-Windows-Setup.exe
+          # Same bytes under the Gusan download name. The Inno output stays
+          # TranscribeApp-Setup so AppId and the installed exe are unchanged.
+          Copy-Item TranscribeApp-Windows-Setup.exe Gusan-Windows-Setup.exe
+          Copy-Item TranscribeApp-Windows.zip Gusan-Windows.zip
 
       - name: Generate Windows checksums
         shell: pwsh
         run: |
-          foreach ($file in @("TranscribeApp-Windows-Setup.exe", "TranscribeApp-Windows.zip")) {
+          foreach ($file in @(
+            "TranscribeApp-Windows-Setup.exe", "Gusan-Windows-Setup.exe",
+            "TranscribeApp-Windows.zip", "Gusan-Windows.zip"
+          )) {
             $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $file" | Set-Content "$file.sha256" -Encoding ascii
           }
@@ -336,6 +343,8 @@ jobs:
           path: |
             TranscribeApp-Windows-Setup.exe
             TranscribeApp-Windows-Setup.exe.sha256
+            Gusan-Windows-Setup.exe
+            Gusan-Windows-Setup.exe.sha256
 
       - uses: actions/upload-artifact@v4
         with:
@@ -343,6 +352,8 @@ jobs:
           path: |
             TranscribeApp-Windows.zip
             TranscribeApp-Windows.zip.sha256
+            Gusan-Windows.zip
+            Gusan-Windows.zip.sha256
 
   # ── macOS .dmg ───────────────────────────────────────────────────────────────
   build-macos:
@@ -454,12 +465,16 @@ jobs:
 
       - name: Package as DMG
         run: |
+          set -euo pipefail
           hdiutil create \
             -volname "Gusan" \
             -srcfolder dist/TranscribeApp.app \
             -ov -format UDZO \
             TranscribeApp-Mac.dmg
-          shasum -a 256 TranscribeApp-Mac.dmg > TranscribeApp-Mac.dmg.sha256
+          cp TranscribeApp-Mac.dmg Gusan-Mac.dmg
+          hash="$(shasum -a 256 TranscribeApp-Mac.dmg | awk '{print $1}')"
+          printf '%s  %s\n' "$hash" TranscribeApp-Mac.dmg > TranscribeApp-Mac.dmg.sha256
+          printf '%s  %s\n' "$hash" Gusan-Mac.dmg > Gusan-Mac.dmg.sha256
 
       - uses: actions/upload-artifact@v4
         with:
@@ -467,6 +482,8 @@ jobs:
           path: |
             TranscribeApp-Mac.dmg
             TranscribeApp-Mac.dmg.sha256
+            Gusan-Mac.dmg
+            Gusan-Mac.dmg.sha256
 
   # ── GitHub Release ────────────────────────────────────────────────────────────
   release:
@@ -517,9 +534,10 @@ jobs:
             echo
             echo
             echo "### Download"
-            echo "- **Windows installer**: \`TranscribeApp-Windows-Setup.exe\`"
-            echo "- **Windows portable**: \`TranscribeApp-Windows.zip\`"
-            echo "- **macOS**: \`TranscribeApp-Mac.dmg\` — on first launch right-click → **Open** to bypass Gatekeeper (the app is ad-hoc signed, not notarized)."
+            echo "- **Windows installer**: \`Gusan-Windows-Setup.exe\`"
+            echo "- **Windows portable**: \`Gusan-Windows.zip\`"
+            echo "- **macOS**: \`Gusan-Mac.dmg\` — on first launch right-click → **Open** to bypass Gatekeeper (the app is ad-hoc signed, not notarized)."
+            echo "- The same three files are also uploaded as \`TranscribeApp-Windows-Setup.exe\`, \`TranscribeApp-Windows.zip\` and \`TranscribeApp-Mac.dmg\`, so an older Gusan still updates."
             echo
             echo "### About"
             echo "Created by Aram Adamyan, founder of Aibuben — an AI community for learning, building, and sharing practical AI tools."
@@ -545,31 +563,34 @@ jobs:
               text = pathlib.Path(path).read_text(encoding="utf-8").strip()
               return text.split()[0].lower()
 
+          def asset(folder, name):
+              # windows.installer / windows.portable / macos.dmg stay the
+              # TranscribeApp names: shipped updaters read those keys.
+              # windows.gusan / macos.gusan are what 2.1.1 and later download.
+              return {
+                  "name": name,
+                  "url": f"{base}/{name}",
+                  "sha256": read_hash(f"{folder}/{name}.sha256"),
+                  "sha256_url": f"{base}/{name}.sha256",
+              }
+
           manifest = {
               "schema": 1,
               "version": version,
               "tag": tag,
               "notes_url": f"https://github.com/{repo}/releases/tag/{tag}",
               "windows": {
-                  "installer": {
-                      "name": "TranscribeApp-Windows-Setup.exe",
-                      "url": f"{base}/TranscribeApp-Windows-Setup.exe",
-                      "sha256": read_hash("windows-installer/TranscribeApp-Windows-Setup.exe.sha256"),
-                      "sha256_url": f"{base}/TranscribeApp-Windows-Setup.exe.sha256",
-                  },
-                  "portable": {
-                      "name": "TranscribeApp-Windows.zip",
-                      "url": f"{base}/TranscribeApp-Windows.zip",
-                      "sha256": read_hash("windows-zip/TranscribeApp-Windows.zip.sha256"),
-                      "sha256_url": f"{base}/TranscribeApp-Windows.zip.sha256",
+                  "installer": asset("windows-installer", "TranscribeApp-Windows-Setup.exe"),
+                  "portable": asset("windows-zip", "TranscribeApp-Windows.zip"),
+                  "gusan": {
+                      "installer": asset("windows-installer", "Gusan-Windows-Setup.exe"),
+                      "portable": asset("windows-zip", "Gusan-Windows.zip"),
                   },
               },
               "macos": {
-                  "dmg": {
-                      "name": "TranscribeApp-Mac.dmg",
-                      "url": f"{base}/TranscribeApp-Mac.dmg",
-                      "sha256": read_hash("macos-dmg/TranscribeApp-Mac.dmg.sha256"),
-                      "sha256_url": f"{base}/TranscribeApp-Mac.dmg.sha256",
+                  "dmg": asset("macos-dmg", "TranscribeApp-Mac.dmg"),
+                  "gusan": {
+                      "dmg": asset("macos-dmg", "Gusan-Mac.dmg"),
                   },
               },
           }
@@ -587,7 +608,13 @@ jobs:
             update-manifest.json
             windows-installer/TranscribeApp-Windows-Setup.exe
             windows-installer/TranscribeApp-Windows-Setup.exe.sha256
+            windows-installer/Gusan-Windows-Setup.exe
+            windows-installer/Gusan-Windows-Setup.exe.sha256
             windows-zip/TranscribeApp-Windows.zip
             windows-zip/TranscribeApp-Windows.zip.sha256
+            windows-zip/Gusan-Windows.zip
+            windows-zip/Gusan-Windows.zip.sha256
             macos-dmg/TranscribeApp-Mac.dmg
             macos-dmg/TranscribeApp-Mac.dmg.sha256
+            macos-dmg/Gusan-Mac.dmg
+            macos-dmg/Gusan-Mac.dmg.sha256

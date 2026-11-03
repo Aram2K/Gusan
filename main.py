@@ -7907,8 +7907,7 @@ def _update_info_from_manifest(manifest, ignore_dismissed=False):
     if not ignore_dismissed and cfg.get("dismissed_update_version") == tag:
         return None
 
-    windows = manifest.get("windows", {})
-    installer = windows.get("installer", {})
+    installer = updater.manifest_installer(manifest)
     return {
         "tag": tag,
         "installer_url": installer.get("url"),
@@ -7926,20 +7925,7 @@ def _update_info_from_release(data, ignore_dismissed=False):
     if not ignore_dismissed and cfg.get("dismissed_update_version") == latest:
         return None
 
-    installer_url = None
-    installer_name = ""
-    preferred = _asset_url(data, "TranscribeApp-Windows-Setup.exe")
-    if preferred:
-        installer_url = preferred
-        installer_name = "transcribeapp-windows-setup.exe"
-    else:
-        for asset in data.get("assets", []):
-            name = asset.get("name", "").lower()
-            if "setup" in name and name.endswith(".exe"):
-                installer_url = asset.get("browser_download_url")
-                installer_name = name
-                break
-
+    installer_url, installer_name = updater.pick_release_installer(data)
     checksum_url = None
     if installer_name:
         checksum_url = (

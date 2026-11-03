@@ -280,9 +280,10 @@ class TestKeptIdentifiers(unittest.TestCase):
 
     def test_updater_asset_and_repo(self):
         import updater
-        self.assertEqual(updater.INSTALLER_NAME, INSTALLER_ASSET)
+        self.assertEqual(updater.INSTALLER_NAME, "Gusan-Windows-Setup.exe")
+        self.assertEqual(updater.LEGACY_INSTALLER_NAME, INSTALLER_ASSET)
         self.assertEqual(updater.RELEASES_API, "https://api.github.com/repos/Aram2K/Gusan/releases/latest")
-        self.assertIn(INSTALLER_ASSET, _read(MAIN_PY))
+        self.assertIn(INSTALLER_ASSET, _read(ROOT / "updater.py"))
 
     def test_single_instance_port_and_handshake(self):
         src = _read(MAIN_PY)
@@ -327,13 +328,21 @@ class TestKeptIdentifiers(unittest.TestCase):
         self.assertIn("--name TranscribeApp", jobs["build-macos"])
         self.assertIn("Move-Item installer\\TranscribeApp-Setup.exe %s" % INSTALLER_ASSET, jobs["build-windows"])
         self.assertIn("dist/TranscribeApp.app", jobs["build-macos"])
-        for asset in (INSTALLER_ASSET, "TranscribeApp-Windows.zip", "TranscribeApp-Mac.dmg"):
-            self.assertIn('"name": "%s"' % asset, jobs["release"])
-        files = _step(jobs["release"], "Create GitHub Release")
+        release = jobs["release"]
+        for asset in (INSTALLER_ASSET, "TranscribeApp-Windows.zip", "TranscribeApp-Mac.dmg",
+                      "Gusan-Windows-Setup.exe", "Gusan-Windows.zip", "Gusan-Mac.dmg"):
+            self.assertIn(asset, release)
+        files = _step(release, "Create GitHub Release")
         for path in ("windows-installer/%s" % INSTALLER_ASSET, "windows-installer/%s.sha256" % INSTALLER_ASSET,
-                     "windows-zip/TranscribeApp-Windows.zip", "macos-dmg/TranscribeApp-Mac.dmg",
+                     "windows-installer/Gusan-Windows-Setup.exe", "windows-installer/Gusan-Windows-Setup.exe.sha256",
+                     "windows-zip/TranscribeApp-Windows.zip", "windows-zip/Gusan-Windows.zip",
+                     "macos-dmg/TranscribeApp-Mac.dmg", "macos-dmg/Gusan-Mac.dmg",
                      "update-manifest.json"):
             self.assertIn(path, files)
+        # Shipped updaters read windows.installer. New builds read windows.gusan.installer.
+        self.assertIn('asset("windows-installer", "TranscribeApp-Windows-Setup.exe")', release)
+        self.assertIn('asset("windows-installer", "Gusan-Windows-Setup.exe")', release)
+        self.assertIn('asset("macos-dmg", "Gusan-Mac.dmg")', release)
 
 
 class TestInstaller(unittest.TestCase):

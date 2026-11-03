@@ -73,10 +73,11 @@ def _small_installers(case):
 class TestKeptIdentifiers(unittest.TestCase):
     def test_repo_api_and_asset_names(self):
         self.assertEqual(updater.RELEASES_API, "https://api.github.com/repos/Aram2K/Gusan/releases/latest")
-        self.assertEqual(updater.INSTALLER_NAME, "TranscribeApp-Windows-Setup.exe")
+        self.assertEqual(updater.INSTALLER_NAME, "Gusan-Windows-Setup.exe")
+        self.assertEqual(updater.LEGACY_INSTALLER_NAME, "TranscribeApp-Windows-Setup.exe")
         self.assertEqual(updater.installer_url("v2.0.1"),
                          "https://github.com/Aram2K/Gusan/releases/download/v2.0.1/"
-                         "TranscribeApp-Windows-Setup.exe")
+                         "Gusan-Windows-Setup.exe")
         self.assertEqual(updater.checksum_url("v2.0.1"), updater.installer_url("v2.0.1") + ".sha256")
 
 
@@ -152,7 +153,7 @@ class TestInstall(unittest.TestCase):
         ok, path = updater.install(self.tag, urlopen=opener, startfile=started.append, dest_dir=self.dir)
         self.assertTrue(ok)
         self.assertEqual(started, [path])
-        self.assertEqual(os.path.basename(path), "TranscribeApp-Windows-Setup.exe")
+        self.assertEqual(os.path.basename(path), updater.INSTALLER_NAME)
         with open(path, "rb") as f:
             self.assertEqual(f.read(), self.exe)
 
@@ -364,7 +365,7 @@ class TestKeptAcrossRuns(unittest.TestCase):
         self.assertTrue(ok)
         self.assertNotEqual(path, kept)
         self.assertEqual(os.path.dirname(path), os.path.dirname(kept))       # the same release folder
-        self.assertRegex(os.path.basename(path), r"^TranscribeApp-Windows-Setup-[0-9a-f]{8}\.exe$")
+        self.assertRegex(os.path.basename(path), r"^Gusan-Windows-Setup-[0-9a-f]{8}\.exe$")
         with open(path, "rb") as f:
             self.assertEqual(f.read(), self.exe)
         self.assertEqual(updater.verified_sha256(path), self.sha)
@@ -1020,7 +1021,11 @@ class TestLogs(unittest.TestCase):
             self.assertTrue(updater.setup_running())
         with procs("explorer.exe", "TranscribeApp-Windows-Setup.tmp", None):          # the copy Setup unpacks
             self.assertTrue(updater.setup_running())
-        with procs("explorer.exe", "TranscribeApp.exe"):                              # never Gusan itself
+        with procs("explorer.exe", "Gusan-Windows-Setup.exe", "Gusan-Windows-Setup.tmp"):
+            self.assertTrue(updater.setup_running())
+        with procs("explorer.exe", "TranscribeApp.exe"):                              # never the installed exe
+            self.assertFalse(updater.setup_running())
+        with procs("explorer.exe", "Gusan"):
             self.assertFalse(updater.setup_running())
 
         def broken(attrs=None):
@@ -1056,7 +1061,8 @@ class TestRelauncher(unittest.TestCase):
         self.assertEqual(env["GUSAN_RELAUNCH_EXE"], exe)
         self.assertEqual(env["GUSAN_RELAUNCH_LOG"], log)
         self.assertEqual(env["GUSAN_RELAUNCH_MINUTES"], str(updater.RELAUNCH_TIMEOUT_MIN))
-        self.assertEqual(env["GUSAN_RELAUNCH_SETUP"], "TranscribeApp-Windows-Setup*")
+        self.assertEqual(env["GUSAN_RELAUNCH_SETUP"],
+                         "Gusan-Windows-Setup*,TranscribeApp-Windows-Setup*")
         self.assertEqual(env["GUSAN_RELAUNCH_PID"], str(os.getpid()))   # the Gusan that quits: it is waited for
         for name in ("$env:GUSAN_RELAUNCH_EXE", "$env:GUSAN_RELAUNCH_LOG", "$env:GUSAN_RELAUNCH_MINUTES",
                      "$env:GUSAN_RELAUNCH_SETUP", "$env:GUSAN_RELAUNCH_PID"):
@@ -1086,7 +1092,7 @@ class TestRelauncher(unittest.TestCase):
     def test_the_script_knows_when_setup_is_done(self):
         script = updater.RELAUNCH_SCRIPT
         self.assertIn("'Log closed.'", script)                       # Setup's last line
-        self.assertIn("Get-Process -Name $setup", script)            # a killed Setup never writes it
+        self.assertIn("Get-Process -Name $setups", script)           # a killed Setup never writes it
         self.assertIn("$gone -ge 3", script)                         # 3 polls without Setup, in a row
         self.assertNotIn("$appear", script)                          # (no log yet is no reason to wait 3 minutes)
         self.assertIn("UtcNow", script)                              # a clock change can't cut it short
@@ -1095,10 +1101,15 @@ class TestRelauncher(unittest.TestCase):
         self.assertNotIn("\n", script)                               # one line: nothing for a command line to mangle
         self.assertNotIn('"', script)                                # single quotes only: nothing to escape
         import fnmatch                                               # the process names Task Manager shows for Setup
+        legacy, branded = "TranscribeApp-Windows-Setup*", "Gusan-Windows-Setup*"
+        self.assertEqual(set(updater.SETUP_PROCESS_PATTERNS), {legacy, branded})
         for name in ("TranscribeApp-Windows-Setup", "TranscribeApp-Windows-Setup-0a1b2c3d", "TranscribeApp-Windows-Setup.tmp"):
-            self.assertTrue(fnmatch.fnmatch(name, updater.SETUP_PROCESS_PATTERN), name)
-        self.assertTrue(fnmatch.fnmatch(updater.INSTALLER_NAME[:-len(".exe")], updater.SETUP_PROCESS_PATTERN))
-        self.assertFalse(fnmatch.fnmatch("TranscribeApp", updater.SETUP_PROCESS_PATTERN))   # never Gusan itself
+            self.assertTrue(fnmatch.fnmatch(name, legacy), name)
+        for name in ("Gusan-Windows-Setup", "Gusan-Windows-Setup-0a1b2c3d", "Gusan-Windows-Setup.tmp"):
+            self.assertTrue(fnmatch.fnmatch(name, branded), name)
+        self.assertFalse(fnmatch.fnmatch("TranscribeApp", legacy))   # never the installed exe
+        self.assertFalse(fnmatch.fnmatch("TranscribeApp", branded))
+        self.assertFalse(fnmatch.fnmatch("Gusan", branded))
 
     def test_the_watcher_gives_up_after_twenty_minutes(self):
         self.assertEqual(updater.RELAUNCH_TIMEOUT_MIN, 20)
@@ -1309,6 +1320,25 @@ class TestParityWithMain(unittest.TestCase):
         manifest = {"version": "9.0.0", "windows": {"installer": {"url": "https://github.com/a.exe", "sha256": "b" * 64}}}
         self.assertEqual(updater.update_info_from_manifest(manifest, main.APP_VERSION, dismissed),
                          main._update_info_from_manifest(manifest))
+        both = {"version": "9.0.0", "windows": {
+            "installer": {"url": "https://github.com/old.exe", "sha256": "c" * 64},
+            "gusan": {"installer": {"url": "https://github.com/gusan.exe", "sha256": "d" * 64,
+                                    "sha256_url": "https://github.com/gusan.exe.sha256"}},
+        }}
+        branded = updater.update_info_from_manifest(both, main.APP_VERSION, dismissed)
+        self.assertEqual(branded["installer_url"], "https://github.com/gusan.exe")
+        self.assertEqual(branded, main._update_info_from_manifest(both))
+        release = {"tag_name": "v9.0.0", "html_url": "https://github.com/Aram2K/Gusan/releases/tag/v9.0.0",
+                   "assets": [
+                       {"name": "TranscribeApp-Windows-Setup.exe", "browser_download_url": "https://github.com/old.exe"},
+                       {"name": "TranscribeApp-Windows-Setup.exe.sha256", "browser_download_url": "https://github.com/old.exe.sha256"},
+                       {"name": "Gusan-Windows-Setup.exe", "browser_download_url": "https://github.com/gusan.exe"},
+                       {"name": "Gusan-Windows-Setup.exe.sha256", "browser_download_url": "https://github.com/gusan.exe.sha256"},
+                   ]}
+        picked = updater.update_info_from_release(release, main.APP_VERSION, dismissed)
+        self.assertEqual(picked["installer_url"], "https://github.com/gusan.exe")
+        self.assertEqual(picked["checksum_url"], "https://github.com/gusan.exe.sha256")
+        self.assertEqual(picked, main._update_info_from_release(release))
 
 
 if __name__ == "__main__":

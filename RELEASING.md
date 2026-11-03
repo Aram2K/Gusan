@@ -6,16 +6,17 @@ Do not publish a release manually unless you intentionally want to bypass the te
 
 ## Compatibility Rules
 
-- Keep the Windows installer asset named `TranscribeApp-Windows-Setup.exe`.
-- Keep the portable Windows asset named `TranscribeApp-Windows.zip`.
-- Keep the macOS asset named `TranscribeApp-Mac.dmg`.
+- Publish the Windows installer as both `Gusan-Windows-Setup.exe` and `TranscribeApp-Windows-Setup.exe` (the same bytes).
+- Publish the portable Windows build as both `Gusan-Windows.zip` and `TranscribeApp-Windows.zip` (the same bytes).
+- Publish the macOS disk image as both `Gusan-Mac.dmg` and `TranscribeApp-Mac.dmg` (the same bytes).
+- `update-manifest.json` keeps `windows.installer`, `windows.portable` and `macos.dmg` on the TranscribeApp names. `windows.gusan` and `macos.gusan` are the Gusan names. New builds download `windows.gusan.installer`. Already-shipped builds read `windows.installer` and the GitHub asset `TranscribeApp-Windows-Setup.exe`.
 - The repo is `Aram2K/Gusan` (renamed from `Aram2K/transcribe-app`). Installed copies still call the old address and rely on GitHub's redirect, so never create another repo named `transcribe-app` under this account. Keep the exe `TranscribeApp.exe`, the Mac bundle `TranscribeApp.app` and its bundle id, the installer `AppId` and task names (`desktopicon`, `startup`), the data folder `Transcribe`, the keyring service `TranscribeApp` and the start-at-login Run value `Transcribe`.
 - Keep what running copies and the server rely on: the single-instance port `47823` and its `transcribe-ok` reply, the IPC action names, config keys, usage event names, the cloud function names (`transcribe-proxy`, `transcribe-analytics`, `confirmed`, `stripe-webhook`) and the sign-in callback `http://127.0.0.1:53682/auth/callback`.
 - Push semantic version tags like `v2.0.0`; do not reuse an old tag for a different build.
 - Let GitHub Actions create the release and upload assets.
 - Do not delete the installer asset from a published release.
 
-Installed copies find updates through GitHub's latest release API and download `releases/download/<tag>/TranscribeApp-Windows-Setup.exe`. That exact name in the latest release is the hard contract. Newer versions also check the `.sha256` file and `update-manifest.json` when present, but older copies only need the installer name. The in-app update (the update window) needs the `.sha256` next to the installer: with no readable checksum it installs nothing (the person gets Try again and the download page), so never publish an installer without it.
+Installed copies from 1.9 through 2.1.0 find updates through GitHub's latest release API and download `releases/download/<tag>/TranscribeApp-Windows-Setup.exe`. That exact name in the latest release is the hard contract. A 2.1.1 build downloads `Gusan-Windows-Setup.exe` (from `windows.gusan.installer` in `update-manifest.json`, or that asset name on the release). Each installer is published with its `.sha256`. The in-app update needs a readable checksum: with none it installs nothing (the person gets Try again and the download page), so never publish an installer without it. The two copies of each file must be byte-identical.
 
 ## What Needs a Release
 
@@ -59,13 +60,10 @@ The version lives in one place: `APP_VERSION` in `app_info.py` (with `APP_NAME =
    ```
 
 5. Wait for GitHub Actions to finish. A tag that differs from `APP_VERSION` stops the build at "Check the version".
-6. Confirm the release contains:
-   - `TranscribeApp-Windows-Setup.exe`
-   - `TranscribeApp-Windows-Setup.exe.sha256`
-   - `TranscribeApp-Windows.zip`
-   - `TranscribeApp-Windows.zip.sha256`
-   - `TranscribeApp-Mac.dmg`
-   - `TranscribeApp-Mac.dmg.sha256`
+6. Confirm the release contains both names, and that each pair shares one sha256:
+   - `Gusan-Windows-Setup.exe` and `TranscribeApp-Windows-Setup.exe`, each with `.sha256`
+   - `Gusan-Windows.zip` and `TranscribeApp-Windows.zip`, each with `.sha256`
+   - `Gusan-Mac.dmg` and `TranscribeApp-Mac.dmg`, each with `.sha256`
    - `update-manifest.json`
 
 7. Test these latest-download URLs:

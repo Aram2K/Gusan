@@ -77,7 +77,10 @@ class TestKeptIdentifiers(unittest.TestCase):
         self.assertIn('IPC_ACTIONS = ("show_settings", "show_onboarding", "show_meeting", "live_prompter")', src)
 
     def test_updater_asset_name(self):
-        self.assertIn("TranscribeApp-Windows-Setup.exe", _src("main.py"))
+        import updater
+        self.assertEqual(updater.LEGACY_INSTALLER_NAME, "TranscribeApp-Windows-Setup.exe")
+        self.assertEqual(updater.INSTALLER_NAME, "Gusan-Windows-Setup.exe")
+        self.assertIn("TranscribeApp-Windows-Setup.exe", _src("updater.py"))
 
     def test_storage_names(self):
         import storage
