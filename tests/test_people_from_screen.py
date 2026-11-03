@@ -397,25 +397,26 @@ class TestOnTheWire(unittest.TestCase):
 # ── has the screen changed? ──────────────────────────────────────────────────
 
 def _png_b64(pixels=None, size=64, block=None, shade=None):
-    """A grey picture as base64 PNG (Pillow), or None when Pillow is not here."""
+    """A grey picture as base64 PNG (Pillow), or None when there is no real Pillow here (not installed, or the suite-wide
+    stand-in of tests/test_core.py is in its place)."""
     try:
         import base64
         from PIL import Image
-    except ImportError:
+        im = Image.new("L", (size, size), 255)
+        px = im.load()
+        for y in range(size):
+            for x in range(size):
+                px[x, y] = int(255 * x / size) if shade == "gradient" else (30 if (x // 8 + y // 8) % 2 and shade == "check" else 220)
+        if block:
+            x0, y0, x1, y1 = block
+            for y in range(y0, y1):
+                for x in range(x0, x1):
+                    px[x, y] = 0
+        buf = io.BytesIO()
+        im.save(buf, "PNG")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
         return None
-    im = Image.new("L", (size, size), 255)
-    px = im.load()
-    for y in range(size):
-        for x in range(size):
-            px[x, y] = int(255 * x / size) if shade == "gradient" else (30 if (x // 8 + y // 8) % 2 and shade == "check" else 220)
-    if block:
-        x0, y0, x1, y1 = block
-        for y in range(y0, y1):
-            for x in range(x0, x1):
-                px[x, y] = 0
-    buf = io.BytesIO()
-    im.save(buf, "PNG")
-    return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 class TestImageHash(unittest.TestCase):
