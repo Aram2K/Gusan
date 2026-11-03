@@ -382,6 +382,7 @@ def process_stream(text, mode, on_token, source_lang="auto", target_lang="en",
     degrades to keyword extraction is worse than one that says it needs an
     engine. Raises ActionError with NO_ENGINE_MESSAGE when nothing real can
     run. Managed (Pro) calls stream through the server too."""
+    action_api.begin_stream()           # stream_end() says how THIS one ended
     mode = normalize_action_mode(mode)
     model = normalize_action_model(model)
     kind = ACTION_MODELS.get(model, {}).get("kind")
@@ -408,9 +409,12 @@ def process_stream(text, mode, on_token, source_lang="auto", target_lang="en",
                 label = local_llm.MODEL_CATALOG.get(model, {}).get("label", model)
                 raise ActionError(f"{label} isn't downloaded yet - download it in "
                                   "Settings › Speech & AI, or choose a cloud engine.")
-            return local_llm.run_action_stream(
+            out = local_llm.run_action_stream(
                 text, mode, on_token, source_lang=source_lang, target_lang=target_lang,
                 model_id=model, vocab_block=vocab_block)
+            if local_llm.stream_cut():
+                action_api.note_stream_end(cut=True)         # stopped at its output cap: may be cut short
+            return out
         if kind == "cloud":
             if not config:
                 raise ActionError(NO_ENGINE_MESSAGE)

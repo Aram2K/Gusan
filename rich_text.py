@@ -30,7 +30,8 @@ stdlib only, so tests/ (PySide6 stubbed) can import it.
     qt_html(md, colors=None)  the same structure for QLabel / QTextEdit.
     answer_text(md, streaming=False)  a model's answer ready for qt_html: links, images and tables as plain
                           words, break points in long strings; streaming_markdown(md) hides a half-written
-                          ** or ` while an answer is still arriving.
+                          ** or ` while an answer is still arriving (or was cut short), close_markers(md)
+                          a ** with no pair in a finished one.
     transcript_paragraphs(text, max_chars=550)  a meeting transcript as
                           readable paragraphs (sentence packing).
     parse_task / toggle_task_line / notes_plain  the meeting notes helpers.
@@ -351,7 +352,8 @@ def to_html(md):
 def qt_html(md, colors=None):
     """The same structure as to_html for in-app QLabel / QTextEdit display.
     ``colors`` (all optional): {"text", "muted", "head", "code_bg"} as CSS
-    colours; done tasks and quotes use "muted"."""
+    colours; done tasks and quotes use "muted"; "item_gap" ("3px") a little
+    air above each list item (a model's answer reads better with it)."""
     c = dict(colors or {})
 
     def style(*pairs):
@@ -377,7 +379,8 @@ def qt_html(md, colors=None):
         elif kind in ("bullet", "num"):
             tag = "ul" if kind == "bullet" else "ol"
             start = ' start="%d"' % b[1] if kind == "num" and b[1] != 1 else ""
-            li = "".join("<li>%s</li>" % inline_html(x[1] if kind == "bullet" else x[2], code=True)
+            li_tag = "<li%s>" % style(("margin-top", c.get("item_gap")))
+            li = "".join("%s%s</li>" % (li_tag, inline_html(x[1] if kind == "bullet" else x[2], code=True))
                          for x in items)
             parts.append("<%s%s%s>%s</%s>" % (tag, start, style(("margin-top", "0px"), ("margin-bottom", "8px"),
                                                                 ("color", text_c)), li, tag))
@@ -416,6 +419,19 @@ def streaming_markdown(md):
     return s
 
 
+def close_markers(md):
+    """A finished answer, safe to render: an open ``` fence is closed and a ** with no pair is dropped, so a
+    marker never shows as raw characters (an answer cut short can end inside one). A lone ` stays - in a finished
+    answer it may be meant (streaming_markdown drops it too, for an answer still arriving)."""
+    s = md or ""
+    if s.count("```") % 2:
+        return s + "\n```"
+    if s.count("**") % 2:
+        i = s.rfind("**")
+        s = s[:i] + s[i + 2:]
+    return s
+
+
 _IMAGE_RE = re.compile(r"!\[([^\]\n]*)\]\([^)\n]*\)")
 _LINK_RE = re.compile(r"\[([^\]\n]+)\]\(\s*<?([^)\s>]*)>?[^)\n]*\)")
 _REF_LINK_RE = re.compile(r"\[([^\]\n]+)\]\[[^\]\n]*\]")
@@ -444,13 +460,21 @@ def _plain_table_rows(md):
     return "\n".join(out)
 
 
+def without_breaks(text):
+    """``text`` with the invisible break points answer_text puts in long strings taken out again: what a reader
+    copies from an answer must paste as the address or the name it was."""
+    return str(text or "").replace(_ZWSP, "")
+
+
 def answer_text(md, streaming=False):
     """A model's answer made ready for qt_html: everything the label cannot show properly becomes plain words.
     Images give their description, links their text (never clickable: ``[text](url)`` -> "text", "text (url)"
     when they differ), table rows become lines, a run of 20+ characters without a space gets break points (a
-    pasted address cannot widen the card). ``streaming``: a half-written ** or ` is left out for now
-    (streaming_markdown). Qt-free; everything stays escaped later (inline_html), so nothing the model writes
-    is ever read as HTML."""
+    pasted address cannot widen the card). ``streaming``: a half-written ** or ` is left out
+    (streaming_markdown) - for an answer still arriving and one that was stopped or cut short; any other answer
+    only loses a ** with no pair and gets an open ``` closed (close_markers), so no marker ever shows as raw
+    characters. Qt-free; everything stays escaped later (inline_html), so nothing the model writes is ever read
+    as HTML."""
     s = str(md or "").replace("\r\n", "\n").replace("\r", "\n")
     s = _plain_table_rows(s)
     s = _IMAGE_RE.sub(lambda m: m.group(1).strip(), s)
@@ -461,8 +485,7 @@ def answer_text(md, streaming=False):
     s = _LINK_RE.sub(link, s)
     s = _REF_LINK_RE.sub(lambda m: m.group(1), s)
     s = _REF_DEF_RE.sub("", s)
-    if streaming:
-        s = streaming_markdown(s)
+    s = streaming_markdown(s) if streaming else close_markers(s)
     return _BREAK_RE.sub("\\1" + _ZWSP, s)
 
 

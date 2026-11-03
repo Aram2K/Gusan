@@ -18,8 +18,10 @@ the front (AppController.open_meeting_after_live_stop), the window is kept out o
 (ui/glass.py) BEFORE it is shown, so not one frame of the notes or the chat reaches a share. A slim bar says so and
 has "Show" (one press lets a share see it again). It stays on while the window is open - going to another page
 does not lift it, that would show more, not less - and is lifted when the window is closed to the tray, when the
-Live Assistant's "Hide from screen share" is turned off, or by Show. Menus, tooltips and prompts are windows of
-their own: the chat's Clear prompt asks for a hidden one, the others are not (a known gap).
+Live Assistant's "Hide from screen share" is turned off, or by Show. The themed prompts opened over this window
+(Rename, Delete, Clear chat ...) are windows of their own and are kept out too (ui/components/mini_prompt.py asks
+this window); the system's Save dialog is not - it is not offered the meeting's name. Menus and tooltips are not
+kept out (a known gap).
 """
 
 import logging
@@ -188,7 +190,7 @@ class ErrorPage(QWidget):
 
 SHARE_BAR_TEXT = "Hidden on screen share while the Live Assistant is private."
 SHARE_BAR_TIP = ("Gusan hides this window from screen shares while the Live Assistant is private. "
-                 "Press Show to let a share see it.")
+                 "Your own screenshots and recordings of it stay blank too. Press Show to let a share see it.")
 
 
 class MainWindow(QMainWindow):

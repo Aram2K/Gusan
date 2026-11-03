@@ -1,5 +1,6 @@
 import json
 import re
+import threading
 
 import requests
 
@@ -680,6 +681,7 @@ def run_managed_action_stream(text, mode, token, on_token, source_lang="auto",
     """Streaming Pro Smart Actions: the server relays the model's event stream,
     so the first words show as soon as they are generated. A server that
     predates streaming answers with plain JSON, delivered in one piece."""
+    begin_stream()
     if not token:
         raise ActionAPIError("Sign in with Pro to use managed Smart Actions.")
     messages = build_messages(text, mode, source_lang, target_lang,
@@ -710,9 +712,11 @@ def run_managed_action_stream(text, mode, token, on_token, source_lang="auto",
         return out
     parts = []
     think = ThinkFilter(template_opened)
+    ended = False                           # [DONE] or a finish reason came: the server's answer is whole
     try:
         for data in _sse_data_lines(resp):
             if data == "[DONE]":
+                ended = True
                 break
             try:
                 obj = json.loads(data)
@@ -720,12 +724,18 @@ def run_managed_action_stream(text, mode, token, on_token, source_lang="auto",
                 continue
             if obj.get("error"):
                 raise ActionAPIError(str(obj["error"]))
-            _emit(think.feed(((obj.get("choices") or [{}])[0].get("delta") or {}).get("content") or ""),
-                  parts, on_token)
+            choice = (obj.get("choices") or [{}])[0]
+            _emit(think.feed((choice.get("delta") or {}).get("content") or ""), parts, on_token)
+            if choice.get("finish_reason"):
+                ended = True
+                if choice["finish_reason"] == "length":
+                    note_stream_end(cut=True)
     except requests.RequestException:
         _interrupted(parts)
     finally:
         _close(resp)                        # also stops the model upstream
+    if not ended and parts and not stream_end()["dropped"]:
+        note_stream_end(dropped=True)       # the stream closed with no end: the server (or the line) gave up
     _emit(think.flush(), parts, on_token)
     return _final(parts, think, template_opened)
 
@@ -922,9 +932,37 @@ def _close(resp):
 
 def _interrupted(parts):
     """The connection dropped mid-stream: keep what already arrived (the
-    caller returns it), or say so plainly when nothing did."""
+    caller returns it), or say so plainly when nothing did. What arrived is
+    not a finished answer: stream_end() says so for a caller that must not
+    show it as one."""
     if not parts:
         raise ActionAPIError("The answer was interrupted - check your connection and try again.")
+    note_stream_end(dropped=True)
+
+
+# How the last stream this thread read ended - for a caller that must not show a cut answer as a finished one (the
+# meeting chat). "dropped": the connection ended before the answer did (the words that had arrived are returned all
+# the same); "cut": the engine stopped at the longest answer it may write (finish reason "length"). Every streaming
+# entry point starts it afresh (begin_stream); the callers that do not care never look.
+_END = threading.local()
+
+
+def begin_stream():
+    """A stream starts on this thread: nothing has gone wrong yet."""
+    _END.info = {"dropped": False, "cut": False}
+
+
+def note_stream_end(**facts):
+    """Say how the stream on this thread ended (dropped=True, cut=True)."""
+    info = getattr(_END, "info", None)
+    if info is None:
+        info = _END.info = {"dropped": False, "cut": False}
+    info.update(facts)
+
+
+def stream_end():
+    """{"dropped": bool, "cut": bool} for the stream this thread read last (both False when it ended normally)."""
+    return dict(getattr(_END, "info", None) or {"dropped": False, "cut": False})
 
 
 def _prepare(config, mode, source_lang, target_lang):
@@ -950,6 +988,7 @@ def run_action_stream(text, mode, config, on_token, source_lang="auto", target_l
 
 
 def _stream_openai_compatible(text, mode, config, source_lang, target_lang, key, on_token):
+    begin_stream()
     provider_defaults = defaults(config.get("action_api_provider"))
     base_url = (config.get("action_api_base_url") or provider_defaults["default_base_url"]).rstrip("/")
     model = model_for(config, mode, provider_defaults)
@@ -998,10 +1037,13 @@ def _stream_openai_compatible(text, mode, config, source_lang, target_lang, key,
                 break
             try:
                 obj = json.loads(data)
-                delta = think.feed(obj["choices"][0].get("delta", {}).get("content") or "")
+                choice = obj["choices"][0]
+                delta = think.feed(choice.get("delta", {}).get("content") or "")
             except Exception:
                 continue
             _emit(delta, parts, on_token)
+            if choice.get("finish_reason") == "length":
+                note_stream_end(cut=True)
     except requests.RequestException:
         _interrupted(parts)
     finally:
@@ -1011,6 +1053,7 @@ def _stream_openai_compatible(text, mode, config, source_lang, target_lang, key,
 
 
 def _stream_gemini(text, mode, config, source_lang, target_lang, key, on_token):
+    begin_stream()
     provider_defaults = defaults(PROVIDER_GEMINI)
     base_url = (config.get("action_api_base_url") or provider_defaults["default_base_url"]).rstrip("/")
     model = (config.get("action_api_model") or provider_defaults["default_model"]).strip()
@@ -1042,6 +1085,8 @@ def _stream_gemini(text, mode, config, source_lang, target_lang, key, on_token):
                 if delta:
                     parts.append(delta)
                     on_token(delta)
+            if (obj.get("candidates") or [{}])[0].get("finishReason") == "MAX_TOKENS":
+                note_stream_end(cut=True)
     except requests.RequestException:
         _interrupted(parts)
     finally:
@@ -1050,6 +1095,7 @@ def _stream_gemini(text, mode, config, source_lang, target_lang, key, on_token):
 
 
 def _stream_anthropic(text, mode, config, source_lang, target_lang, key, on_token):
+    begin_stream()
     provider_defaults = defaults(PROVIDER_ANTHROPIC)
     base_url = (config.get("action_api_base_url") or provider_defaults["default_base_url"]).rstrip("/")
     model = (config.get("action_api_model") or provider_defaults["default_model"]).strip()
@@ -1085,6 +1131,9 @@ def _stream_anthropic(text, mode, config, source_lang, target_lang, key, on_toke
                 if delta:
                     parts.append(delta)
                     on_token(delta)
+            elif obj.get("type") == "message_delta":
+                if (obj.get("delta") or {}).get("stop_reason") == "max_tokens":
+                    note_stream_end(cut=True)
             elif obj.get("type") == "message_stop":
                 break
     except requests.RequestException:

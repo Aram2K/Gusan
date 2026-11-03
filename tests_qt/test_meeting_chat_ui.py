@@ -184,7 +184,12 @@ def test_ready_shows_the_intro_three_starters_and_who_answers(build, meetings_ro
     f = make_meeting(meetings_root)
     win, page, card, *_ = build("pro", f)
     assert card._gate == ("ready", "")
-    assert card.input.isEnabled() and card.send_btn.isEnabled() and not card.stop_btn.isVisibleTo(card)
+    assert card.input.isEnabled() and not card.stop_btn.isVisibleTo(card)
+    assert not card.send_btn.isEnabled()                      # nothing written yet: the blue button is not on offer
+    card.input.setPlainText("Who spoke?")
+    assert card.send_btn.isEnabled()
+    card.input.clear()
+    assert not card.send_btn.isEnabled()
     assert [c.text() for c in card._chips] == ["What were the key decisions?", "What did I agree to do?",
                                                 "Write a follow-up email"]
     assert all(c.isVisibleTo(card) for c in card._chips)
@@ -889,8 +894,10 @@ def test_the_card_stays_light_on_a_dark_os(build, meetings_root, scheme, ai):
         c = img.pixelColor(x, y)
         return (c.red() + c.green() + c.blue()) / 3.0
     assert lum(card.width() // 2, 6) > 200                             # the card's own glass
-    box = card.input.geometry().center()
-    assert lum(box.x(), box.y()) > 230                                 # the box is white, with dark text on it
+    box = card.input.geometry()
+    row = sorted(lum(x, box.center().y()) for x in range(box.left() + 6, box.right() - 6))
+    assert row[len(row) // 2] > 230                                    # the box is white (most of a row of it: one
+                                                                       # pixel can sit on a letter of the placeholder)
     assert card.input.palette().color(QPalette.Base).lightness() > 200
     assert card.input.palette().color(QPalette.Text).lightness() < 100
     user_label = card._rows[0].findChild(QLabel)
@@ -916,8 +923,9 @@ def test_wide_windows_put_the_column_beside_the_notes(build, meetings_root, widt
     assert nv._narrow is False
     side = nv._side
     assert 320 <= side.width() <= 520
-    assert card.height() >= 340 or card.height() >= 330                # its minimum, or more when the window is tall
-    assert card.minimumHeight() == 340
+    from ui.pages import meeting_views
+    assert card.height() >= meeting_views.CHAT_H                       # its minimum, or more when the window is tall
+    assert card.minimumHeight() == meeting_views.CHAT_H == 420         # tall enough for a question and a short answer
     assert nv.article.width() >= 380
     assert side.geometry().left() > nv.article.geometry().right()      # beside, not below
     assert nv.copy_btn.text() == "Copy notes" and nv.continue_btn.text() == "Continue recording"
@@ -988,7 +996,7 @@ def test_at_one_and_a_half_times_the_scale_the_card_keeps_its_height_and_the_pag
     # 150 % = a 1280 x 680 logical window: the right column needs more than the window gives, so the page scrolls
     f = make_meeting(meetings_root)
     win, page, card, *_ = build("pro", f, width=1280, height=560)
-    assert card.height() >= 340
+    assert card.height() >= 420
     holder = page._holders["notes"]
     assert holder.verticalScrollBar().maximum() > 0
     assert card.input.isVisibleTo(card) and card.send_btn.isVisibleTo(card)

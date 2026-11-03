@@ -343,9 +343,21 @@ class MiniPrompt(QDialog):
             logger.debug("MiniPrompt placement failed", exc_info=True)
 
 
+def _over_hidden_window(dlg):
+    """Was the card opened over a window that is kept out of screen shares (MainWindow.hidden_from_share, after a
+    Live Assistant Stop)? Then it is too: its title can be the meeting's name, and a prompt is a window of its own
+    that the OS would not leave out by itself."""
+    try:
+        host = dlg.parentWidget()
+        return host is not None and bool(getattr(host.window(), "hidden_from_share", False))
+    except Exception:
+        return False
+
+
 def _run(dlg, private=False):
-    """Exec the card (hidden from screen shares when ``private``) and let it go."""
-    if private:
+    """Exec the card (hidden from screen shares when ``private``, or when the window it opened over is) and let
+    it go."""
+    if private or _over_hidden_window(dlg):
         try:
             from ui import glass
             dlg.winId()                          # the native window, before it is shown

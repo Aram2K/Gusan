@@ -7,7 +7,6 @@ wrong, hostile text staying inside its section, and the conversation surviving a
 unfinished answer as a finished one."""
 import json
 import re
-import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -171,7 +170,9 @@ class TestTimeMarks(unittest.TestCase):
         self.assertEqual(out.split("\n"), ["You: [00:00] One.", "You: lost words.", "\u2014 Resumed \u2014",
                                            "You: [01:45] Three."])
 
-    def test_three_hours_are_fast_enough(self):
+    def test_three_hours_are_matched_without_a_clock(self):
+        # (not a stopwatch: a loaded runner is slow for reasons that are not ours - the cost is counted in
+        # tests/test_meeting_chat_fixes.py: about one try per line)
         segs = [_seg(i * 4.0, "Word %d of the long meeting." % i, "you" if (i // 3) % 2 == 0 else "them")
                 for i in range(2700)]
         lines, cur, label = [], [], None
@@ -182,11 +183,8 @@ class TestTimeMarks(unittest.TestCase):
             label = s["src"]
             cur.append(s["t"])
         lines.append(("You: " if label == "you" else "Them: ") + " ".join(cur))
-        t0 = time.perf_counter()
         out, ok = mc.time_marked("\n".join(lines), _doc(segs, seconds=11000))
-        took = time.perf_counter() - t0
         self.assertTrue(ok)
-        self.assertLess(took, 2.0)                                       # (about 30 ms on a normal computer)
         self.assertGreater(out.count("["), 100)
 
 
@@ -628,6 +626,8 @@ class TestAsk(_Folder):
         flags = []
 
         def cancelled():
+            if not stream.calls:
+                return False                                         # (before the request goes out: not asked yet)
             flags.append(1)
             return len(flags) > 2                                    # the third piece is refused
         with self.assertRaises(mc.Cancelled) as cm:

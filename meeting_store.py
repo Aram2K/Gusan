@@ -51,6 +51,7 @@ CHAT_MAX_MESSAGES = 200
 CHAT_MAX_CHARS = 20000
 CHAT_ROLES = ("user", "assistant")
 CHAT_STATUSES = ("done", "stopped")       # an answer is kept only when it ended, or the user stopped it
+CHAT_WHYS = ("dropped",)                  # why a stopped answer ended: the connection dropped (else the user stopped it)
 
 # Row status for the Meetings list (see meeting_status).
 STATUS_RECORDING = "recording"
@@ -174,6 +175,9 @@ def chat_path(folder):
     return Path(folder) / CHAT_FILE
 
 
+CHAT_TS_MAX = 4102444800                 # 2100-01-01: a message's time is epoch seconds (about 1.8e9 today)
+
+
 def _chat_int(value, low=0, high=10 ** 9):
     try:
         n = int(value)
@@ -195,11 +199,15 @@ def clean_chat(messages):
         if not isinstance(text, str) or not text.strip():
             continue
         row = {"role": m["role"], "text": text[:CHAT_MAX_CHARS]}
-        ts = _chat_int(m.get("ts"))
+        ts = _chat_int(m.get("ts"), high=CHAT_TS_MAX)
         if ts is not None:
             row["ts"] = ts
         if m["role"] == "assistant":
             row["status"] = m.get("status") if m.get("status") in CHAT_STATUSES else "stopped"
+            if m.get("why") in CHAT_WHYS and row["status"] == "stopped":
+                row["why"] = m["why"]                      # the connection dropped: the answer may be cut short
+            if m.get("cut") is True and row["status"] == "done":
+                row["cut"] = True                          # it reached the longest answer Gusan writes
             for key in ("engine", "kind"):
                 if isinstance(m.get(key), str) and m[key].strip():
                     row[key] = m[key].strip()[:120]
@@ -221,17 +229,64 @@ def clean_chat(messages):
     return out[-CHAT_MAX_MESSAGES:]
 
 
+CHAT_OK, CHAT_MISSING, CHAT_UNREADABLE = "ok", "missing", "unreadable"
+
+
+def read_chat(folder):
+    """(the meeting's chat as a clean list - see clean_chat, how the file was): ``"ok"`` (a good chat.json),
+    ``"missing"`` (a meeting with no chat yet) or ``"unreadable"`` (the file is there but could not be read now -
+    locked by an antivirus or a sync tool, bad JSON, another version, not a list). The card tells them apart so a
+    chat that could not be read is never overwritten as if it were empty. Never raises."""
+    path = chat_path(folder)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return [], CHAT_MISSING
+    except Exception:
+        return [], (CHAT_UNREADABLE if os.path.exists(path) else CHAT_MISSING)
+    if not isinstance(data, dict) or data.get("version") != CHAT_VERSION or not isinstance(data.get("messages"), list):
+        return [], CHAT_UNREADABLE
+    return clean_chat(data["messages"]), CHAT_OK
+
+
 def load_chat(folder):
     """The meeting's chat (chat.json) as a clean list of messages (see clean_chat); [] when there is none or the
-    file cannot be read (bad JSON, another version, not a list). Never raises."""
+    file cannot be read (read_chat says which). Never raises."""
+    return read_chat(folder)[0]
+
+
+def keep_unreadable_chat(folder):
+    """Copy a chat.json that cannot be read to ``chat.json.unreadable`` (``-2``, ``-3`` ... when that is taken) so
+    the conversation that goes on may be saved over it without losing the old one. True when it is kept (or there is
+    nothing to keep), False when it could not be copied. Never raises."""
+    src = chat_path(folder)
     try:
-        with open(chat_path(folder), "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        return []
-    if not isinstance(data, dict) or data.get("version") != CHAT_VERSION:
-        return []
-    return clean_chat(data.get("messages"))
+        if not src.exists():
+            return True
+        for n in range(1, 50):
+            dst = src.with_name(CHAT_FILE + ".unreadable" + ("" if n == 1 else "-%d" % n))
+            if not dst.exists():
+                shutil.copy2(str(src), str(dst))
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def open_chat(folder, wait=0.15):
+    """(the chat's messages, whether new ones may be saved) for the card that opens a meeting: read_chat - a file
+    that is there but cannot be read is read once more after ``wait`` seconds (a lock from an antivirus or a sync
+    tool is short) - and when it still cannot be read it is kept aside (keep_unreadable_chat) and the chat starts
+    empty, saveable only when that copy was made: a chat that could not even be put aside is never overwritten.
+    Disk work: worker thread. Never raises."""
+    rows, state = read_chat(folder)
+    if state == CHAT_UNREADABLE:
+        time.sleep(max(0.0, wait))
+        rows, state = read_chat(folder)
+    if state != CHAT_UNREADABLE:
+        return rows, True
+    return [], keep_unreadable_chat(folder)
 
 
 def load_transcript(folder):

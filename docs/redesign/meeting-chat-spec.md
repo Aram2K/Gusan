@@ -33,27 +33,48 @@ the meeting page.
   * a slim bar at the top of the window says "Hidden on screen share while the Live Assistant is private." with Show.
     It stays on while the window is open (going to another page does not lift it: that would show more, not less); it is
     lifted by Show, by closing the window to the tray, and by turning "Hide from screen share" off. Never persisted.
-  * known gap: menus, tooltips and prompts are windows of their own and are not hidden (the chat's Clear prompt asks for a
-    hidden one).
+  * the themed prompts opened over this window (Rename, Delete, Clear chat ...) are windows of their own and are kept out of
+    the share too: `ui/components/mini_prompt.py _run` asks the window it opened over (`hidden_from_share`), so no caller has to
+    remember. The system's Save dialog cannot be hidden before it shows: while the window is hidden it is not offered the
+    meeting's name (the file name is "Meeting notes"). Known gap: menus and tooltips are not kept out.
+  * the OS leaves the window out of the user's own screenshots and recordings too (Snipping Tool, Win+Shift+S) until Show
+    is pressed or the window is closed to the tray; the bar's tooltip says so.
 
 ## B. The chat
 Card "Ask about this meeting" above People and the recording, for every meeting that has a transcript (also old ones and
-the Live Assistant's Past sessions), notes view only. Wide (page >= 830 px): the right column is 320-520 px (it asks for
-400, the card's size hint never depends on its content), the card is at least 340 px tall. Narrow (below 830; hysteresis to
-846): the column goes below the notes, the card is 440 px tall, and the toolbar's two longest buttons shorten ("Copy",
-"Continue"; their accessible names keep the long words) - which also fixes the old clipping at the 960 px minimum window.
+the Live Assistant's Past sessions), notes view only. Wide (page >= 830 px): the notes (at most 620 px) and the right column
+(320-520 px; it asks for 400, the card's size hint never depends on its content) sit in one box that stops growing at 1164 px
+and stays on the title's left edge - on a big screen the room left over is on the right, the two cards are not spread apart. The
+card is at least 420 px tall (the page scrolls when the window is shorter). Narrow (below 830; hysteresis to 846): the column
+goes below the notes, the card is 440 px tall, a link "Ask about this meeting" under the toolbar scrolls to it and puts the
+cursor in the box (the chat would otherwise be out of sight below the notes), and the toolbar's two longest buttons shorten
+("Copy", "Continue"; their accessible names keep the long words) - which also fixes the old clipping at the 960 px minimum window.
 
 Inside: header + Clear chat; the conversation (user: right-aligned plain-text bubble, cut at 600 characters in the
 bubble, all of it kept and sent; answer: no bubble, real formatting - lists and bold, never raw symbols, never HTML from
 the model, never a link or a picture, long strings get break points); three starter questions while empty; the box (Enter
 sends, Shift+Enter new line, Esc stops an answer that is coming, 1-5 lines, 4,000 characters with a counter from 3,500);
-Send / Stop; one footer line "<who answers> - AI can be wrong." (Privacy mode: "Stays on this computer.").
+Send / Stop (one width - the wider of the two needs, at least 90 px, read once the card is in the window so "Stop" is never cut off - and 44 px tall like the box; Send is grey until something is written); one footer line "<who
+answers> - AI can be wrong." (Privacy mode: "Stays on this computer."). Each answer's Copy has a little less air on its left than other ghost buttons, so its icon sits near the answer's edge. A starter question does not throw away a draft. A
+question's bubble is as wide as its words, up to the row. The conversation is a tab stop with a ring when the keyboard is on
+it; each answer's Copy and Try again follow it in the keyboard order, then the box, Send, Stop. Selected words copy without the
+invisible break points (a copied address pastes as the address); the Copy button copies the raw answer. A hairline marks the
+top of the conversation while it is scrolled (a line cut in half by the edge reads as an edge, not as a mistake); the items
+of a list in an answer have a little air between them (`rich_text.qt_html` colors `item_gap`). Only the newest 30
+messages are drawn when a meeting opens ("Show earlier messages" adds 30 more): a long chat stays quick to open and to add to
+(the file and the model's history keep all of it).
 
 States: no transcript; finishing the transcript; ready (empty / with a chat); thinking ("Waiting for the AI on this
 computer" when a local model is busy with the notes); streaming; done (Copy, and a coverage note when part of a long meeting
-was left out); stopped (the words stay, marked "Stopped", never sent back to the model, never shown as complete); failed
-(one calm sentence + Try again; only the question is kept); allowance used up (no Try again); needs Pro or a key (+ Open
-settings); signed out (+ Sign in); Privacy mode with no model on this computer (+ Open settings).
+was left out); cut short (the engine reached the longest answer it may write: kept, with "This answer was cut short. Ask for the
+rest if you need it."); stopped (the words stay, marked "Stopped", never sent back to the model, never shown as complete);
+connection dropped (the words that arrived, "The connection dropped, so this answer may be cut short." with Copy and Try
+again - kept as stopped, never as finished, never sent back; Try again replaces it); failed (one calm sentence + Try again;
+only the question is kept); allowance used up (no Try again); needs Pro or a key (+ Open settings); signed out (+ Sign in);
+Privacy mode with no model on this computer (+ Open settings). An answer that is still coming when Privacy mode is switched
+on, the user signs out or the plan ends ends where it is (marked "Stopped"): the connection is closed. Every kept answer that
+did not end where the model meant it to (stopped, dropped, cut) is drawn the way a streaming one is, so no half-written **
+shows as raw symbols; a ** with no pair never shows in any answer.
 
 ### Which AI answers
 The notes' engine: `meeting_session.notes_engine` (this meeting's pick = cfg `meeting_notes_model`, else the saved
@@ -83,13 +104,17 @@ and windows of about 700 tokens of the transcript chosen by how many of the ques
 they hold, rarer words counting more, the opening and the end favoured; a question that names nothing ("summarise it") gets
 windows spread over the whole meeting; gaps and cut ends are marked with the left-out line; the answer says "Long meeting:
 this answer used the parts closest to your question (about 40 of 55 min)." When an engine says the prompt was too big (before
-a word) a prompt 0.6 times the size is sent, at most twice, then "This meeting is too long for this AI model to read in one
-go. Try a more specific question, or pick another engine in Settings > Speech & AI."
+a word) a prompt 0.6 times the size is sent, at most twice (four times with the user's own key, whose provider's window nobody
+knows), then "This meeting is too long for this AI model to read in one go. Try a more specific question, or pick another
+engine in Settings > Speech & AI." - with an own key and a prompt already under 8,000 tokens: "This AI model can't read a
+meeting this long. Pick another engine in Settings > Speech & AI." Stop is noticed before the meeting is read, after the
+sign-in check and right before the request goes out (not only at the first word): a question stopped early sends nothing.
 
 Times: `[mm:ss]` / `[h:mm:ss]` marks come from segments.json (every Live Assistant and every mic + system sound meeting since
 2.0.1): each transcript line is matched word for word, in order, to the segments (up to 12 segments ahead when the saved
 text dropped one); a line that does not match gets no mark and the marks stop until the next "Resumed" line - never a wrong
-time. A part of a continued meeting whose earlier part has no segments has no place on the clock and gets none. Cost: about 1%
+time. A short line (under 20 characters and under 4 words: "Yes.", "Okay, thanks.") that fits two places in that look-ahead
+keeps the first for the sake of the lines after it but gets no mark: it could be either. A part of a continued meeting whose earlier part has no segments has no place on the clock and gets none. Cost: about 1%
 more tokens, 10-35 ms for a 55-minute to a 3-hour meeting.
 
 ### The route
@@ -97,14 +122,22 @@ No server change: the managed route (`smart-action`) takes any mode string, so t
 chain (Mistral Small first) and streams. On the client the new mode is added everywhere a mode must be known:
 `actions.ACTION_MEETING_CHAT` and its whitelist, `action_api.build_messages` / `_max_tokens_for` (1400),
 `local_llm._messages_for` / `_MAX_TOKENS_BY_MODE` (600) and `local_llm.run_action_stream`, which raises
-`ContextTooLong` instead of condensing for minutes. A connection that drops mid-stream returns what arrived (as the Live
-Assistant does): such an answer can look complete.
+`ContextTooLong` instead of condensing for minutes. The streams say how they ended (`action_api.stream_end()`, a thread-local
+set by every streaming entry point and reset by `process_stream` and by `ask`): "dropped" - the connection broke after some
+words, or the managed stream closed with no [DONE] and no finish reason - and "cut" - finish reason "length" (also Anthropic's
+max_tokens, Gemini's MAX_TOKENS, a local model's length). The other streaming callers (notes, the Live Assistant) ignore it and
+behave as before. Not done: Stop does not abort a request that is already in flight (a blocking `requests` call); it is noticed
+at the next word, and a request that has not started is not made.
 
 ### The conversation (chat.json)
 `<meeting folder>/chat.json`: `{"version": 1, "messages": [...]}`, written atomically with the page's newest-change-wins
 writer (never creates a folder that is gone). Kept: the user's questions and the answers that ended ("done") or were
-stopped ("stopped"); at most 200 messages of 20,000 characters; a status this build does not know counts as stopped. An
-answer that failed is not kept; a question without an answer comes back with "No answer yet - Try again". The trash moves
+stopped ("stopped", with `"why": "dropped"` when the connection dropped); an answer that reached the cap keeps `"cut": true`;
+`ts` is epoch seconds; at most 200 messages of 20,000 characters; a status this build does not know counts as stopped. An
+answer that failed is not kept; a question without an answer comes back with "No answer yet - Try again". A chat.json that is
+there but cannot be read (locked for a moment, bad JSON, another version) is read once more after 150 ms; if it still cannot
+be read it is copied to `chat.json.unreadable` (`-2`, `-3` ...) before the conversation that goes on is saved over it, and if
+even that copy fails nothing is written (`meeting_store.open_chat`). The trash moves
 the folder whole (Undo brings the chat back); a permanent delete removes it with the folder; releasing a meeting (about to be
 trashed or deleted) ends a running answer and writes nothing more; switching meeting ends it as "stopped" in its own folder.
 Nothing else reads the file: not the list, the search, Word / Markdown / Notion exports.
@@ -118,10 +151,21 @@ deploys that function.
 `meeting_chat.py` (Qt-free brain), `ui/pages/meeting_chat_ui.py` (the card), hooks in `ui/pages/meeting_views.py`
 (`NotesView`), `ui/pages/meetings.py` (`writing=True`, `transcript_saved`, setting changes), `ui/live_assist.py` (Stop),
 `main.py` (`open_meeting_after_live_stop`), `ui/shell.py` (`hide_from_share`, the bar), `meeting_session.py`
-(`transcript_saved`, `transcript_final`, `notes_engine`), `meeting_store.py` (`load_chat`), `actions.py`, `action_api.py`,
-`local_llm.py`, `rich_text.py` (`answer_text`, `streaming_markdown`), `telemetry.py`.
-Tests: `tests/test_meeting_chat.py`, `tests/test_meeting_chat_routes.py`, `tests_qt/test_meeting_chat_ui.py`,
-`tests_qt/test_meeting_chat_open.py`.
+(`transcript_saved`, `transcript_final`, `notes_engine`), `meeting_store.py` (`read_chat`, `open_chat`, `load_chat`),
+`actions.py`, `action_api.py` (`stream_end`), `local_llm.py` (`stream_cut`), `rich_text.py` (`answer_text`,
+`streaming_markdown`, `close_markers`, `without_breaks`), `ui/components/mini_prompt.py` (prompts follow a hidden window),
+`telemetry.py`.
+Tests: `tests/test_meeting_chat.py`, `tests/test_meeting_chat_routes.py`, `tests/test_meeting_chat_fixes.py` (what the reviews
+found), `tests_qt/test_meeting_chat_ui.py`, `tests_qt/test_meeting_chat_open.py`, `tests_qt/test_meeting_chat_fixes.py`.
+
+## Known limits (decided, not forgotten)
+* A time mark can still be wrong when the saved transcript lost more than 12 whole segments in a row and the next line is a
+  short one that was also said earlier (a "Yes."): only one place fits in the look-ahead, so nothing says it is the wrong one.
+  Two places that fit (the usual case) give no mark. The model is told times are marks, not promises.
+* Nested lists in an answer are drawn flat (the shared renderer, rich_text.parse_blocks, has no nesting).
+* The chat card has no soft shadow (a streaming repaint would go through an off-screen pixmap); People and the recording do.
+* The footer names the engine that was chosen ("Gusan Cloud - Mistral Small"); the server does not say which engine really
+  answered, so after a fallback inside the server it can be a different one (server_change notes, optional).
 
 ## By hand on Windows before release
 A real 55-minute Live Assistant session in French: Stop jumps to the meeting while sharing a screen with the card private

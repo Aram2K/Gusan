@@ -479,12 +479,22 @@ def run_action(text, mode, source_lang="auto", target_lang="en", model_id=QWEN_T
                                   vocab_block)
 
 
+_STREAM = threading.local()          # how the last stream on this thread ended (stream_cut)
+
+
+def stream_cut():
+    """True when the last run_action_stream on this thread stopped at its output cap (finish reason "length"):
+    the answer it returned may be cut short."""
+    return bool(getattr(_STREAM, "cut", False))
+
+
 def run_action_stream(text, mode, on_token, source_lang="auto", target_lang="en",
                       model_id=QWEN_TINY_ID, vocab_block=""):
     """Like run_action but streams: ``on_token(delta)`` fires for every piece
     of text as the model produces it; returns the complete text. Inputs that
     would need the map-reduce path fall back to a single-shot run (one
     callback with the whole result)."""
+    _STREAM.cut = False
     text = (text or "").strip()
     if not text:
         return ""
@@ -505,12 +515,15 @@ def run_action_stream(text, mode, on_token, source_lang="auto", target_lang="en"
                 messages=messages, temperature=0.1, top_p=0.9, max_tokens=max_out,
                 repeat_penalty=1.08, stream=True):
             try:
-                delta = chunk["choices"][0].get("delta", {}).get("content") or ""
+                choice = chunk["choices"][0]
+                delta = choice.get("delta", {}).get("content") or ""
             except Exception:
-                delta = ""
+                choice, delta = {}, ""
             if delta:
                 parts.append(delta)
                 on_token(delta)
+            if choice.get("finish_reason") == "length":
+                _STREAM.cut = True                    # it stopped at max_out: the answer may be cut short
         return "".join(parts).strip()
 
 

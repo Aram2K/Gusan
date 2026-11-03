@@ -43,8 +43,9 @@ FLASH_ERROR_MS = 5000      # a failure to read: the Notion errors
 FLASH_MIN_W = 160          # the flash line wraps rather than get narrower than this
 NOTION_THEN = "Send this meeting"       # the Notion sheet's button when it was opened from here
 NOTION_REASONS = ("auth", "no_access", "rate", "offline", "full")      # telemetry: why a send failed (else "other")
+ARTICLE_MAX_W = 620                 # the notes card stops growing here (it reads best at this width)
 CHAT_MIN_W, CHAT_MAX_W = 320, 520   # the notes view's right column (the chat above People and the recording)
-CHAT_H, CHAT_H_NARROW = 340, 440    # the chat card's height: at least, and when it sits below the notes
+CHAT_H, CHAT_H_NARROW = 420, 440    # the chat card's height: at least, and when it sits below the notes
 NARROW_W, WIDE_W = 830, 846         # the page is narrower than this: the column goes below the notes (the second
                                     # number is where it goes back: no flicker while a scroll bar comes and goes)
 
@@ -1402,15 +1403,35 @@ class NotesView(QWidget):
         root.setSpacing(0)
         root.addWidget(self._build_header())
         root.addLayout(self._build_toolbar())
-        body = QHBoxLayout()
-        body.setContentsMargins(32, 0, 32, 28)
+        # Narrow window: the chat is below the notes, out of sight - a link under the toolbar takes the reader to it.
+        self._ask_row = QWidget(self)
+        arow = QHBoxLayout(self._ask_row)
+        arow.setContentsMargins(32, 0, 32, 10)
+        self.ask_link = Button("Ask about this meeting", "link", "s", icon="chev_d", parent=self._ask_row)
+        self.ask_link.setIcon(icons.icon("chev_d", 14, "blue-tx", sw=2))
+        self.ask_link.setIconSize(QSize(14, 14))
+        self.ask_link.setAccessibleName("Go to the questions about this meeting")
+        self.ask_link.clicked.connect(self.show_chat)
+        arow.addWidget(self.ask_link, 0, Qt.AlignLeft)
+        arow.addStretch(1)
+        self._ask_row.hide()
+        root.addWidget(self._ask_row)
+        # The notes and the column beside them sit in one box that stops growing at ARTICLE_MAX_W + CHAT_MAX_W: on a
+        # big screen the two cards stay together on the title's left edge (the room left over is on the right), not
+        # spread out with a gap between them.
+        outer = QHBoxLayout()
+        outer.setContentsMargins(32, 0, 32, 28)
+        outer.setSpacing(0)
+        self._cols = QWidget(self)
+        body = QHBoxLayout(self._cols)
+        body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(24)
         self._body = body
         self._narrow = False            # the side column sits below the notes (see resizeEvent)
         self.article = white_card(16, "card", self)
         self.article.setAccessibleName("Meeting notes")
         self.article.setMinimumWidth(380)
-        self.article.setMaximumWidth(620)
+        self.article.setMaximumWidth(ARTICLE_MAX_W)
         self.article.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         al = QVBoxLayout(self.article)
         al.setContentsMargins(1, 1, 1, 1)
@@ -1467,7 +1488,11 @@ class NotesView(QWidget):
         sidew.setMaximumWidth(CHAT_MAX_W)
         self._side = sidew
         body.addWidget(sidew, 0)
-        root.addLayout(body, 1)
+        self._cols.setMaximumWidth(ARTICLE_MAX_W + 24 + CHAT_MAX_W)
+        outer.addWidget(self._cols, 1000)
+        outer.addStretch(1)
+        self._outer = outer
+        root.addLayout(outer, 1)
         meeting_speakers_ui.install(self)          # ⋯ › Identify speakers, and its line in the Transcript tab
 
     # ── the two columns ──
@@ -1485,7 +1510,10 @@ class NotesView(QWidget):
             return
         self._narrow = narrow
         self._body.setDirection(QBoxLayout.TopToBottom if narrow else QBoxLayout.LeftToRight)
-        self.article.setMaximumWidth(16777215 if narrow else 620)
+        self._ask_row.setVisible(narrow)
+        self._outer.setStretch(1, 0 if narrow else 1)      # (narrow: the column takes every pixel)
+        self._cols.setMaximumWidth(16777215 if narrow else ARTICLE_MAX_W + 24 + CHAT_MAX_W)
+        self.article.setMaximumWidth(16777215 if narrow else ARTICLE_MAX_W)
         self.article.setMinimumHeight(460 if narrow else 0)
         self._side.setMaximumWidth(16777215 if narrow else CHAT_MAX_W)
         self._side.setMinimumWidth(0 if narrow else CHAT_MIN_W)
@@ -1499,6 +1527,16 @@ class NotesView(QWidget):
 
     def _copy_label(self):
         return "Copy" if self._narrow else "Copy notes"
+
+    def show_chat(self):
+        """Scroll the page to the questions about this meeting and put the cursor in the box (the narrow layout,
+        where the chat sits below the notes)."""
+        w = self.parentWidget()
+        while w is not None and not isinstance(w, QScrollArea):
+            w = w.parentWidget()
+        if w is not None:
+            w.ensureWidgetVisible(self.chat, 0, 16)
+        self.chat.focus_input()
 
     # ── building ──
     def _build_header(self):
@@ -1603,7 +1641,10 @@ class NotesView(QWidget):
         same = str(folder) == self.folder
         if not same:
             self.audio_player.stop(release=True)     # another meeting: let go of this recording
-            self.chat.unbind()                       # ... and of its chat (a running answer ends in its own folder)
+            try:
+                self.chat.unbind()                   # ... and of its chat (a running answer ends in its own folder)
+            except Exception:
+                logger.warning("The meeting chat could not be let go", exc_info=True)
         # (only when what is on screen IS this meeting: a meeting still being opened has nothing
         # to keep, and the previous one's scroll position is not its own)
         shown = str((self.data or {}).get("folder") or "") == str(folder)
@@ -1791,7 +1832,10 @@ class NotesView(QWidget):
         self.audio_player.set_parts(audio, d.get("duration_sec") or 0)     # the same parts: keeps playing
         self.copy_btn.setEnabled(bool(notes.strip()))
         self.sync_actions()
-        self.chat.bind(self.folder, d, busy, self._transcript_final(busy))
+        try:
+            self.chat.bind(self.folder, d, busy, self._transcript_final(busy))
+        except Exception:                                  # the page must finish drawing whatever the chat's gate says
+            logger.warning("The meeting chat could not be set up", exc_info=True)
         meeting_speakers_ui.after_render(self)
 
     def _transcript_final(self, busy):
@@ -1909,7 +1953,10 @@ class NotesView(QWidget):
             return
         title = d.get("title") or "Meeting"
         from docx_export import safe_filename
-        stem = safe_filename(title, "Meeting notes")
+        # The Save dialog is a window of its own that a screen share can see: while this window is hidden from the
+        # share (after a Live Assistant Stop) it is not offered the meeting's name.
+        hidden = bool(getattr(self.window(), "hidden_from_share", False))
+        stem = safe_filename("" if hidden else title, "Meeting notes")
         docs = os.path.join(os.path.expanduser("~"), "Documents")
         base = docs if os.path.isdir(docs) else os.path.expanduser("~")
         if kind == "word":

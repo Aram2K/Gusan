@@ -14,7 +14,10 @@ without one:
     pick_engine(cfg, pro, has_token, ...)
                                 which AI answers (the notes' engine) and, when none can, why - no network
     ask(folder, question, history, cfg=, pro=, resolve=, ...)
-                                the whole question, blocking (worker thread); streams through ``on_text``
+                                the whole question, blocking (worker thread); streams through ``on_text``;
+                                a Stop is noticed before anything is read or sent, not only at the first word;
+                                the Answer says whether the connection dropped (``dropped``) or the engine
+                                reached the longest answer it may write (``cut``): action_api.stream_end()
     friendly_error(text, kind)  a calm sentence for whatever went wrong, never raw error text
     dump_chat(messages)         chat.json's text (meeting_store.load_chat reads it)
 
@@ -27,6 +30,7 @@ anywhere else: the only analytics event is a count (``meeting_chat_asked``, the 
 """
 
 import json
+import logging
 import math
 import re
 import time
@@ -41,6 +45,8 @@ import meeting_store
 import rich_text
 import speech_langs
 
+logger = logging.getLogger("transcribe")
+
 MAX_QUESTION_CHARS = 4000            # a longer question (a pasted document) is cut here
 HISTORY_QUESTION_CHARS = 500         # an earlier question sent back to the model
 HISTORY_ANSWER_CHARS = {"cloud": 1500, "local": 500}
@@ -51,11 +57,14 @@ LOCAL_OUT_TOKENS = 600               # what a local answer may write (local_llm.
 LOCAL_MARGIN = 160                   # room kept free in the local window
 WINDOW_TOKENS = 700                  # a piece of transcript is chosen or left out as a whole
 RETRIES = 2                          # smaller prompts tried when an engine says the first was too big
+RETRIES_OWN_KEY = 4                  # ... with the user's own key: nobody knows that provider's window
 SHRINK = 0.6
+SMALL_BUDGET = 8000                  # a prompt this small that is still too long: it is the engine, not the question
 LEFT_OUT = "[… part of the meeting left out …]"
 TIME_GAP = 45.0                      # a time mark at the start of a line when this many seconds passed
 TIME_GAP_INSIDE = 60.0               # ... and inside a long line
 RESYNC = 12                          # segments looked ahead when a line does not match the next one
+DISTINCT_CHARS, DISTINCT_WORDS = 20, 4   # a line shorter than both ("Yes.", "Okay, thanks.") may be said twice
 
 STARTERS = ("What were the key decisions?", "What did I agree to do?", "Write a follow-up email")
 
@@ -68,6 +77,9 @@ SIGNED_OUT = "Sign in to ask questions about your meetings."
 PRIVACY_NO_MODEL = actions.LOCAL_ANSWERS_MESSAGE
 TOO_LONG = ("This meeting is too long for this AI model to read in one go. Try a more specific question, "
             "or pick another engine in Settings › Speech & AI.")
+TOO_LONG_SMALL = "This AI model can't read a meeting this long. Pick another engine in Settings › Speech & AI."
+DROPPED = "The connection dropped, so this answer may be cut short."
+CUT_SHORT = "This answer was cut short. Ask for the rest if you need it."
 OFFLINE_CLOUD = "Couldn't reach Gusan Cloud. Check your internet connection."
 OFFLINE_KEY = "Couldn't reach your AI service. Check your internet connection."
 SERVER = "Gusan Cloud couldn't answer just now. Try again in a moment."
@@ -211,6 +223,11 @@ def _match(segs, k, target):
     return i if i > k and acc == target else None
 
 
+def _is_short(line):
+    """A line that may well be said more than once in a meeting ("Yes.", "Okay, thanks.")."""
+    return len(line) < DISTINCT_CHARS and len(line.split()) < DISTINCT_WORDS
+
+
 def time_marked(transcript, segments_doc, line_gap=TIME_GAP, inner_gap=TIME_GAP_INSIDE):
     """(the transcript with "[mm:ss]" marks, ok). Each line of the saved transcript is matched, word for word, to
     the segments segments.json kept (consecutive segments of one speaker make one line; the names that come after
@@ -218,7 +235,8 @@ def time_marked(transcript, segments_doc, line_gap=TIME_GAP, inner_gap=TIME_GAP_
     of the line - and again inside a long line - once ``line_gap`` / ``inner_gap`` seconds passed since the last
     mark. A line that does not match gets no mark and the marks stop until a "— Resumed —" line (never a wrong
     time); a line is looked for up to RESYNC segments ahead of where the last one ended (a segment the saved
-    text dropped). ``ok``: every line matched. Without segments the transcript comes back as it is, (…, False)."""
+    text dropped). A short line that fits two places in that look-ahead ("Yes.") gets no mark: it could be either.
+    ``ok``: every line matched. Without segments the transcript comes back as it is, (…, False)."""
     segs, firsts = _flatten(segments_doc)
     if not segs:
         return transcript or "", False
@@ -246,7 +264,7 @@ def time_marked(transcript, segments_doc, line_gap=TIME_GAP, inner_gap=TIME_GAP_
             for label, body in tries:
                 end = _match(segs, k, _norm(body))
                 if end is not None:
-                    hit = (label, k, end)
+                    hit = (label, k, end, _norm(body))
                     break
             if hit:
                 break
@@ -254,11 +272,14 @@ def time_marked(transcript, segments_doc, line_gap=TIME_GAP, inner_gap=TIME_GAP_
             out.append(line)
             synced, failed = False, True
             continue
-        label, k, end = hit
+        label, k, end, target = hit
+        # A short line ("Yes.") that fits two places in the look-ahead could be either: it keeps the first (the
+        # transcript is usually whole) but is given no time - never a wrong one.
+        unsure = _is_short(target) and any(_match(segs, o, target) is not None for o in starts if o > k)
         synced, matched, j = True, True, end
         pieces = []
         for n, (t0, text) in enumerate(segs[k:end]):
-            if t0 - last_mark >= (line_gap if n == 0 else inner_gap):
+            if not unsure and t0 - last_mark >= (line_gap if n == 0 else inner_gap):
                 pieces.append("[%s] %s" % (clock(t0), text))
                 last_mark = t0
             else:
@@ -321,14 +342,14 @@ def load_material(folder):
 
 # ── the prompt ───────────────────────────────────────────────────────────────
 _TAGS = ("meeting", "notes_written_by_gusan", "users_own_notes", "transcript", "conversation_so_far", "question")
-_TAG_RE = re.compile(r"<(/?)(%s)\b" % "|".join(_TAGS), re.I)
+_TAG_RE = re.compile(r"<[\s\u200b]*/?[\s\u200b]*(?:%s)\b" % "|".join(_TAGS), re.I)    # "</ transcript>" too
 _ZWSP = "​"
 
 
 def _defang(text):
     """Text from the meeting, the notes or a question cannot close one of the prompt's sections: the tag's
     angle bracket gets an invisible character after it."""
-    return _TAG_RE.sub(lambda m: "<" + _ZWSP + m.group(1) + m.group(2), str(text or ""))
+    return _TAG_RE.sub(lambda m: "<" + _ZWSP + m.group(0)[1:], str(text or ""))
 
 
 def _section(tag, body):
@@ -780,6 +801,8 @@ class Answer:
     kind: str = ""
     seconds: float = 0.0
     first_word_seconds: object = None
+    dropped: bool = False               # the connection ended before the answer did: it may be cut short
+    cut: bool = False                   # the engine stopped at the longest answer it may write
 
 
 def ask(folder, question, history, *, cfg, pro, resolve, on_text=None, cancelled=None, stream=None,
@@ -791,15 +814,25 @@ def ask(folder, question, history, *, cfg, pro, resolve, on_text=None, cancelled
     token - this can touch the network). ``on_text(text)`` gets the whole answer so far after each piece;
     ``cancelled()`` True stops it - Cancelled is raised, carrying what had arrived. Raises ChatError with a
     calm sentence for everything else. When an engine says the prompt was too big (before it wrote a word) a
-    smaller one is sent, up to RETRIES times, and the answer says how much of the meeting it saw."""
+    smaller one is sent, up to RETRIES times (RETRIES_OWN_KEY with the user's own key: nobody knows that
+    provider's window), and the answer says how much of the meeting it saw. ``cancelled()`` is also asked
+    before the meeting is read, after the sign-in check and right before the request goes out."""
     started = time.monotonic()
     cfg = cfg or {}
     stream = stream or actions.process_stream
+
+    def check():
+        """Stop pressed before a word came: nothing more is fetched, nothing is sent."""
+        if cancelled is not None and cancelled():
+            raise Cancelled("")
+
+    check()
     material = material or load_material(folder)
     if not (material.transcript or "").strip():
         raise ChatError("no_transcript", NO_TRANSCRIPT)
     pref = meeting_session.notes_engine(cfg, pro, cfg.get("meeting_notes_model") or None)
     engine, config = resolve(pref)
+    check()                                                 # (resolve can wait for a sign-in token)
     config = config or cfg
     has_token = bool(config.get("_managed_token"))
     routed_managed = actions.ACTION_MODELS.get(engine, {}).get("kind") == "managed"
@@ -810,30 +843,44 @@ def ask(folder, question, history, *, cfg, pro, resolve, on_text=None, cancelled
         raise ChatError(choice.problem, problem_text(choice.problem, choice))
     local = choice.kind == "local"
     budget = local_budget() if local else (BUDGET_OWN_KEY if choice.kind == "own_key" else BUDGET_CLOUD)
+    retries = RETRIES_OWN_KEY if choice.kind == "own_key" else RETRIES      # (its window is anybody's guess)
     attempt = 0
     while True:
         plan = plan_context(material, question, history, budget, local=local)
+        check()
         buf = TokenBuffer(on_text, cancelled)
+        action_api.begin_stream()                 # (process_stream does it too: a stream that is not it)
         try:
             text = stream(plan.prompt, actions.ACTION_MEETING_CHAT, buf.feed, model=choice.engine_id, config=config)
         except Cancelled:
             raise
         except Exception as e:                    # noqa: BLE001 - said in words, below
-            if attempt < RETRIES and not buf.started and (isinstance(e, actions.ContextTooLong) or is_too_long(e)):
+            too_long = isinstance(e, actions.ContextTooLong) or is_too_long(e)
+            if attempt < retries and not buf.started and too_long:
                 attempt += 1
                 budget = int(budget * SHRINK)
                 continue
-            code, message = (("too_long", TOO_LONG) if isinstance(e, actions.ContextTooLong)
-                             else friendly_error(str(e), choice.kind))
+            if too_long:
+                code = "too_long"
+                message = TOO_LONG_SMALL if choice.kind == "own_key" and budget < SMALL_BUDGET else TOO_LONG
+            else:
+                code, message = friendly_error(str(e), choice.kind)
+                if isinstance(e, actions.ActionError):      # (its text can echo the request: only the kind is kept)
+                    logger.warning("Ask about this meeting: the AI route failed (%s, %s)", type(e).__name__, code)
+                else:                                       # a bug, not a refusal: the log must show it
+                    logger.warning("Ask about this meeting failed", exc_info=True)
             raise ChatError(code, message) from e
         break
     text = (text or buf.text or "").strip()
     if not text:
         raise ChatError("empty", NO_ANSWER)
+    end = action_api.stream_end()
+    dropped = bool(end.get("dropped"))
     now = time.monotonic()
     first = round(buf.first_at - started, 2) if buf.first_at else None
     return Answer(text=text, coverage=plan.coverage, engine_label=choice.label, kind=choice.kind,
-                  seconds=round(now - started, 2), first_word_seconds=first)
+                  seconds=round(now - started, 2), first_word_seconds=first,
+                  dropped=dropped, cut=bool(end.get("cut")) and not dropped)
 
 
 # ── the file ─────────────────────────────────────────────────────────────────

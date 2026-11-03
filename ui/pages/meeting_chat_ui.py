@@ -18,8 +18,11 @@ worker hands the whole text so far to the window at most every 50 ms and the car
 STREAM_RENDER_MS, with the app's real formatting (rich_text.answer_text -> qt_html: bold and lists, never raw
 symbols, never HTML from the model, never a link or a picture). A question's text is shown as plain text, cut at
 QUESTION_SHOWN characters (all of it is kept and sent). An answer that was stopped keeps its words, marked
-"Stopped", and is never sent back to the model; one that failed is a calm sentence and Try again, and only the
-question is kept. Nothing about a question or an answer goes anywhere but the AI engine: the one analytics event
+"Stopped", and is never sent back to the model; so is one the connection cut short ("The connection dropped ...",
+with Try again) - neither is ever kept as if it were complete; one that failed is a calm sentence and Try again, and
+only the question is kept. An answer that reached the longest an engine may write is kept with a note. Only the
+last SHOWN_MESSAGES messages are drawn when a meeting opens ("Show earlier messages" adds more): a long chat stays
+quick to open and to add to. Nothing about a question or an answer goes anywhere but the AI engine: the one analytics event
 is a count (meeting_chat_asked, the kind of engine).
 """
 
@@ -28,8 +31,8 @@ import os
 import threading
 import time
 
-from PySide6.QtCore import QObject, QPoint, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAccessible, QAccessibleEvent
+from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QAccessible, QAccessibleEvent, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QScrollArea, QSizePolicy,
                                QVBoxLayout, QWidget)
 
@@ -50,8 +53,12 @@ PARTIAL_MS = 50                # the worker hands the text over at most this oft
 QUESTION_SHOWN = 600           # a question's bubble shows this many characters (all of it is sent)
 COUNTER_FROM = 3500            # the characters counter shows from here
 INPUT_MIN_H, INPUT_MAX_H = 44, 120
+SEND_W = 90                    # Send and Stop are one width (at least this): the box does not change size when an answer starts
+SHOWN_MESSAGES = 30            # a meeting opens with this many of the newest messages drawn
+MIN_H = 420                    # the card is at least this tall (the page scrolls when the window is shorter)
 PREFERRED_W = 400              # the card's (and so the right column's) width while the window has room
 COPIED_MS = 1800
+START_LOOK_MS = 300            # how long an answer that just ended is put at its first line while the page lays out
 
 TITLE = "Ask about this meeting"
 PLACEHOLDER = "Ask about this meeting…"
@@ -65,6 +72,7 @@ LOCAL_NOTE = "Stays on this computer."
 CLEAR_TITLE = "Clear this chat?"
 CLEAR_TEXT = "The questions and answers about this meeting are removed. The meeting itself stays."
 HIDDEN_NOTE = "Hidden on screen share"
+EARLIER = "Show earlier messages"
 
 
 def _qss():
@@ -73,6 +81,11 @@ def _qss():
 QFrame[chat="bubble"] {{
     background: {c('blue-sub')}; border: 1px solid {c('blue-line')}; border-radius: 14px;
 }}
+QScrollArea[chat="history"] {{ background: transparent; border: 2px solid transparent; border-radius: 10px; }}
+QScrollArea[chat="history"] > QWidget#qt_scrollarea_viewport {{ background: transparent; }}
+QScrollArea[chat="history"][focusVisible="true"] {{ border: 2px solid {c('blue-l')}; }}
+QFrame[chat="rule"] {{ background: transparent; border: none; }}
+QFrame[chat="rule"][scrolled="true"] {{ background: {c('line')}; }}
 """
 
 
@@ -114,7 +127,57 @@ def _announce(widget):
 
 
 def _colors():
-    return {"text": theme.qss_color("text"), "muted": theme.qss_color("muted"), "head": theme.qss_color("ink")}
+    return {"text": theme.qss_color("text"), "muted": theme.qss_color("muted"), "head": theme.qss_color("ink"),
+            "code_bg": theme.qss_color("bg2"), "item_gap": "3px"}
+
+
+class _CopyLabel(QLabel):
+    """A label whose selection copies as the text it was: Ctrl+C and the right-click menu leave out the invisible
+    break points answer_text (and mini_prompt.breakable) put in long words, so a copied address or link pastes as
+    the address or the link."""
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._menu)
+
+    def copy_selection(self):
+        """The selected words go to the clipboard, plain (a paragraph break comes back as a line break)."""
+        text = self.selectedText().replace("\u2029", "\n").replace("\u2028", "\n")
+        text = rich_text.without_breaks(text)
+        if text:
+            QGuiApplication.clipboard().setText(text)
+        return bool(text)
+
+    def keyPressEvent(self, e):                                   # noqa: N802 (Qt name)
+        if e.matches(QKeySequence.Copy) and self.hasSelectedText():
+            e.accept()
+            self.copy_selection()
+            return
+        super().keyPressEvent(e)
+
+    def _menu(self, pos):
+        if not self.hasSelectedText():
+            return                                                # (the answer's Copy button is the way without one)
+        menu = views.make_menu(self)
+        act = menu.addAction("Copy")
+        act.triggered.connect(self.copy_selection)
+        menu.aboutToHide.connect(menu.deleteLater)
+        menu.popup(self.mapToGlobal(pos))
+
+
+class _FitLabel(_CopyLabel):
+    """A wrapping plain-text label that asks for the width its words need, up to the room there is: a plain
+    word-wrapped QLabel asks for a narrow, tall box (Qt aims for a squarish shape), so a short question would sit
+    in a bubble far narrower than the row, on several lines."""
+
+    def sizeHint(self):                                           # noqa: N802 (Qt name)
+        fm = self.fontMetrics()
+        width = max([fm.horizontalAdvance(line) for line in (self.text() or " ").split("\n")] or [0]) + 2
+        return QSize(width, self.heightForWidth(width))
+
+    def minimumSizeHint(self):                                    # noqa: N802 (Qt name)
+        return QSize(40, 0)
 
 
 class _AnswerRow(QWidget):
@@ -125,9 +188,9 @@ class _AnswerRow(QWidget):
         self.card = card
         self.msg = None
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(2, 0, 8, 0)
+        lay.setContentsMargins(0, 0, 8, 0)
         lay.setSpacing(4)
-        self.body = QLabel(self)
+        self.body = _CopyLabel("", self)
         self.body.setTextFormat(Qt.RichText)
         self.body.setWordWrap(True)
         self.body.setFont(theme.font(13.5))
@@ -149,6 +212,8 @@ class _AnswerRow(QWidget):
         self.actions.setSpacing(6)
         self.copy_btn = Button("Copy", "ghost", "s", icon="copy", parent=self)
         self.copy_btn.setAccessibleName("Copy this answer")
+        # (less air on the left than a ghost button has: its icon sits nearer the answer's own left edge)
+        self.copy_btn.setStyleSheet("QPushButton { padding: 0px 10px 0px 5px; }")
         self.copy_btn.clicked.connect(self._copy)
         self.retry_btn = Button("Try again", "secondary", "s", parent=self)
         self.retry_btn.clicked.connect(lambda: card.retry())
@@ -194,14 +259,21 @@ class _AnswerRow(QWidget):
         self.copy_btn.hide()
         self.retry_btn.hide()
 
-    def show_message(self, msg):
-        """A kept answer (done, or stopped by the user)."""
+    def show_message(self, msg, retry=False):
+        """A kept answer: done, cut short (it reached the longest answer an engine may write), stopped by the user,
+        or ended by a dropped connection (``retry``: it offers Try again). One that does not end where the model
+        meant it to is drawn the way a streaming one is, so no half-written ** or ` shows as raw symbols."""
         self.msg = msg
-        self.set_text(msg.get("text") or "")
-        self.set_status(STOPPED if msg.get("status") == "stopped" else "")
-        self.set_note(meeting_chat.coverage_note(msg.get("coverage")))
+        stopped = msg.get("status") != "done"
+        self.set_text(msg.get("text") or "", streaming=stopped or bool(msg.get("cut")))
+        if stopped:
+            self.set_status(meeting_chat.DROPPED if msg.get("why") == "dropped" else STOPPED)
+        else:
+            self.set_status("")
+        notes = [meeting_chat.coverage_note(msg.get("coverage")), meeting_chat.CUT_SHORT if msg.get("cut") else ""]
+        self.set_note(" ".join(n for n in notes if n))
         self.copy_btn.show()
-        self.retry_btn.hide()
+        self.retry_btn.setVisible(bool(retry) and msg.get("why") == "dropped")
 
     def show_error(self, sentence, retry=True):
         self.set_text("")
@@ -229,7 +301,7 @@ class ChatCard(Card):
     """See the module notes."""
 
     def __init__(self, view, parent=None):
-        super().__init__(parent or view, pad=(16, 14), gap=10, shadow=False)   # no shadow: a streaming repaint would
+        super().__init__(parent or view, pad=(18, 16), gap=10, shadow=False)   # no shadow: a streaming repaint would
         self.view = view                                                       # go through its off-screen pixmap
         self.page = view.page
         self.setAccessibleName(TITLE)
@@ -243,7 +315,9 @@ class ChatCard(Card):
         self._busy = False
         self._final = True
         self._msgs = []                # the conversation (meeting_store.clean_chat rows)
+        self._first = 0                # the index of the first message drawn (SHOWN_MESSAGES: the older ones wait)
         self._loaded = False
+        self._saveable = True          # False: chat.json is there but could not be read or kept - never overwritten
         self._load_token = 0
         self._req = 0                  # the question being answered; a stale request's results are dropped
         self._running = False
@@ -253,8 +327,10 @@ class ChatCard(Card):
         self._live = None              # the answer row being written
         self._error_row = None         # an answer that failed (not part of the conversation)
         self._choice = meeting_chat.EngineChoice()
+        self._run_choice = self._choice  # the engine the answer being written comes from
         self._gate = ("ready", "")
         self._stick = True
+        self._start_row = None         # the answer that just ended, being put at its first line (_place_start)
         self._rows = []
 
         head = QHBoxLayout()
@@ -264,37 +340,54 @@ class ChatCard(Card):
         self.clear_btn = Button("Clear chat", "link", "s", parent=self)
         self.clear_btn.setAccessibleName("Clear the chat")
         self.clear_btn.clicked.connect(self.clear)
+        keep = self.clear_btn.sizePolicy()
+        keep.setRetainSizeWhenHidden(True)                  # the title does not move when the link comes and goes
+        self.clear_btn.setSizePolicy(keep)
         self.clear_btn.hide()
         head.addWidget(self.clear_btn)
         self.add(head)
 
         self.scroll = QScrollArea(self)
-        self.scroll.setProperty("gusan", "scroll")
+        self.scroll.setProperty("chat", "history")           # (a ring on the box when the keyboard is on it: _qss)
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll.viewport().setAutoFillBackground(False)
         self.scroll.setFocusPolicy(Qt.StrongFocus)
+        theme.focus_ring(self.scroll)
         self.scroll.setAccessibleName("Conversation")
         content = QWidget()
         content.setProperty("gusan", "scrollContent")
         self._content = content
         self._col = QVBoxLayout(content)
-        self._col.setContentsMargins(0, 0, 4, 0)
+        self._col.setContentsMargins(0, 0, 2, 0)
         self._col.setSpacing(12)
+        self._earlier = Button(EARLIER, "link", "s", parent=content)
+        self._earlier.clicked.connect(self.show_earlier)
+        self._earlier.hide()
+        self._col.addWidget(self._earlier, 0, Qt.AlignLeft)
         self._empty = self._build_empty(content)
         self._col.addWidget(self._empty)
         self._col.addStretch(1)
         self.scroll.setWidget(content)
         self.add(self.scroll, 1)
+        # A hairline across the top of the history while it is scrolled: a line cut in half by the edge reads as an
+        # edge, not as a mistake. It is a child of the viewport (the answers slide under it), clear when at the top.
+        self._rule = QFrame(self.scroll.viewport())
+        self._rule.setProperty("chat", "rule")
+        self._rule.setProperty("scrolled", False)
+        self._rule.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._rule.setGeometry(0, 0, 0, 1)
+        self.scroll.viewport().installEventFilter(self)
         bar = self.scroll.verticalScrollBar()
         bar.rangeChanged.connect(self._on_range)
         bar.valueChanged.connect(self._on_value)
+        bar.valueChanged.connect(self._sync_rule)
         self._programmatic = False
 
         self.gate_bar = self._gate_box(self)          # the same words above the box once there is a chat
         self.add(self.gate_bar)
-        self.counter = views.tlabel("", 11.5, 400, "faint", parent=self)
+        self.counter = views.tlabel("", 11.5, 400, "muted", parent=self)
         self.counter.setAlignment(Qt.AlignRight)
         self.counter.hide()
         self.add(self.counter)
@@ -313,13 +406,15 @@ class ChatCard(Card):
         self.input.submit.connect(self.send)
         self.input.stop_asked.connect(self.stop)
         row.addWidget(self.input, 1)
-        self.send_btn = Button("Send", "primary", "m", parent=self)
+        self.send_btn = Button("Send", "primary", "l", parent=self)
         self.send_btn.setAccessibleName("Send question")
         self.send_btn.clicked.connect(lambda: self.send())
-        self.stop_btn = Button("Stop", "secondary", "m", icon="stop", parent=self)
+        self.stop_btn = Button("Stop", "secondary", "l", icon="stop", parent=self)
         self.stop_btn.setAccessibleName("Stop the answer")
         self.stop_btn.clicked.connect(lambda: self.stop())
         self.stop_btn.hide()
+        self.send_btn.setFixedWidth(SEND_W)
+        self.stop_btn.setFixedWidth(SEND_W)               # (_fit_buttons makes both as wide as the wider needs)
         row.addWidget(self.send_btn, 0, Qt.AlignBottom)
         row.addWidget(self.stop_btn, 0, Qt.AlignBottom)
         self.add(row)
@@ -332,28 +427,72 @@ class ChatCard(Card):
         foot.addWidget(self._foot_icon)
         self.foot = views.ElidedLabel("", self)
         self.foot.setFont(theme.font(11.5))
-        views.set_tone(self.foot, "faint")
+        views.set_tone(self.foot, "muted")
         foot.addWidget(self.foot, 1)
         self._foot_row = QWidget(self)
         self._foot_row.setLayout(foot)
         foot.setContentsMargins(0, 0, 0, 0)
         self.add(self._foot_row)
 
-        self.setMinimumHeight(340)
-        self.setTabOrder(self.clear_btn, self._chips[0])
-        for a, b in zip(self._chips, self._chips[1:]):
-            self.setTabOrder(a, b)
-        self.setTabOrder(self._chips[-1], self.scroll)
-        self.setTabOrder(self.scroll, self.input)
-        self.setTabOrder(self.input, self.send_btn)
-        self.setTabOrder(self.send_btn, self.stop_btn)
+        self.setMinimumHeight(MIN_H)
+        self._retab()
         self._sync()
+
+    def _fit_buttons(self):
+        """Send and Stop are one width - the wider of the two needs (Stop has an icon), at least SEND_W: the box does
+        not change size when an answer starts and neither word is cut off, whatever the font is. Read once the card
+        is in the window (the window's style gives the buttons their padding), so not while it is built."""
+        if getattr(self, "stop_btn", None) is None:
+            return                                                # (a style change while the card is being built)
+        for b in (self.send_btn, self.stop_btn):
+            b.ensurePolished()
+        width = max(SEND_W, self.send_btn.sizeHint().width(), self.stop_btn.sizeHint().width())
+        if self.send_btn.width() != width or self.stop_btn.width() != width:
+            self.send_btn.setFixedWidth(width)
+            self.stop_btn.setFixedWidth(width)
+
+    def showEvent(self, e):                                       # noqa: N802 (Qt name)
+        super().showEvent(e)
+        self._fit_buttons()
+
+    def changeEvent(self, e):                                     # noqa: N802 (Qt name)
+        super().changeEvent(e)
+        if e.type() in (QEvent.StyleChange, QEvent.FontChange):
+            self._fit_buttons()
+
+    def eventFilter(self, obj, e):                                # noqa: N802 (Qt name)
+        if e.type() == QEvent.Resize and obj is self.scroll.viewport():
+            self._rule.setGeometry(0, 0, obj.width(), 1)
+            self._rule.raise_()
+        return super().eventFilter(obj, e)
+
+    def _sync_rule(self, *_):
+        """The hairline shows while the history is scrolled down from its top."""
+        on = self.scroll.verticalScrollBar().value() > 0
+        if bool(self._rule.property("scrolled")) != on:
+            self._rule.setProperty("scrolled", on)
+            self._rule.style().unpolish(self._rule)
+            self._rule.style().polish(self._rule)
 
     def sizeHint(self):                                           # noqa: N802 (Qt name)
         """The column's width does not depend on what the card holds (the footer's length, an answer): it asks for
         PREFERRED_W and gives way to the notes down to the column's own minimum."""
         sh = super().sizeHint()
-        return QSize(PREFERRED_W, max(sh.height(), 340))
+        return QSize(PREFERRED_W, max(sh.height(), MIN_H))
+
+    def _retab(self):
+        """Keyboard order: Clear chat, the starters, Show earlier, the conversation, then each answer's Copy and Try
+        again, the box, Send, Stop - the answers' buttons sit inside the conversation, so they follow it."""
+        try:
+            chain = [self.clear_btn] + list(self._chips) + [self._earlier, self.scroll]
+            for row in self._rows:
+                if isinstance(row, _AnswerRow):
+                    chain += [row.copy_btn, row.retry_btn]
+            chain += [self.input, self.send_btn, self.stop_btn]
+            for a, b in zip(chain, chain[1:]):
+                self.setTabOrder(a, b)
+        except RuntimeError:
+            logger.debug("the chat's keyboard order could not be set", exc_info=True)   # (a row is going away)
 
     # ── building ──
     def _gate_box(self, parent):
@@ -403,13 +542,14 @@ class ChatCard(Card):
         self._data = data or {}
         self._busy, self._final = bool(busy), bool(final)
         self._sync()
+        self._stop_if_forbidden()                          # (signing out or a plan change re-draws the page)
 
     def unbind(self):
         """Another meeting is loading: a running answer ends here ("stopped", saved in its own folder) and the card
         waits to be bound again."""
         self._cancel_running(save=True)
         self._folder = None
-        self._msgs, self._loaded = [], False
+        self._msgs, self._loaded, self._saveable = [], False, True
         self._load_token += 1
         self._data = {}
         self._rebuild()
@@ -420,7 +560,7 @@ class ChatCard(Card):
         saved (the file may not be written into a folder that is going away)."""
         self._cancel_running(save=False)
         self._folder = None
-        self._msgs, self._loaded = [], False
+        self._msgs, self._loaded, self._saveable = [], False, True
         self._load_token += 1
         self._rebuild()
         self._sync()
@@ -431,7 +571,7 @@ class ChatCard(Card):
     def _switch(self, folder):
         self._cancel_running(save=True)
         self._folder = folder or None
-        self._msgs, self._loaded = [], False
+        self._msgs, self._loaded, self._saveable = [], False, True
         self._load_token += 1
         token = self._load_token
         self._rebuild()
@@ -439,13 +579,17 @@ class ChatCard(Card):
             return
 
         def work():
-            return meeting_store.load_chat(folder)
-        self._bg.run(work, lambda res, err, t=token: self._loaded_chat(t, res if err is None else []))
+            return meeting_store.open_chat(folder)
+        self._bg.run(work, lambda res, err, t=token: self._loaded_chat(t, res if err is None else ([], False)))
 
-    def _loaded_chat(self, token, rows):
+    def _loaded_chat(self, token, res):
+        """The chat is read: (its messages, whether new ones may be saved - False when chat.json is there but could
+        not be read or put aside: it is never written over then)."""
         if token != self._load_token or self._running:
             return
+        rows, saveable = res
         self._msgs = list(rows or [])
+        self._saveable = bool(saveable)
         self._loaded = True
         self._rebuild()
         self._sync()
@@ -476,8 +620,20 @@ class ChatCard(Card):
         return "ready", ""
 
     def refresh_gate(self):
-        """A setting that decides the engine changed (Privacy mode, the AI writer, the plan)."""
+        """A setting that decides the engine changed (Privacy mode, the AI writer, the plan, signing in or out). What
+        would answer now is read again - and an answer that is coming from an engine that may no longer be used
+        ends here (it keeps what arrived, marked "Stopped"): switching Privacy mode on stops the cloud at once."""
         self._sync()
+        self._stop_if_forbidden()
+
+    def _stop_if_forbidden(self):
+        """An answer is coming from an engine that may not be used now - Privacy mode was switched on while it came
+        from the cloud, the user signed out, the plan ended - ends where it is."""
+        if not self._running:
+            return
+        privacy = bool((self.page.cfg() or {}).get("privacy_mode"))
+        if self._engine().problem or (privacy and self._run_choice.kind != "local"):
+            self.stop()
 
     def _ready(self):
         return self._gate[0] == "ready" and self._loaded and bool(self._folder)
@@ -486,6 +642,7 @@ class ChatCard(Card):
         """Draw what depends on the gate and the conversation: the empty state, the note above the box, the
         buttons, the footer."""
         self._gate = self._compute_gate()
+        self._fit_buttons()
         mode, text = self._gate
         empty = not self._msgs and not self._running
         self._empty.setVisible(empty)
@@ -506,11 +663,15 @@ class ChatCard(Card):
         self.input.setEnabled(usable)
         self.input.running = self._running
         self.input.setPlaceholderText(PLACEHOLDER if usable else "")
-        self.send_btn.setEnabled(usable and not self._running)
+        self._sync_send()
         self.send_btn.setVisible(not self._running)
         self.stop_btn.setVisible(self._running)
         self.clear_btn.setVisible(bool(self._msgs) and not self._running)
         self._sync_footer()
+
+    def _sync_send(self):
+        """Send is for a question that is written: the blue button is not on offer for an empty box."""
+        self.send_btn.setEnabled(self._ready() and not self._running and bool(self.input.toPlainText().strip()))
 
     def _gate_button(self, mode):
         """(button text, what it does) for a gate that has a way out, else None."""
@@ -553,6 +714,7 @@ class ChatCard(Card):
         self.counter.setText("%s / %s" % (format(n, ","), format(meeting_chat.MAX_QUESTION_CHARS, ",")))
         self.counter.setVisible(n >= COUNTER_FROM)
         self._fit_input()
+        self._sync_send()
 
     def _fit_input(self):
         doc = self.input.document()
@@ -575,23 +737,35 @@ class ChatCard(Card):
             return
         text = text[:meeting_chat.MAX_QUESTION_CHARS]
         self._clear_error_row()
+        self._hide_retries()
         self._msgs.append({"role": "user", "text": text, "ts": int(time.time())})
         self._add_user_row(text)
-        self.input.clear()
+        if not isinstance(question, str):
+            self.input.clear()                             # (a starter does not throw away what was typed)
         self.page.track("meeting_chat_asked", {"engine": self._choice.kind if self._choice.kind in
                                                ("cloud", "own_key", "local") else "cloud"})
         self._save()
         self._answer(text)
 
     def retry(self):
-        """Try again: the last question asks again (the failed attempt, or the missing answer, goes away)."""
-        if self._running or not self._msgs or self._msgs[-1].get("role") != "user":
+        """Try again: the last question asks again (the failed attempt, the missing answer, or an answer the
+        connection cut short, goes away)."""
+        if self._running or not self._msgs:
+            return
+        last = self._msgs[-1]
+        cut_short = (last.get("role") == "assistant" and last.get("why") == "dropped" and len(self._msgs) >= 2
+                     and self._msgs[-2].get("role") == "user")
+        if last.get("role") != "user" and not cut_short:
             return
         self._gate = self._compute_gate()
         if not self._ready():
             self._sync()
             return
         self._clear_error_row()
+        if cut_short:
+            self._msgs.pop()
+            self._remove_row_of(last)
+            self._save()
         self._answer(self._msgs[-1]["text"])
 
     def _answer(self, question):
@@ -599,6 +773,7 @@ class ChatCard(Card):
         self._req += 1
         req = self._req
         self._running, self._partial, self._pending = True, "", None
+        self._run_choice = self._choice
         self._stick = True
         row = self._new_answer_row()
         waiting = False
@@ -691,9 +866,13 @@ class ChatCard(Card):
             msg = {"role": "assistant", "text": ans.text, "status": "done", "engine": ans.engine_label,
                    "kind": ans.kind, "coverage": ans.coverage.as_dict(), "seconds": ans.seconds,
                    "ts": int(time.time())}
+            if ans.dropped:                                # the connection ended before the answer did: it is not
+                msg["status"], msg["why"] = "stopped", "dropped"      # kept as a finished one (nor sent back to the model)
+            elif ans.cut:
+                msg["cut"] = True                          # it reached the longest answer the engine may write
             self._msgs.append(msg)
             if row is not None:
-                row.show_message(msg)
+                row.show_message(msg, retry=True)
             self._save()
             self._sync()
             self._scroll_to_start_of(row)
@@ -727,7 +906,7 @@ class ChatCard(Card):
         text = (text or "").strip()
         if text:
             msg = {"role": "assistant", "text": text, "status": "stopped", "ts": int(time.time()),
-                   "engine": self._choice.label, "kind": self._choice.kind}
+                   "engine": self._run_choice.label, "kind": self._run_choice.kind}
             self._msgs.append(msg)
             if row is not None:
                 row.show_message(msg)
@@ -748,18 +927,23 @@ class ChatCard(Card):
         text = (self._partial or "").strip()
         if text and save:
             self._msgs.append({"role": "assistant", "text": text, "status": "stopped", "ts": int(time.time()),
-                               "engine": self._choice.label, "kind": self._choice.kind})
+                               "engine": self._run_choice.label, "kind": self._run_choice.kind})
             self._save()
         if row is not None:
-            row.hide()
-            row.deleteLater()
+            self._drop_row(row)
 
     def clear(self):
         """Clear chat: after one question, the conversation is emptied (the meeting stays)."""
         if not self._msgs or self._running:
             return
+        folder = self._folder                              # (the prompt runs its own loop: the page may move on)
         private = bool(getattr(self.window(), "hidden_from_share", False))
         if not mini_prompt.confirm(self, CLEAR_TITLE, CLEAR_TEXT, "Clear", "Keep", private=private):
+            return
+        if folder != self._folder:
+            self._save_empty(folder)                       # the page moved on: the chat the user was asked about
+            return                                         # is cleared in its own folder; the one on screen stays
+        if self._running:
             return
         self._msgs = []
         self._rebuild()
@@ -767,9 +951,24 @@ class ChatCard(Card):
         self._sync()
 
     # ── saving (the meeting's chat.json) ──
+    def _save_empty(self, folder):
+        """Clear chat of a meeting that is no longer on screen: its chat.json is written empty (newest change wins,
+        so what a Stop saved a moment ago does not come back)."""
+        if not folder:
+            return
+        text = meeting_chat.dump_chat([])
+        path = meeting_store.chat_path(folder)
+        version = views.next_version()
+
+        def work():
+            if not os.path.isdir(folder):
+                return False
+            return views.write_latest(str(path), text, version)
+        self._bg.run(work, None)
+
     def _save(self):
         folder = self._folder
-        if not folder:
+        if not folder or not self._saveable:
             return
         text = meeting_chat.dump_chat(self._msgs)
         path = meeting_store.chat_path(folder)
@@ -797,7 +996,10 @@ class ChatCard(Card):
         bl = QVBoxLayout(bubble)
         bl.setContentsMargins(12, 8, 12, 8)
         shown = text if len(text) <= QUESTION_SHOWN else text[:QUESTION_SHOWN].rstrip() + "…"
-        lb = views.tlabel(mini_prompt.breakable(shown), 13.5, 400, "ink", parent=bubble, wrap=True)
+        lb = _FitLabel(mini_prompt.breakable(shown), bubble)
+        lb.setProperty("mtone", "ink")
+        lb.setFont(theme.font(13.5))
+        lb.setWordWrap(True)
         lb.setTextFormat(Qt.PlainText)                      # a question is text, never markup
         lb.setTextInteractionFlags(Qt.TextSelectableByMouse)
         bl.addWidget(lb)
@@ -806,23 +1008,53 @@ class ChatCard(Card):
         self._insert(row)
         return row
 
-    def _new_answer_row(self):
+    def _new_answer_row(self, retab=True):
         row = _AnswerRow(self, self._content)
         self._insert(row)
+        if retab:
+            self._retab()
         return row
+
+    def _hide_retries(self):
+        """A new question: the Try again of an answer the connection cut short is not on offer any more."""
+        for r in self._rows:
+            if isinstance(r, _AnswerRow) and r.msg is not None:
+                r.retry_btn.hide()
+
+    def _remove_row_of(self, msg):
+        for r in list(self._rows):
+            if isinstance(r, _AnswerRow) and r.msg is msg:
+                self._drop_row(r)
+
+    def _drop_row(self, row):
+        try:
+            row.hide()
+            self._col.removeWidget(row)
+            row.deleteLater()
+        except RuntimeError:
+            pass
+        self._rows = [r for r in self._rows if r is not row]
 
     def _clear_error_row(self):
         row, self._error_row = self._error_row, None
         if row is not None:
-            try:
-                row.hide()
-                row.deleteLater()
-                self._rows = [r for r in self._rows if r is not row]
-            except RuntimeError:
-                pass
+            self._drop_row(row)
 
-    def _rebuild(self):
-        """Draw the whole conversation again (a meeting was opened, the chat was cleared)."""
+    def show_earlier(self):
+        """"Show earlier messages": SHOWN_MESSAGES more of the conversation are drawn, from the top."""
+        if self._running or self._first <= 0:
+            return
+        first = max(0, self._first - SHOWN_MESSAGES)
+        if first and self._msgs[first]["role"] == "assistant":
+            first -= 1
+        self._first = first
+        self._rebuild(reveal=True)
+        self._stick = False
+        QTimer.singleShot(0, lambda: self.scroll.verticalScrollBar().setValue(0))
+
+    def _rebuild(self, reveal=False):
+        """Draw the conversation again (a meeting was opened, the chat was cleared): its last SHOWN_MESSAGES
+        messages, or - ``reveal`` - from ``self._first`` on."""
         self._error_row = None
         for w in self._rows:
             try:
@@ -832,46 +1064,75 @@ class ChatCard(Card):
             except RuntimeError:
                 pass
         self._rows = []
-        for i, msg in enumerate(self._msgs):
+        n = len(self._msgs)
+        if not reveal:
+            first = max(0, n - SHOWN_MESSAGES)
+            if first and self._msgs[first]["role"] == "assistant":
+                first -= 1                                 # an answer is never drawn without its question
+            self._first = first
+        self._first = min(self._first, n)
+        self._earlier.setVisible(self._first > 0)
+        for i in range(self._first, n):
+            msg = self._msgs[i]
             if msg["role"] == "user":
                 self._add_user_row(msg["text"])
-                nxt = self._msgs[i + 1] if i + 1 < len(self._msgs) else None
+                nxt = self._msgs[i + 1] if i + 1 < n else None
                 if nxt is None or nxt["role"] != "assistant":
-                    if i == len(self._msgs) - 1 and not self._running:
-                        row = self._new_answer_row()
+                    if i == n - 1 and not self._running:
+                        row = self._new_answer_row(retab=False)
                         row.show_unanswered()
                         self._error_row = row
             else:
-                row = self._new_answer_row()
-                row.show_message(msg)
+                row = self._new_answer_row(retab=False)
+                row.show_message(msg, retry=(i == n - 1))
         self._stick = True
+        self._retab()
 
     # ── scrolling ──
     def _on_value(self, value):
         if self._programmatic:
             return
+        self._start_row = None                             # the reader took over
         bar = self.scroll.verticalScrollBar()
         self._stick = bar.maximum() - value <= 4
 
     def _on_range(self, _lo, hi):
+        if self._start_row is not None and self._place_start():
+            return
         if self._stick:
             self._programmatic = True
             self.scroll.verticalScrollBar().setValue(hi)
             self._programmatic = False
 
     def _scroll_to_start_of(self, row):
-        """An answer ended: when it is taller than the view the reader starts at its first line."""
+        """An answer ended: when it is taller than the view the reader starts at its first line. The page lays the
+        answer out in more than one pass (its scroll bar comes and the width changes), so for a moment the first
+        line is looked for again each time the scroll range changes."""
         if row is None:
             return
+        self._start_row = row
+        QTimer.singleShot(0, self._place_start)
+        QTimer.singleShot(START_LOOK_MS, self._stop_looking)
 
-        def put():
+    def _stop_looking(self):
+        self._start_row = None
+
+    def _place_start(self):
+        """Put the answer that just ended at its first line when it is taller than the view. True when it did."""
+        row = self._start_row
+        if row is None:
+            return False
+        try:
+            self._col.activate()
+            if row.height() <= self.scroll.viewport().height():
+                return False
+            self._stick = False
+            self._programmatic = True
             try:
-                bar = self.scroll.verticalScrollBar()
-                if row.height() > self.scroll.viewport().height():
-                    self._stick = False
-                    self._programmatic = True
-                    bar.setValue(max(0, row.mapTo(self._content, QPoint(0, 0)).y() - 6))
-                    self._programmatic = False
-            except RuntimeError:
-                pass
-        QTimer.singleShot(0, put)
+                self.scroll.verticalScrollBar().setValue(max(0, row.mapTo(self._content, QPoint(0, 0)).y() - 6))
+            finally:
+                self._programmatic = False
+            return True
+        except RuntimeError:
+            self._start_row = None
+            return False

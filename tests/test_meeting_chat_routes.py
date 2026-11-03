@@ -387,11 +387,13 @@ class TestShowingAModelsAnswer(unittest.TestCase):
         self.assertIn("<b>", html)
         self.assertNotIn("**", html)
 
-    def test_a_half_written_marker_is_hidden_while_streaming_only(self):
+    def test_a_half_written_marker_is_hidden_while_streaming_and_a_lone_bold_marker_never_shows(self):
         self.assertEqual(rich_text.answer_text("Say **this", streaming=True), "Say this")
         self.assertEqual(rich_text.answer_text("Run `pip", streaming=True), "Run pip")
         self.assertEqual(rich_text.answer_text("Say **this**", streaming=True), "Say **this**")
-        self.assertEqual(rich_text.answer_text("Say **this"), "Say **this")
+        # a finished (or cut short) answer: a ** with no pair is never drawn as raw symbols; a lone ` may be meant
+        self.assertEqual(rich_text.answer_text("Say **this"), "Say this")
+        self.assertEqual(rich_text.answer_text("Run `pip"), "Run `pip")
         self.assertEqual(rich_text.streaming_markdown("```python\nprint(1)"), "```python\nprint(1)\n```")
         self.assertEqual(rich_text.streaming_markdown(""), "")
 
