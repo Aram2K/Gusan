@@ -389,6 +389,9 @@ def run_then(fn, *args, then=None, error=None, name="gusan-worker", **kwargs):
 # never changed. Everything here goes through app.set_settings (one save, one redraw).
 import uuid as _uuid
 
+# Set once the keys saved the old way (the three slots) joined the list (slot_migration).
+MIGRATED_KEY = "api_keys_migrated"
+
 # The providers a key can be for, in the order the "Provider" list shows them.
 ENTRY_PROVIDERS = ("api_mistral", "api_gemini", "api_openai_compatible", "api_anthropic", "api_cerebras")
 ENTRY_PROVIDER_LABELS = {
@@ -440,7 +443,8 @@ def entry_view(cfg, e):
     uses = []
     if (cfg or {}).get("speech_key_id") == e["id"] and (cfg or {}).get("backend") in ("mistral", "google"):
         uses.append("Speech")
-    if (cfg or {}).get("writer_key_id") == e["id"]:
+    from engine_choice import writer_choice
+    if (cfg or {}).get("writer_key_id") == e["id"] and writer_choice(cfg) == "own_key":
         uses.append("AI writer")
     provider = ENTRY_PROVIDER_LABELS.get(e["provider"], e["provider"])
     if e["provider"] == "api_openai_compatible":
@@ -523,10 +527,16 @@ def update_entry(app, key_id, name, provider, model, key=None, base_url=""):
     e = _clean_entry(key_id, name, provider, model, base_url)
     lst = [dict(e) if x["id"] == key_id else dict(x) for x in entries(app.cfg)]
     secrets = dict(app.cfg.get("api_key_secrets") or {})
+    old_secret = secret_of(app.cfg, key_id)
     if str(key or "").strip():
         secrets[key_id] = str(key).strip()
     changes = {"api_keys": lst, "api_key_secrets": secrets}
-    changes.update(_active_changes(app.cfg, e, secrets.get(key_id, "")))
+    new_secret = secrets.get(key_id, "")
+    if old_secret and new_secret != old_secret:
+        for field in KEY_FIELDS:          # a slot filled with this key (added, or used by a card)
+            if str(app.cfg.get(field) or "").strip() == old_secret:
+                changes[field] = new_secret
+    changes.update(_active_changes(app.cfg, e, new_secret))
     return _apply(app, changes)
 
 
@@ -551,9 +561,10 @@ def remove_entry(app, key_id):
     if cfg.get("writer_key_id") == key_id:
         changes["writer_key_id"] = ""
         changes[WRITER_PROVIDERS[e["provider"]]["key_field"]] = ""
-    # The slot still holding this key (filled when it was added): emptied too.
+    # Every slot still holding this key (filled when it was added, or by a card): emptied too,
+    # so a removed key is never used again (and never moved back into the list).
     secret = secret_of(cfg, key_id)
-    for field in ("mistral_api_key", "google_api_key"):
+    for field in KEY_FIELDS:
         if secret and str(cfg.get(field) or "").strip() == secret and field not in changes:
             changes[field] = ""
             changes.update(_speech_fallback(cfg, field))
@@ -567,6 +578,8 @@ def slot_migration(cfg):
     import actions
     from engine_choice import WRITER_PROVIDERS, _norm_provider, writer_choice
     cfg = cfg or {}
+    if cfg.get(MIGRATED_KEY):
+        return {}                         # once only: a key removed from the list never comes back
     lst = [dict(x) for x in entries(cfg)]
     secrets = dict(cfg.get("api_key_secrets") or {})
     held = {v for v in secrets.values() if v}
@@ -610,6 +623,8 @@ def slot_migration(cfg):
                 cfg.get("action_api_model"), cfg.get("action_api_base_url"))
     if len(lst) != len(entries(cfg)):
         changes.update(api_keys=lst, api_key_secrets=secrets)
+    if changes:
+        changes[MIGRATED_KEY] = True      # done: a key removed from the list later stays removed
     return changes
 
 

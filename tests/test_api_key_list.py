@@ -96,6 +96,67 @@ class TestEntries(unittest.TestCase):
         self.assertEqual(app.cfg["mistral_api_key"], "mk-new-111111")
 
 
+class TestReviewFixes(unittest.TestCase):
+    """What a review of the key list found: each case stays fixed."""
+
+    def test_switching_between_compatible_keys_never_keeps_the_other_address(self):
+        import engine_choice as ec
+        app = FakeApp()
+        e1 = api_keys.add_entry(app, "Self-hosted", "api_openai_compatible", "m1", "sk-111111111",
+                                base_url="https://llm.example.com/v1")
+        e2 = api_keys.add_entry(app, "OpenAI", "api_openai_compatible", "gpt-5.4-mini", "sk-222222222")
+        app.cfg.update(ec.set_writer_value(app.cfg, "key:" + e1)["changes"])
+        self.assertEqual(app.cfg["action_api_base_url"], "https://llm.example.com/v1")
+        app.cfg.update(ec.set_writer_value(app.cfg, "key:" + e2)["changes"])
+        self.assertEqual(app.cfg["action_api_base_url"], "https://api.openai.com/v1")     # its own, not E1's
+        self.assertEqual(app.cfg["action_api_key"], "sk-222222222")
+
+    def test_speech_and_a_gemini_writer_share_the_google_key_and_say_so(self):
+        import engine_choice as ec
+        app = FakeApp()
+        s = api_keys.add_entry(app, "Speech G", "api_gemini", "", "AIza-speech-1")
+        w = api_keys.add_entry(app, "Writer G", "api_gemini", "", "AIza-writer-2")
+        app.cfg.update(ec.set_dictation_speech(app.cfg, "key:" + s)["changes"])
+        app.cfg.update(ec.set_writer_value(app.cfg, "key:" + w)["changes"])
+        self.assertEqual(app.cfg["google_api_key"], "AIza-writer-2")
+        self.assertEqual(app.cfg["speech_key_id"], w)                       # the card shows the key really used
+
+    def test_editing_a_secret_replaces_it_in_every_slot(self):
+        app = FakeApp()
+        key_id = api_keys.add_entry(app, "M", "api_mistral", "", "mk-old-0000000")
+        self.assertEqual(app.cfg["mistral_api_key"], "mk-old-0000000")      # filled when it was added
+        api_keys.update_entry(app, key_id, "M", "api_mistral", "", key="mk-new-1111111")
+        self.assertEqual(app.cfg["mistral_api_key"], "mk-new-1111111")
+        api_keys.remove_entry(app, key_id)
+        self.assertEqual(app.cfg["mistral_api_key"], "")
+
+    def test_the_writer_chip_follows_what_really_writes(self):
+        app = FakeApp()
+        key_id = api_keys.add_entry(app, "O", "api_openai_compatible", "", "sk-333333333")
+        app.cfg.update(writer_key_id=key_id, action_model="api_openai_compatible")
+        self.assertEqual(api_keys.entry_view(app.cfg, api_keys.entry(app.cfg, key_id))["in_use"], "AI writer")
+        app.cfg["action_model"] = "qwen_tiny"                                # the writer moved to this computer
+        self.assertEqual(api_keys.entry_view(app.cfg, api_keys.entry(app.cfg, key_id))["in_use"], "")
+
+    def test_a_stashed_accounts_keys_get_their_own_keyring_items(self):
+        import main
+        store = {}
+        cfg = {**main.DEFAULT, "api_keys": [], "api_key_secrets": {},
+               "user_secrets": {"user:b": {"api_keys": [{"id": "kb", "name": "B", "provider": "api_mistral",
+                                                         "model": "", "base_url": ""}],
+                                           "api_key_secrets": {"kb": "mk-b-secret"}}}}
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(main, "CONFIG_PATH", os.path.join(d, "config.json")), \
+                mock.patch.object(main.storage, "write_secret", side_effect=lambda n, v: store.__setitem__(n, v) or True):
+            main.save_config(cfg)
+            with open(main.CONFIG_PATH, encoding="utf-8") as f:
+                disk = f.read()
+        self.assertNotIn("mk-b-secret", disk)
+        self.assertEqual(store[main.storage.api_key_secret_name("kb")], "mk-b-secret")
+        self.assertNotIn("mk-b-secret", store.get(main.storage.USER_SECRETS_SECRET, ""))   # never in the one blob
+        self.assertEqual(cfg["user_secrets"]["user:b"]["api_key_secrets"], {"kb": "mk-b-secret"})  # live cfg kept
+
+
 class TestOldKeysMove(unittest.TestCase):
     def test_the_old_slots_become_entries_once(self):
         cfg = {"mistral_api_key": "mk-aaaaaaaaaa", "backend": "mistral", "google_api_key": "AIza-bbbbbbb",
@@ -111,6 +172,14 @@ class TestOldKeysMove(unittest.TestCase):
 
     def test_nothing_to_move(self):
         self.assertEqual(api_keys.slot_migration({}), {})
+
+    def test_a_key_removed_after_the_move_never_comes_back(self):
+        cfg = {"action_api_key": "sk-old-0000000", "action_api_provider": "api_openai_compatible",
+               "action_model": "qwen_tiny"}
+        cfg.update(api_keys.slot_migration(cfg))
+        self.assertTrue(cfg[api_keys.MIGRATED_KEY] and len(api_keys.entries(cfg)) == 1)
+        cfg.update(api_keys=[], api_key_secrets={})                            # removed in the list
+        self.assertEqual(api_keys.slot_migration(cfg), {})
 
 
 class TestTest(unittest.TestCase):
@@ -179,7 +248,7 @@ class TestCloudWriterChoice(unittest.TestCase):
     def test_the_server_moves_the_pick_first(self):
         src = open(os.path.join(ROOT, "supabase", "functions", "smart-action", "index.ts"), encoding="utf-8").read()
         self.assertIn("function preferRoutes(", src)
-        self.assertIn("preferRoutes(await routesFor(", src)
+        self.assertIn("const routes = notes ? chain : preferRoutes(chain, body?.model);", src)   # notes keep their order
         for fam in action_api.CLOUD_WRITER_FAMILIES:
             self.assertIn('"%s"' % fam, src)
 

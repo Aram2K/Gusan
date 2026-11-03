@@ -308,6 +308,7 @@ DEFAULT = {
     # action_api_key); speech_key_id / writer_key_id say which saved key that was.
     "api_keys": [],
     "api_key_secrets": {},
+    "api_keys_migrated": False,           # api_keys.slot_migration ran (once)
     "speech_key_id": "",
     "writer_key_id": "",
     # Gusan Cloud: the AI writer picked ("" = the server's order, DeepSeek first;
@@ -437,10 +438,6 @@ def _strip_user_secret_keys(store):
             if isinstance(v, str) and v.strip():
                 keys[k] = v
             clean[k] = ""
-        if isinstance(clean.get("api_key_secrets"), dict):
-            if clean["api_key_secrets"]:
-                keys["api_key_secrets"] = clean["api_key_secrets"]
-            clean["api_key_secrets"] = {}
         sanitized[owner] = clean
         if keys:
             blob[owner] = keys
@@ -467,6 +464,64 @@ def _load_notion_secrets(loaded):
             if loaded[key]:
                 held[key] = ""
     return held, moved
+
+
+def _read_api_key_secrets(entries, held):
+    """{id: secret} for saved keys: a copy left in config.json (the keyring refused it) as it is,
+    the rest from the keyring (one item per key, storage.api_key_secret_name)."""
+    secrets = {str(k): str(v) for k, v in (held or {}).items() if v} if isinstance(held, dict) else {}
+    for e in entries or []:
+        key_id = str(e.get("id") or "") if isinstance(e, dict) else ""
+        if key_id and not secrets.get(key_id):
+            try:
+                value = storage.read_secret(storage.api_key_secret_name(key_id))
+            except Exception:
+                value = ""
+            _note_keyring_value(storage.api_key_secret_name(key_id), value)
+            if value:
+                secrets[key_id] = value
+    return secrets
+
+
+def _load_api_key_secrets(loaded):
+    """Settings › My API keys: the secrets of this account's keys, and of the accounts stashed on
+    this computer (entitlements.reconcile_user_secrets swaps them in)."""
+    loaded["api_key_secrets"] = _read_api_key_secrets(loaded.get("api_keys"), loaded.get("api_key_secrets"))
+    store = loaded.get("user_secrets")
+    if isinstance(store, dict):
+        for snap in store.values():
+            if isinstance(snap, dict) and snap.get("api_keys"):
+                snap["api_key_secrets"] = _read_api_key_secrets(snap.get("api_keys"), snap.get("api_key_secrets"))
+
+
+def _store_api_key_secrets(disk):
+    """Write every saved key's secret - this account's and the stashed accounts' - to the keyring,
+    one item per key (never one blob: Windows Credential Manager caps an item at 2560 bytes), and
+    blank them in ``disk``. A secret the keyring refused stays on disk, as the slots' do. The item
+    of a key no account has any more is deleted."""
+    store = disk.get("user_secrets")
+    if isinstance(store, dict):                       # a copy: the live cfg keeps its secrets
+        store = {o: (dict(v) if isinstance(v, dict) else v) for o, v in store.items()}
+        disk["user_secrets"] = store
+    holders = [disk] + [v for v in (store or {}).values() if isinstance(v, dict)]
+    ids = set()
+    for h in holders:
+        secrets = h.get("api_key_secrets") if isinstance(h.get("api_key_secrets"), dict) else {}
+        kept = {}
+        for e in h.get("api_keys") or []:
+            key_id = str(e.get("id") or "") if isinstance(e, dict) else ""
+            if not key_id:
+                continue
+            ids.add(key_id)
+            value = str(secrets.get(key_id) or "").strip()
+            if value and not _store_secret(storage.api_key_secret_name(key_id), value):
+                kept[key_id] = value
+        if "api_key_secrets" in h or h is disk:
+            h["api_key_secrets"] = kept
+    for name in [n for n in _keyring_known() if n.startswith(storage.API_KEY_SECRET_PREFIX)]:
+        if name[len(storage.API_KEY_SECRET_PREFIX):] not in ids:
+            _store_secret(name, "")                  # a key that was removed
+            _keyring_known().pop(name, None)
 
 
 def load_config():
@@ -545,22 +600,6 @@ def load_config():
         loaded["mistral_api_key"] = storage.read_secret(storage.MISTRAL_API_KEY_SECRET)
         _note_keyring_value(storage.MISTRAL_API_KEY_SECRET, loaded["mistral_api_key"])
 
-    # Settings › My API keys: each key's secret is its own keyring item (a copy left in
-    # config.json - the keyring refused it - is used as it is).
-    on_disk = loaded.get("api_key_secrets") if isinstance(loaded.get("api_key_secrets"), dict) else {}
-    secrets = {str(k): str(v) for k, v in on_disk.items() if v}
-    for e in loaded.get("api_keys") or []:
-        key_id = str(e.get("id") or "") if isinstance(e, dict) else ""
-        if key_id and not secrets.get(key_id):
-            try:
-                value = storage.read_secret(storage.api_key_secret_name(key_id))
-            except Exception:
-                value = ""
-            _note_keyring_value(storage.api_key_secret_name(key_id), value)
-            if value:
-                secrets[key_id] = value
-    loaded["api_key_secrets"] = secrets
-
     # Per-user stashed keys (account switching) live in the keyring as one JSON
     # blob; merge them back over the sanitized on-disk snapshots.
     try:
@@ -574,18 +613,10 @@ def load_config():
                     snap = store.get(owner)
                     if isinstance(snap, dict) and isinstance(keys, dict):
                         for k, v in keys.items():
-                            if (k in _SECRET_CFG_KEYS or k == "api_key_secrets") and v and not snap.get(k):
+                            if k in _SECRET_CFG_KEYS and v and not snap.get(k):
                                 snap[k] = v
     except Exception:
         logger.debug("Could not merge user secrets from keyring", exc_info=True)
-
-    # Keys saved the old way (one Mistral / Google / AI-writer slot) join Settings › My API keys
-    # once; the next save_config writes them. Never fatal: the slots keep working as they are.
-    try:
-        import api_keys
-        loaded.update(api_keys.slot_migration(loaded))
-    except Exception:
-        logger.debug("Could not move the saved API keys into the key list", exc_info=True)
 
     if ANALYTICS_CONSENT_PATH.exists() and not loaded.get("analytics_consent_applied"):
         if ANALYTICS_DECLINED_PATH.exists():
@@ -597,6 +628,14 @@ def load_config():
         except OSError as e:
             logger.warning("Could not record installer analytics consent: %s", e)
 
+    _load_api_key_secrets(loaded)
+    # Keys saved the old way (one Mistral / Google / AI-writer slot) join Settings › My API keys
+    # once; the next save_config writes them. Never fatal: the slots keep working as they are.
+    try:
+        import api_keys
+        loaded.update(api_keys.slot_migration(loaded))
+    except Exception:
+        logger.debug("Could not move the saved API keys into the key list", exc_info=True)
     return loaded
 
 def save_config(c):
@@ -619,19 +658,8 @@ def save_config(c):
     for k, name in _NOTION_SECRETS.items():
         if _store_secret(name, (disk.get(k) or "").strip()):
             disk[k] = ""
-    # Settings › My API keys: one keyring item per saved key; a removed key's item is deleted.
-    key_secrets = disk.get("api_key_secrets") if isinstance(disk.get("api_key_secrets"), dict) else {}
-    ids = {str(e.get("id")) for e in (disk.get("api_keys") or []) if isinstance(e, dict) and e.get("id")}
-    kept = {}
-    for key_id in ids:
-        value = str(key_secrets.get(key_id) or "").strip()
-        if value and not _store_secret(storage.api_key_secret_name(key_id), value):
-            kept[key_id] = value                     # the keyring refused it: it stays on disk (as the slots do)
-    for name in [n for n in _keyring_known() if n.startswith(storage.API_KEY_SECRET_PREFIX)]:
-        if name[len(storage.API_KEY_SECRET_PREFIX):] not in ids:
-            _store_secret(name, "")                  # a key that was removed
-            _keyring_known().pop(name, None)
-    disk["api_key_secrets"] = kept
+    # Settings › My API keys: one keyring item per saved key, for every account on this computer.
+    _store_api_key_secrets(disk)
     # Per-user stashed keys (account switching) go to the keyring too - the
     # on-disk store keeps only the non-secret engine config per user.
     sanitized_store, keys_blob = _strip_user_secret_keys(disk.get("user_secrets"))
@@ -3737,45 +3765,25 @@ class AudioRecorder:
         self.audio.terminate()
 
 # ── Dynamic Pillow Tray Icon Generator ───────────────────────────────────────
-def make_icon(color="#3b82f6"):
-    # Create the transparent base image
-    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    
-    # Create a temporary image for the Armenian flag background
-    bg = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    bg_draw = ImageDraw.Draw(bg)
-    
-    # Armenian flag colors
-    red = (217, 30, 24, 255)     # #d91e18
-    blue = (0, 51, 160, 255)     # #0033a0
-    orange = (242, 168, 21, 255) # #f2a815
-    
-    # Draw three horizontal stripes
-    bg_draw.rectangle([0, 0, 64, 22], fill=red)
-    bg_draw.rectangle([0, 22, 64, 42], fill=blue)
-    bg_draw.rectangle([0, 42, 64, 64], fill=orange)
-    
-    # Create a circular mask
-    mask = Image.new("L", (64, 64), 0)
-    mask_draw = ImageDraw.Draw(mask)
-    mask_draw.ellipse([2, 2, 62, 62], fill=255)
-    
-    # Composite the flag background onto the main image using the circular mask
-    img.paste(bg, (0, 0), mask)
-    
-    # Draw the white microphone outline/elements on top
-    d = ImageDraw.Draw(img)
-    d.rectangle([24, 12, 40, 40], fill="white")
-    d.ellipse([18, 32, 46, 52],   fill="white")
-    d.rectangle([30, 50, 34, 60], fill="white")
-    d.rectangle([22, 58, 42, 62], fill="white")
-    return img
+def make_icon(color="#3b82f6", size=64):
+    """The Gusan logo as a PIL image (logo.render: smooth edges at any size)."""
+    import logo
+    return logo.render(size)
 
-def make_qicon(color="#3b82f6"):
-    img = make_icon(color)
-    data = img.tobytes("raw", "RGBA")
-    qimg = QImage(data, img.size[0], img.size[1], QImage.Format_RGBA8888)
-    return QIcon(QPixmap.fromImage(qimg))
+
+def make_qicon(color="#3b82f6", app_icon=False):
+    """The logo as a QIcon carrying every size it is shown at, each drawn at that size (never a
+    small one stretched - that was the pixelated Dock icon). ``app_icon`` on a Mac: on Apple's
+    icon grid, so it sits at the size of the other apps in the Dock."""
+    import logo
+    margin = logo.MAC_MARGIN if (app_icon and sys.platform == "darwin") else 0.0
+    icon = QIcon()
+    for size in logo.ICON_SIZES:
+        img = logo.render(size, margin)
+        data = img.tobytes("raw", "RGBA")
+        qimg = QImage(data, size, size, QImage.Format_RGBA8888).copy()     # own the pixels
+        icon.addPixmap(QPixmap.fromImage(qimg))
+    return icon
 
 
 class GusanApplication(QApplication):
@@ -4030,6 +4038,8 @@ class AppController(QObject):
         # regardless of which thread emits the signal.
         self.sig_hotkey.connect(self._on_hotkey, Qt.QueuedConnection)
         self.sig_assist_hotkey.connect(self.toggle_live_assist, Qt.QueuedConnection)
+        # Before any hotkey registers: the first one's "macOS blocks it" must be heard.
+        self.sig_mac_permissions.connect(self._on_mac_permissions_needed, Qt.QueuedConnection)
         self._setup_assist_hotkey(self.cfg.get("live_assist_hotkey", ""))
         self.sig_smart_hotkey.connect(self._on_smart_hotkey, Qt.QueuedConnection)
         self._setup_smart_hotkey(self.cfg.get("smart_actions_hotkey", ""))
@@ -4059,7 +4069,6 @@ class AppController(QObject):
         self.sig_gpu_done.connect(self._on_gpu_done, Qt.QueuedConnection)
         self.sig_gpu_wait.connect(self._on_gpu_wait, Qt.QueuedConnection)
         self.sig_gpu_runtime_failed.connect(self._on_gpu_runtime_failed, Qt.QueuedConnection)
-        self.sig_mac_permissions.connect(self._on_mac_permissions_needed, Qt.QueuedConnection)
         self.recorder.on_cuda_failed = self.sig_gpu_runtime_failed.emit
         # Every minute: free a speech / local AI model that sits unused.
         self._idle_timer = QTimer(self)
@@ -5828,6 +5837,10 @@ class AppController(QObject):
             return
         if reason == "paste":
             self.show_tray_hint(title, msg, on_click=self.show_macos_permissions_guide)
+        elif getattr(self, "_perm_guide_for_hotkey", False):
+            return                                   # once a session: every re-registration says it again
+        else:
+            self._perm_guide_for_hotkey = True
         self.show_macos_permissions_guide()
 
     def _hotkey_text(self):
@@ -5838,9 +5851,16 @@ class AppController(QObject):
         """Quit and reopen the installed app (macOS applies a new Input
         Monitoring grant only to a fresh launch). False when it can't (run
         from source): the guide then says to reopen it by hand."""
-        if not mac_permissions.relaunch_after_exit():
+        proc = mac_permissions.relaunch_after_exit()
+        if not proc:
             return False
-        self.quit_app()
+        if self.quit_app() is False:
+            # Kept running (a meeting or a file asked first): no reopening some later quit.
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            return False
         return True
 
     def show_macos_permissions_guide(self):
@@ -6433,7 +6453,7 @@ class AppController(QObject):
                     body = ("Smart Actions are paused while a meeting is recording. "
                             "Stop the meeting to use them again.")
                 else:
-                    body = (f"{hotkeys.display(self.cfg.get("hotkey", hotkeys.DICTATION_DEFAULT))} dictation is paused while a "
+                    body = (f"{hotkeys.display(self.cfg.get('hotkey', hotkeys.DICTATION_DEFAULT))} dictation is paused while a "
                             "meeting is recording so the two don't mix. Stop the meeting to dictate again.")
                 self.show_tray_hint("Meeting Recording Active", body)
                 return
@@ -8132,7 +8152,7 @@ def main():
 
     # Set premium global application window icon (circular Armenian Flag + Microphone)
     try:
-        qapp.setWindowIcon(make_qicon())
+        qapp.setWindowIcon(make_qicon(app_icon=True))
     except Exception as e:
         logging.error("Failed to set global window icon: %s", e)
 

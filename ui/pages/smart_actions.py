@@ -238,7 +238,7 @@ def _frame(parent, name, css):
 
 
 def link_button(text, parent=None):
-    """A link with a trailing chevron ("More options in Speech & AI ›")."""
+    """A link with a trailing chevron ("Speech & AI settings ›")."""
     b = Button(text.replace("&", "&&"), "link", "s", parent=parent)
     b.setAccessibleName(text)
     b.setFont(theme.font(13, 600))
@@ -1148,7 +1148,7 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
         foot = QWidget(rail)
         fh = QHBoxLayout(foot)
         fh.setContentsMargins(0, 0, 0, 0)
-        more = link_button("More options in Speech & AI", foot)
+        more = link_button("Speech & AI settings", foot)
         more.clicked.connect(lambda: self._open_route("settings", section="speech", focus="writer"))
         fh.addWidget(more)
         fh.addStretch(1)

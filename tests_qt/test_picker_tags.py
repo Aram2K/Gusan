@@ -380,14 +380,19 @@ def test_settings_says_the_same_words(env):
     page = win.open("settings", section="speech")
     page.ensure_built()
     QApplication.processEvents()
-    hints = {k: t.hints() for k, t in page.speech_tiles.items()}
-    assert hints["local"] == ["Whisper Small · Local · Balanced"]
-    assert hints["cloud"] == ["Fast · Cloud · nothing to download"]
-    assert hints["own_key"] == ["Mistral or Google Gemini"]
-    app.cfg.update(backend="google", google_api_key="AIza-test", google_stt_model="gemini-2.5-pro")
+    card = page.speech_card
+    app.cfg.update(backend="local", whisper_model="small")
     page.refresh()
-    assert page.speech_tiles["own_key"].hints() == ["Gemini 2.5 Pro · your Google key · Cloud"]
-    _shot(page.speech_tiles["local"].parentWidget().window(), "settings_speech_and_ai")
+    assert card.combo.currentText() == "Whisper Small · Local"                   # the pickers' words
+    card.runs_on._on_clicked(card.sources.index("cloud"))
+    titles = [card.combo.itemData(i, Qt.UserRole + 3) for i in card.combo.row_indexes()]
+    assert titles == ["Fast", "Best accuracy"] and card.combo.row_tags(card.combo.row_indexes()[0]) == ("cloud", "pro")
+    app.cfg.update(backend="google", google_stt_model="gemini-2.5-pro", speech_key_id="g",
+                   api_keys=[{"id": "g", "name": "My Google", "provider": "api_gemini", "model": "", "base_url": ""}],
+                   api_key_secrets={"g": "AIza-test"}, google_api_key="AIza-test")
+    page.refresh()
+    assert card.combo.currentText() == "Gemini 2.5 Pro · My Google · Cloud"
+    _shot(card.window(), "settings_speech_and_ai")
 
 
 def test_onboardings_cloud_card_says_cloud(qapp):

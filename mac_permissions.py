@@ -261,17 +261,18 @@ def app_bundle(executable=None):
 
 def relaunch_after_exit(pid=None, bundle=None, popen=subprocess.Popen):
     """Start a tiny shell that waits for this process to end, then opens the
-    app again. Call it, then quit. True when the shell was started."""
+    app again. Call it, then quit. Returns the started process (terminate it
+    when the quit doesn't happen), or False when it couldn't start."""
     bundle = bundle or app_bundle()
     if not bundle:
         return False
     pid = int(pid or os.getpid())
     script = 'while kill -0 "$1" 2>/dev/null; do sleep 0.3; done; exec open "$2"'
     try:
-        popen(["/bin/sh", "-c", script, "gusan-relaunch", str(pid), bundle],
-              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-              start_new_session=True, close_fds=True)
-        return True
+        proc = popen(["/bin/sh", "-c", script, "gusan-relaunch", str(pid), bundle],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True, close_fds=True)
+        return proc if proc is not None else True
     except Exception as e:
         logger.warning("Could not schedule the relaunch: %s", e)
         return False

@@ -91,6 +91,22 @@ class TestRestart(unittest.TestCase):
             self.assertFalse(P.relaunch_after_exit(popen=lambda *a, **k: self.fail("started")))
 
 
+class TestRestartForPermissions(unittest.TestCase):
+    def test_kept_running_means_no_reopening_later(self):
+        import main
+        killed = []
+        proc = mock.Mock(terminate=lambda: killed.append(1))
+        app = mock.Mock()
+        app.quit_app.return_value = False                     # a meeting asked, the person kept Gusan open
+        with mock.patch.object(main.mac_permissions, "relaunch_after_exit", return_value=proc):
+            self.assertFalse(main.AppController.restart_for_permissions(app))
+        self.assertEqual(killed, [1])
+        app.quit_app.return_value = True
+        with mock.patch.object(main.mac_permissions, "relaunch_after_exit", return_value=proc):
+            self.assertTrue(main.AppController.restart_for_permissions(app))
+        self.assertEqual(killed, [1])
+
+
 class TestMacBuild(unittest.TestCase):
     """The Mac .app shows the Gusan logo and the name Gusan in Launchpad, the
     Dock and Finder, while the file and bundle id stay TranscribeApp."""
@@ -123,10 +139,11 @@ class TestMacBuild(unittest.TestCase):
             "import sys; sys.path.insert(0, sys.argv[1])\n"
             "try:\n    from PIL import Image\nexcept ImportError:\n    print('skip'); sys.exit()\n"
             "import make_icns\n"
-            "out = make_icns.make_icns(sys.argv[2], sys.argv[3])\n"
+            "out = make_icns.make_icns(sys.argv[3])\n"
             "img = Image.open(out); fmt = img.format\n"
             "img.size = (1024, 1024); img.load(); big = img.convert('RGBA')\n"   # the 512@2x entry
-            "print(fmt, big.getpixel((10, 10))[3], big.getpixel((512, 512))[3])\n")
+            "edge = len({big.getpixel((x, 512))[3] for x in range(0, 200)})\n"
+            "print(fmt, big.getpixel((10, 10))[3], big.getpixel((512, 512))[3], edge)\n")
         with tempfile.TemporaryDirectory() as d:
             res = subprocess.run([sys.executable, "-c", probe, os.path.join(ROOT, "installer"),
                                   os.path.join(ROOT, "assets", "icon_1024.png"), os.path.join(d, "icon.icns")],
@@ -134,10 +151,11 @@ class TestMacBuild(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         if res.stdout.strip() == "skip":
             self.skipTest("Pillow not installed")
-        fmt, corner, middle = res.stdout.split()
+        fmt, corner, middle, edge = res.stdout.split()
         self.assertEqual(fmt, "ICNS")
         self.assertEqual(int(corner), 0)        # transparent margin
         self.assertGreater(int(middle), 0)      # the logo
+        self.assertGreater(int(edge), 2)        # a smooth edge: in-between alphas, not 0 / 255 steps
 
 
 if __name__ == "__main__":

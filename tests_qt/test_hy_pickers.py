@@ -146,7 +146,7 @@ def test_no_row_no_card_nothing_until_it_is_available(live_build, page_for, audi
     assert att.model_combo.findData(HY) < 0
     win, _app = env.build("pro")
     settings = _settings(win, section="speech")
-    assert settings.hy_card.isHidden()
+    assert HY not in _rows(settings.speech_card.combo)
 
 
 def test_the_row_comes_with_the_listing_and_goes_with_it(live_build, hy_listed):
@@ -427,7 +427,7 @@ def test_audio_an_armenian_file_under_automatic_goes_to_gusan_cloud_for_pro(audi
     page.on_open()
     assert page.model_combo.currentData() == "auto"
     assert page.model_line.text() == "Best accuracy · Cloud · for Armenian"
-    assert page.rail_foot.text() == "Sent to Gusan Cloud to transcribe."
+    assert page.rail_foot.text() == "Sent securely to Gusan Cloud."
     assert page.model_row.hint_label.isHidden()                                # nothing to warn about
     # ... and the Automatic row says so too: CLOUD and PRO, never LOCAL for audio that leaves this computer
     from ui.components import model_combo as mc
@@ -451,7 +451,7 @@ def test_audio_without_the_cloud_the_armenian_model_reads_it_when_it_is_here(aud
     page.on_open()
     assert page.model_line.text() == "NVIDIA FastConformer Armenian · Local"
     assert page.model_row.hint_label.isHidden()
-    assert page.rail_foot.text() == "On this computer. Nothing is uploaded."
+    assert page.rail_foot.text() == "Private: stays on this computer."
 
 
 def test_audio_else_whisper_with_the_hint_that_offers_the_model(audio_build, hy_listed):
@@ -532,51 +532,49 @@ def test_the_dictation_page_shows_the_hint_under_its_runs_on_line(dict_page, hy_
 
 
 # ═════════════════════════════ Settings > Speech & AI ═════════════════════════════
-def _card_texts(card):
-    return card.title.text(), card.sub.text(), sorted(card.buttons)
+def _pick(card, value):
+    card.combo.setCurrentIndex(card.combo.findData(value))
+    _spin()
 
 
-def test_settings_the_card_follows_the_download(env, hy_listed):
-    win, app = env.build("pro")
+def test_settings_the_speech_list_offers_it_and_downloads_it(env, hy_listed):
+    from ui.components.model_combo import MARK_DOWNLOAD, MARK_ROLE
+    win, app = env.build("pro", backend="local")
     app.downloads = HyDownloads(ready=("small",))
     page = _settings(win, section="speech")
-    card = page.hy_card
-    assert not card.isHidden()
-    assert _card_texts(card) == ("NVIDIA FastConformer Armenian", NOTE, ["download"])
-    card.buttons["download"].click()
+    card = page.speech_card
+    i = card.combo.findData(HY)
+    assert i >= 0 and card.combo.itemData(i, MARK_ROLE) == MARK_DOWNLOAD
+    env.answers.append("go")
+    _pick(card, HY)
+    assert env.asked[-1]["title"] == "Download NVIDIA FastConformer Armenian?"
     assert app.downloads.started == [HY]
-    _spin()
-    assert _card_texts(card)[2] == ["cancel"] and card.sub.text() == "Downloading · 42%"
-    card.buttons["cancel"].click()
-    assert app.downloads.cancelled == [HY]
-    _spin()
-    assert _card_texts(card) == ("NVIDIA FastConformer Armenian", NOTE, ["download"])
-    card.buttons["download"].click()
     hy_listed["ready"] = True
-    app.downloads.finish(HY, "ready")                                          # done: it is picked like a Whisper card
+    app.downloads.finish(HY, "ready")                                          # done: it is used
     _spin(10)
-    assert app.cfg["whisper_model"] == HY
-    assert card.sub.text() == NOTE_READY and sorted(card.buttons) == ["remove"]
-    assert card.findChildren(type(card.action_lay.itemAt(0).widget())) is not None
+    assert app.cfg["whisper_model"] == HY and card.combo.currentData() == HY
+    assert card.action.text() == "Remove"
 
 
 def test_settings_a_failed_download_says_why_and_offers_another_try(env, hy_listed):
-    win, app = env.build("pro")
+    win, app = env.build("pro", backend="local", whisper_model=HY)
     app.downloads = HyDownloads(ready=("small",), hy="failed")
     app.downloads.errors[HY] = "Not enough free disk space for this model."
     page = _settings(win, section="speech")
-    assert page.hy_card.sub.text() == "Not enough free disk space for this model."
-    assert list(page.hy_card.buttons) == ["download"] and page.hy_card.buttons["download"].text() == "Try again"
+    assert page.speech_card.combo.currentIndex() == -1                          # not here: "Select a model"
+    assert page.speech_card.status.text() == "Not enough free disk space for this model."
+    assert page.speech_card.action.text() == "Try again"
+    page.speech_card.action.click()
+    assert app.downloads.started == [HY]
 
 
 def test_settings_use_remove_and_the_cleanup_of_the_picks(env, hy_listed):
     hy_listed["ready"] = True
-    win, app = env.build("pro", live_assist_speech_model=HY, file_model=HY, smart_actions_speech_model=HY)
+    win, app = env.build("pro", backend="local", live_assist_speech_model=HY, file_model=HY,
+                         smart_actions_speech_model=HY)
     app.downloads = HyDownloads(ready=("small",), hy="ready")
     page = _settings(win, section="speech")
-    card = page.hy_card
-    assert sorted(card.buttons) == ["remove", "use"]
-    card.buttons["use"].click()
+    _pick(page.speech_card, HY)                                                 # on this computer: no question
     assert app.cfg["whisper_model"] == HY
     page._on_removed(HY, True, "")                                              # it was removed: nothing keeps asking for it
     assert app.cfg["live_assist_speech_model"] == "" and app.cfg["file_model"] == "auto"
@@ -638,25 +636,13 @@ def test_render_every_picker_with_the_armenian_row(live_build, page_for, audio_b
     page.speech.refresh()
     rail(page, page.speech.combo, "live_downloading")
     hy_listed["listed"] = True
-    win, sapp = env.build("pro")
+    win, sapp = env.build("pro", backend="local")
     win.resize(1280, 900)
     sapp.downloads = HyDownloads(ready=("small",))
     win.show()
     page = _settings(win, section="speech")
-    _shot(page.hy_card.window(), "settings_card_missing")
-    sapp.downloads.start(HY)
-    sapp.downloads.pct[HY] = 42
-    _spin(10)
-    _shot(page.hy_card.window(), "settings_card_downloading")
-    hy_listed["ready"] = True
-    sapp.downloads.finish(HY, "ready")
-    _spin(10)
-    _shot(page.hy_card.window(), "settings_card_ready")
-    hy_listed["listed"] = False                                              # hidden: the page has no card at all
-    win2, sapp2 = env.build("pro")
-    win2.resize(1280, 900)
-    sapp2.downloads = HyDownloads(ready=("small",))
-    win2.show()
-    page2 = _settings(win2, section="speech")
-    assert page2.hy_card.isHidden()
-    _shot(page2.hy_card.window(), "settings_card_hidden")
+    _open_list(page.speech_card.combo, "settings_list_missing")
+    hy_listed["listed"] = False                                              # hidden: no row at all
+    page.refresh()
+    assert HY not in _rows(page.speech_card.combo)
+    _shot(page.speech_card.window(), "settings_card_hidden")

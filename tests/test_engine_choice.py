@@ -873,7 +873,7 @@ class TestWriterPicker(unittest.TestCase):
         self.assertEqual(ec.set_writer_value(gem, "key:g")["changes"]["google_api_key"], "AIza-1")
 
     def test_the_cloud_writer_is_named(self):
-        self.assertEqual(ec.cloud_writer_name({"cloud_writer_model": "openai"}), "GPT-5.4 mini")
+        self.assertEqual(ec.cloud_writer_name({"cloud_writer_model": "openai"}), "OpenAI GPT")
         self.assertEqual(ec.cloud_writer_name({"cloud_writer_model": "nonsense"}), "DeepSeek V4.1 Flash")
 
 if __name__ == "__main__":

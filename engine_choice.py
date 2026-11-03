@@ -428,12 +428,14 @@ CLOUD_LIVE_MODEL = hardware.CLOUD_LIVE_MODEL          # Live Assistant answers o
 CLOUD_SMART_MODEL = hardware.CLOUD_SMART_MODEL        # Smart Actions on Gusan Cloud
 # The AI writers Gusan Cloud can be asked for (cfg "cloud_writer_model", sent as the request's
 # "model": action_api.CLOUD_WRITER_FAMILIES). "" = the server's own order, DeepSeek first. The
-# picked one answers first; the others stay behind it as the fallback (smart-action preferRoutes).
+# picked one answers Smart Actions and the Live Assistant first; the others stay behind it as the
+# fallback (smart-action preferRoutes). Meeting notes keep the server's order. OpenAI and Claude
+# are named by family: the server runs a different model of each for answers and for notes.
 CLOUD_WRITER_KEY = "cloud_writer_model"
 CLOUD_WRITERS = (
-    ("deepseek", hardware.CLOUD_LIVE_MODEL, "By DeepSeek · the default, fastest"),
-    ("openai", "GPT-5.4 mini", "By OpenAI"),
-    ("claude", "Claude Haiku 5.5", "By Anthropic"),
+    ("deepseek", hardware.CLOUD_LIVE_MODEL, "Gusan's default · fastest"),
+    ("openai", "OpenAI GPT", "By OpenAI"),
+    ("claude", "Anthropic Claude", "By Anthropic"),
     ("mistral", "Mistral Small", "By Mistral AI"),
     ("gemini", "Gemini 2.5 Flash", "By Google"),
 )
@@ -859,6 +861,12 @@ def set_dictation_speech(app_or_cfg, value, *, pro=None, downloaded=None, turn_o
                                 turn_off_privacy=turn_off_privacy)
         if res.get("ok"):
             res["changes"].update({field: secret, "speech_key_id": entry["id"]})
+            writer = _entry(cfg, cfg.get("writer_key_id"))
+            if (field == "google_api_key" and writer is not None and writer["id"] != entry["id"]
+                    and WRITER_PROVIDERS[writer["provider"]]["key_field"] == "google_api_key"
+                    and writer_choice(cfg) == "own_key"):
+                # A Gemini AI writer reads the same slot: it now runs on this key too - say so.
+                res["changes"]["writer_key_id"] = entry["id"]
         return res
     return set_speech_source(app_or_cfg, "own_key", provider=DICTATION_OWN[value], pro=pro,
                              turn_off_privacy=turn_off_privacy)
@@ -949,12 +957,18 @@ def set_writer_value(app_or_cfg, value, *, pro=None, downloaded=None, turn_off_p
             return _outcome(problem="unknown")
         if not secret:
             return _outcome(problem="needs_key")
-        field = WRITER_PROVIDERS[entry["provider"]]["key_field"]      # the slot that provider's writer reads
+        info = WRITER_PROVIDERS[entry["provider"]]
+        field = info["key_field"]                     # the slot that provider's writer reads
+        # Always this key's own address (never one a previous key left behind).
+        base = (entry.get("base_url") or info["default_url"]) if info["base_url"] == "editable" else None
         res = set_writer(dict(cfg, **{field: secret}), "own_key", model=entry.get("model") or None,
-                         provider=entry["provider"], base_url=entry.get("base_url") or None, pro=pro,
+                         provider=entry["provider"], base_url=base, pro=pro,
                          turn_off_privacy=turn_off_privacy)
         if res.get("ok"):
             res["changes"].update({field: secret, "writer_key_id": entry["id"]})
+            if field == "google_api_key" and cfg.get("backend") == "google" and cfg.get("speech_key_id") != entry["id"]:
+                # Speech on Google reads the same slot: it now runs on this key too - say so.
+                res["changes"]["speech_key_id"] = entry["id"]
         return res
     return set_writer(app_or_cfg, "own_key", model=model, provider=ident, pro=pro,
                       turn_off_privacy=turn_off_privacy)

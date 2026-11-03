@@ -20,7 +20,7 @@ MUTED = "#64748b"
 # Each plan as its card shows it: (name, price, per, struck "was" price, one detail line, what it
 # gives, the line at the foot of the card). The full commitment / withdrawal wording is in Stripe
 # Checkout (pricing_policy.checkout_extras): the card says it once, plainly.
-BENEFITS = ("Meeting recording with AI notes", "Smart Actions by voice",
+BENEFITS = ("Meeting recording with AI notes", "Live Assistant in your calls", "Smart Actions by voice",
             "Fast cloud transcription", "Priority models and support")
 LIFETIME_BENEFITS = ("Every Pro feature you have today", "All future Pro features included",
                      "No monthly bill, ever", "Priority models and support")
@@ -439,7 +439,7 @@ class ProDialog(QDialog):
         title.setStyleSheet("font-size: 22px; font-weight: 800; color: %s;" % INK)
         root.addWidget(title)
         sub = QLabel(self._feature_line(feature) if feature else
-                     "Meeting notes, Smart Actions and fast cloud speech.", self)
+                     "Meetings, the Live Assistant, Smart Actions and fast cloud speech.", self)
         sub.setAlignment(Qt.AlignCenter)
         sub.setWordWrap(True)
         sub.setContentsMargins(side, 0, side, 0)
@@ -502,11 +502,10 @@ class ProDialog(QDialog):
         self._ask_spots()
 
     def _feature_line(self, feature):
-        if feature == "Meeting notes":
-            return "You've used this month's free cloud meeting note."
-        if feature == "Live Assistant session":
-            return "You've used this month's free Live Assistant session."
-        return f"{feature} is a Pro feature."
+        """What brought the person here, in one line ("Meeting recording comes with Gusan Pro.")."""
+        name = {"Meeting notes": "Cloud meeting notes", "Live Assistant session": "Live Assistant"}.get(
+            feature, feature)
+        return f"{name} comes with Gusan Pro."
 
     # ── lifetime spots ──
     def _ask_spots(self):

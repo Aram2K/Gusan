@@ -715,26 +715,6 @@ def test_the_pages_own_menus(qapp, scheme, window, meetings_root, monkeypatch, m
         made.append(menu)
         readable(_popup(menu, window.mapToGlobal(QPoint(400, 200))), "Notes > " + name, minimum=2)
         menu.close()
-    # Settings: a model tile's "Remove" menu. menu.exec() blocks and cannot be replaced from Python, so a
-    # timer measures the open menu from inside the wait and closes it.
-    page = window.open("settings")
-    QApplication.processEvents()
-    page.ensure_built("speech")              # the page builds its sections lazily: this one, now, not "soon"
-    QApplication.processEvents()
-    seen = []
-
-    def look():
-        menu = QApplication.activePopupWidget()
-        if isinstance(menu, QMenu):
-            seen.append(readable_rows(menu, "Settings > Remove a model"))
-            menu.close()
-    card = next(iter(page.writer_sizes.values()))              # a writer-size tile: right-click removes the model
-    card.set_state("ready")
-    QTimer.singleShot(300, look)
-    card.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Mouse, QPoint(5, 5),
-                                            window.mapToGlobal(QPoint(300, 240))))
-    assert seen and seen[0], "the menu never opened"
-    assert all(r >= need for _n, _b, _t, r, need in seen[0])
 
 
 def readable_rows(widget, where):

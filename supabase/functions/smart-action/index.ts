@@ -30,8 +30,9 @@
 //   CLAUDE_NOTES_MS) -> Mistral Small -> Gemini Flash (NOTES_TAIL_MS each).
 // * Everything else (the live recap, apps before 2.0 that send no mode):
 //   Mistral Small -> OpenAI (OPENAI_FAST_MODEL) -> Gemini Flash.
-// * body.model (optional, the AI writer the person picked in the app): that engine goes first,
-//   the rest of the mode's chain follows as the fallback (preferRoutes).
+// * body.model (optional, the AI writer the person picked in the app): for Smart Actions and Live
+//   Assistant answers that engine goes first, the rest of the chain follows as the fallback
+//   (preferRoutes). Meeting notes keep their own order.
 // Not streamed, EVERY engine has a whole-answer time limit (its own, else
 // WHOLE_CAP_MS), and the chain as a whole stays inside NON_STREAM_DEADLINE_MS,
 // so the app's 45 s wait always ends with an answer or a clean error.
@@ -872,7 +873,10 @@ Deno.serve(async (req) => {
   if (messages.length === 0) return json({ error: "no_messages" }, 400);
 
   const startedAt = Date.now();
-  const routes = preferRoutes(await routesFor(live, smart, notes, messages, maxTokens, stream), body?.model);
+  // The person's pick leads Smart Actions and Live Assistant answers; meeting notes keep their own
+  // order (their tail engines have a short whole-answer cap and would only time out first).
+  const chain = await routesFor(live, smart, notes, messages, maxTokens, stream);
+  const routes = notes ? chain : preferRoutes(chain, body?.model);
   if (!routes.length) {
     console.error("no chat engine configured: set MISTRAL_STT_KEY, GOOGLE_STT_KEY, OPENAI_TOKEN or CLAUDE_LLM_KEY");
     return json({ error: "actions_not_configured" }, 503);

@@ -159,7 +159,8 @@ SPEECH_HELP = ("The speech-to-text (STT) model turns your voice into text. "
                "Dictation and meetings use it.")
 WRITER_KIND = "Language model (LLM)"
 WRITER_HELP = ("The large language model (LLM) writes for you: Smart Actions, meeting notes "
-               "and the Live Assistant's answers.")
+               "and the Live Assistant's answers. On Gusan Cloud, the model you pick answers "
+               "first; meeting notes use Gusan's own choice.")
 PICK_A_MODEL = "Select a model"
 PAUSED_TEXT = "Off while Privacy mode is on"
 
@@ -2108,6 +2109,7 @@ class SettingsPage(QWidget):
         # A "Runs on" picked but no model yet: the card shows that source's list with nothing
         # selected ("Select a model"); nothing changes until a model is picked.
         self._preview = {"speech": None, "writer": None}
+        self._preview_truth = {"speech": None, "writer": None}   # what was set when the preview began
         self._key_then = None                 # "speech" / "writer": a key being added for that card
 
         kblk, kv = self._block("My API keys", parent=sec)
@@ -2230,7 +2232,13 @@ class SettingsPage(QWidget):
             text = "Downloading %s…%s" % (info.plain, (" %d%%" % pct) if pct is not None else "")
             return text, ("Cancel" if mid == hardware.HY_MODEL_ID else ""), "muted"
         if st == "failed":
-            return self._model_errors.get(mid) or "The download didn't finish.", "Try again", "muted"
+            why = self._model_errors.get(mid)
+            if not why and self._dl() is not None:
+                try:
+                    why = self._dl().error(mid)
+                except Exception:
+                    why = ""
+            return why or "The download didn't finish.", "Try again", "muted"
         if st == "missing":
             return "Not on this computer yet · %s" % info.size, "Download", "muted"
         return ready_text, "Remove", "muted"
@@ -2385,7 +2393,9 @@ class SettingsPage(QWidget):
         """A "Runs on" segment: show that source's models, nothing chosen yet. Nothing changes until a
         model is picked (the segment of what is set just shows it again)."""
         src = self.speech_card.sources[i]
-        self._preview["speech"] = None if src == engine_choice.speech_choice(self.cfg) else src
+        truth = engine_choice.speech_choice(self.cfg)
+        self._preview["speech"] = None if src == truth else src
+        self._preview_truth["speech"] = truth
         self._refresh_speech_choice()
 
     def _speech_model_picked(self, _i):
@@ -2417,8 +2427,10 @@ class SettingsPage(QWidget):
             fn()
 
     def _shown_source(self, card, truth):
+        """The source the card shows: the one just clicked (nothing picked yet), unless it is what
+        is set now, or the setting changed somewhere else since (then what is really set)."""
         shown = self._preview.get(card)
-        if shown == truth:
+        if shown == truth or (shown and self._preview_truth.get(card) != truth):
             shown = self._preview[card] = None
         return shown or truth
 
@@ -2505,7 +2517,9 @@ class SettingsPage(QWidget):
 
     def _writer_source_clicked(self, i):
         src = self.writer_card.sources[i]
-        self._preview["writer"] = None if src == self._writer_kind() else src
+        truth = self._writer_kind()
+        self._preview["writer"] = None if src == truth else src
+        self._preview_truth["writer"] = truth
         self._refresh_writer()
 
     def _writer_model_picked(self, _i):
@@ -2547,6 +2561,8 @@ class SettingsPage(QWidget):
             value = engine_choice.local_writer(cfg) if kind == "local" else engine_choice.writer_value(cfg)
         if src == "local" and value and self._writer_model_state(value) in ("missing", "failed"):
             value = None          # not on this computer: "Select a model" - a pick asks to download it
+        if src == kind == "local" and (self._writer_now() or {}).get("kind") != "local":
+            value = None          # the built-in rules write: no model is in use, so none is shown chosen
         card.fill(engine_choice.writer_rows(cfg, is_pro(self.app), choice=src), value)
         if src == "local":
             self._mark_rows(card, self._writer_model_state, hardware.LOCAL_AI_INFO.get)

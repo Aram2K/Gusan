@@ -1035,10 +1035,12 @@ class MeetingCore:
 
         if dictation_was_running and hasattr(app, "show_tray_hint"):
             try:
+                import hotkeys
+                key = hotkeys.display(cfg.get("hotkey") or hotkeys.DICTATION_DEFAULT)
                 app.show_tray_hint(
                     "Dictation Stopped",
-                    "Your Alt-R dictation was stopped so it isn't mixed into this "
-                    "meeting recording.")
+                    "Your %s dictation was stopped so it isn't mixed into this "
+                    "meeting recording." % key)
             except Exception:
                 pass
 

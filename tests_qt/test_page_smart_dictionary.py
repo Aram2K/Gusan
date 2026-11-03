@@ -443,7 +443,7 @@ def test_rail_rows_in_order(pages, tries):
     assert [r.label.text() for r in page.rail.rows()] == ["Shortcut", "Transcribes with", "Writes with"]
     assert not hasattr(page, "translate_combo")
     assert page.shortcut_row.pro_tag is None                       # changing the key is not Pro
-    assert page.more_button.accessibleName() == "More options in Speech & AI"
+    assert page.more_button.accessibleName() == "Speech & AI settings"
 
 
 @pytest.mark.parametrize("tier", ["guest", "free"])
