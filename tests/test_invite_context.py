@@ -161,6 +161,44 @@ class TestFromMeeting(unittest.TestCase):
         self.assertEqual((len(ctx["attendees"]), len(ctx["others"])), (40, 40))
 
 
+class TestCardPrefill(unittest.TestCase):
+    """What a "Coming up" row (Meetings, Home) fills the Meetings start card with."""
+
+    def test_the_four_options_the_page_opens_with(self):
+        self.assertEqual(ic.card_prefill(_meeting()), {
+            "title": "Q3 planning", "attendees": ["Anna Smith", "David Lee"],
+            "calendar_event_id": "ev1", "agenda": "Budget\nHiring"})
+
+    def test_no_title_says_meeting(self):
+        for title in ("", "   ", None):
+            self.assertEqual(ic.card_prefill(_meeting(title=title))["title"], "Meeting")
+        self.assertEqual(ic.card_prefill({})["title"], "Meeting")
+
+    def test_a_private_event_sends_no_agenda(self):
+        p = ic.card_prefill(_meeting(private=True, agenda="secret"))
+        self.assertEqual(p["agenda"], "")
+        self.assertEqual(p["calendar_event_id"], "ev1")
+
+    def test_the_others_not_the_whole_invite(self):
+        p = ic.card_prefill(_meeting(attendees=["Aram", "Anna"], others=["Anna"]))
+        self.assertEqual(p["attendees"], ["Anna"])
+
+    def test_clean_text_only_no_emails_no_links_ids_as_text(self):
+        p = ic.card_prefill(_meeting(others=["Anna <anna@example.com>", "dave@example.com"], id=7,
+                                     link="https://meet.google.com/abc", title="Plan\nthe  week"))
+        self.assertEqual(p["attendees"], ["Anna", "Dave"])
+        self.assertEqual((p["calendar_event_id"], p["title"]), ("7", "Plan the week"))
+        self.assertNotIn("@", repr(p))
+        self.assertNotIn("link", p)
+        self.assertEqual(set(p), {"title", "attendees", "calendar_event_id", "agenda"})
+
+    def test_it_is_what_from_meeting_says(self):
+        m = _meeting()
+        ctx = ic.from_meeting(m)
+        self.assertEqual(ic.card_prefill(m), {"title": ctx["title"], "attendees": ctx["others"],
+                                              "calendar_event_id": ctx["event_id"], "agenda": ctx["agenda"]})
+
+
 class TestContextText(unittest.TestCase):
     def test_notes_and_live_text(self):
         notes = ic.context_text(_meeting(), "notes")

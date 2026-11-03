@@ -2,8 +2,16 @@
 //
 // Pro users run Smart Actions (translate / rewrite / summarize / email /
 // meeting notes) and the Live Assistance through SERVER-held keys, so they never
-// need their own. Flow: verify the caller + is_pro() + daily quota (in
+// need their own. Flow: verify the caller + entitlement + daily quota (in
 // parallel - one round trip, not three) -> model -> text, streamed when asked.
+//
+// Free accounts are not Pro. They may still call this function for:
+//   * one cloud meeting note per calendar month (mode "meeting_notes",
+//     note_ref = the meeting id; a retry of the same id does not count again)
+//   * Live Assistant answers inside the one open session they started
+//     (mode "live_assist", session_id from begin_live_session)
+// Other modes stay Pro-only. The daily cap below is an abuse ceiling, not a
+// fair-use quota, and it still applies to Pro.
 //
 // Routing - each request tries the configured engines in order, moving on if
 // one is missing, fails, or (streamed) hasn't produced its first words in time
@@ -122,9 +130,12 @@ const OPENAI_NOTES_MS = 18_000;   // meeting notes, the whole answer (the two pr
 const claude = CLAUDE_KEY ? new Anthropic({ apiKey: CLAUDE_KEY, maxRetries: 0 }) : null;
 // Per isolate: has the Claude key been checked yet (a free models lookup, logged).
 let claudeChecked = false;
-// A cost-abuse ceiling, not a usage limit: ~10x a heavy day of dictation plus
-// Live Assistance answers (one per question asked in a call).
+// A cost-abuse ceiling, not a product quota: ~10x a heavy day of dictation plus
+// Live Assistance answers (one per question asked in a call). Pro has no
+// monthly minute cap; this per-day ceiling stays so a loop cannot run up the bill.
 const DAILY_CAP = 1000;
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // A long meeting transcript is well under 1 MB; screenshots are downscaled JPEGs.
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_MESSAGES = 200;
@@ -780,6 +791,8 @@ Deno.serve(async (req) => {
   const notes = body?.mode === "meeting_notes";
 
   const supa = createClient(SUPABASE_URL, ANON_KEY, { global: { headers: { Authorization: authHeader } } });
+  const sessionId = typeof body?.session_id === "string" ? body.session_id.trim() : "";
+  const noteRef = typeof body?.note_ref === "string" ? body.note_ref.slice(0, 200) : "";
   const [userRes, proRes, quotaRes] = await Promise.all([
     supa.auth.getUser(),
     supa.rpc("is_pro"),
@@ -788,7 +801,26 @@ Deno.serve(async (req) => {
   ]);
   if (userRes.error || !userRes.data?.user) return json({ error: "unauthorized" }, 401);
   if (proRes.error) return json({ error: "entitlement_check_failed" }, 500);
-  if (proRes.data !== true) return json({ error: "pro_required" }, 403);
+  if (proRes.data !== true) {
+    // Free: one cloud meeting note a month, and Live Assistant only inside
+    // the session begin_live_session() already opened. Everything else is Pro.
+    if (notes) {
+      const { data: allowed, error } = await supa.rpc("consume_meeting_note", { note_ref: noteRef });
+      if (error) return json({ error: "quota_check_failed" }, 500);
+      if (allowed !== true) {
+        return json({ error: "allowance_used", allowance: "meeting_notes" }, 402);
+      }
+    } else if (live || warmup) {
+      const id = UUID_RE.test(sessionId) ? sessionId : null;
+      const { data: open, error } = await supa.rpc("live_session_open", { p_session_id: id });
+      if (error) return json({ error: "quota_check_failed" }, 500);
+      if (open !== true) {
+        return json({ error: "allowance_used", allowance: "live_session" }, 402);
+      }
+    } else {
+      return json({ error: "pro_required" }, 403);
+    }
+  }
 
   if (warmup) {
     if (LIVE_URL && LIVE_TOKEN) {

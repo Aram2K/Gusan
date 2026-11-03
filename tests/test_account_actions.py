@@ -42,7 +42,7 @@ class TestAccountView(_NoDevTier):
         v = aa.account_view(auth("guest"), {}, now=NOW)
         self.assertEqual((v["signed_in"], v["guest"], v["name"], v["email"], v["initial"], v["tier"], v["badge"]),
                          (False, True, "User", "", "", "guest", "GUEST"))
-        self.assertEqual(v["smart_text"], "Sign up to try them")
+        self.assertEqual(v["smart_text"], "Sign in to use them")
         # A guest's one action is Sign in / Sign up: no upgrade.
         self.assertEqual(v["buttons"], {"sign_in": True, "sign_out": False, "upgrade": False,
                                         "manage": False, "delete": False, "admin": False})
@@ -57,13 +57,13 @@ class TestAccountView(_NoDevTier):
         v = aa.account_view(auth("free"), {}, now=NOW, smart_remaining=4)
         self.assertEqual((v["name"], v["initial"], v["badge"], v["plan_label"], v["plan_line"]),
                          ("Aram", "A", "FREE", "Free", "Free"))
-        self.assertEqual((v["smart_tries_left"], v["smart_tries_total"], v["smart_text"]), (4, 5, "4 of 5 left"))
+        self.assertEqual((v["smart_tries_left"], v["smart_text"]), (None, "Unlimited"))
         self.assertTrue(v["buttons"]["upgrade"] and v["buttons"]["sign_out"] and v["buttons"]["delete"])
         self.assertFalse(v["buttons"]["manage"])
 
     def test_name_falls_back_to_the_email(self):
         v = aa.account_view(auth("free", name=None, email="mariam@example.com"), {}, smart_remaining=0)
-        self.assertEqual((v["name"], v["initial"], v["smart_text"]), ("mariam", "M", "0 of 5 left"))
+        self.assertEqual((v["name"], v["initial"], v["smart_text"]), ("mariam", "M", "Unlimited"))
 
     def test_pro_annual(self):
         v = aa.account_view(auth("pro", plan="annual", status="active", period_end="2027-10-04T09:00:00Z"),
@@ -75,19 +75,27 @@ class TestAccountView(_NoDevTier):
         v = aa.account_view(auth("pro", plan="monthly", period_end="2026-11-01T00:00:00+00:00", cancel=True),
                             {}, now=NOW)
         self.assertEqual(v["plan_line"], "Monthly · ends 1 Nov 2026")
+        a = auth("pro", plan="yearly", period_end="2026-11-30T00:00:00Z")
+        a.commitment_ends_at = "2027-10-30T00:00:00Z"
+        v = aa.account_view(a, {}, now=NOW)
+        self.assertEqual(v["plan_line"], "Yearly · committed until 30 Oct 2027")
+        self.assertTrue(v["buttons"]["manage"])
+        a.cancels_at = "2027-10-30T00:00:00Z"
+        self.assertEqual(aa.account_view(a, {}, now=NOW)["plan_line"], "Yearly · ends 30 Oct 2027")
+        life = auth("pro", plan="lifetime")
+        self.assertEqual(aa.account_view(life, {}, now=NOW)["plan_line"], "Lifetime")
 
-    def test_stripe_trial_uses_status(self):
+    def test_a_stale_trial_status_is_not_shown_as_a_trial(self):
         a = auth("pro", plan="annual", status="trialing", period_end="2026-10-09T10:00:00Z")
         v = aa.account_view(a, {}, now=NOW)
-        self.assertTrue(v["on_trial"])
-        self.assertEqual((v["trial_days_left"], v["plan_line"]), (2, "Pro trial · 2 days left"))
-        self.assertTrue(v["buttons"]["manage"])             # the trial is cancelled in the portal
-        a.period_end = "2026-10-08T00:00:00Z"
-        self.assertEqual(aa.account_view(a, {}, now=NOW)["plan_line"], "Pro trial · 1 day left")
+        self.assertFalse(v["on_trial"])
+        self.assertEqual(v["plan_line"], "Annual · renews 9 Oct 2026")
+        self.assertTrue(v["buttons"]["manage"])
 
     def test_old_in_app_trial_and_admin(self):
         v = aa.account_view(auth("pro", plan="trial", period_end="2026-10-08T12:00:00Z"), {}, now=NOW)
-        self.assertEqual(v["plan_line"], "Pro trial · 1 day left")
+        self.assertEqual(v["plan_line"], "Pro")
+        self.assertFalse(v["on_trial"])
         self.assertFalse(v["buttons"]["manage"])            # no Stripe customer behind it
         v = aa.account_view(auth("pro", plan="admin", admin=True), {"admin_tier_override": "auto"}, now=NOW)
         self.assertEqual((v["plan_line"], v["is_admin"], v["buttons"]["admin"]), ("Admin", True, True))
@@ -95,10 +103,10 @@ class TestAccountView(_NoDevTier):
     def test_admin_preview_follows_the_forced_tier(self):
         a = auth("pro", plan="admin", admin=True)
         v = aa.account_view(a, {"admin_tier_override": "free"}, smart_remaining=3)
-        self.assertEqual((v["pro"], v["badge"], v["admin_tier"], v["smart_text"]), (False, "FREE", "free", "3 of 5 left"))
-        # Previewing Guest: a guest can't use Smart Actions until they sign up.
+        self.assertEqual((v["pro"], v["badge"], v["admin_tier"], v["smart_text"]), (False, "FREE", "free", "Unlimited"))
+        # Previewing Guest: a guest can't use Smart Actions until they sign in.
         v = aa.account_view(a, {"admin_tier_override": "guest"}, smart_remaining=3)
-        self.assertEqual((v["badge"], v["smart_tries_left"], v["smart_text"]), ("GUEST", None, "Sign up to try them"))
+        self.assertEqual((v["badge"], v["smart_tries_left"], v["smart_text"]), ("GUEST", None, "Sign in to use them"))
 
     def test_an_admin_previewing_guest_is_never_shown_by_name(self):
         # The founder's screenshot: a GUEST chip with "Aram" and an "A". A super admin previewing Guest is

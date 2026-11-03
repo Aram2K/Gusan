@@ -294,7 +294,7 @@ def test_the_pro_window_for_a_guest_leads_through_sign_in(qapp, monkeypatch):
     for app in (make_stub_app("guest"), stale_guest_app()):
         dlg = _pro_dialog(app)
         assert dlg.btn_go.text() == "Sign in to upgrade"
-        assert dlg.note.text() == "Sign in first, then try Pro free for 3 days."
+        assert dlg.note.text() == "Sign in first, then choose a plan."
         assert "a855f7" not in dlg.btn_go.styleSheet()                    # the blue sign-in button, not the violet trial one
         dlg.btn_go.click()
         assert ("show_auth_gate",) in app.calls
@@ -303,12 +303,36 @@ def test_the_pro_window_for_a_guest_leads_through_sign_in(qapp, monkeypatch):
         dlg.deleteLater()
 
 
-def test_the_pro_window_for_free_still_starts_the_trial(qapp):
+def test_the_pro_window_for_free_checks_out_without_a_trial(qapp):
     dlg = _pro_dialog(make_stub_app("free"))
-    assert dlg.btn_go.text() == "Start 3-day free trial"
+    assert dlg.btn_go.text() == "Continue to checkout"
     assert "a855f7" in dlg.btn_go.styleSheet()
-    assert "Stripe" in dlg.note.text() and "Sign in" not in dlg.note.text()
+    assert "Stripe" in dlg.note.text() and "12-month" in dlg.note.text()
+    assert "free" not in dlg.note.text().lower()
     dlg.deleteLater()
+
+
+def test_closing_the_pro_window_does_not_wait_on_the_spots_fetch(qapp):
+    """The lifetime-spots request must not be a QThread owned by the window.
+
+    Destroying that thread while the request is still running aborts the
+    process, which hung the offscreen suite."""
+    import threading
+    import time
+    gate = threading.Event()
+    app = make_stub_app("free")
+
+    def spots():
+        gate.wait(5)
+        return 7
+
+    app.lifetime_spots_left = spots
+    started = time.monotonic()
+    dlg = _pro_dialog(app)
+    dlg.deleteLater()
+    QApplication.processEvents()
+    assert time.monotonic() - started < 2
+    gate.set()
 
 
 # ── the pages that name a person ──

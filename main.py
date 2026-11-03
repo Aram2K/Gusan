@@ -89,9 +89,9 @@ DELETE_ACCOUNT_URL = "https://hftcelxzfoubheqeoool.supabase.co/functions/v1/dele
 BILLING_PORTAL_URL = "https://hftcelxzfoubheqeoool.supabase.co/functions/v1/billing-portal"
 SUPPORT_EMAIL = "aibuben.xyz@gmail.com"
 
-# ── Monetization links (Stripe) ───────────────────────────────────────────────
-PRO_MONTHLY_URL = "https://buy.stripe.com/3cI5kC30N1oeari7rh0Ba00"
-PRO_ANNUAL_URL  = "https://buy.stripe.com/fZuaEW0SF4Aq1UMh1R0Ba01"
+# ── Monetization (Stripe) ─────────────────────────────────────────────────────
+# Checkout sessions are created by the create-checkout function (lookup keys,
+# no trial). The old payment links are not offered any more.
 # "Manage subscription" opens the Stripe Customer Portal already signed in via
 # the billing-portal function. This is Stripe's no-code login link (Settings →
 # Billing → Customer portal → Login link) - the fallback for an account the
@@ -173,6 +173,10 @@ DEFAULT = {
     "dismissed_update_version": "",
     "pending_update_version": "",
     "pending_update_body": "",
+    # The in-app install handed to the installer last: {"to": tag, "log": path, "from": version
+    # [, "quit": True]}. Read at the next start (AppController._after_restart_checks): still an older
+    # version then = the install stopped, and it is said once. Written by the controller only.
+    "update_attempt": {},
     "previous_version": "",
     "tray_hint_shown": False,
     "meeting_consent_ack": False,  # one-time recording-consent notice
@@ -735,21 +739,28 @@ def cloud_error_message(provider, status, body_text):
     return (f"{provider} error (HTTP {status}). {msg[:90]}").strip()
 
 
-def billing_portal_session(token, post=None):
+def billing_portal_session(token, post=None, action="portal"):
     """(url, problem) for the signed-in user's Stripe Customer Portal, from the
     billing-portal function. ``problem`` is "" on success, else "signed_out",
-    "no_customer" (no Stripe customer for this account) or "unavailable"."""
+    "no_customer" (no Stripe customer for this account) or "unavailable".
+
+    action "cancel" schedules cancellation (at the end of a 12-month
+    commitment, otherwise at the end of the current period) and returns
+    (None, "") when that was accepted — there is no page to open."""
     if not token:
         return None, "signed_out"
     if post is None:
         import requests
         post = requests.post
+    payload = {"action": action} if action == "cancel" else {}
     try:
-        resp = post(BILLING_PORTAL_URL, json={},
+        resp = post(BILLING_PORTAL_URL, json=payload,
                     headers={"Authorization": f"Bearer {token}"}, timeout=20)
     except Exception as e:
         logger.warning("Billing portal unreachable: %s", e)
         return None, "unavailable"
+    if action == "cancel" and resp.status_code == 200:
+        return None, ""
     if resp.status_code == 200:
         try:
             url = (resp.json() or {}).get("url") or ""
@@ -3897,9 +3908,23 @@ class AppController(QObject):
         self._file_job_running = False
         self._model_wait = None              # {"name", "pct"} while a dictation waits on its model
         self._update_notice_shown = None     # the release a notice was shown for this run
-        self._update_ready = None            # (tag, installer path) for "Install updates when I quit"
-        self._update_fetching = None
-        self._update_installing = False
+        self._update_ready = None            # (tag, installer path): downloaded and checked
+        self._update_fetching = None         # the release whose installer a worker is fetching
+        self._update_fetch_user = False      # ...for the update window (Cancel stops it) or quietly ahead
+        self._update_installing = False      # an in-app update attempt runs: download .. hand-over
+        self._update_closing = False         # the installer is started: Gusan closes in a moment
+        self._update_window = None           # ui/update_window.py, built on the first update
+        self._update_cancel = False          # the attempt was cancelled
+        self._update_gen = 0                 # each attempt's own number (a timer of an old one does nothing)
+        self._update_queued = None           # (tag, manual, on_done) started once a cancelled download ends
+        self._update_tag = ""
+        self._update_manual = True
+        self._update_on_done = None
+        self._update_key_asked = False       # asked about a typed-but-unsaved key (once per attempt)
+        self._update_force = False           # "Install now": go on although a key is not saved
+        self._update_asking = False          # that question is on screen
+        self._update_failed_notice = False   # the last install stopped: said once, nothing else until then
+        self._update_progress_at = 0.0
         self._hotkeys_suspended = False
         # One download manager for speech and local AI models: Settings,
         # onboarding, Audio to text and dictation all share its downloads.
@@ -4044,6 +4069,8 @@ class AppController(QObject):
         if (cached_pending and self.cfg.get("onboarding_done", False)
                 and updater.should_prompt(self.cfg, cached_pending, APP_VERSION)):
             QTimer.singleShot(1500, lambda: self.sig_update_available.emit(cached_pending))
+        # Just updated (the quiet install reopens Gusan without a word)? Or did the install stop?
+        self._after_restart_checks()
 
     def _setup_tray(self):
         self.tray_icon = QSystemTrayIcon(self)
@@ -4409,19 +4436,51 @@ class AppController(QObject):
 
     def open_billing(self):
         """Settings → Account → Manage subscription (and the tray): the Stripe
-        Customer Portal, already signed in - cancel (a trial is then never
-        charged), change the card, download invoices."""
+        Customer Portal, already signed in - change the card, download invoices.
+        A yearly plan can only be cancelled at the end of its 12-month commitment."""
         if not self.auth.is_authenticated:
             self.show_auth_gate()
             return
         if getattr(self, "_billing_busy", False):
             return                              # a click is already on its way
+        self._billing_action = "portal"
+        end = getattr(self.auth, "commitment_ends_at", None)
+        if end and not getattr(self.auth, "cancels_at", None):
+            from datetime import datetime, timezone
+            try:
+                when = datetime.fromisoformat(str(end).replace("Z", "+00:00"))
+                active = when > datetime.now(timezone.utc)
+            except (TypeError, ValueError):
+                active = False
+            if active:
+                from ui.components import mini_prompt
+                import account_actions
+                shown = account_actions.format_date(end) or "the end of the 12 months"
+                choice = mini_prompt.choose(
+                    self._dialog_parent(), "Gusan Pro",
+                    f"Your yearly plan is a 12-month commitment, through {shown}. "
+                    "You can cancel it from that date, not before.",
+                    [("portal", "Card and invoices", "secondary"),
+                     ("cancel", "Cancel at end of commitment", "primary"),
+                     ("close", "Not now", "ghost")],
+                    default="portal", icon="crown")
+                if choice in (None, "", "close"):
+                    return
+                if choice == "cancel":
+                    self._billing_action = "cancel"
         self._billing_busy = True
         threading.Thread(target=self._open_billing_worker, daemon=True).start()
 
     def _open_billing_worker(self):
+        action = getattr(self, "_billing_action", "portal") or "portal"
         try:
-            url, problem = billing_portal_session(self.auth.get_access_token())
+            url, problem = billing_portal_session(self.auth.get_access_token(), action=action)
+            if action == "cancel" and not problem:
+                self.overlay.call_soon(
+                    self.show_tray_hint, "Gusan Pro",
+                    "Cancellation is set for the end of your 12-month commitment. "
+                    "You'll be billed each month until then.")
+                return
             if not url and problem != "signed_out" and STRIPE_PORTAL_URL:
                 url = STRIPE_PORTAL_URL         # Stripe's email-code login instead
             if url:
@@ -4528,33 +4587,115 @@ class AppController(QObject):
         else:
             clicked = mini_prompt.choose(
                 parent, f"{APP_NAME} Pro",
-                feat + "Upgrade to unlock Meetings, Smart Actions, and fast cloud transcription.",
-                [("monthly", "€7.99/mo", "secondary"), ("annual", "€59/yr", "primary"),
-                 ("cancel", "Maybe later", "ghost")],
-                default="annual", icon="crown")
+                feat + "Gusan Pro is unlimited cloud transcription, meeting notes and Live Assistant.",
+                [("monthly", "€15.99/mo", "secondary"), ("yearly", "€9.99/mo", "primary"),
+                 ("lifetime", "€199 once", "secondary"), ("cancel", "Maybe later", "ghost")],
+                default="yearly", icon="crown")
         if clicked == "signin":
             self.show_auth_gate()
-        elif clicked == "monthly":
-            webbrowser.open(self._checkout_url(PRO_MONTHLY_URL))
-        elif clicked == "annual":
-            webbrowser.open(self._checkout_url(PRO_ANNUAL_URL))
+        elif clicked in ("monthly", "yearly", "lifetime"):
+            self.open_checkout(clicked)
 
-    def _checkout_url(self, base):
-        """Append the signed-in user's id (+ email) to a Stripe payment link so
-        the webhook can link the resulting subscription to the right account."""
+    def open_checkout(self, plan):
+        """Open Stripe Checkout for monthly, yearly (12-month commitment) or lifetime."""
+        if not getattr(getattr(self, "auth", None), "is_authenticated", False):
+            self.show_auth_gate()
+            return
+        if getattr(self, "_checkout_busy", False):
+            return
+        self._checkout_busy = True
+
+        def work():
+            import quotas
+            token = None
+            try:
+                token = self.auth.get_access_token()
+            except Exception:
+                token = None
+            url, problem, info = quotas.create_checkout(token, plan)
+            try:
+                self.overlay.call_soon(self._checkout_ready, url, problem, info or {}, plan)
+            except Exception:
+                self._checkout_busy = False
+
+        threading.Thread(target=work, daemon=True, name="gusan-checkout").start()
+
+    def _checkout_ready(self, url, problem, info, plan):
+        self._checkout_busy = False
+        spots = info.get("spots_left") if isinstance(info, dict) else None
+        if url:
+            webbrowser.open(url)
+            try:
+                telemetry.track("checkout_opened", {"plan": plan}, self.cfg, APP_VERSION)
+            except Exception:
+                pass
+            self.watch_for_upgrade()
+            return
+        messages = {
+            "sold_out": "The lifetime plan is sold out.",
+            "already_lifetime": "This account already has lifetime Gusan Pro.",
+            "signed_out": "Sign in again, then you can upgrade.",
+            "unknown_plan": "That plan isn't available.",
+            "unavailable": "Checkout couldn't be opened. Try again in a moment.",
+            "terms_url_required": (
+                "Checkout needs a Terms of Service URL saved in the Stripe account's "
+                "public details (https://gusan.aibuben.xyz/terms) before it can ask "
+                "you to agree. That isn't set yet."
+            ),
+        }
+        text = messages.get(problem, messages["unavailable"])
+        if problem == "terms_url_required" and isinstance(info, dict) and info.get("message"):
+            text = info["message"]
+        if problem == "sold_out" and spots == 0:
+            text = "The lifetime plan is sold out (0 of 200 left)."
+        self.show_tray_hint("Gusan Pro", text)
+
+    def lifetime_spots_left(self):
+        """How many lifetime spots are left, or None. Blocking; the Pro window calls it off the GUI thread."""
+        import quotas
+        token = None
         try:
-            uid = getattr(self.auth, "user_id", None)
-            if not uid:
-                return base
-            from urllib.parse import urlencode
-            params = {"client_reference_id": uid}
-            email = getattr(self.auth, "user_email", None)
-            if email:
-                params["prefilled_email"] = email
-            sep = "&" if "?" in base else "?"
-            return f"{base}{sep}{urlencode(params)}"
+            token = self.auth.get_access_token()
         except Exception:
-            return base
+            token = None
+        return quotas.lifetime_spots_left(token)
+
+    def claim_live_session(self):
+        """Take this month's free Live Assistant session (or resume the open one).
+
+        Pro is never blocked by the allowance. Returns {ok, reason, session_id}.
+        Blocking: one small RPC before Start."""
+        import quotas
+        token = None
+        try:
+            token = self.auth.get_access_token()
+        except Exception:
+            token = None
+        if not token:
+            return {"ok": False, "reason": "signed_out"}
+        result = quotas.begin_live_session(token)
+        if result.get("ok") and result.get("session_id"):
+            self._live_session_id = result["session_id"]
+        elif self.is_pro():
+            return {"ok": True, "reason": "pro", "session_id": getattr(self, "_live_session_id", "") or ""}
+        return result
+
+    def release_live_session(self):
+        """The Live Assistant session ended: the free allowance is spent."""
+        sid = getattr(self, "_live_session_id", None)
+        self._live_session_id = None
+        if not sid:
+            return
+
+        def work():
+            import quotas
+            try:
+                token = self.auth.get_access_token()
+            except Exception:
+                return
+            quotas.end_live_session(token, sid)
+
+        threading.Thread(target=work, daemon=True, name="gusan-live-session-end").start()
 
     def _on_tray_activated(self, reason):
         # Any direct click on the tray icon opens the app - single, double,
@@ -4872,7 +5013,8 @@ class AppController(QObject):
             logger.debug("Background update check failed: %s", e)
             status, tag = updater.ERROR, ""
         if status == updater.LATEST and sys.platform == "win32":
-            updater.prune_cache()          # up to date: no installer kept in %TEMP%
+            updater.prune_cache()          # up to date: no installer kept in %TEMP%...
+            updater.prune_logs()           # ...nor the log of an install that is over
         self.track("update_check_result", updater.check_props(status, manual=False))
         self._sig_update_checked.emit(status, tag)
 
@@ -4892,8 +5034,16 @@ class AppController(QObject):
             self.sig_setting_changed.emit("pending_update_version")
         if status in (updater.AVAILABLE, updater.DISMISSED) and tag:
             self._prepare_update_on_quit(tag)
-        if not manual and status == updater.AVAILABLE and updater.should_prompt(self.cfg, tag, APP_VERSION):
+        if (not manual and status == updater.AVAILABLE and updater.should_prompt(self.cfg, tag, APP_VERSION)
+                and not AppController._update_quiet_needed(self)):
             self.sig_update_available.emit(tag)
+
+    def _update_quiet_needed(self):
+        """True while no new "Update available" notice may appear: an update is running (a second popup
+        is never wanted), the installer is starting, or the last install stopped and that has not been
+        said yet (the update window then has Try again)."""
+        return bool(getattr(self, "_update_installing", False) or getattr(self, "_update_closing", False)
+                    or getattr(self, "_update_failed_notice", False))
 
     def _prompt_update(self, tag):
         """GUI thread (sig_update_available): ONE quiet notice per run for a
@@ -4912,6 +5062,8 @@ class AppController(QObject):
         if (self.is_rec or AppController._is_meeting_busy(self)
                 or not updater.should_prompt(self.cfg, tag, APP_VERSION)):
             return                              # a meeting: shown after a later dictation
+        if AppController._update_quiet_needed(self):
+            return                              # updating already (or just failed): no second popup
         if getattr(self, "_update_notice_shown", None) == tag:
             return                              # once a run, not after every dictation
         self._update_notice_shown = tag
@@ -4926,7 +5078,8 @@ class AppController(QObject):
         the GUI thread (the dictation worker never waits for it)."""
         pending = self.cfg.get("pending_update_version", "")
         if (not pending or getattr(self, "_update_notice_shown", None) == pending
-                or not updater.should_prompt(self.cfg, pending, APP_VERSION)):
+                or not updater.should_prompt(self.cfg, pending, APP_VERSION)
+                or AppController._update_quiet_needed(self)):
             return
         self._run_on_gui(QTimer.singleShot, 2500, lambda t=pending: self._prompt_update(t))
 
@@ -4935,105 +5088,397 @@ class AppController(QObject):
         """True when release ``tag`` is newer than the running version."""
         return _parse_version(tag) > _parse_version(APP_VERSION)
 
+    # ── Install update: a window from the first click to the restart ──
+    # install_update is the one entry (Settings, the tray notice, the window's Try again). It is a
+    # small state machine on the GUI thread: validate -> fetch (a worker, shared with the quiet fetch
+    # ahead for "Install updates when I quit") -> wait until nothing is running -> hand over to the
+    # installer (a worker: the permission prompt of an all-users install blocks until answered) ->
+    # quit_app. Every timer carries its attempt's number (_update_gen), so one left from a cancelled
+    # attempt never acts on the next.
+    @staticmethod
+    def _update_call(cb, ok, info):
+        """cb(ok, info), never raising."""
+        if callable(cb):
+            try:
+                cb(ok, info)
+            except Exception:
+                logger.debug("update result callback failed", exc_info=True)
+
     def install_update(self, tag, manual=True, on_done=None):
-        """Download, check (sha256 when published) and run the installer for
-        ``tag`` on a worker (updater.install), then quit so it can replace the
-        app. On macOS (no installer to run) the release page opens instead.
-        ``on_done(ok, info)`` runs on the GUI thread when it did NOT install
-        (info: a short message) so a page can say so; without it a tray
-        notification does. False when an install is already running, or when
-        it can't install now (a recording or a file job: installing quits the
-        app) - on_done / the notification then says why."""
-        if getattr(self, "_update_installing", False):
+        """Install release ``tag`` in this copy, with a window from the first click to the restart
+        (ui/update_window.py): download progress with Cancel, the checksum check, "Installing" - Gusan
+        then closes and opens again by itself - or what went wrong with Try again / the download page.
+        GUI thread.
+
+        True: an attempt started. False: nothing started - not a release this copy can install; the
+        download page opened instead (a Mac, the portable zip, python main.py); an attempt is already
+        running (its window comes forward); or a recording / file job has to finish first.
+        ``on_done(ok, info)`` runs once, on the GUI thread, when the attempt ends WITHOUT installing:
+        info is a short message to show, "" for a plain Cancel or a hand-over to the browser. Without
+        it a tray notification says why nothing started."""
+        done = AppController._update_call
+        if not updater.valid_tag(tag) or not AppController._is_newer(tag):
+            done(on_done, False, updater.MSG_NOT_A_RELEASE)
             return False
-        blocked = AppController._update_blocker(self)
+        if sys.platform != "win32" or not updater.can_self_install():
+            # Not a copy that can update itself in place: the release page, in the browser.
+            webbrowser.open(updater.release_page(tag))
+            if not manual:
+                self.track("update_install_started", {"manual": False, "to": tag})
+            self.track("update_install_result", {"manual": bool(manual), "ok": False})
+            self.show_tray_hint(f"{APP_NAME} {tag}", "Opening the download page in your browser.")
+            done(on_done, False, "")
+            return False
+        if self._update_closing:
+            return False                        # the installer runs; Gusan is closing
+        win = self._update_window
+        if self._update_installing:
+            if self._update_asking:
+                return False                    # the question is on screen: nothing else starts
+            if self._update_cancel:
+                # A cancelled download still winding down (a stalled line takes up to 30 s to notice):
+                # start again the moment it has - never two downloads at once.
+                self._update_queued = (tag, bool(manual), on_done)
+                if win is not None:
+                    win.show_downloading()
+            elif callable(on_done):
+                self._update_on_done = on_done  # the newest page's row hears the result
+            if win is not None:
+                self._bring_to_front(win)
+            return False
+        blocked = self._update_blocker()
         if blocked:
             if callable(on_done):
-                try:
-                    on_done(False, blocked)
-                except Exception:
-                    logger.debug("update result callback failed", exc_info=True)
+                done(on_done, False, blocked)
             else:
                 self.show_tray_hint("Update not installed", blocked)
             return False
+        self._update_gen += 1
+        gen = self._update_gen
+        self._update_cancel = False
+        self._update_queued = None
+        self._update_key_asked = False
+        self._update_force = False
         self._update_installing = True
+        self._update_tag, self._update_manual, self._update_on_done = tag, bool(manual), on_done
         if not manual:
             self.track("update_install_started", {"manual": False, "to": tag})
-        ready = getattr(self, "_update_ready", None)
-
-        def _run():
-            try:
-                if ready and ready[0] == tag and os.path.isfile(ready[1]):
-                    ok, info = updater.launch(ready[1])      # fetched ahead already
-                else:
-                    ok, info = updater.install(tag)
-            except Exception as e:
-                logger.warning("Update install failed: %s", e)
-                ok, info = False, "Couldn't install the update."
-            self._run_on_gui(self._on_update_installed, tag, ok, info, manual, on_done)
-        threading.Thread(target=_run, daemon=True).start()
+        win = self._update_window_for(tag)
+        win.show_downloading()
+        self._bring_to_front(win)
+        ready = self._update_ready
+        if ready and ready[0] == tag and os.path.isfile(ready[1]):
+            self._update_handover(gen)          # fetched ahead already: nothing to download
+        elif self._update_fetching and self._update_fetching != tag:
+            self._update_queued = (tag, bool(manual), on_done)      # another release is downloading: after it
+        elif not self._update_fetching:
+            self._start_update_fetch(tag, user=True)
+        # else the quiet fetch ahead of this very release is running: the window joins it
         return True
 
     def _update_blocker(self):
-        """Why an update can't install right now ("" = it can): installing
-        quits the app, which would end a recording or a file being converted."""
+        """Why an update can't install right now ("" = it can): installing quits the app, which would
+        end a recording, a dictation still being transcribed or a file being converted."""
         if getattr(self, "is_rec", False) is True or AppController._is_meeting_busy(self):
             return "Finish the recording first, then install the update."
+        if getattr(self, "_busy", False) is True:
+            return "Wait for your dictation to finish, then install the update."
         if getattr(self, "_file_job_running", False) is True:
             return "Wait for the file to finish converting, then install the update."
         return ""
 
-    def _on_update_installed(self, tag, ok, info, manual, on_done):
-        self._update_installing = False
-        self.track("update_install_result", {"manual": bool(manual), "ok": bool(ok)})
-        if ok:
-            # The installer is running: quit so it can replace the files.
-            self._update_ready = None
-            self.cfg["pending_update_version"] = ""
-            self.flush_config_save()
-            QTimer.singleShot(1500, self.quit_app)
-            return
-        if info == updater.UNSUPPORTED:
-            webbrowser.open(updater.release_page(tag))
-            info = ""
-        if callable(on_done):
-            try:
-                on_done(False, info)
-            except Exception:
-                logger.debug("update result callback failed", exc_info=True)
-        elif info:
-            self.show_tray_hint("Update not installed", info)
+    def _update_stale(self, gen):
+        """The attempt was cancelled or is over, a timer is left from an earlier one, or Gusan quits."""
+        return bool(self._update_cancel or not self._update_installing
+                    or (gen is not None and gen != self._update_gen)
+                    or getattr(self, "_quitting", False))
 
+    def _update_window_for(self, tag):
+        """The update window (built the first time, lazily), set to release ``tag``."""
+        win = self._update_window
+        if win is None:
+            from ui.update_window import UpdateWindow
+            win = UpdateWindow(tag, main_app=self)
+            win.cancel_requested.connect(self._cancel_update)
+            win.install_requested.connect(self._update_install_now)
+            win.retry_requested.connect(self._update_retry)
+            win.website_requested.connect(self._update_open_page)
+            self._update_window = win
+        elif getattr(win, "tag", tag) != tag:
+            win.set_tag(tag)
+        return win
+
+    def _update_done(self, ok, info):
+        """The attempt ended without installing: its on_done, once."""
+        cb, self._update_on_done = self._update_on_done, None
+        AppController._update_call(cb, ok, info)
+
+    def _update_failed(self, message, detail=""):
+        """The attempt ends with a way forward: the window says what went wrong (Try again / the download
+        page / Close), the page's row too. Gusan stays fully usable."""
+        self._update_installing = False
+        self.track("update_install_result", {"manual": bool(self._update_manual), "ok": False})
+        win = self._update_window
+        if win is not None:
+            win.show_failed(message, detail)
+            # Nobody asked for THIS: it may have failed while they dictate or type somewhere else. It comes
+            # up on top, but never takes the keyboard (and its Enter is not theirs).
+            self._bring_to_front(win, activate=False)
+        else:
+            self.show_tray_hint("Update not installed", message)
+        self._update_done(False, message)
+
+    def _cancel_update(self):
+        """Cancel, Esc or the X of the window while it downloads or waits."""
+        if self._update_closing or not self._update_installing:
+            return
+        if self._update_cancel:
+            # Cancelled already; a request made since ("install again" while that download winds down) is
+            # queued behind it: this Cancel is for that one.
+            queued, self._update_queued = self._update_queued, None
+            if queued:
+                if self._update_window is not None:
+                    self._update_window.hide()
+                AppController._update_call(queued[2], False, "")
+            return
+        self._update_cancel = True
+        self._update_queued = None
+        win = self._update_window
+        if win is not None:
+            win.hide()                          # gone at once, even while a stalled line is still being read
+        self._update_done(False, "")
+        if not (self._update_fetching and self._update_fetch_user):
+            self._update_installing = False     # nothing of this attempt is still running
+
+    def _update_install_now(self):
+        """The window's Install now (waiting for a typed key to be saved): go on anyway."""
+        if self._update_closing or not self._update_installing or self._update_cancel:
+            return
+        self._update_force = True
+        self._update_handover(self._update_gen)
+
+    def _update_retry(self):
+        """The window's Try again. While a recording, a dictation or a file job runs the install can't
+        start: the window says so itself (a tray notice alone looked like a button that did nothing)."""
+        blocked = self._update_blocker()
+        win = self._update_window
+        if blocked and win is not None and not self._update_installing and not self._update_closing:
+            win.show_failed(blocked)
+            return
+        self.install_update(self._update_tag, manual=True, on_done=self._update_on_done)
+
+    def _update_open_page(self):
+        """The window's Open the download page."""
+        webbrowser.open(updater.release_page(self._update_tag))
+
+    def _on_update_progress(self, done, total):
+        """GUI thread: the download's progress, for the window."""
+        win = self._update_window
+        if win is not None and self._update_installing and not self._update_cancel:
+            win.show_progress(done, total)
+
+    def _update_poll(self, gen):
+        QTimer.singleShot(2000, lambda g=gen: self._update_handover(g))
+
+    def _update_unsaved_edits(self):
+        """A page has typed-but-unsaved work (a key in Settings > My API keys): installing closes Gusan
+        and it would be lost. Pages tell through an optional ``unsaved_edits()``."""
+        mw = getattr(self, "main_win", None)
+        if mw is None:
+            return False
+        try:
+            for page in mw.pages().values():
+                hook = getattr(page, "unsaved_edits", None)
+                if callable(hook) and hook():
+                    return True
+        except Exception:
+            logger.debug("unsaved-edits check failed", exc_info=True)
+        return False
+
+    def _ask_install_with_unsaved_key(self, win):
+        """The one question of an update: "install" or anything else (Not yet, Esc). Over the update window."""
+        from ui.components import mini_prompt
+        return mini_prompt.choose(
+            win, "Install the update now?",
+            f"The key you typed isn't saved yet. If you install now, {APP_NAME} closes and it is lost.",
+            [("install", "Install now", "primary"), ("wait", "Not yet", "secondary")],
+            default="wait", icon="download")
+
+    def _update_handover(self, gen=None):
+        """The installer is downloaded and checked: hand over to it. Re-armed every 2 s while it has to
+        wait. Never while a recording, transcription, meeting or file job runs (one may have started
+        during the download): the window then says so and waits. A typed-but-unsaved API key is asked
+        about once."""
+        if self._update_closing or self._update_stale(gen):
+            return
+        win = self._update_window
+        ready = self._update_ready
+        if not ready or ready[0] != self._update_tag or not os.path.isfile(ready[1]):
+            self._update_ready = None
+            self._update_failed(updater.MSG_FILE_MISSING)
+            return
+        if self._update_blocker():
+            win.show_waiting()
+            self._update_poll(gen)
+            return
+        if self._update_unsaved_edits() and not self._update_force:
+            if not self._update_key_asked:
+                self._update_key_asked = True
+                self._update_asking = True
+                try:
+                    answer = self._ask_install_with_unsaved_key(win)
+                finally:
+                    self._update_asking = False
+                if self._update_stale(gen):
+                    return                      # cancelled (or Gusan quit) while asking: nothing installs
+                if answer == "install":
+                    self._update_force = True
+                    self._update_handover(gen)  # the question ran its own loop: everything again
+                    return
+            # "Not yet": it goes on by itself once the key is saved, or at the window's Install now.
+            win.show_waiting(can_install=True)
+            self._update_poll(gen)
+            return
+        self._update_start_installer(ready[1])
+
+    def _update_start_installer(self, path):
+        all_users = bool(updater.is_all_users_install())
+        # FIRST, so that no dictation, meeting or file job can start while a permission prompt is open.
+        self._update_closing = True
+        win = self._update_window
+        win.show_installing(admin=all_users)
+        # Not activated: the handover may come minutes after the click (it waited for a recording), and
+        # whatever they are typing in meanwhile must not land in this window.
+        self._bring_to_front(win, activate=False)
+        log = updater.new_log_path()
+
+        def _run():
+            watcher = None
+            try:
+                if updater.setup_running() is True:
+                    # Never two Setups at once (a hand-started installer, an earlier install still going).
+                    ok, info = False, updater.MSG_SETUP_RUNNING
+                else:
+                    # An all-users install asks Windows for permission here: blocks until it is answered.
+                    # A per-user Setup reopens Gusan itself when it succeeds.
+                    ok, info = updater.launch_installer(path, all_users=all_users, log_path=log,
+                                                        relaunch=not all_users)
+                    if ok:
+                        # ...and this watcher, as THIS user, reopens it whatever happens to Setup: a failed
+                        # install, an all-users one (an elevated Setup cannot start anything as the person).
+                        watcher = updater.spawn_relauncher(sys.executable, log)
+            except Exception:
+                logger.warning("Starting the installer failed", exc_info=True)
+                ok, info = False, updater.MSG_NO_START
+            self._run_on_gui(self._on_update_launched, ok, info, log, all_users, watcher is not None)
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_update_launched(self, ok, info, log, all_users, watcher_started):
+        """GUI thread: the installer was (not) started."""
+        if not ok:
+            # The permission prompt said No, or Windows / an antivirus refused: nothing was started
+            # and nothing will reopen, so Gusan simply carries on.
+            self._update_closing = False
+            self._update_failed(info)
+            return
+        self._update_ready = None
+        # Still an older version at the next start = the install stopped: said then (_after_restart_checks).
+        # pending_update_version stays until the new version actually runs.
+        self.cfg["update_attempt"] = {"to": self._update_tag, "log": log, "from": APP_VERSION}
+        self.flush_config_save()
+        self.track("update_install_result", {"manual": bool(self._update_manual), "ok": True})
+        delay = 1500
+        if all_users and not watcher_started:
+            # Nothing can reopen it as this user: say so, and long enough to be read.
+            win = self._update_window
+            if win is not None:
+                win.show_installing(reopens=False)         # (the permission question is answered by now)
+            delay = 5000
+        # quit_app: services shut down and a meeting is saved; the update window never vetoes it.
+        QTimer.singleShot(delay, self.quit_app)
+
+    # ── the download: one worker for the update window and for "Install updates when I quit" ──
     def _prepare_update_on_quit(self, tag):
-        """"Install updates when I quit" (Windows): fetch and check the
-        installer now, on a worker, so quitting only has to start it. It is
-        kept per release in %TEMP%\\gusan-update\\<tag>\\ and reused by the
-        next runs once its sha256 checks out (updater.cached_download) - not
-        ~100 MB downloaded again every launch."""
+        """"Install updates when I quit" (Windows): fetch and check the installer now, on a worker, so
+        quitting only has to start it. It is kept per release in %TEMP%\\gusan-update\\<tag>\\ and reused
+        by the next runs once its sha256 checks out (updater.cached_download) - not ~100 MB downloaded
+        again every launch. Only a copy that can update itself in place."""
         if sys.platform != "win32" or not self.cfg.get("install_updates_on_quit", True):
             return
+        if not updater.can_self_install():
+            return              # the portable zip / python main.py: nothing to run at Quit
         if not updater.should_prompt(self.cfg, tag, APP_VERSION):
             return              # not newer, or a version the user skipped
-        ready = getattr(self, "_update_ready", None)
-        if (ready and ready[0] == tag) or getattr(self, "_update_fetching", None) == tag:
+        if self._update_installing or self._update_closing:
+            return              # the update window is fetching it
+        ready = self._update_ready
+        if (ready and ready[0] == tag) or self._update_fetching == tag:
             return
+        self._start_update_fetch(tag, user=False)
+
+    def _start_update_fetch(self, tag, user):
+        """One worker fetches (or finds, already kept) the installer of release ``tag``: quietly ahead
+        for Quit (``user`` False), or behind the update window (``user`` True: its Cancel stops it).
+        Progress goes to the window while an attempt is live. False when a fetch already runs."""
+        if self._update_fetching:
+            return False
         self._update_fetching = tag
+        self._update_fetch_user = bool(user)
+        self._update_progress_at = 0.0
+
+        def stop():
+            return bool(getattr(self, "_quitting", False) or (user and self._update_cancel))
+
+        def progress(done, total):
+            if not self._update_installing or self._update_cancel:
+                return          # nobody is watching (the quiet fetch ahead)
+            # At most 10 a second (a fast line reads ~100 chunks a second), and always the last.
+            now = time.monotonic()
+            last = bool(total) and done >= total
+            if not last and now - self._update_progress_at < 0.1:
+                return
+            self._update_progress_at = now
+            self._run_on_gui(self._on_update_progress, done, total)
 
         def _run():
             try:
-                # Its own folder: an "Install now" download never writes the same file.
-                ok, info = updater.cached_download(tag)
+                ok, info = updater.cached_download(tag, on_progress=progress, should_cancel=stop)
             except Exception as e:
-                ok, info = False, str(e)
+                logger.warning("Update download failed: %s", e, exc_info=True)
+                ok, info = False, updater.MSG_NETWORK
             self._run_on_gui(self._on_update_fetched, tag, ok, info)
         threading.Thread(target=_run, daemon=True).start()
+        return True
 
     def _on_update_fetched(self, tag, ok, info):
+        """GUI thread: the fetch ended. A live attempt goes on (or fails); a cancelled one ends - a
+        download that finished as Cancel landed wins for Cancel, but the file is kept for Quit - and a
+        request queued behind it starts now."""
         self._update_fetching = None
+        self._update_fetch_user = False
         if ok:
             self._update_ready = (tag, info)
+        elif info != updater.CANCELLED:
+            logger.info("Update %s not fetched: %s", tag, info)
+        queued, self._update_queued = self._update_queued, None
+        if not self._update_installing:
+            return              # the quiet fetch ahead: nobody waits for it
+        if queued:
+            # A cancelled download has wound down (or another release's): the new request starts now.
+            self._update_installing = False
+            QTimer.singleShot(0, lambda q=queued: self.install_update(q[0], q[1], on_done=q[2]))
+            return
+        if self._update_cancel or tag != self._update_tag:
+            self._update_installing = False
+            return
+        if ok:
+            self._update_handover(self._update_gen)
+        elif info == updater.CANCELLED:
+            self._update_installing = False     # Gusan is quitting
+            if self._update_window is not None:
+                self._update_window.hide()
         else:
-            logger.info("Update %s not fetched ahead: %s", tag, info)
+            self._update_failed(info)
 
     def _on_own_setting_changed(self, key):
         """sig_setting_changed for the controller's own services."""
@@ -5043,33 +5488,145 @@ class AppController(QObject):
                 self._prepare_update_on_quit(pending)
 
     def _run_update_on_quit(self):
-        """quit_app: start the installer fetched ahead, when the setting is on
-        and it is still newer than this version."""
-        ready, self._update_ready = getattr(self, "_update_ready", None), None
+        """quit_app: start the installer fetched ahead, when the setting is on and it is still newer
+        than this version - quietly (Setup's small progress window), for this user only, and without
+        reopening Gusan: the person chose to quit. Never for a copy that can't update itself in place
+        (portable zip, python main.py), and never for an all-users copy: Quit must not raise a Windows
+        permission prompt - those keep the Install update button."""
+        ready, self._update_ready = self._update_ready, None
+        if self._update_closing:
+            return              # the update window has handed over already
         if not ready or not self.cfg.get("install_updates_on_quit", True):
             return
         tag, path = ready
         # Still newer, not skipped meanwhile, and still on disk.
         if not (updater.should_prompt(self.cfg, tag, APP_VERSION) and os.path.isfile(path)):
             return
+        if not updater.can_self_install() or updater.is_all_users_install():
+            return
+        last = self.cfg.get("update_attempt")
+        if isinstance(last, dict) and last.get("failed") and last.get("to") == tag:
+            # This release's install at Quit stopped last time (said at the start after it): quitting does
+            # not try it again - and again - behind their back. Install update is theirs to press.
+            logger.info("Update on quit skipped: the install of %s stopped before", tag)
+            return
+        if updater.setup_running() is True:
+            logger.info("Update on quit skipped: a Gusan installer is still running")
+            return
         self.track("update_install_started", {"manual": False, "to": tag})
-        ok, _info = updater.launch(path)
+        log = updater.new_log_path()
+        ok, info = updater.launch_installer(path, all_users=False, log_path=log, relaunch=False)
         self.track("update_install_result", {"manual": False, "ok": bool(ok)})
         if ok:
-            self.cfg["pending_update_version"] = ""
+            # A failed install is said at the next start; pending_update_version stays until then.
+            self.cfg["update_attempt"] = {"to": tag, "log": log, "from": APP_VERSION, "quit": True}
             self.schedule_config_save()           # quit_app flushes it right after
+        else:
+            logger.info("Update on quit did not start: %s", info)
+
+    # ── after the restart: it worked, or it stopped - never silence ──
+    def _clear_update_attempt(self):
+        self.cfg["update_attempt"] = {}
+        save_config(self.cfg)
+
+    def _after_restart_checks(self):
+        """At start (GUI thread, the tray exists). The in-app install handed to Setup last time
+        (cfg["update_attempt"]): this version has caught up with it = it worked - say so once and tidy
+        %TEMP%; still older and Setup not running = it stopped, and that is said once (a window with
+        Try again for a Install update; a tray notice for one at Quit). While Setup still runs (Gusan
+        was opened by hand meanwhile) nothing is said and the record stays. Nothing was handed over:
+        nothing happens."""
+        try:
+            attempt = self.cfg.get("update_attempt") or {}
+            if not isinstance(attempt, dict) or not attempt:
+                return
+            tag = str(attempt.get("to") or "")
+            if not updater.valid_tag(tag):
+                self._clear_update_attempt()
+                return
+            if not AppController._is_newer(tag):
+                self._clear_update_attempt()
+                QTimer.singleShot(2500, lambda: self.show_tray_hint(
+                    f"{APP_NAME} is up to date", f"Updated to version {APP_VERSION}."))
+                QTimer.singleShot(30_000, self._tidy_update_files)      # once Setup has surely exited
+                return
+            if attempt.get("failed"):
+                return          # an install at Quit that stopped: said once already, kept only so Quit won't retry it
+            log = str(attempt.get("log") or "")
+            if log and os.path.exists(log) and updater.install_running(log):
+                return
+            # Until it is said, no "Update available" notice: the window / notice has Try again.
+            self._update_failed_notice = True
+            QTimer.singleShot(3000, lambda a=dict(attempt): self._show_update_failed_after_restart(a))
+        except Exception:
+            logger.warning("The after-update check failed", exc_info=True)
+
+    def _show_update_failed_after_restart(self, attempt):
+        """The install stopped before it finished. Said once, and never over an update started since."""
+        self._update_failed_notice = False
+        tag = str(attempt.get("to") or "")
+        if tag and attempt.get("quit"):
+            # An install at Quit that stopped: remembered (until the person installs it themself or the
+            # release is installed some other way), so that the next Quit doesn't start the same install again.
+            self.cfg["update_attempt"] = {"to": tag, "from": str(attempt.get("from") or ""), "quit": True,
+                                          "failed": True}
+            save_config(self.cfg)
+        else:
+            self._clear_update_attempt()
+        if not tag or self._update_installing or self._update_closing:
+            return
+        log = str(attempt.get("log") or "")
+        if attempt.get("quit") or self._update_blocker():
+            # The install at Quit: no window was open then; one notice, whose click tries again. The same
+            # when they are dictating or recording right now - a window popping up then would be in their way.
+            self.show_tray_hint(f"{APP_NAME} didn't update",
+                                f"The update to {tag} stopped before it finished. Click to try again.",
+                                on_click=lambda t=tag: self.install_update(t, manual=True))
+            return
+        self._update_tag, self._update_manual, self._update_on_done = tag, True, None
+        win = self._update_window_for(tag)
+        win.show_failed("The installer stopped before it finished.",
+                        f"Details: {log}" if log and os.path.exists(log) else "")
+        # It opens by itself, seconds after Gusan started: never over what they are typing.
+        self._bring_to_front(win, activate=False)
+
+    def _tidy_update_files(self):
+        """Gusan runs the new version: the installer and the logs it left in %TEMP% are not needed - except
+        the installer of a release fetched in the 30 seconds since (the new version may already have found
+        the next one, and a second download costs ~100 MB)."""
+        if sys.platform != "win32":
+            return
+        ready = self._update_ready
+        keep = (ready[0] if ready else "") or self._update_fetching or None
+
+        def _run():
+            try:
+                updater.prune_cache(keep=keep)
+                updater.prune_logs()
+            except Exception:
+                logger.debug("tidying the update files failed", exc_info=True)
+        threading.Thread(target=_run, daemon=True).start()
 
     # ── Modular Window Surface Triggers (Main thread-safe wrappers) ──
     @staticmethod
-    def _bring_to_front(w):
+    def _bring_to_front(w, activate=True):
         """Reliably surface a window. A minimized window ignores plain show() on
         Windows - which made tray clicks look like they did nothing - and a
-        window behind others needs the raise+activate pair."""
+        window behind others needs the raise+activate pair. ``activate`` False
+        (a window nobody just asked for - an update that failed on its own, say):
+        it comes up on top but the keyboard stays where it was, so a dictation
+        or a sentence being typed never lands in it."""
+        set_attribute = getattr(w, "setAttribute", None)
+        if callable(set_attribute):
+            set_attribute(Qt.WA_ShowWithoutActivating, not activate)
         if w.isMinimized():
+            if not activate:
+                return                  # they put it away: showing it again would take the keyboard
             w.showNormal()
         w.show()
         w.raise_()
-        w.activateWindow()
+        if activate:
+            w.activateWindow()
 
     def _ensure_main_window(self):
         """The Gusan window (ui/shell.py), built the first time it opens -
@@ -5520,12 +6077,11 @@ class AppController(QObject):
 
     def _on_smart_hotkey(self):
         """GUI thread: the Smart Actions shortcut. Starts ONE take that runs
-        as a Smart Action - Pro always; Free while tries are left (the try is
-        counted when it finishes, _stop_impl); Free with none left gets the
-        Pro window; a guest the sign-up sheet. Pressed while recording it
-        just stops the take, which keeps the kind it started with (so does
-        Alt+R). While a meeting records, only the quiet "paused" hint
-        (_on_hotkey) - never the Pro window or sign-up over a meeting."""
+        as a Smart Action. Signed-in people have unlimited Smart Actions (local
+        or their own key). A guest gets the sign-up sheet. Pressed while
+        recording it just stops the take, which keeps the kind it started with
+        (so does Alt+R). While a meeting records, only the quiet "paused" hint
+        (_on_hotkey) - never the sign-up sheet over a meeting."""
         was_rec = self.is_rec
         if not was_rec:
             if getattr(self, "_hotkeys_suspended", False) is True:
@@ -5534,11 +6090,8 @@ class AppController(QObject):
                 pass                # no take can start: _on_hotkey says why
             elif not self.is_pro():
                 auth_now, cfg_now = getattr(self, "auth", None), getattr(self, "cfg", None)
-                if entitlements.tier(auth_now, cfg_now) == entitlements.TIER_GUEST:
-                    self.show_auth_gate()       # signing up gives the free tries
-                    return
                 if not entitlements.can_use_smart_action(auth_now, cfg_now):
-                    self._pro_upsell("Smart Actions")
+                    self.show_auth_gate()
                     return
             self._smart_next = True
         try:
@@ -5951,6 +6504,10 @@ class AppController(QObject):
     def _start(self):
         if self.is_rec:
             return
+        # The installer is running and Gusan closes in a moment: nothing new starts.
+        if getattr(self, "_update_closing", False) is True:
+            self.show_tray_hint(updater.UPDATING_TITLE, updater.UPDATING_TEXT)
+            return
         # A file transcription owns the shared Whisper model right now -
         # starting a dictation would just hang on the inference lock until the
         # whole file is done (potentially an hour of "Finalising…").
@@ -6274,6 +6831,20 @@ class AppController(QObject):
                     ((self.cfg.get("action_api_key") or "") or (self.cfg.get("google_api_key") or "")).strip())
                 if m_kind in ("rules", "managed") or (m_kind == "cloud" and not has_own_cloud_key):
                     action_model = actions.API_MANAGED_ID
+        # A free Live Assistant session (one a month) may use Gusan Cloud for
+        # its answers. The id is what the server checks. Local / privacy stays local.
+        sid = getattr(self, "_live_session_id", None)
+        if sid and not self.cfg.get("privacy_mode") and self.cfg.get("live_assist_writer") != "local":
+            token = action_config.get("_managed_token") if isinstance(action_config, dict) else None
+            if not token:
+                try:
+                    token = self.auth.get_access_token()
+                except Exception:
+                    token = None
+            if token:
+                action_config = {**self.cfg, "_managed_token": token, "_live_session_id": sid}
+                if not self.is_pro():
+                    action_model = actions.API_MANAGED_ID
         return action_model, action_config
 
     def _stop(self):
@@ -6432,30 +7003,16 @@ class AppController(QObject):
         action_mode = oneshot or actions.ACTION_TRANSCRIBE_ONLY
         output_text = text
 
-        # Smart Actions: Pro = unlimited; everyone else gets 5 free tries. The
-        # shortcut already checked at the press (_on_smart_hotkey); this is
-        # the backstop for tries that ran out meanwhile - then the exact words
-        # are pasted. A try is counted quietly (the counter is on the Smart
-        # Actions page).
+        # Smart Actions are unlimited once you're signed in. A guest (the
+        # shortcut already sent them to sign-in) gets their exact words.
         if action_mode != actions.ACTION_TRANSCRIBE_ONLY and not self.is_pro():
-            if entitlements.can_use_smart_action(self.auth, self.cfg):
-                entitlements.add_smart_action_use(self.auth)
-                # Pages redraw the tries counter (Smart Actions, Account & plan).
-                self.sig_auth_changed.emit()
-            else:
+            if not entitlements.can_use_smart_action(self.auth, self.cfg):
                 action_mode = actions.ACTION_TRANSCRIBE_ONLY
-                if entitlements.tier(self.auth, self.cfg) == entitlements.TIER_GUEST:
-                    self.overlay.call_soon(
-                        self.show_tray_hint,
-                        "Sign up free for 5 Smart Actions",
-                        "Pasted your exact words.",
-                    )
-                else:
-                    self.overlay.call_soon(
-                        self.show_tray_hint,
-                        "Free Smart Actions used up",
-                        "Pasted your exact words. Pro has unlimited Smart Actions.",
-                    )
+                self.overlay.call_soon(
+                    self.show_tray_hint,
+                    "Sign in to use Smart Actions",
+                    "Pasted your exact words.",
+                )
 
         pill_kind = None
         if action_mode != actions.ACTION_TRANSCRIBE_ONLY:
@@ -6550,6 +7107,8 @@ class AppController(QObject):
         """What quitting now would end, as one plain sentence ("" = nothing):
         a meeting or Live Assistant session recording or writing its notes, or
         a file being converted."""
+        if getattr(self, "_update_closing", False) is True:
+            return ""           # the installer is running: asking now would only make Setup force Gusan shut
         s = getattr(self, "meeting_session", None)
         if s is not None and getattr(s, "is_busy", False):
             if getattr(s, "state", None) == "recording":
@@ -7114,10 +7673,12 @@ class AppController(QObject):
 
     def record_from_calendar(self, meeting, with_assist=False):
         """Record a Google Calendar meeting (the reminder's Record / Record +
-        Live Assistant): Pro gate, the one-time consent notice, then the
-        meeting session starts with the meeting's title, people and event id
-        and the Meetings page shows it live. ``with_assist`` also opens the
-        Live Assistant card. Returns True when the recording started."""
+        Live Assistant): the one-time consent notice, then the meeting session
+        starts with the meeting's title, people and event id and the Meetings
+        page shows it live. Recording is free. Record + Live Assistant on a
+        free plan spends this month's one Live Assistant session first.
+        ``with_assist`` also opens the Live Assistant card. Returns True when
+        the recording started."""
         m = dict(meeting or {})
         toast = getattr(self, "_reminder", None)
         if toast is not None:
@@ -7125,9 +7686,10 @@ class AppController(QObject):
                 toast.hide_reminder()
             except RuntimeError:
                 pass
-        if not self.is_pro():
-            self._pro_upsell("Meeting recording")
-            if not self.is_pro():
+        if with_assist and not self.is_pro():
+            claimed = self.claim_live_session()
+            if not (isinstance(claimed, dict) and claimed.get("ok")):
+                self._pro_upsell("Live Assistant")
                 return False
         # The one place the meeting's words are cleaned (calendar_start_context): the
         # title, the people on the invite (you included - the notes say who is who)
@@ -7301,6 +7863,27 @@ def _bucket_count(value):
     return "> 2500"
 
 
+def _running_update_install(config=None):
+    """The in-app install (cfg["update_attempt"]) that is still replacing this copy's files while THIS
+    version starts, else None. Starting then would lock the very files Setup copies - it stops halfway,
+    or closes this copy again and nothing reopens it. Not when this version has already caught up with
+    the attempt (it IS the updated app, started by Setup while Setup is still exiting), and not for a
+    Setup that has been silent for ten minutes (a stuck installer must never keep Gusan from opening)."""
+    try:
+        attempt = (cfg if config is None else config).get("update_attempt")
+        if not isinstance(attempt, dict) or attempt.get("failed"):
+            return None
+        tag, log = str(attempt.get("to") or ""), str(attempt.get("log") or "")
+        if not log or not updater.valid_tag(tag) or _parse_version(tag) <= _parse_version(APP_VERSION):
+            return None
+        if not os.path.exists(log) or time.time() - os.path.getmtime(log) > 600:
+            return None
+        return attempt if updater.install_running(log) else None
+    except Exception:
+        logger.debug("could not tell whether an install is still running", exc_info=True)
+        return None
+
+
 # ── Main Entrypoint ───────────────────────────────────────────────────────────
 def main():
     # 1. IPC Single-Instance check
@@ -7310,6 +7893,18 @@ def main():
         action = launch_action(sys.argv)
         if action:
             signal_running_instance(action)
+        sys.exit(0)
+
+    # 1b. Setup is still replacing this copy's files (an in-app update that is still going, and Gusan was
+    # started by hand meanwhile): step aside before anything is loaded or locked. What reopens Gusan once
+    # Setup ends: for the update window's install Setup itself (per user) and its watcher; for the install
+    # at Quit nobody - a watcher is started here (it also waits for this process to be gone).
+    running = _running_update_install()
+    if running is not None:
+        logger.info("An update install is still running - not starting now")
+        if running.get("quit"):
+            updater.spawn_relauncher(sys.executable, str(running.get("log") or ""))
+        lock_sock.close()
         sys.exit(0)
 
     # A GPU-acceleration removal scheduled last run (its DLLs were loaded):

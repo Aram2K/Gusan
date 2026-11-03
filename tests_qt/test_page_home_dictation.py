@@ -544,15 +544,20 @@ def test_service_signals_connect_once_and_go_with_the_page(qapp, pin_clock):
     app.downloads = FakeDownloads()
     app.calendar = FakeCalendar(connected=True)
     progress = SIGNAL("progress(QString,int,int,int)")
+    changed = SIGNAL("changed(QVariantList)")
     for mod in (home, dictation):
         page = mod.create(app)
         page.sync_io = True
         page.on_open()
         page.on_open()
         assert app.downloads.receivers(progress) == 1, mod.__name__
+        if mod is home:                                     # the Next chip and the Coming up section: once each
+            assert app.calendar.receivers(changed) == 2
+            assert page.upcoming is not None
         page.deleteLater()
         QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         assert app.downloads.receivers(progress) == 0, mod.__name__
+        assert app.calendar.receivers(changed) == 0, mod.__name__
     app.downloads.progress.emit("small", 50, 1, 2)          # nothing left to call: no error
     app.calendar.changed.emit([])
 

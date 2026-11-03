@@ -413,7 +413,7 @@ class TestEntitlementStatus(_AuthCase):
                                        "current_period_end": "2026-10-10T00:00:00Z"}])]
         self.assertTrue(m.refresh_entitlement())
         self.assertEqual((m.plan, m.subscription_status), ("annual", "trialing"))
-        self.assertTrue(m.on_trial)
+        self.assertFalse(m.on_trial)                            # trials no longer grant a banner
         m._clear_local()
         self.assertIsNone(m.subscription_status)
         self.assertFalse(m.on_trial)
@@ -425,7 +425,7 @@ class TestEntitlementStatus(_AuthCase):
         m._set_entitlement(True, "monthly", None, False)            # an older RPC: no status
         self.assertIsNone(m.subscription_status)
         m._set_entitlement(True, "trial", None, False)             # the retired in-app trial
-        self.assertTrue(m.on_trial)
+        self.assertFalse(m.on_trial)
         m._set_entitlement(False, None, None, False, status="trialing")
         self.assertFalse(m.on_trial)                                # not Pro: no trial to show
         m._set_entitlement(True, "annual", None, False, status=42)

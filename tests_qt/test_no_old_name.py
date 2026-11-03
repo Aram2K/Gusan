@@ -182,6 +182,32 @@ def test_the_meetings_live_and_notes_views(quiet, meetings_root):
     assert_no_old_name("Meetings notes view", visible_strings(page))
 
 
+def test_the_update_window_in_every_stage(quiet):
+    """The in-app update window (ui/update_window.py): its title, every stage's words and buttons."""
+    from ui.update_window import UpdateWindow
+    w = UpdateWindow("v2.0.2")
+    quiet.append(w)
+    w.show()
+    mb = 2 ** 20
+    seen = set()
+    for name, go in (("downloading", lambda: w.show_downloading()),
+                     ("progress", lambda: w.show_progress(45 * mb, 100 * mb)),
+                     ("checking", lambda: w.show_progress(100 * mb, 100 * mb)),
+                     ("waiting", lambda: w.show_waiting()),
+                     ("waiting for a typed key", lambda: w.show_waiting(can_install=True)),
+                     ("installing", lambda: w.show_installing()),
+                     ("installing as administrator", lambda: w.show_installing(admin=True)),
+                     ("installing, nothing reopens it", lambda: w.show_installing(reopens=False)),
+                     ("failed", lambda: w.show_failed("Couldn't download the update.", "Details: C:\\x.log"))):
+        go()
+        QApplication.processEvents()
+        strings = visible_strings(w)
+        assert len(strings) > 3, name
+        assert_no_old_name("the update window (%s)" % name, strings)
+        seen.update(strings)
+    assert "Updating Gusan" in seen and "Try again" in seen
+
+
 # ── the welcome, the sign-in sheet, the Pro window ───────────────────────────
 @pytest.mark.parametrize("tier", ["guest", "pro"])
 def test_every_step_of_the_welcome(quiet, tier):

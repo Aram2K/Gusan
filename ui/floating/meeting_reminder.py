@@ -196,9 +196,7 @@ def glyph(name, size=16, color="muted", sw=1.8):
 
 def call_name(kind):
     """What the meta line calls the service ("" without a link; "other" has no brand)."""
-    if not kind:
-        return ""
-    return "Video call" if kind == calendar_sync.CALL_OTHER else str(kind)
+    return calendar_sync.call_label(kind)
 
 
 def call_mark_pixmap(kind, size=18):
@@ -759,23 +757,6 @@ class MeetingReminder(QWidget):
     def _on_record(self, with_assist):
         m = self._meeting
         if m is None or self._upselling:
-            return
-        if not self._is_pro():
-            self._upselling = True
-            try:
-                self._hide_quietly()
-                _call(self.app, "_pro_upsell", FEATURE_ASSIST if with_assist else FEATURE_RECORD)
-            finally:
-                self._upselling = False
-            if self._is_pro():
-                self._finish("record")
-                self.record.emit(m, bool(with_assist))
-            elif self.still_due():
-                self.refresh_account()
-                self._update_when()
-                self._show_now()
-            else:
-                self._finish("expired")
             return
         self._finish("record")
         self.record.emit(m, bool(with_assist))

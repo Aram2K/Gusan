@@ -97,6 +97,10 @@ signal of the object (checked on PySide6 6.8.2).
      every event that isn't cancelled, all-day, declined, focus time ... counts.
 8. Home "Next:" chip and tray "Next:" row: ``calendar.next_meeting()`` on
    ``changed``; update one kept QAction instead of rebuilding the tray menu.
+   Home's "Coming up" section (ui/pages/home_upcoming.py, above Recent) reads
+   ``meetings()`` - the Meetings page's own list - on changed / connected /
+   disconnected / connecting / status / error, when Home opens or is shown, and on
+   Home's 60 s tick; it never calls ``refresh()`` (no network from Home).
 
 Signals (all delivered on the GUI thread): changed(list), connected(str email),
 disconnected(str reason: "user" | "expired" | "account"), error(str),

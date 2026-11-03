@@ -224,6 +224,7 @@ _BUSY_LOCAL = {
 BUSY_CLOUD = "Gusan is converting a file. Try again when it's done."
 MSG_RECORDING = "Finish the recording first. Audio to text uses the same speech model."
 MSG_OTHER_JOB = "A file is already being converted. Wait for it to finish."
+MSG_UPDATING = "Gusan is updating. It closes and opens again in a moment."
 MSG_NO_AUDIO = "No audio could be read from this file."
 MSG_UNREADABLE = "This file couldn't be read. It may be damaged or not an audio or video file."
 MSG_MEMORY = "There isn't enough free memory to read this file. Close some apps and try again."
@@ -334,6 +335,8 @@ def refusal_message(app):
     recorder and its model are shared with dictation and meetings."""
     if app is None:
         return ""
+    if getattr(app, "_update_closing", False) is True:     # the installer is running: Gusan closes in a moment
+        return MSG_UPDATING
     if getattr(app, "is_rec", False) or getattr(app, "_busy", False):
         return MSG_RECORDING
     busy = getattr(app, "_is_meeting_busy", None)

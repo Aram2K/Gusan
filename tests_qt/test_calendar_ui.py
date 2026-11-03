@@ -663,7 +663,7 @@ def test_an_expired_grant_says_so_on_the_card_and_in_the_rail(shell, at_noon):
     cal.connect_calendar()                                       # connecting
     assert lv.connect_card.sub.text().startswith("Waiting for Google")
     cal.cancel_connect()
-    assert lv.connect_card.sub.text() == "See your meetings and get a nudge to record."
+    assert lv.connect_card.sub.text() == "See your meetings and get a reminder to record."
     assert lv.rail.cal_row.hint_label.text() == ""
 
 
@@ -675,7 +675,7 @@ def test_a_users_own_disconnect_leaves_no_expiry_line(shell, at_noon):
     cal.is_connected = True
     cal.connected.emit("aram@aibuben.xyz")
     cal.disconnect_calendar("user")
-    assert lv.connect_card.sub.text() == "See your meetings and get a nudge to record."
+    assert lv.connect_card.sub.text() == "See your meetings and get a reminder to record."
     assert lv.rail.cal_row.hint_label.text() == ""
 
 
@@ -710,7 +710,7 @@ def test_a_failed_connect_error_stays_on_the_card_until_the_next_try(shell, at_n
     cal.connecting.emit(True)
     assert lv.connect_card.sub.text().startswith("Waiting for Google")
     cal.connecting.emit(False)
-    assert lv.connect_card.sub.text() == "See your meetings and get a nudge to record."
+    assert lv.connect_card.sub.text() == "See your meetings and get a reminder to record."
 
 
 # ── a calendar invite's title and names are text, never markup ───────────────

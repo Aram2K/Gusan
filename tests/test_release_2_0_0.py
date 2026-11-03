@@ -242,7 +242,7 @@ class TestNameAndVersion(unittest.TestCase):
     def test_app_name_and_version(self):
         import app_info
         self.assertEqual(app_info.APP_NAME, "Gusan")
-        self.assertEqual(app_info.APP_VERSION, "2.0.1")
+        self.assertEqual(app_info.APP_VERSION, "2.1.0")
 
     def test_version_is_plain_three_numbers(self):
         # main._parse_version reads a suffix such as "2.0.0-beta.1" as (0, 0, 0).
@@ -412,6 +412,48 @@ class TestInstaller(unittest.TestCase):
         icons = [_expand(e["Name"], self.defines) for e in _entries(self.text, "Icons")]
         self.assertEqual(icons, ["{group}\\Gusan", "{group}\\Uninstall Gusan", "{autodesktop}\\Gusan"])
 
+    def test_an_in_app_update_can_name_its_install_mode_and_reopen_gusan(self):
+        """What the update window's quiet install (updater.install_command) relies on."""
+        import updater
+        setup = _setup(self.text)
+        self.assertEqual(updater.APP_ID, V1_APP_ID[1:])     # the uninstall key it reads is this installer's (the {{ is Inno's escape)
+        self.assertEqual(setup["PrivilegesRequired"].lower(), "lowest")
+        # /CURRENTUSER and /ALLUSERS are only certain to be honoured with "commandline".
+        self.assertIn("commandline", setup["PrivilegesRequiredOverridesAllowed"].split())
+        self.assertIn("dialog", setup["PrivilegesRequiredOverridesAllowed"].split())     # the wizard still asks
+        run = _entries(self.text, "Run")
+        relaunch = [e for e in run if e.get("Check") == "RelaunchAfterUpdate"]
+        self.assertEqual(len(relaunch), 1)
+        flags = relaunch[0]["Flags"].split()
+        self.assertEqual(relaunch[0]["Parameters"], "--show-settings")
+        self.assertIn("runasoriginaluser", flags)         # as the person, never as the administrator who approved
+        self.assertIn("nowait", flags)
+        self.assertNotIn("postinstall", flags)
+        self.assertNotIn("skipifsilent", flags)           # it runs in a silent install, when asked to
+        self.assertIn("{param:relaunch|0}", self.text)    # asked by updater's /relaunch=1 only
+        self.assertIn("/relaunch=1", updater.install_command("x.exe", relaunch=True, log_path="l")[2])
+        func = self.text[self.text.index("function RelaunchAfterUpdate"):]
+        self.assertIn("WizardSilent", func.split("end;")[0])
+        # A plain silent deployment still doesn't start the app; the wizard's own Launch box keeps working.
+        post = [e for e in run if "postinstall" in e.get("Flags", "")]
+        self.assertEqual(len(post), 1)
+        self.assertIn("skipifsilent", post[0]["Flags"].split())
+
+    def test_two_setups_never_run_at_once(self):
+        # An installer started by hand while an in-app update is still copying files would copy over it.
+        self.assertEqual(_setup(self.text).get("SetupMutex"), "GusanSetupMutex")
+
+    def test_an_update_never_applies_the_start_at_login_task_again(self):
+        import updater
+        tasks = {e["Name"]: e for e in _entries(self.text, "Tasks")}
+        self.assertIn("startup", tasks)
+        self.assertEqual(tasks["startup"].get("Check"), "not IsUpgrade")      # fresh installs only...
+        self.assertIn('/MERGETASKS="!startup"', updater.INSTALL_ARGS)          # ...and the app says so as well
+        self.assertIn("/NORESTARTAPPLICATIONS", updater.INSTALL_ARGS)
+        for line in _section(self.text, "Registry"):
+            if "CurrentVersion\\Run" in line:
+                self.assertIn("Tasks: startup", line)                         # the Run value only with that task
+
 
 class TestBuild(unittest.TestCase):
 
@@ -444,6 +486,21 @@ class TestBuild(unittest.TestCase):
         self.assertIn("${{ steps.version.outputs.version }}", _step(self.jobs["build-windows"],
                                                                     "Build Inno Setup installer"))
 
+    def test_the_updater_is_tested_on_a_real_windows_before_anything_is_built(self):
+        """The PowerShell watcher, the ShellExecute command line and the file lock behind an all-users start
+        only run on Windows; tests/ runs on ubuntu, where they are skipped."""
+        job = self.jobs["build-windows"]
+        steps = [n for n, _ in _steps(job)]
+        name = "Updater on real Windows (watcher, command line, file lock)"
+        self.assertIn(name, steps)
+        self.assertLess(steps.index(name), steps.index("Build .exe"))
+        body = _step(job, name)
+        self.assertIn("tests/test_updater.py -k ForReal", body)
+        self.assertIn("exit $LASTEXITCODE", body)                  # a failing test fails the job
+        text = _read(ROOT / "tests" / "test_updater.py")           # (and the selection really selects them)
+        for cls in ("TestLaunchForReal", "TestWatcherForReal", "TestHoldForReal"):
+            self.assertIn("class %s(" % cls, text)
+
     def test_version_info_script_is_the_same_in_ci_and_build_ps1(self):
         self.assertEqual(_version_info_script(self.yml), _version_info_script(self.ps1))
 
@@ -465,7 +522,7 @@ class TestBuild(unittest.TestCase):
         self.assertEqual(strings["OriginalFilename"], "TranscribeApp.exe")
         self.assertEqual(strings["FileVersion"], dotted)
         self.assertEqual(strings["ProductVersion"], dotted)
-        self.assertEqual(dotted, "2.0.1.0")
+        self.assertEqual(dotted, "2.1.0.0")
         nums = tuple(int(x) for x in dotted.split("."))
         self.assertEqual(info["ffi"]["filevers"], nums)
         self.assertEqual(info["ffi"]["prodvers"], nums)

@@ -292,7 +292,9 @@ def model_for(config, mode, provider_defaults):
 
 
 class ActionAPIError(RuntimeError):
-    pass
+    def __init__(self, message, code=""):
+        super().__init__(message)
+        self.code = code or ""
 
 
 import smart_prompt
@@ -589,7 +591,8 @@ def server_mode(mode):
 
 
 def run_managed_action(text, mode, token, source_lang="auto", target_lang="en",
-                       vocab_block="", image_b64=None, image_status=None):
+                       vocab_block="", image_b64=None, image_status=None,
+                       session_id="", note_ref=""):
     """Pro Smart Actions via the server (no BYO key): we build the messages here
     and the edge function runs them on the founder's keys. ``mode`` picks the
     model there: Smart Actions go to DeepSeek V4.1 Flash, meeting notes and the
@@ -605,10 +608,11 @@ def run_managed_action(text, mode, token, source_lang="auto", target_lang="en",
                               vocab_block=vocab_block)
 
     def _post(msgs):
+        body = {"messages": msgs, "max_tokens": _max_tokens_for(mode), "mode": server_mode(mode)}
+        body.update(_managed_extra(session_id, note_ref))
         return requests.post(
             SMART_ACTION_URL,
-            json={"messages": msgs, "max_tokens": _max_tokens_for(mode),
-                  "mode": server_mode(mode)},
+            json=body,
             headers={"Authorization": f"Bearer {token}"},
             timeout=45,
         )
@@ -627,11 +631,33 @@ def run_managed_action(text, mode, token, source_lang="auto", target_lang="en",
     return text
 
 
+def _managed_extra(session_id="", note_ref=""):
+    extra = {}
+    if session_id:
+        extra["session_id"] = session_id
+    if note_ref:
+        extra["note_ref"] = note_ref
+    return extra
+
+
 def _raise_for_managed_status(resp):
+    if resp.status_code == 402:
+        kind = ""
+        try:
+            kind = (resp.json() or {}).get("allowance") or ""
+        except ValueError:
+            kind = ""
+        if kind == "meeting_notes":
+            raise ActionAPIError(
+                "You've used this month's free cloud meeting note. Upgrade to Gusan Pro for unlimited cloud notes.",
+                code="allowance_used")
+        raise ActionAPIError(
+            "You've used this month's free Live Assistant session. Upgrade to Gusan Pro for unlimited sessions.",
+            code="allowance_used")
     if resp.status_code == 403:
-        raise ActionAPIError("Pro is required for managed Smart Actions.")
+        raise ActionAPIError("Gusan Pro is required for this cloud action.")
     if resp.status_code == 429:
-        raise ActionAPIError("Daily fair-use limit reached (1,000 Smart Actions a day). "
+        raise ActionAPIError("Daily safety limit reached (1,000 cloud actions a day). "
                              "It resets at midnight UTC.")
     if resp.status_code == 503:
         raise ActionAPIError("Managed Smart Actions aren't set up on the server yet.")
@@ -639,7 +665,7 @@ def _raise_for_managed_status(resp):
 
 def run_managed_action_stream(text, mode, token, on_token, source_lang="auto",
                               target_lang="en", vocab_block="", image_b64=None,
-                              image_status=None):
+                              image_status=None, session_id="", note_ref=""):
     """Streaming Pro Smart Actions: the server relays the model's event stream,
     so the first words show as soon as they are generated. A server that
     predates streaming answers with plain JSON, delivered in one piece."""
@@ -649,10 +675,12 @@ def run_managed_action_stream(text, mode, token, on_token, source_lang="auto",
                               vocab_block=vocab_block)
 
     def _post(msgs):
+        body = {"messages": msgs, "max_tokens": _max_tokens_for(mode),
+                "mode": server_mode(mode), "stream": True}
+        body.update(_managed_extra(session_id, note_ref))
         return requests.post(
             SMART_ACTION_URL,
-            json={"messages": msgs, "max_tokens": _max_tokens_for(mode),
-                  "mode": server_mode(mode), "stream": True},
+            json=body,
             headers={"Authorization": f"Bearer {token}"},
             stream=True, timeout=(10, 90),
         )
@@ -693,14 +721,16 @@ def run_managed_action_stream(text, mode, token, on_token, source_lang="auto",
     return _final(parts, think, template_opened)
 
 
-def warm_up_managed(token, timeout=5):
+def warm_up_managed(token, timeout=5, session_id=""):
     """Ask the server to wake the live model - a scale-to-zero GPU endpoint
     can take a while to start - while the user is still settling into the
     call. Fire-and-forget: errors are ignored."""
     if not token:
         return
     try:
-        requests.post(SMART_ACTION_URL, json={"warmup": True, "mode": "live_assist"},
+        body = {"warmup": True, "mode": "live_assist"}
+        body.update(_managed_extra(session_id))
+        requests.post(SMART_ACTION_URL, json=body,
                       headers={"Authorization": f"Bearer {token}"}, timeout=timeout)
     except requests.RequestException:
         pass

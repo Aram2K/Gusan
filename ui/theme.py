@@ -599,6 +599,7 @@ QPushButton[gusan="btn"][kind="ghost"]:pressed {{ background: {c('rgba(15,23,42,
 
 QPushButton[gusan="btn"][kind="link"] {{ background: transparent; color: {t['blue-tx']}; border: 1px solid transparent; padding: 0px 2px; }}
 QPushButton[gusan="btn"][kind="link"]:hover {{ color: {t['blue']}; }}
+QPushButton[gusan="btn"][kind="link"][room="true"] {{ padding: 0px 6px; }}   /* the keyboard ring has air around the word */
 
 QPushButton[gusan="btn"][kind="pro"] {{ background: {pro_btn}; color: #ffffff; border: 1px solid {t['pro']}; }}
 QPushButton[gusan="btn"][kind="pro"]:hover {{ background: {pro_btn_h}; }}

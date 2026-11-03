@@ -92,9 +92,10 @@ class TestSmartPressDuringAMeeting(unittest.TestCase):
             self.assertEqual(len(hints), 1, tier)
             self.assertTrue(hints[0].startswith("Smart Actions are paused"), tier)
 
-    def test_without_a_meeting_the_gate_is_unchanged(self):
+    def test_without_a_meeting_free_starts_and_a_guest_signs_in(self):
         tries = main.entitlements.FREE_SMART_ACTION_TRIES
-        self.assertEqual(self._press("free", tries, meeting=False)[1], ["Smart Actions"])
+        # Free Smart Actions are unlimited, however many were counted before.
+        self.assertEqual(self._press("free", tries, meeting=False)[3], [True])
         self.assertEqual(self._press("guest", meeting=False)[2], [1])
         self.assertEqual(self._press("free", 1, meeting=False)[3], [True])
 

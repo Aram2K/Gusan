@@ -420,6 +420,77 @@ def test_the_connect_calendar_box_and_its_link_are_readable(qapp, scheme, window
     dlg.close()
 
 
+def _painted_pieces(root):
+    """The text Home paints itself (ui.pages.home.Runs is a widget, not a label): measured like the rest."""
+    from ui.pages import home
+    out = []
+    for w in root.findChildren(home.Runs):
+        clip = _clip(w, root) if w.isVisibleTo(root) and w.text() else None
+        if clip is not None:
+            out.append(("painted %r" % w.text()[:40], clip, BAR))
+    return out
+
+
+def test_home_coming_up_is_readable_in_every_state_on_a_light_and_a_dark_windows(qapp, scheme, window, monkeypatch):
+    """The section's rows are painted text and QSS buttons: on a dark Windows nothing may turn dark-on-dark,
+    and the card stays the app's light glass."""
+    from PySide6.QtCore import QPoint
+    from tests_qt.test_home_upcoming import FakeCalendar, five, local
+    from ui.pages import home_upcoming
+    now = local(0, 10, 0)
+    monkeypatch.setattr(home_upcoming, "_utcnow", lambda: now)
+    cal = FakeCalendar(five(), status_text="Paused in Privacy mode.")
+    window.app.calendar = cal
+    page = window.open("home")
+    for _ in range(3):
+        QApplication.processEvents()
+    sec = page.upcoming
+    assert sec is not None and sec.state() == "list"
+
+    def section_pieces():
+        """The section's text, in the page's pixels (its widgets belong to the page, like the tiles)."""
+        out = []
+        for w in sec.widgets():
+            if w.isVisibleTo(page):
+                at = w.mapTo(page, QPoint(0, 0))
+                out += [(n, r.translated(at), need) for n, r, need in widget_pieces(w) + _painted_pieces(w)]
+        return out
+
+    def check(where, minimum):
+        for _ in range(3):
+            QApplication.processEvents()
+        return readable(page, "Home > Coming up > " + where, section_pieces(), minimum=minimum)
+
+    rows = check("three meetings and the paused line", 14)
+    names = " ".join(n for n, *_ in rows)
+    for word in ("Weekly product sync", "in 25 min", "Join", "Record", "See all", "Paused in Privacy mode."):
+        assert word in names, word
+    # The card is light glass, the same picture in both schemes (the sample is between the title and Join).
+    img = render(page)
+    row = sec.rows[1]
+    x = row.mapTo(page, QPoint(row.join_button.x() - 24, row.height() // 2))
+    assert _lum(img.pixelColor(x.x() * SCALE, x.y() * SCALE)) > 0.8
+    cal._status = ""
+    cal.rows = []
+    cal.changed.emit([])
+    check("nothing ahead", 2)
+    cal.has_read = False
+    cal.changed.emit([])
+    check("checking", 2)
+    cal.disconnect_calendar("expired")
+    check("the invitation and an expired grant", 3)
+    cal.error.emit("Couldn't connect Google Calendar - try again.")
+    rows = check("the invitation and an error", 3)
+    assert any("Couldn't connect" in n for n, *_ in rows)
+    cal.connect_calendar()
+    rows = check("waiting for the browser", 3)
+    assert any("Cancel" in n for n, *_ in rows)
+    cal.cancel_connect()
+    cal.rows = five()
+    cal.sign_in_done()
+    check("connected again", 8)
+
+
 def test_enter_and_escape_on_a_dangerous_question(qapp, scheme, window):
     from PySide6.QtTest import QTest
     from ui.components import mini_prompt as mp
@@ -648,6 +719,8 @@ def test_the_pages_own_menus(qapp, scheme, window, meetings_root, monkeypatch, m
     # timer measures the open menu from inside the wait and closes it.
     page = window.open("settings")
     QApplication.processEvents()
+    page.ensure_built("speech")              # the page builds its sections lazily: this one, now, not "soon"
+    QApplication.processEvents()
     seen = []
 
     def look():
@@ -870,6 +943,8 @@ def test_what_the_live_card_opens_is_readable_in_both_card_looks(qapp, scheme, l
 
     def fake_exec(dlg):                       # measured while it is open (the card deletes it when it closes)
         seen.append(readable(dlg, "the file picker over the %s card" % look, minimum=5))
+        dlg.close()                               # a later test file on this worker must not find it still open
+        dlg.deleteLater()
         return 0
     monkeypatch.setattr(QFileDialog, "exec", fake_exec)
     assert c._private and c._exclusion_ok
@@ -1042,3 +1117,66 @@ def test_the_palette_is_complete_and_the_style_is_fusion(qapp, scheme):
     assert pal.color(QPalette.Window).lightness() > 200 and pal.color(QPalette.WindowText).lightness() < 80
     assert contrast(pal.color(QPalette.Active, QPalette.PlaceholderText), pal.color(QPalette.Base)) >= BAR
     assert contrast(pal.color(QPalette.Active, QPalette.WindowText), pal.color(QPalette.Window)) >= 12
+
+
+# ═══════════════════════════ the update window (ui/update_window.py) ═══════════════════════════
+def _update_window_stages(w):
+    """(name, go) for every stage the controller puts the update window in."""
+    mb = 2 ** 20
+    long_log = "Details: C:/Users/Someone/AppData/Local/Temp/gusan-update/logs/gusan-update-0a1b2c3d.log"
+    return (("downloading", lambda: w.show_downloading()),
+            ("progress", lambda: (w.show_downloading(), w.show_progress(45 * mb, 100 * mb))),
+            ("checking", lambda: (w.show_downloading(), w.show_progress(100 * mb, 100 * mb))),
+            ("waiting", lambda: w.show_waiting()),
+            ("waiting for a typed key", lambda: w.show_waiting(can_install=True)),
+            ("installing", lambda: w.show_installing()),
+            ("installing as administrator", lambda: w.show_installing(admin=True)),
+            ("installing, nothing reopens it", lambda: w.show_installing(reopens=False, admin=True)),
+            ("failed", lambda: w.show_failed("The update couldn't be downloaded. Check your connection.")),
+            ("failed with the log", lambda: w.show_failed("The installer stopped before it finished.", long_log)))
+
+
+def test_the_update_window_is_readable_in_every_stage(qapp, scheme, made):
+    from ui.update_window import UpdateWindow
+    w = UpdateWindow("v2.0.2")
+    made.append(w)
+    for name, go in _update_window_stages(w):
+        go()
+        rows = readable(w, "the update window (%s)" % name, minimum=4)
+        names = " ".join(n for n, *_ in rows)
+        assert "Updating Gusan" in names, name
+
+
+def test_the_update_window_looks_the_same_on_a_dark_windows(qapp):
+    from ui import theme
+    from ui.update_window import UpdateWindow
+
+    def pictures():
+        w = UpdateWindow("v2.0.2")
+        out = {}
+        for name, go in _update_window_stages(w):
+            go()
+            _show(w)
+            if w.bar.maximum() == 0:
+                # A busy bar is animated: two grabs (the light one and the dark one) are taken at different
+                # moments and differ by where its chunk is - on a loaded computer that failed this test at
+                # random. The test is about colours, so the bar holds still.
+                w.bar.setRange(0, 100)
+                w.bar.setValue(50)
+            out[name] = w.grab().toImage()
+        w.close()
+        w.deleteLater()
+        return out
+
+    qapp.setPalette(os_light_palette())
+    theme.install_light_scheme(qapp)
+    light = pictures()
+    qapp.setPalette(os_dark_palette())
+    theme.install_light_scheme(qapp)
+    dark = pictures()
+    qapp.setPalette(os_light_palette())
+    theme.install_light_scheme(qapp)
+    assert set(light) == set(dark)
+    for key in light:
+        assert light[key].size() == dark[key].size(), key
+        assert light[key] == dark[key], "%s looks different on a dark Windows" % key

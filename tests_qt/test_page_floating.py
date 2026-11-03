@@ -119,23 +119,19 @@ def test_after_the_start_the_line_turns_amber(toast):
     assert theme.qss_color("amber-tx") in t.when_label.styleSheet()
 
 
-def test_free_record_opens_the_pro_window(toast):
+def test_free_record_starts_the_meeting(toast):
     t, app = toast("free")
-    got, during = [], []
-
-    def upsell(feature=None):
-        app.calls.append(("_pro_upsell", feature))
-        during.append((t.isVisible(), t.is_showing()))     # hidden, but still "the one toast"
-    app._pro_upsell = upsell
+    got, closed = [], []
     t.record.connect(lambda m, a: got.append((m["id"], a)))
+    t.closed.connect(lambda m, why: closed.append(why))
     t.record_button.click()
-    assert ("_pro_upsell", "Meeting recording") in app.calls
-    assert during == [(False, True)]
-    assert got == []
-    assert t.isVisible()                       # still due: back after the Pro window
+    assert got == [("evt-1", False)] and closed == ["record"]
+    assert ("_pro_upsell", "Meeting recording") not in app.calls
+    t, app = toast("free")
+    got = []
+    t.record.connect(lambda m, a: got.append((m["id"], a)))
     t.assist_button.click()
-    assert ("_pro_upsell", "Live Assistance") in app.calls
-    assert got == []
+    assert got == [("evt-1", True)]
 
 
 def test_free_user_who_upgrades_in_the_pro_window_records(toast):
@@ -455,8 +451,8 @@ def test_tray_free_actions_call_the_app(tray):
     a = tr.actions
     for key in ("open", "dictate", "meeting", "assist", "convert", "upgrade", "settings", "quit"):
         a[key].trigger()
-    # Live Assistant opens the card for Free too (its Start asks for Pro); Record a meeting is Pro.
-    assert app.calls == [("show_main",), ("_on_hotkey",), ("_pro_upsell", "Meeting recording"),
+    # Live Assistant opens the card for Free too; Record a meeting opens Meetings.
+    assert app.calls == [("show_main",), ("_on_hotkey",), ("show_main", "meetings"),
                          ("toggle_live_assist",), ("show_main", "audio_to_text"),
                          ("_pro_upsell", None), ("show_main", "settings"), ("quit_app",)]
 

@@ -67,7 +67,10 @@ DisableDirPage=auto
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
+; The in-app update (updater.py) always names its mode on the command line - /CURRENTUSER for a
+; per-user copy, /ALLUSERS for one in Program Files - so it updates exactly the copy that runs.
+; "dialog" alone would leave Setup free to ignore both.
+PrivilegesRequiredOverridesAllowed=commandline dialog
 OutputBaseFilename=TranscribeApp-Setup
 OutputDir=.
 Compression=lzma2/ultra
@@ -78,6 +81,10 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName} {#MyAppVersion}
 CloseApplications=force
 RestartApplications=yes
+; Never two Setups at once: a second one (an installer started by hand while an in-app update still
+; runs, a second click) would copy files over the first's. The in-app update also checks for a
+; running Setup before it starts one (updater.setup_running).
+SetupMutex=GusanSetupMutex
 ; Don't ask the user to choose components/etc — make the install fast.
 DisableReadyPage=yes
 DisableFinishedPage=no
@@ -187,6 +194,15 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--show-settings"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+; An in-app update runs this installer quietly (see updater.py). A per-user update passes
+; /relaunch=1: this entry reopens Gusan when the install succeeds. The app also starts a small
+; watcher as the person (updater.spawn_relauncher) that reopens it once Setup has ended - so it
+; also comes back after a FAILED install, and after an all-users install (where this elevated Setup
+; is not trusted to start anything as the original user: "runasoriginaluser" for an update started
+; by an administrator who elevates themself is untested on a real build, so /relaunch=1 is not
+; passed there). Two launches are harmless: the single-instance lock keeps one. A plain silent
+; deployment (no /relaunch=1) does not start the app.
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--show-settings"; Flags: nowait runasoriginaluser; Check: RelaunchAfterUpdate
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
@@ -611,6 +627,12 @@ begin
     RegDeleteValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Run', '{#MyRunValueName}');
     RegDeleteValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run', '{#MyRunValueName}');
   end;
+end;
+
+// Started by the app's updater (updater.INSTALL_ARGS): reopen Gusan afterwards.
+function RelaunchAfterUpdate(): Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:relaunch|0}') = '1');
 end;
 
 function InitializeSetup(): Boolean;

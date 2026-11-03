@@ -633,8 +633,14 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(fj.refusal_message(app), fj.MSG_RECORDING)
         app.meeting, app._file_job_running = False, True
         self.assertEqual(fj.refusal_message(app), fj.MSG_OTHER_JOB)
+        # The in-app update has started the installer: Gusan closes in a moment (any job would be cut off).
+        app._file_job_running, app._update_closing = False, True
+        self.assertEqual(fj.refusal_message(app), fj.MSG_UPDATING)
+        self.assertEqual(fj.MSG_UPDATING, "Gusan is updating. It closes and opens again in a moment.")
+        app._update_closing = False
+        self.assertEqual(fj.refusal_message(app), "")
         for msg in (fj.MSG_RECORDING, fj.BUSY_FOR_DICTATION, fj.BUSY_FOR_MEETING, fj.BUSY_TITLE,
-                    fj.BUSY_CLOUD):
+                    fj.BUSY_CLOUD, fj.MSG_UPDATING):
             self.assertNotIn("Transcribe", msg)
 
     def test_imports_without_qt_numpy_or_main(self):
