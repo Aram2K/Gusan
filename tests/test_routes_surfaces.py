@@ -534,11 +534,14 @@ class TestCalendarReminder(unittest.TestCase):
         self.assertIs(app.recorder.fast_live_chunks, False)
         app._ensure_live_assist.assert_not_called()
 
-    def test_free_users_can_record(self):
-        app = calendar_app(pro=False)
-        self.assertTrue(app.record_from_calendar(MEETING))
-        self.assertEqual(app.upsells, [])
-        self.assertEqual(len(app.started), 1)
+    def test_free_users_get_the_pro_window(self):
+        """Recording a meeting and the Live Assistant are Pro: the reminder's Record opens the
+        Pro window, and nothing starts."""
+        for with_assist, feature in ((False, "Meeting recording"), (True, "Live Assistant")):
+            app = calendar_app(pro=False)
+            self.assertFalse(app.record_from_calendar(MEETING, with_assist=with_assist))
+            self.assertEqual(app.upsells, [feature])
+            self.assertEqual(app.started, [])
 
     def test_no_consent_or_busy_or_refused(self):
         app = calendar_app()

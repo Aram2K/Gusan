@@ -7878,10 +7878,9 @@ class AppController(QObject):
         """Record a Google Calendar meeting (the reminder's Record / Record +
         Live Assistant): the one-time consent notice, then the meeting session
         starts with the meeting's title, people and event id and the Meetings
-        page shows it live. Recording is free. Record + Live Assistant on a
-        free plan spends this month's one Live Assistant session first.
-        ``with_assist`` also opens the Live Assistant card. Returns True when
-        the recording started."""
+        page shows it live. Recording and the Live Assistant are Pro: a Free or
+        guest plan gets the Pro window. ``with_assist`` also opens the Live
+        Assistant card. Returns True when the recording started."""
         m = dict(meeting or {})
         toast = getattr(self, "_reminder", None)
         if toast is not None:
@@ -7889,11 +7888,9 @@ class AppController(QObject):
                 toast.hide_reminder()
             except RuntimeError:
                 pass
-        if with_assist and not self.is_pro():
-            claimed = self.claim_live_session()
-            if not (isinstance(claimed, dict) and claimed.get("ok")):
-                self._pro_upsell("Live Assistant")
-                return False
+        if not self.is_pro():
+            self._pro_upsell("Live Assistant" if with_assist else "Meeting recording")
+            return False
         # The one place the meeting's words are cleaned (calendar_start_context): the
         # title, the people on the invite (you included - the notes say who is who)
         # and the event id. ``card`` is what the start card may show; the agenda

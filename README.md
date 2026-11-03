@@ -48,7 +48,7 @@ Also: mixed languages in one sentence · a dictionary for names and terms · you
 
 ## Free and Pro
 
-**Free:** unlimited dictation, Smart Actions and audio to text on this computer (or with your own key). One cloud meeting note and one Live Assistant session each calendar month.
+**Free:** unlimited dictation, Smart Actions and audio to text on this computer (or with your own key). Meetings and the Live Assistant come with Gusan Pro (on Free you can open the Live Assistant to look around).
 **Gusan Pro:** unlimited Gusan Cloud transcription, meeting notes, Live Assistant and Smart Actions. €15.99/month, €9.99/month with a 12-month commitment, or €199 lifetime for the first 200 people. See [pricing](https://gusan.aibuben.xyz/#pricing).
 
 ## Install

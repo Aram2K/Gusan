@@ -106,9 +106,13 @@ DROP_TITLE = "Drop audio or video here"
 DROP_FORMATS = "MP3, WAV, M4A, FLAC or video · any length"
 RAIL_TITLE = "Audio to text settings"
 MODEL_COMBO_WIDTH = 260                  # room for a real model name and its chips
-RAIL_FOOT = "On this computer. Nothing is uploaded."
-RAIL_FOOT_CLOUD = "Sent to Gusan Cloud to transcribe."
-RAIL_FOOT_OWN = "Sent to {name} with your key."
+# Where the audio goes, said plainly (the footer of the rail; its icon: shield / cloud / key).
+RAIL_FOOT = "Private: your audio never leaves this computer."
+RAIL_FOOT_CLOUD = "Your audio is sent securely to Gusan Cloud to turn it into text."
+RAIL_FOOT_OWN = "Your audio is sent to {name} with your own key."
+# The Word file: a copy of the transcript next to the audio (file_jobs: "<name> transcript.docx").
+WORD_LABEL = "Also save a Word file"
+WORD_HINT = ".docx, next to your audio file"
 PRIVACY_HINT = "Privacy mode keeps it on this computer."    # as on Smart Actions
 UPSELL_SPEECH = engine_choice.UPSELL_SPEECH                 # "Fast cloud transcription"
 FILES_TITLE = "Your files"
@@ -1226,9 +1230,9 @@ class AudioToTextPage(QWidget):
         self.timestamps_toggle = Toggle("Timestamps", True, rail)
         self.timestamps_toggle.toggled.connect(lambda on: self._set(K_TS, bool(on)))
         rail.add_row(SettingRow("Timestamps", self.timestamps_toggle))
-        self.word_toggle = Toggle("Save as Word", True, rail)
+        self.word_toggle = Toggle(WORD_LABEL, True, rail)
         self.word_toggle.toggled.connect(lambda on: self._set(K_WORD, bool(on)))
-        rail.add_row(SettingRow("Save as Word", self.word_toggle))
+        rail.add_row(SettingRow(WORD_LABEL, self.word_toggle, hint=WORD_HINT))
 
         foot = QWidget(rail)
         fl = QHBoxLayout(foot)

@@ -443,7 +443,9 @@ def test_speech_card_reflects_the_shared_downloads(env):
     _spin()
     assert app.cfg["whisper_model"] == "base" and app.cfg["backend"] == "local"
     assert card.combo.currentData() == "base"
-    assert "Best for your computer: Whisper Small" in card.status.text()
+    from ui.components.model_combo import NOTE_ROLE
+    assert card.status.text() == "On this computer · 140 MB"
+    assert card.combo.itemData(card.combo.findData("small"), NOTE_ROLE) == "Balanced · Best for this computer"
 
 
 def test_downloads_that_appear_later_are_heard_once(env):
@@ -533,16 +535,16 @@ def test_pro_sees_cloud_selected(env):
     page = _settings(win)
     assert page.speech_card.source() == "cloud"
     assert page.speech_card.combo.currentData() == "cloud"
-    assert page.speech_card.status.text().startswith("Nothing to download.")
+    assert page.speech_card.status.isHidden()                        # nothing to say: no line
     assert page.writer_card.source() == "cloud"
     assert page.writer_card.combo.currentText().startswith("DeepSeek V4.1 Flash")
-    assert page.writer_card.status.text().startswith("DeepSeek V4.1 Flash answers first")
+    assert page.writer_card.status.isHidden()
     # Gusan Cloud's writers: the picked one answers first.
     assert _rows(page.writer_card.combo) == ["cloud", "cloud:openai", "cloud:claude", "cloud:mistral",
                                              "cloud:gemini"]
     _pick(page.writer_card, "cloud:claude")
     assert app.cfg["cloud_writer_model"] == "claude"
-    assert page.writer_card.status.text().startswith("Claude Haiku 5.5 answers first")
+    assert page.writer_card.combo.currentData() == "cloud:claude"
 
 
 def test_runs_on_shows_the_list_and_nothing_changes_until_a_pick(env):
@@ -563,7 +565,6 @@ def test_runs_on_shows_the_list_and_nothing_changes_until_a_pick(env):
     _runs_on(page.writer_card, "cloud")
     _pick(page.writer_card, "cloud")
     assert ("_pro_upsell", "Smart Actions") in app.calls
-    assert page.writer_card.status.text()                                                # says what to do
 
 
 def test_pro_switches_speech_and_writer(env):
@@ -631,7 +632,7 @@ def test_own_key_without_a_key_opens_the_key_list(env):
     assert app.cfg["mistral_api_key"] == "mk-test-key-0000-abc"
     assert card.source() == "own_key"
     assert card.combo.currentData() == "key:" + app.cfg["speech_key_id"]
-    assert "Work Mistral" in card.status.text()
+    assert card.action.text() == "Edit key" and card.status.isHidden()
 
 
 def test_a_key_added_on_its_own_is_only_saved(env):
@@ -659,7 +660,7 @@ def test_any_key_can_be_added_tested_edited_and_removed(env, monkeypatch):
     win, app = env.build("free")
     page = _settings(win)
     panel = page.keys_panel
-    assert panel.empty.isVisibleTo(page) and not panel.rows
+    assert not panel.list_card.isVisibleTo(page) and not panel.rows        # no keys: just "+ Add key"
     panel.add_button.click()
     ed = panel.editor
     ed.name.setText("My OpenAI")

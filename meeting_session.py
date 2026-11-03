@@ -229,6 +229,9 @@ GAP_MARK = "[...]"
 
 # Refusal codes of start() / continue_meeting() (also emitted as error(code, msg)).
 ERR_CONSENT = "consent_needed"
+ERR_PRO = "pro_required"
+PRO_RECORD_FEATURE = "Meeting recording"         # the Pro window's feature name
+PRO_RECORD_MESSAGE = "Meeting recording comes with Gusan Pro."
 ERR_BUSY = "busy"
 ERR_NO_RECORDER = "no_recorder"
 ERR_FILE_JOB = "file_job"
@@ -735,6 +738,18 @@ class MeetingCore:
             self._last_phase = phase
             self.state_changed.emit(phase)
 
+    @staticmethod
+    def plan_blocks(app):
+        """True for a Free or guest plan: recording a meeting is Pro. A controller that can't
+        say its plan (no is_pro) is not blocked."""
+        fn = getattr(app, "is_pro", None) if app is not None else None
+        if not callable(fn):
+            return False
+        try:
+            return fn() is False
+        except Exception:
+            return False
+
     def _refuse(self, code, message):
         self.error.emit(code, message)
         return False, code, message
@@ -790,6 +805,13 @@ class MeetingCore:
         rec = getattr(app, "recorder", None) if app is not None else None
         if rec is None:
             return self._refuse(ERR_NO_RECORDER, "The recorder isn't ready yet.")
+        # Free and guests: the Pro window, never a recording (the Meetings page, a calendar
+        # reminder and the Live Assistant all start here).
+        if self.plan_blocks(app):
+            upsell = getattr(app, "_pro_upsell", None)
+            if callable(upsell):
+                upsell(PRO_RECORD_FEATURE)
+            return self._refuse(ERR_PRO, PRO_RECORD_MESSAGE)
         # An in-app update has handed over to the installer: Gusan closes in a moment.
         if getattr(app, "_update_closing", False) is True:
             import updater

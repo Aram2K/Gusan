@@ -110,7 +110,7 @@ from app_info import APP_NAME, APP_VERSION
 from ui import hy_model, theme
 from ui.components import (Avatar, Button, Card, Chip, Divider, IconTile, Keycap, NavItem,
                            PageHeader, Segmented, SettingRow, Toggle, icons, label, mini_prompt)
-from ui.components.model_combo import MARK_DOWNLOAD, PlainNameCombo
+from ui.components.model_combo import MARK_DOWNLOAD, NOTE_ROLE, PlainNameCombo
 from ui.components.controls import keycap_labels
 
 logger = logging.getLogger("transcribe")
@@ -1286,11 +1286,8 @@ class ApiKeysPanel(QWidget):
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(10)
-        self.list_card = Card(self, pad=(20, 4), gap=0)
-        self.empty = text_label("No keys yet. Add one to run Speech or the AI writer on your own account.",
-                                13, role="muted", parent=self.list_card, wrap=True)
-        self.empty.setContentsMargins(0, 14, 0, 14)
-        self.list_card.add(self.empty)
+        self.list_card = Card(self, pad=(20, 4), gap=0)      # shown once there is a key
+        self.list_card.hide()
         v.addWidget(self.list_card)
         self.add_button = Button("Add key", "secondary", "s", icon="plus", parent=self)
         self.add_button.setAccessibleName("Add an API key")
@@ -1326,7 +1323,7 @@ class ApiKeysPanel(QWidget):
             last = row
         if last is not None:
             last.set_last(True)
-        self.empty.setVisible(not items)
+        self.list_card.setVisible(bool(items))
 
     def _test_row(self, key_id):
         row = self.rows.get(key_id)
@@ -1402,6 +1399,7 @@ class EngineCard(Card):
         head.addWidget(self.trail, 0, Qt.AlignVCenter)
         self.add(head)
         self.sub = text_label(sub, 12.5, role="muted", parent=self, wrap=True)
+        self.sub.setVisible(bool(sub))
         self.add(self.sub)
         self.sources = tuple(k for k, _n in sources)
         self.runs_on = Segmented([n for _k, n in sources], 0, "%s runs on" % title, size="s", parent=self)
@@ -1462,6 +1460,7 @@ class EngineCard(Card):
 
     def set_status(self, text, action="", tone="muted"):
         self.status.setText(text)
+        self.status.setVisible(bool(text))
         self.status.setProperty("textRole", tone)
         self.status.style().unpolish(self.status)
         self.status.style().polish(self.status)
@@ -2083,7 +2082,7 @@ class SettingsPage(QWidget):
         inner = QVBoxLayout()
         inner.setSpacing(30)
         # Two cards in one format: Speech (dictation and meetings) and the AI writer.
-        self.speech_card = EngineCard("Speech", "Dictation and meetings.", SPEECH_SOURCES_UI,
+        self.speech_card = EngineCard("Speech", "", SPEECH_SOURCES_UI,
                                       kind=SPEECH_KIND, help_text=SPEECH_HELP, parent=sec)
         self.hw_trail = self.speech_card.trail
         self.speech_card.runs_on.changed.connect(self._speech_source_clicked)
@@ -2098,8 +2097,7 @@ class SettingsPage(QWidget):
         self.speech_card.extra.addWidget(self.gpu_card)
         inner.addWidget(self.speech_card)
 
-        self.writer_card = EngineCard("AI writer", "Smart Actions, meeting notes and Live Assistant.",
-                                      WRITER_SOURCES_UI, kind=WRITER_KIND, help_text=WRITER_HELP, parent=sec)
+        self.writer_card = EngineCard("AI writer", "", WRITER_SOURCES_UI, kind=WRITER_KIND, help_text=WRITER_HELP, parent=sec)
         self.writer_card.runs_on.changed.connect(self._writer_source_clicked)
         self.writer_card.combo.currentIndexChanged.connect(self._writer_model_picked)
         self.writer_card.action_clicked.connect(self._writer_action)
@@ -2112,8 +2110,7 @@ class SettingsPage(QWidget):
         self._preview = {"speech": None, "writer": None}
         self._key_then = None                 # "speech" / "writer": a key being added for that card
 
-        kblk, kv = self._block("My API keys", sub="Add a key from any AI service. Its models then show "
-                               "under “Your own key” above.", parent=sec)
+        kblk, kv = self._block("My API keys", parent=sec)
         self.keys_panel = ApiKeysPanel(kblk)
         self.keys_panel.test.connect(self._test_entry)
         self.keys_panel.test_saved.connect(self._test_saved_entry)
@@ -2432,21 +2429,23 @@ class SettingsPage(QWidget):
         src = self._shown_source("speech", truth)
         card.set_source(src)
         rows = engine_choice.dictation_speech_rows(cfg, is_pro(self.app), source=src)
-        card.fill(rows, engine_choice.dictation_speech_value(cfg) if src == truth else None)
+        value = engine_choice.dictation_speech_value(cfg) if src == truth else None
+        if src == "local" and value and self._speech_model_state(value) in ("missing", "failed"):
+            value = None          # not on this computer: "Select a model" - a pick asks to download it
+        card.fill(rows, value)
         if src == "local":
             self._mark_rows(card, self._speech_model_state, hardware.info)
+            rec = self._recommended()
+            i = card.combo.findData(rec) if rec else -1
+            if i >= 0 and hardware.info(rec) is not None:
+                card.combo.setItemData(i, "%s · Best for this computer" % hardware.info(rec).plain, NOTE_ROLE)
         self._speech_status()
 
     def _preview_status(self, card, src, has_rows):
         """The line under a "Runs on" just picked (no model chosen yet)."""
         if src == "own_key" and not has_rows:
-            needs = ("a Mistral or Google Gemini key" if card == "speech" else "a key")
-            return "Add %s below to use it." % needs, "Add key"
-        if src == "cloud" and not is_pro(self.app):
-            return "Gusan Cloud comes with Gusan Pro. Pick a model to see the plans.", ""
-        if src == "local":
-            return "Pick a model. It downloads once, then works offline.", ""
-        return "Pick a model to use it.", ""
+            return "", "Add key"
+        return "", ""
 
     def _open_key_for(self, card):
         self._key_then = card
@@ -2464,18 +2463,16 @@ class SettingsPage(QWidget):
                 def fn():
                     self._open_key_for("speech")
         elif src == "cloud":
-            text = "Nothing to download. Gusan Cloud picks the engine and says which one ran."
+            text = ""
         elif src == "own_key":
             e = api_keys.entry(cfg, cfg.get("speech_key_id"))
+            text = ""
             if e is not None:
-                text = "Uses your key “%s”." % api_keys.entry_view(cfg, e)["title"]
                 action = "Edit key"
 
                 def fn():
                     self.keys_panel.open_edit(e, api_keys.entry_view(cfg, e))
                     self._scroll_to_widget(self.keys_panel)
-            else:
-                text = "Uses %s." % engine_choice.owner_phrase(self._speech_now().get("plain"))
         else:
             sel = cfg.get("whisper_model") or hardware.DEFAULT_SPEECH_MODEL
             info = hardware.info(sel)
@@ -2486,10 +2483,9 @@ class SettingsPage(QWidget):
                 ready = "On this computer · %s" % info.size
                 if hardware.slower_here(sel, on_gpu):
                     ready += " · a little slower here"
-                rec = self._recommended()
-                if rec and rec != sel and hardware.info(rec) is not None:
-                    ready += " · Best for your computer: %s" % hardware.info(rec).real
                 text, action, _tone = self._download_status(sel, info, st, ready)
+                if st == "missing":
+                    text, action = "", ""          # the box says "Select a model"
                 if action == "Remove":
                     def fn():
                         self._model_remove(sel)
@@ -2499,7 +2495,7 @@ class SettingsPage(QWidget):
                     def fn():
                         self._model_download(sel)
             if cfg.get("privacy_mode"):
-                text = (text + "\n" if text else "") + "Privacy mode is on: speech stays on this computer."
+                text = (text + "\n" if text else "") + "Privacy mode is on."
         self._speech_action_fn = fn
         self.speech_card.set_status(text, action)
 
@@ -2549,6 +2545,8 @@ class SettingsPage(QWidget):
             value = "cloud" if fam == "deepseek" else "cloud:" + fam
         elif src == kind:
             value = engine_choice.local_writer(cfg) if kind == "local" else engine_choice.writer_value(cfg)
+        if src == "local" and value and self._writer_model_state(value) in ("missing", "failed"):
+            value = None          # not on this computer: "Select a model" - a pick asks to download it
         card.fill(engine_choice.writer_rows(cfg, is_pro(self.app), choice=src), value)
         if src == "local":
             self._mark_rows(card, self._writer_model_state, hardware.LOCAL_AI_INFO.get)
@@ -2566,26 +2564,26 @@ class SettingsPage(QWidget):
                 def fn():
                     self._open_key_for("writer")
         elif cfg.get("privacy_mode") and engine_choice.writer_choice(cfg) != "local":
-            text = PAUSED_TEXT + ". The built-in rules write until then."
+            text = PAUSED_TEXT + "."
         elif kind == "cloud":
-            text = ("%s answers first; the others take over if it's busy. Nothing to download."
-                    % engine_choice.cloud_writer_name(cfg))
+            text = ""
         elif kind == "own_key":
             e = api_keys.entry(cfg, cfg.get("writer_key_id"))
+            text = ""
             if e is not None:
-                text = "Uses your key “%s”." % api_keys.entry_view(cfg, e)["title"]
                 action = "Edit key"
 
                 def fn():
                     self.keys_panel.open_edit(e, api_keys.entry_view(cfg, e))
                     self._scroll_to_widget(self.keys_panel)
-            else:
-                text = "Uses your %s key." % (now.get("plain") or "own")
         elif kind == "local":
             mid = engine_choice.local_writer(cfg)
             info = hardware.LOCAL_AI_INFO.get(mid)
-            text, action, _tone = self._download_status(mid, info, self._writer_model_state(mid),
+            st = self._writer_model_state(mid)
+            text, action, _tone = self._download_status(mid, info, st,
                                                         "On this computer · %s · works offline" % info.size)
+            if st == "missing":
+                text, action = "", ""              # the box says "Select a model"
             if action == "Remove":
                 def fn():
                     self._model_remove(mid)
@@ -2593,7 +2591,7 @@ class SettingsPage(QWidget):
                 def fn():
                     self._model_download(mid, use_as="writer")
         else:
-            text = "No AI model yet: the built-in rules write. Pick a model to download it."
+            text = ""                              # no AI model yet: the box says "Select a model"
         self._writer_action_fn = fn
         self.writer_card.set_status(text, action)
 

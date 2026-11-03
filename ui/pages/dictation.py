@@ -768,6 +768,7 @@ class DictationPage(QWidget):
         # What transcribes: every model on this computer, Gusan Cloud (PRO) and your own keys.
         self.model_combo = _rail_combo(PlainNameCombo(), "Speech model", width=MODEL_COMBO_WIDTH)
         self.model_combo.enable_row_marks()   # whole rows: chips and a download icon at the right
+        self.model_combo.setPlaceholderText("Select a model")       # the model set isn't on this computer
         self._pending_model = None            # a pick waiting for its download
         self._fill_model_combo()
         self.model_combo.currentIndexChanged.connect(self._on_model)
@@ -1014,9 +1015,15 @@ class DictationPage(QWidget):
         box.blockSignals(True)
         try:
             box.fill_rows(self._model_rows())
-            idx = box.findData(self._model_value())
-            if idx >= 0:
-                box.setCurrentIndex(idx)
+            value = self._model_value()
+            idx = box.findData(value) if value else -1
+            try:
+                import hardware
+                if hardware.is_speech_id(value) and self._model_state(value) in ("missing", "failed"):
+                    idx = -1      # not on this computer: "Select a model" - a pick asks to download it
+            except Exception:
+                pass
+            box.setCurrentIndex(idx if idx >= 0 and not box.is_heading(idx) else -1)
         finally:
             box.blockSignals(False)
         self._mark_model_rows()
