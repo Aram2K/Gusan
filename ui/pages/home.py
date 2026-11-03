@@ -477,7 +477,7 @@ def read_copy(spec):
         import meeting_store
         notes = meeting_store.load_notes(ref) or ""
         if notes.strip():
-            return notes, True
+            return rich_text.clean_notes(notes) or notes, True      # no empty section, no "Owner: , Due: "
         transcript = meeting_store.load_transcript(ref) or ""
         return "\n\n".join(rich_text.transcript_paragraphs(transcript)), False
     if kind == "transcript":

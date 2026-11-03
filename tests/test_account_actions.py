@@ -166,6 +166,14 @@ class TestAppTier(unittest.TestCase):
                                      current_tier=lambda: "guest")
         self.assertEqual(aa.first_name(previewing), "")
 
+    def test_first_name_can_be_the_profile_name_only(self):
+        # a name that goes into a document (the notes engine is told who "You" is) is never made up from an address
+        self.assertEqual(aa.first_name(_app("free", name="Aram Adamyan"), email_fallback=False), "Aram")
+        self.assertEqual(aa.first_name(_app("pro", name=None, email="mariam@example.com"), email_fallback=False), "")
+        self.assertEqual(aa.first_name(_app("pro", name="  ", email="mariam@example.com"), email_fallback=False), "")
+        self.assertEqual(aa.first_name(_app("guest"), email_fallback=False), "")
+        self.assertEqual(aa.first_name(_app("pro", name=None, email="mariam@example.com")), "mariam")      # unchanged
+
 
 class TestDeleteAccount(unittest.TestCase):
     def test_confirm_word(self):

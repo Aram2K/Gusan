@@ -25,8 +25,9 @@ recreate the page, tell the user) without reading the text. The text itself is
 always our own plain sentence: nothing Notion or ``requests`` said, and never
 a token, goes into a message or the log.
 
-Pure stdlib + requests. No Qt. The only project import is app_info (the
-product name), so this stays unit-testable on its own.
+Pure stdlib + requests. No Qt. The only project imports are app_info (the
+product name) and rich_text (the notes' inline marks), so this stays
+unit-testable on its own.
 """
 import logging
 import re
@@ -34,6 +35,7 @@ import time
 
 import requests
 
+import rich_text
 from app_info import APP_NAME
 
 logger = logging.getLogger("transcribe.notion")
@@ -176,25 +178,48 @@ BLANK_SETTINGS = {
 }
 
 
-def _rich(text):
-    """Rich-text array, chunked under Notion's per-item length cap."""
+def _runs(text):
+    """The text as (piece, bold, italic, code) runs: **bold**, *italic* / _italic_ and `code` become annotations, so
+    Notion shows no literal marks (rich_text.inline_runs knows bold and italic; `code` is cut out first)."""
+    out = []
+    for i, part in enumerate(re.split(r"`([^`\n]+)`", text)):
+        if i % 2:
+            out.append((part, False, False, True))
+        else:
+            out.extend((t, b, it, False) for t, b, it in rich_text.inline_runs(part))
+    return out
+
+
+def _rich(text, marks=False):
+    """Rich-text array, chunked under Notion's per-item length cap. ``marks``: **bold**, *italic* and `code` in the
+    text become Notion annotations instead of staying as typed (the meeting notes' lines)."""
     text = text or ""
     if not text:
         return []
+    if marks and re.search(r"[*_`]", text):
+        items = []
+        for piece, bold, italic, code in _runs(text):
+            for i in range(0, len(piece), MAX_RICH_LEN):
+                item = {"type": "text", "text": {"content": piece[i:i + MAX_RICH_LEN]}}
+                if bold or italic or code:
+                    item["annotations"] = {"bold": bold, "italic": italic, "code": code}
+                items.append(item)
+        return items
     return [{"type": "text", "text": {"content": text[i:i + MAX_RICH_LEN]}}
             for i in range(0, len(text), MAX_RICH_LEN)]
 
 
-def _block(block_type, text):
+def _block(block_type, text, marks=False):
     return {"object": "block", "type": block_type,
-            block_type: {"rich_text": _rich(text)}}
+            block_type: {"rich_text": _rich(text, marks)}}
 
 
 def markdown_to_blocks(md):
     """Translate the notes' markdown subset into Notion blocks.
 
-    Handles what our summaries actually emit: ## / ### headings, - [ ] todos,
-    -/* bullets, numbered items, and plain paragraphs. Anything else stays a
+    Handles what our summaries actually emit: ## / ### (and deeper) headings,
+    - [ ] todos, -/* bullets, numbered items, and plain paragraphs, with
+    **bold**, *italic* and `code` as Notion's own marks. Anything else stays a
     paragraph - never dropped.
     """
     blocks = []
@@ -202,23 +227,23 @@ def markdown_to_blocks(md):
         line = raw_line.strip()
         if not line:
             continue
-        if line.startswith("### "):
-            blocks.append(_block("heading_3", line[4:]))
+        if re.match(r"^#{3,6} ", line):
+            blocks.append(_block("heading_3", rich_text.strip_inline(re.sub(r"^#+ ", "", line))))
         elif line.startswith("## "):
-            blocks.append(_block("heading_2", line[3:]))
+            blocks.append(_block("heading_2", rich_text.strip_inline(line[3:])))
         elif line.startswith("# "):
-            blocks.append(_block("heading_1", line[2:]))
+            blocks.append(_block("heading_1", rich_text.strip_inline(line[2:])))
         elif (m := re.match(r"^[-*] \[([ xX])\] (.*)$", line)):
             blocks.append({"object": "block", "type": "to_do",
-                           "to_do": {"rich_text": _rich(m.group(2).strip()),
+                           "to_do": {"rich_text": _rich(m.group(2).strip(), True),
                                      "checked": m.group(1).lower() == "x"}})
         elif line.startswith(("- ", "* ")):
-            blocks.append(_block("bulleted_list_item", line[2:]))
+            blocks.append(_block("bulleted_list_item", line[2:], True))
         elif re.match(r"^\d+[.)] ", line):
             blocks.append(_block("numbered_list_item",
-                                 line.split(" ", 1)[1] if " " in line else line))
+                                 line.split(" ", 1)[1] if " " in line else line, True))
         else:
-            blocks.append(_block("paragraph", line))
+            blocks.append(_block("paragraph", line, True))
     return blocks
 
 

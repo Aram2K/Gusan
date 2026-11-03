@@ -187,7 +187,20 @@ def busy_banner(view):
                             "minutes for a long meeting - you can leave this page.",
                             "blue", "Cancel", lambda: cancel(view))
     label = getattr(s, "busy_label", "") or "Writing notes…"
-    return view._banner(label, "The notes show up here when they're ready.", "blue")
+    text = "The notes show up here when they're ready."
+    if _long_meeting(view):
+        text += " A long meeting can take a minute."            # richer notes for a long meeting take a little longer
+    return view._banner(label, text, "blue")
+
+
+LONG_MEETING_SEC = 30 * 60
+
+
+def _long_meeting(view):
+    try:
+        return float((getattr(view, "data", None) or {}).get("duration_sec") or 0) >= LONG_MEETING_SEC
+    except (TypeError, ValueError):
+        return False
 
 
 def followup_state(view):

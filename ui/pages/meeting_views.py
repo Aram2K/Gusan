@@ -1192,7 +1192,8 @@ notes_plain = rich_text.notes_plain             # notes as plain paragraphs: no 
 
 
 class ActionItem(QWidget):
-    """One action item: checkbox, face, **Owner** task, due."""
+    """One action item: checkbox, face, **Owner** task, due. The face and the bold name are only for a person: parse_task
+    leaves out an empty or generic owner ('Them', 'Speaker 2', 'the other side'), so those items are just the task."""
 
     toggled = Signal(int, bool)
 
@@ -1213,9 +1214,12 @@ class ActionItem(QWidget):
         self.box.setCursor(Qt.PointingHandCursor)
         theme.focus_ring(self.box)
         lay.addWidget(self.box, 0, Qt.AlignVCenter)
-        if owner:
-            lay.addWidget(Faces([owner], 22, me=me, parent=self), 0, Qt.AlignVCenter)
         self._me = (me or "").strip().lower()
+        if owner:
+            # the person who recorded is drawn as in the sidebar, whether the notes say "You" or their name; two owners,
+            # two faces
+            faces = [(me or n) if n.lower() == "you" else n for n in self._owner_names()]
+            lay.addWidget(Faces(faces, 22, me=me, parent=self), 0, Qt.AlignVCenter)
         self.text_label = QLabel(self)
         self.text_label.setTextFormat(Qt.RichText)
         self.text_label.setWordWrap(True)
@@ -1223,15 +1227,21 @@ class ActionItem(QWidget):
         self.text_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         lay.addWidget(self.text_label, 1, Qt.AlignVCenter)
         self.due_label = tlabel(due, 12.5, 400, "muted")
+        self.due_label.setTextFormat(Qt.PlainText)          # words from the notes, never markup
         self.due_label.setVisible(bool(due))
         lay.addWidget(self.due_label, 0, Qt.AlignVCenter)
         self.box.toggled.connect(self._on_toggle)
         self._render()
 
+    def _owner_names(self):
+        return [n.strip() for n in (self.owner or "").split(", ") if n.strip()]
+
     def owner_shown(self):
-        if self.owner and self._me and self.owner.split()[0].lower() == self._me:
-            return "You"
-        return self.owner
+        """The owner as the chip says it: the viewer's own name is 'You' ('Aram, Marc' -> 'You, Marc'), the others stay."""
+        names = self._owner_names()
+        if self._me:
+            names = ["You" if n.split()[0].lower() == self._me else n for n in names]
+        return ", ".join(dict.fromkeys(names)) if names else (self.owner or "")
 
     def _render(self):
         done = self.box.isChecked()
@@ -1250,7 +1260,7 @@ class ActionItem(QWidget):
 
 
 class NotesDoc(QWidget):
-    """The rendered notes (Summary, Decisions, Action items, Open questions)."""
+    """The rendered notes (Summary, Decisions, Action items, Open questions, Discussion: its topics are sub-headings)."""
 
     task_toggled = Signal(int, bool)
     LINE = 23                   # 14.5 / 23 px, as the mockup's notes
@@ -1268,7 +1278,8 @@ class NotesDoc(QWidget):
 
     def render(self, md, banner=None, notices=(), written_by=None, blocks=None):
         """``blocks`` (instead of parsing ``md``): parse_notes' blocks, plus
-        ("html", rich text) paragraphs (the transcript shown when there are no notes)."""
+        ("html", rich text) paragraphs (the transcript shown when there are no notes). Parsed from ``md``, a section with
+        nothing under it is not shown and a topic under a section is a sub-heading (parse_notes(sections=True))."""
         clear_layout(self._lay)
         self.tasks = []
         lay = self._lay
@@ -1286,14 +1297,22 @@ class NotesDoc(QWidget):
             lay.addSpacing(10)
         first = True
         prev = None
-        for kind, data in (parse_notes(md) if blocks is None else blocks):
+        for kind, data in (parse_notes(md, sections=True) if blocks is None else blocks):
             if kind == "head":
                 if not first:
                     lay.addSpacing(20)
                 lb = tlabel(data, 18, 600, "ink", display=True, wrap=True)
+                lb.setTextFormat(Qt.PlainText)          # a heading the AI wrote is text, never markup
                 lb.setAccessibleName(data)
                 lay.addWidget(lb)
                 lay.addSpacing(10)
+            elif kind == "subhead":
+                lay.addSpacing(0 if prev in ("head", None) else 14)
+                lb = tlabel(data, 15, 600, "ink", wrap=True)
+                lb.setTextFormat(Qt.PlainText)
+                lb.setAccessibleName(data)
+                lay.addWidget(lb)
+                lay.addSpacing(5)
             elif kind == "task":
                 if prev == "task":
                     lay.addSpacing(4)
@@ -1694,6 +1713,8 @@ class NotesView(QWidget):
         self._meta.addStretch(1)
 
         notes = d.get("notes") or ""
+        if notes.strip() and not parse_notes(notes, sections=True):
+            notes = ""              # nothing but empty sections ("None."): shown like no notes, the transcript is still here
         busy = self.page.is_active_folder(self.folder)
         banner = None
         has_transcript = bool((d.get("transcript") or "").strip())
@@ -1835,7 +1856,7 @@ class NotesView(QWidget):
         notes = (self.data.get("notes") or "").strip()
         if not notes:
             return
-        ok = bool(rich_clipboard.copy_rich(notes))
+        ok = bool(rich_clipboard.copy_rich(rich_text.clean_notes(notes)))
         if ok:
             self.copy_btn.setText("Copied")
             self._flash.start(FLASH_MS)
@@ -1877,7 +1898,7 @@ class NotesView(QWidget):
                 return
             if not path.lower().endswith(".md"):
                 path += ".md"
-            text = "# %s\n\n%s\n\n%s\n" % (title, self._meta_line(), (d.get("notes") or "").strip())
+            text = "# %s\n\n%s\n\n%s\n" % (title, self._meta_line(), rich_text.clean_notes(d.get("notes") or "").strip())
 
             def work():
                 with open(path, "w", encoding="utf-8") as f:

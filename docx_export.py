@@ -23,7 +23,6 @@ transcript, as group_segments makes them) plus these optional keys (Gusan
 notes_paragraphs(md) turns meeting notes Markdown into such paragraphs.
 """
 import datetime
-import html as _html
 import re
 import zipfile
 from xml.sax.saxutils import escape
@@ -148,24 +147,7 @@ def _para(runs, *, space_after=160, space_before=0, indent=None, hanging=0, keep
     return f'<w:p><w:pPr>{"".join(props)}</w:pPr>' + "".join(runs) + "</w:p>"
 
 
-_INLINE_TAG_RE = re.compile(r"(</?b>|</?i>|</?code>)")
-
-
-def inline_runs(text):
-    """'**Fix** the *drift*' -> [("Fix", True, False), (" the ", False, False),
-    ("drift", False, True)]: rich_text's inline Markdown as (text, bold, italic)."""
-    out = []
-    bold = italic = False
-    for piece in _INLINE_TAG_RE.split(rich_text.inline_html(text or "")):
-        if piece in ("<b>", "</b>"):
-            bold = piece == "<b>"
-        elif piece in ("<i>", "</i>"):
-            italic = piece == "<i>"
-        elif piece in ("<code>", "</code>"):
-            continue
-        elif piece:
-            out.append((_html.unescape(piece), bold, italic))
-    return out
+inline_runs = rich_text.inline_runs     # '**Fix** the *drift*' -> [("Fix", True, False), (" the ", False, False), ...]
 
 
 def _text_runs(p, *, bold=False, italic=False, color=None, size=_BODY_SIZE, font=None):
@@ -214,14 +196,18 @@ def speaker_name(spk, names=None):
 
 def notes_paragraphs(md):
     """Meeting notes Markdown -> styled build_docx paragraphs: ## headings bold
-    14 pt, **Label:** lines bold, bullets / numbers / tasks indented with
-    • / 1. / ☐ ☑ (owner and due muted after the task), **bold** runs."""
+    14 pt, a topic under one (### Topic) and **Label:** lines bold, bullets /
+    numbers / tasks indented with • / 1. / ☐ ☑ (owner and due muted after the
+    task, nothing for an empty or generic owner), **bold** runs. A section with
+    nothing under it is left out."""
     out = []
-    for b in rich_text.parse_blocks(md):
+    blocks = rich_text.parse_blocks(rich_text.clean_notes(md))
+    roles = rich_text.heading_roles(blocks)
+    for i, b in enumerate(blocks):
         kind = b[0]
         if kind == "head":
-            out.append({"style": "heading" if b[1] < rich_text.BOLD_HEAD_LEVEL else "subheading",
-                        "text": b[2], "md": True})
+            sub = b[1] >= rich_text.BOLD_HEAD_LEVEL or roles.get(i) == "sub"
+            out.append({"style": "subheading" if sub else "heading", "text": b[2], "md": True})
         elif kind == "para":
             out.append({"style": "body", "text": b[1], "md": True})
         elif kind == "bullet":

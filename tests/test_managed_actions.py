@@ -14,7 +14,8 @@ import actions
 class TestManagedMeetingNotes(unittest.TestCase):
     def test_pro_meeting_notes_routes_to_managed_cloud(self):
         cfg = {"_managed_token": "tok123"}
-        with patch("action_api.run_managed_action",
+        # meeting notes are streamed (a long meeting's notes outlast any whole-answer wait)
+        with patch("action_api.run_managed_action_stream",
                    return_value="# Notes\n- shipped build") as m:
             out = actions.process(
                 "we shipped the build and agreed to meet monday",
@@ -43,7 +44,8 @@ class TestManagedMeetingNotes(unittest.TestCase):
     def test_privacy_mode_keeps_managed_local(self):
         # Privacy mode must keep everything local even with a token present.
         cfg = {"_managed_token": "tok123", "privacy_mode": True}
-        with patch("action_api.run_managed_action") as m:
+        with patch("action_api.run_managed_action") as m, \
+                patch("action_api.run_managed_action_stream") as ms:
             out = actions.process(
                 "we discussed the launch plan and next steps.",
                 actions.ACTION_MEETING_NOTES,
@@ -51,6 +53,7 @@ class TestManagedMeetingNotes(unittest.TestCase):
                 model=actions.API_MANAGED_ID, config=cfg,
             )
         m.assert_not_called()
+        ms.assert_not_called()
         self.assertIsInstance(out, str)
         self.assertTrue(out.strip())
 

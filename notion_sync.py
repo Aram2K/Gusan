@@ -51,6 +51,7 @@ import meeting_store
 import notion_connect
 import notion_export
 import notion_mcp
+import rich_text
 from app_info import APP_NAME
 from notion_connect import ConnectError
 from notion_export import NotionAuthError, NotionError, NotionNotFoundError
@@ -179,7 +180,9 @@ def _send(folder, cfg, auto, persist, publish, refresh, create_hub, update_meta,
     meta = meeting_store.load_meta(folder)
     if auto and meta.get("notion_url"):
         return _result(False, str(meta["notion_url"]))                  # already there: never twice
-    notes = meeting_store.load_notes(folder)
+    # the notes as they are saved, with every action item in one clean shape and no empty section (notes from before
+    # that, written by an engine that said 'Owner: , Due: ', are tidied on the way out; the file is left as it is)
+    notes = rich_text.clean_notes(meeting_store.load_notes(folder))
     transcript = "" if auto else meeting_store.load_transcript(folder)
     if not (notes.strip() or transcript.strip()):
         return _result(False, code="other", sentence=NOTHING_TEXT)
