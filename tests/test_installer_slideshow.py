@@ -484,7 +484,9 @@ class TestFinishPage(unittest.TestCase):
         self.assertIn("'{#MyAppName} is updated'", self.text)
 
     def test_the_launch_box_still_says_launch_gusan(self):
-        run = _section(self.text, "Run")
+        # The in-app update added a second [Run] entry (the silent /relaunch one): the Launch checkbox
+        # is the one that has a Description.
+        run = [line for line in _section(self.text, "Run") if "Description:" in line]
         self.assertEqual(len(run), 1)
         self.assertIn('Description: "Launch {#MyAppName}"', run[0])
         self.assertIn("postinstall", run[0])
