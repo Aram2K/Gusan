@@ -170,11 +170,29 @@ class MeetingDeleter(QObject):
         fn = getattr(s, "speakers_state", None)
         if names and callable(fn):
             try:
-                if fn(folder):
+                # A pass that is only WAITING (for a recording that may last an hour, say) holds no file
+                # and does nothing: it does not block, it is ended before the move (delete). One that is
+                # working is not stopped from the list.
+                state = fn(folder)
+                if state and state != "waiting":
                     return REASON_FINISHING
             except Exception:
                 logger.debug("speakers_state failed", exc_info=True)
         return ""
+
+    def _stop_waiting_passes(self, folders):
+        """End the names passes that are only waiting for these meetings, and wait until they have let go
+        (off the window's thread: it waits)."""
+        s = self.session()
+        fn, stop = getattr(s, "speakers_state", None), getattr(s, "stop_speaker_pass", None)
+        if not (callable(fn) and callable(stop)):
+            return
+        for folder in folders:
+            try:
+                if fn(folder) == "waiting":
+                    stop(folder)
+            except Exception:
+                logger.debug("stopping a waiting speaker pass before a delete failed", exc_info=True)
 
     def is_deleting(self, folder):
         return folder in self._deleting
@@ -246,6 +264,8 @@ class MeetingDeleter(QObject):
 
         def work():
             patient = True
+            if not names_stopped:
+                self._stop_waiting_passes(folders)
             for folder in folders:
                 try:
                     self._item.emit(folder, self._move(folder, patient), "")

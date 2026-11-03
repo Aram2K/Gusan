@@ -2438,6 +2438,14 @@ def _interruptible(hook, **kw):
                 self.last_error = "cancelled"
                 return []
             return FakeDiarizer.diarize(self, audio, num_speakers, threshold, on_progress, should_cancel)
+
+        def embed_spans(self, audio, spans, on_progress=None, should_cancel=None):
+            self.runs += 1
+            hook(self)
+            if should_cancel is not None and should_cancel():
+                self.last_error = "cancelled"
+                return [], "cancelled"
+            return FakeDiarizer.embed_spans(self, audio, spans, on_progress, should_cancel)
     return Diarizer(**kw)
 
 
@@ -2588,7 +2596,7 @@ class TestNotesFirstSpeakersAfter(_SpeakerBase):
         s._followup._wait = lambda sec: setattr(app, "is_rec", False)
         folder = self._stop(s)
         self.assertEqual(calls["n"], 2)                             # stopped once, then done
-        self.assertEqual(s._followup.retries(folder), 1)
+        self.assertEqual(s._followup.take_result(folder)[1], "done")
         self.assertEqual((folder / "transcript.txt").read_text(encoding="utf-8"), LABELLED)
         self.assertFalse((folder / ms.BEFORE_SPEAKERS).exists())
         self.assertEqual(s._proc.call_count, 1)
@@ -2610,7 +2618,8 @@ class TestNotesFirstSpeakersAfter(_SpeakerBase):
         s._followup._wait = lambda sec: setattr(app, "is_rec", False)
         folder = self._stop(s)
         self.assertEqual(dia.runs, 6)                               # the first run + five retries
-        self.assertEqual(s._followup.retries(folder), 6)
+        self.assertEqual(s._followup.take_result(folder)[1], "gave_up")      # and the page can say so
+        self.assertEqual(s._followup.retries(folder), 0)            # (nothing of the count is kept once it ended)
         self.assertEqual((folder / "transcript.txt").read_text(encoding="utf-8"), SOURCES_ONLY)
         self.assertEqual(s.speakers_state(), "")                    # nothing waits any more
         meta = ms.load_meta(folder)
@@ -2718,7 +2727,7 @@ class TestNotesFirstSpeakersAfter(_SpeakerBase):
         self.assertEqual(s2.speakers_state(), "")
         self.assertEqual(s2._followup.folders(), [])
 
-    def test_identify_speakers_by_hand_stands_in_for_the_queued_pass(self):
+    def test_identify_speakers_by_hand_is_the_same_pass_in_front_of_the_queue(self):
         from tests.test_meeting_speakers import FakeDiarizer
         s, rec, app = self._meeting(FakeDiarizer(), inline=False)
         with patch.object(msess.actions, "process", return_value="## Notes"):
@@ -2728,12 +2737,20 @@ class TestNotesFirstSpeakersAfter(_SpeakerBase):
             target(*args)                                       # Stop's worker; the names are only queued
         folder = s.meeting_dir
         self.assertEqual(s.speakers_state(folder), "waiting")
-        out = msess.meeting_speakers.Outcome()
-        out.texts = ["You: x"]
-        with patch.object(msess.meeting_speakers, "build_transcript", return_value=out):
-            self.assertTrue(s.identify_speakers(folder)[0])
-        self.assertEqual(s.speakers_state(folder), "")          # the queued pass stood down
-        self.assertEqual(s._followup.folders(), [])
+        self.assertTrue(s.cancel_speaker_followup(folder))      # Cancel on the banner: dropped ...
+        self.assertEqual(s.speakers_state(folder), "")
+        other = self.root / "20260101_090000"                   # ... and another meeting is queued meanwhile
+        other.mkdir()
+        s._followup._queue.append(str(other))
+        built = []
+        with patch.object(msess.meeting_speakers, "build_transcript", side_effect=lambda *a, **k: built.append(1)):
+            self.assertEqual(s.identify_speakers(folder), (True, "", ""))
+        self.assertEqual(built, [])                             # nothing is read again: the saved segments are used
+        self.assertEqual(s._followup.folders(), [str(folder), str(other)])      # in front of the others
+        self.assertEqual(s.speakers_state(folder), "waiting")   # one banner, one Cancel: the same pass
+        self.assertEqual((s.phase, s.is_busy), ("done", False))     # and the session is not locked for it
+        self.assertEqual(s.identify_speakers(folder), (True, "", ""))      # asking again changes nothing
+        self.assertEqual(s._followup.folders(), [str(folder), str(other)])
 
     def test_a_rewrite_after_the_names_uses_them_and_keeps_the_notice(self):
         from tests.test_meeting_speakers import FakeDiarizer
@@ -2802,7 +2819,7 @@ class TestNotesFirstSpeakersAfter(_SpeakerBase):
         s._followup._wait = wait
         folder = self._stop(s)
         self.assertEqual(calls["n"], 2)                             # told to stop at once, ran again after
-        self.assertEqual(s._followup.retries(folder), 1)
+        self.assertEqual(s._followup.take_result(folder)[1], "done")
         self.assertEqual(len(rewrites), 1)
         self.assertIn(SOURCES_ONLY, rewrites[0])                    # the rewrite read one transcript, whole...
         self.assertNotIn("Speaker 1", rewrites[0])                  # ...not one the names were replacing meanwhile
@@ -2833,7 +2850,8 @@ class TestNotesFirstSpeakersAfter(_SpeakerBase):
             backup = folder / ms.BEFORE_SPEAKERS
             seen["backup"] = backup.read_text(encoding="utf-8") if backup.is_file() else None
             return _outcome(("You: by hand",))
-        with patch.object(msess.meeting_speakers, "build_transcript", side_effect=identify_reads):
+        with patch.object(msess.meeting_speakers, "build_transcript", side_effect=identify_reads), \
+                patch.object(msess.meeting_speakers, "refinable", return_value=[]):     # (the meeting must be read again)
             self.assertTrue(s.identify_speakers(str(folder))[0])    # (inline: the run is over on return)
         self.assertEqual(seen, {"pass": "", "backup": SOURCES_ONLY})     # the pass was gone; Identify's own copy there
         self.assertEqual((folder / "transcript.txt").read_text(encoding="utf-8"), "You: by hand")
@@ -2874,7 +2892,7 @@ class TestNotesFirstSpeakersAfter(_SpeakerBase):
         s._followup._wait = wait
         folder = self._stop(s)
         self.assertEqual(steps, [msess.STATE_DONE, msess.STATE_RECORDING])      # it only looked again: never ran while it recorded
-        self.assertEqual(dia.runs, 1)                                      # ONE pass, over both parts
+        self.assertEqual(dia.runs, 2)                                      # ONE pass, over both parts (a run of voice prints each)
         text = (folder / "transcript.txt").read_text(encoding="utf-8")
         self.assertTrue(text.startswith(LABELLED + "\n\n— Resumed "), text)
         self.assertTrue(text.endswith("You: Back again.\nSpeaker 1: Welcome back. Where were we."), text)
@@ -2907,7 +2925,7 @@ class TestNotesFirstSpeakersAfter(_SpeakerBase):
         self.assertTrue(text.startswith(LABELLED + "\n\n— Resumed "), text)       # the first part's names came too
         self.assertTrue(text.endswith("You: Back again.\nSpeaker 1: Welcome back. Where were we."), text)
         self.assertEqual([p["done"] for p in ms.load_segments(folder)["parts"]], [True, True])
-        self.assertEqual(dia.runs, 2)                                              # the cancelled one + one for both
+        self.assertEqual(dia.runs, 3)                                              # the cancelled one + one for both (a run each)
 
     def test_privacy_mode_switched_on_while_the_names_wait_is_obeyed_when_they_start(self):
         from tests.test_meeting_speakers import FakeDiarizer
@@ -3002,6 +3020,192 @@ class TestNotesFirstSpeakersAfter(_SpeakerBase):
             s = self._stopped(rec, mode="smart_meeting")
         self.assertTrue(s._build_calls[0][1]["diarize"])            # the names could not follow: do it now
 
+# ── what the page may say about the pass: why it waits, how far it is, how it ended ────────────────────
+
+@unittest.skipUnless(_real_numpy(), "real numpy not importable (stubbed)")
+class TestWhatThePageMaySayAboutThePass(_SpeakerBase):
+    _meeting = TestNotesFirstSpeakersAfter._meeting
+    _stop = TestNotesFirstSpeakersAfter._stop
+
+    def test_the_pass_is_told_what_it_waits_for(self):
+        from tests.test_meeting_speakers import FakeDiarizer
+        s, rec, app = self._meeting(FakeDiarizer())
+        self.assertEqual(s._speaker_pass_blocker(), "")                       # nothing needs the computer
+        self.assertFalse(s._speaker_pass_blocked())
+        for state, notes_only, want in ((msess.STATE_RECORDING, False, "recording"),
+                                        (msess.STATE_PROCESSING, False, "notes"),      # the Stop of a meeting
+                                        (msess.STATE_PROCESSING, True, "notes")):      # Rewrite notes / Retry
+            s.state, s._notes_only = state, notes_only
+            self.assertEqual(s._speaker_pass_blocker(), want, (state, notes_only))
+            self.assertTrue(s._speaker_pass_blocked())
+        s.state, s._notes_only = msess.STATE_DONE, False
+        for flag, want in (("is_rec", "dictation"), ("_busy", "dictation"), ("_file_job_running", "file")):
+            setattr(app, flag, True)
+            self.assertEqual(s._speaker_pass_blocker(), want, flag)
+            self.assertTrue(s._speaker_pass_blocked())
+            setattr(app, flag, False)
+        self.assertEqual(s._speaker_pass_blocker(), "")
+        # a recording is what it is, even while a dictation flag is up; and a flag that is merely truthy is not one
+        s.state, app.is_rec = msess.STATE_RECORDING, True
+        self.assertEqual(s._speaker_pass_blocker(), "recording")
+        s.state, app.is_rec, app._busy = msess.STATE_DONE, "yes", 1
+        self.assertEqual(s._speaker_pass_blocker(), "")
+        s.app = None
+        self.assertEqual(s._speaker_pass_blocker(), "")                       # (no app: nothing else can be busy)
+
+    def test_a_check_that_fails_means_busy(self):
+        from tests.test_meeting_speakers import FakeDiarizer
+        s, rec, app = self._meeting(FakeDiarizer())
+
+        class Broken:
+            @property
+            def is_rec(self):
+                raise RuntimeError("gone")
+        s.app = Broken()
+        self.assertEqual(s._speaker_pass_blocker(), "busy")
+        self.assertTrue(s._speaker_pass_blocked())
+
+    def test_the_follow_up_asks_the_blocker_not_the_bool(self):
+        from tests.test_meeting_speakers import FakeDiarizer
+        s, rec, app = self._meeting(FakeDiarizer())
+        self.assertEqual(s._followup._is_busy, s._speaker_pass_blocker)
+
+    def test_the_page_can_ask_what_the_waiting_pass_waits_for_and_how_far_the_working_one_is(self):
+        from tests.test_meeting_speakers import FakeDiarizer
+        s, rec, app = self._meeting(FakeDiarizer(), inline=False)
+        with patch.object(msess.actions, "process", return_value="## Notes"):
+            self.assertTrue(s.start("Call", "", audio_mode="smart_meeting")[0])
+            app.is_rec = True                                                  # a dictation is going on
+            self.assertTrue(s.stop(""))
+            target, args = s.spawned[0]
+            target(*args)                                                      # Stop's worker; the names are only queued
+        folder = str(s.meeting_dir)
+        snap = s.speakers_progress(folder)
+        self.assertEqual((snap["state"], snap["stage"], snap["fraction"]), ("waiting", "", None))
+        self.assertEqual(snap["waiting_for"], "settling")                      # (not looked at yet: about to start)
+        seen = []
+
+        def wait(seconds):                                                     # the worker looks again
+            seen.append(s.speakers_progress(folder))
+            app.is_rec = False
+        s._followup._wait = wait
+        for target, args in [t for t in s.spawned if t[0].__name__ == "_loop"]:
+            target(*args)
+        self.assertEqual(seen[0]["waiting_for"], "dictation")                  # it names what holds it back
+        self.assertEqual(s.speakers_progress(folder)["state"], "")
+        self.assertEqual(s.speakers_progress("nothing here"), s._followup.snapshot("nothing here"))
+
+    def test_progress_is_asked_without_failing_whatever_the_follow_up_does(self):
+        from tests.test_meeting_speakers import FakeDiarizer
+        s, rec, app = self._meeting(FakeDiarizer())
+        with patch.object(s._followup, "snapshot", side_effect=RuntimeError("boom")):
+            self.assertEqual(s.speakers_progress("x"), {})
+        with patch.object(s._followup, "take_result", side_effect=RuntimeError("boom")):
+            self.assertIsNone(s.speakers_result("x"))
+
+    def test_the_pass_gets_its_progress_and_the_voice_prints_it_keeps(self):
+        from tests.test_meeting_speakers import FakeDiarizer
+        seen = []
+        state = {"n": 0}
+
+        def fake_refine(folder, *, privacy=False, status=None, should_cancel=None, names=None, diarizer=None,
+                        progress=None, resume=None):
+            state["n"] += 1
+            seen.append((callable(progress), dict(resume) if resume is not None else None))
+            if progress is not None:
+                progress("voices", 3, 10)
+            if state["n"] == 1:
+                resume["kept"] = ["a print"]
+                app.is_rec = True                                           # a dictation starts: this try is stopped
+                should_cancel()
+                return msess.meeting_speakers.PassResult("cancelled", "cancelled")
+            return msess.meeting_speakers.PassResult("done", "", "", 2)
+        s, rec, app = self._meeting(FakeDiarizer())
+        s._followup._wait = lambda sec: setattr(app, "is_rec", False)
+        with patch.object(msess.meeting_speakers, "refine_meeting", fake_refine):
+            folder = self._stop(s)
+        self.assertEqual(seen, [(True, {}), (True, {"kept": ["a print"]})])     # the second try sees what the first made
+        self.assertEqual(s.speakers_result(str(folder)), ("Found 2 speakers on the call.", "ok"))
+        self.assertIsNone(s.speakers_result(str(folder)))                          # said once
+
+    def test_how_a_pass_ended_is_said_once_for_each_outcome(self):
+        from tests.test_meeting_speakers import FakeDiarizer
+        for diarizer, line in ((FakeDiarizer(), ("Only one person spoke on the call.", "ok")),
+                               (FakeDiarizer(fail="worker exited with code 3"),
+                                ("Couldn't tell the people on the call apart.", "amber")),
+                               (FakeDiarizer(fail="timed out"),
+                                ("Couldn't tell the people on the call apart.", "amber"))):
+            s, rec, app = self._meeting(diarizer)
+            folder = self._stop(s)
+            self.assertEqual(s.speakers_result(str(folder)), line)
+            self.assertIsNone(s.speakers_result(str(folder)))
+
+    def test_a_cancel_and_too_many_interruptions_are_said_too(self):
+        from tests.test_meeting_speakers import FakeDiarizer
+        s, rec, app = self._meeting(_interruptible(lambda d: s.cancel_speaker_followup(s.meeting_dir)))
+        folder = self._stop(s)
+        self.assertEqual(s.speakers_result(str(folder)), ("Stopped.", "ok"))
+        s, rec, app = self._meeting(_interruptible(lambda d: setattr(app, "is_rec", True)))
+        s._followup._wait = lambda sec: setattr(app, "is_rec", False)
+        folder = self._stop(s)
+        self.assertEqual(s.speakers_result(str(folder)), ("Other work kept interrupting it. You can try again.", "amber"))
+
+    def test_identify_speakers_by_hand_during_a_dictation_waits_instead_of_refusing(self):
+        from tests.test_meeting_speakers import FakeDiarizer
+        s, rec, app = self._meeting(FakeDiarizer(), inline=False)
+        with patch.object(msess.actions, "process", return_value="## Notes"):
+            self.assertTrue(s.start("Call", "", audio_mode="smart_meeting")[0])
+            self.assertTrue(s.stop(""))
+            target, args = s.spawned[0]
+            target(*args)
+        folder = str(s.meeting_dir)
+        s.cancel_speaker_followup(folder)                                       # (Cancel on the banner, say)
+        self.assertEqual(s.speakers_state(folder), "")
+        app.is_rec = True                                                       # ... and now a dictation is running
+        errors = _Recorder(s.error)
+        self.assertEqual(s.identify_speakers(folder), (True, "", ""))           # asked for: it waits, it does not refuse
+        self.assertEqual(errors.calls, [])
+        self.assertEqual(s.speakers_state(folder), "waiting")
+        self.assertEqual((s.phase, s.is_busy), ("done", False))
+
+    def test_a_meeting_that_has_to_be_read_again_keeps_the_old_refusals(self):
+        from tests.test_meeting_speakers import FakeDiarizer
+        s, rec, app = self._meeting(FakeDiarizer())
+        folder = self._stop(s)                                                  # (the names came at Stop: nothing left)
+        self.assertEqual(msess.meeting_speakers.refinable(folder), [])
+        app.is_rec = True
+        ok, code, message = s.identify_speakers(folder)
+        self.assertEqual((ok, code), (False, msess.ERR_BUSY))
+        self.assertIn("Finish your dictation", message)
+        app.is_rec = False
+        app._file_job_running = True
+        self.assertEqual(s.identify_speakers(folder)[1], msess.ERR_FILE_JOB)
+        app._file_job_running = False
+        self.assertEqual(s.identify_speakers(folder / "missing")[1], msess.ERR_NO_AUDIO)
+
+    def test_the_legacy_run_always_ends_through_finished_even_when_it_fails_early(self):
+        from tests.test_meeting_speakers import FakeDiarizer
+        s, rec, app = self._meeting(FakeDiarizer(), inline=False)
+        with patch.object(msess.actions, "process", return_value="## Notes"):
+            self.assertTrue(s.start("Call", "", audio_mode="smart_meeting")[0])
+            self.assertTrue(s.stop(""))
+            target, args = s.spawned.pop(0)
+            target(*args)                                                      # Stop's worker; the names are only queued
+        folder = s.meeting_dir
+        finished = _Recorder(s.finished)
+        errors = _Recorder(s.error)
+        # the check that runs first inside the worker fails (a file the folder lost, say): nothing is touched yet
+        with patch.object(msess.meeting_speakers, "refinable", return_value=[]), \
+                patch.object(msess.MeetingCore, "_cut_short_message", side_effect=["", RuntimeError("disk")]):
+            self.assertTrue(s.identify_speakers(folder)[0])
+            self.assertEqual(s.phase, "processing")
+            for target, args in [t for t in s.spawned if t[0].__name__ == "_run_identify"]:
+                target(*args)
+        self.assertEqual(s.phase, "done")                                       # never left "processing" for ever
+        self.assertFalse(s.is_busy)
+        self.assertEqual(len(finished.calls), 1)
+        self.assertEqual(errors.calls[0][0], msess.ERR_SPEAKERS)
+        self.assertFalse(s.identifying)                                         # so no Identifying banner is left behind
 
 # ── Gusan 2.0.1: what transcribes a Live Assistant session ───────────────────────────
 
@@ -3319,14 +3523,20 @@ class TestACloudSessionIsNeverReadAgainLater(_SpeakerBase):
         s, rec, folder = self._stopped()
         self.assertEqual((folder / "transcript.txt").read_text(encoding="utf-8"), YOU_THEM)
         self.assertEqual(s.speakers_state(str(folder)), "waiting")
-        errors = self._identify(s, folder)
+        errors = _Recorder(s.error)
+        self.assertEqual(s.identify_speakers(folder), (True, "", ""))          # the same pass, asked for by hand
+        self.assertEqual((s.phase, s.is_busy), ("done", False))                # nothing of the session is locked
+        for target, args in [t for t in s.spawned if t[0].__name__ == "_loop"]:
+            target(*args)                                                      # (the background worker runs it)
         self.assertEqual(rec.reads, 0)                               # the recording was never read again
         self.assertEqual((folder / "transcript.txt").read_text(encoding="utf-8"), YOU_SPEAKER)
         self.assertIn("speakers_at", ms.load_meta(folder))
+        self.assertEqual(ms.load_meta(folder)["speakers_found"], 1)
         self.assertEqual(errors.calls, [])
-        self.assertEqual((s.phase, s.last_run_speakers), ("done", True))
         self.assertFalse((folder / ms.BEFORE_SPEAKERS).exists())
-        self.assertEqual(s._final_transcript, YOU_SPEAKER)
+        self.assertEqual(s.speakers_state(str(folder)), "")
+        self.assertEqual(s.speakers_result(str(folder)), ("Only one person spoke on the call.", "ok"))
+        self.assertIsNone(s.speakers_result(str(folder)))                      # said once
 
     def test_identify_speakers_with_nothing_left_to_name_keeps_the_words_and_says_why(self):
         s, rec, folder = self._stopped(inline=True)                  # the names came at Stop already
@@ -3378,7 +3588,8 @@ class TestACloudSessionIsNeverReadAgainLater(_SpeakerBase):
     def test_a_cancelled_run_on_a_cloud_meeting_changes_nothing(self):
         s, rec, folder = self._stopped()
         s._cancel_run.set()
-        s.identify_speakers(folder)                                  # (identify clears the flag: cancel from inside)
+        with patch.object(msess.meeting_speakers, "refinable", return_value=[]):     # (read the way a meeting is when it must be)
+            s.identify_speakers(folder)                              # (identify clears the flag: cancel from inside)
         errors = _Recorder(s.error)
         original = msess.meeting_speakers.refine_meeting
 

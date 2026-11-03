@@ -78,26 +78,72 @@ def is_available():
     return sherpa_installed() and models_downloaded()
 
 
-def download_models(on_progress=None):
+DOWNLOAD_TIMEOUT_S = 15        # a connection that sends nothing for this long ends the download with an error
+DOWNLOAD_CHUNK = 64 * 1024     # the size of one read: a cancel is looked at between two of them
+
+
+def _download(url, dest, on_bytes=None, should_cancel=None, timeout=DOWNLOAD_TIMEOUT_S):
+    """``url`` into the file ``dest``, in chunks. ``should_cancel()`` is asked before every chunk and a
+    yes ends it at once (False); a connection that goes quiet for ``timeout`` seconds, or ends early,
+    raises - the pass must never wait for ever on a stalled link. ``on_bytes(done, total)`` (total 0
+    when the server did not say). True when the whole file arrived; ``dest`` is removed otherwise."""
+    finished = False
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            try:
+                total = int(response.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError, AttributeError):
+                total = 0
+            got = 0
+            with open(dest, "wb") as out:
+                while True:
+                    if should_cancel is not None and should_cancel():
+                        return False
+                    block = response.read(DOWNLOAD_CHUNK)
+                    if not block:
+                        break
+                    out.write(block)
+                    got += len(block)
+                    if on_bytes is not None:
+                        on_bytes(got, total)
+            if total and got < total:
+                raise OSError("the download ended early (%d of %d bytes)" % (got, total))
+        finished = True
+        return True
+    finally:
+        if not finished:
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+
+
+def download_models(on_progress=None, should_cancel=None, on_bytes=None):
     """Fetch the segmentation + embedding models into the app data dir.
 
     Safe to call when already present (no-op). Returns True on success. Never
-    raises - logs and returns False so the caller can fall back gracefully.
+    raises - logs and returns False so the caller can fall back gracefully (also
+    after ``should_cancel()`` said yes, which ends it between two chunks).
+    ``on_progress(text)``: the status line, at most every 5 points; ``on_bytes(done, total)``: the
+    bytes of the speaker model (the 40 MB one the voice prints need; the small segmentation model
+    after it goes by without), for a real progress bar (total 0 = not known).
     """
     try:
         d = _models_dir()
         d.mkdir(parents=True, exist_ok=True)
 
-        def hook_for(label):
-            """urlretrieve's reporthook: the status line shows the percent
-            (at most every 5 points - a status line is not a progress bar)."""
+        def bytes_for(label, bar=None):
+            """The status line shows the percent (at most every 5 points - a status line is not
+            a progress bar); ``bar`` (on_bytes) gets every chunk."""
             seen = [-10]
 
-            def hook(blocks, block_size, total):
+            def hook(got, total):
+                if bar is not None:
+                    bar(got, total)
                 if not on_progress or total <= 0:
                     return
-                pct = min(100, int(blocks * block_size * 100 / total))
-                if pct >= seen[0] + 5:
+                pct = min(100, int(got * 100 / total))
+                if pct >= seen[0] + 5 or (pct >= 100 and seen[0] < 100):
                     seen[0] = pct
                     on_progress("%s %d%%" % (label, pct))
             return hook
@@ -106,14 +152,16 @@ def download_models(on_progress=None):
             if on_progress:
                 on_progress("Downloading speaker model (40 MB)...")
             tmp = d / "embedding.onnx.part"
-            urllib.request.urlretrieve(_EMB_URL, tmp, hook_for("Downloading speaker model (40 MB)"))
+            if not _download(_EMB_URL, tmp, bytes_for("Downloading speaker model (40 MB)", on_bytes), should_cancel):
+                return False
             tmp.replace(emb_model_path())
 
         if not seg_model_path().exists():
             if on_progress:
                 on_progress("Downloading segmentation model (7 MB)...")
             arch = d / "seg.tar.bz2"
-            urllib.request.urlretrieve(_SEG_URL, arch, hook_for("Downloading segmentation model (7 MB)"))
+            if not _download(_SEG_URL, arch, bytes_for("Downloading segmentation model (7 MB)"), should_cancel):
+                return False
             with tarfile.open(arch) as tf:
                 tf.extractall(d)
             try:
@@ -225,6 +273,121 @@ def diarize(audio, num_speakers=None, threshold=0.7, on_progress=None, should_ca
         last_error = str(e)[:200] or type(e).__name__
         logger.warning("Diarization failed: %s", e)
         return []
+
+
+# ── one voice print per stretch of speech (voice_prints.py decides which stretches) ──
+
+VOICE_MIN_SEC = 1.0        # a stretch shorter than this has no voice print
+VOICE_MIN_RMS = 0.001      # a stretch quieter than this (about -60 dBFS) is silence
+
+
+def voice_threads():
+    """How many CPU threads the voice-print child gets on this computer."""
+    return diarization_proc.voice_threads()
+
+
+def build_extractor(threads=None):
+    """The speaker model alone (sherpa-onnx's embedding extractor): turns a stretch of speech
+    into one voice print. ``threads``: how many CPU threads it may use."""
+    import sherpa_onnx
+    count = int(threads or 0) or max(1, min(4, (os.cpu_count() or 4) // 4))
+    config = sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(emb_model_path()), num_threads=count)
+    return sherpa_onnx.SpeakerEmbeddingExtractor(config)
+
+
+def voice_print(extractor, samples):
+    """The voice print (a list of floats) of 16 kHz mono float32 ``samples``."""
+    stream = extractor.create_stream()
+    stream.accept_waveform(SAMPLE_RATE, samples)
+    stream.input_finished()
+    return [float(x) for x in extractor.compute(stream)]
+
+
+def _spans_to_audio(audio, spans):
+    """The stretches of ``audio`` joined into one float32 array, and how many samples each took
+    (0 = nothing to embed: silent, shorter than VOICE_MIN_SEC, or past the end of the sound)."""
+    a = np.asarray(audio)
+    if a.ndim > 1:
+        a = a.reshape(a.shape[0], -1).mean(axis=1)
+    scale = np.float32(1.0 / 32767.0) if a.dtype.kind in "iu" else None
+    pieces, lengths = [], []
+    for start, end in spans:
+        i0 = max(0, int(round(float(start) * SAMPLE_RATE)))
+        i1 = min(len(a), int(round(float(end) * SAMPLE_RATE)))
+        if i1 - i0 < VOICE_MIN_SEC * SAMPLE_RATE:
+            lengths.append(0)
+            continue
+        x = a[i0:i1].astype(np.float32)
+        if scale is not None:
+            x *= scale
+        if float(np.sqrt(np.mean(x * x))) < VOICE_MIN_RMS:
+            lengths.append(0)
+            continue
+        pieces.append(x)
+        lengths.append(len(x))
+    joined = np.concatenate(pieces) if pieces else np.zeros(0, np.float32)
+    return joined, lengths
+
+
+def embed_spans(audio, spans, on_progress=None, should_cancel=None):
+    """One voice print per ``(start_s, end_s)`` stretch of ``audio`` (16 kHz mono, int16 or
+    float). Returns ``(vectors, error)``: ``vectors`` has one entry per stretch - a list of floats,
+    or None for a stretch with nothing to embed (silent, under a second, past the end of the
+    sound) - and ``error`` is "" when all are done, else a short reason ("cancelled", "app
+    quitting", "timed out", "stalled", "unavailable" ...); on an error ``vectors`` holds the
+    stretches that were finished (a prefix), so a later try can go on from there. Never raises.
+    ``on_progress(done, total)`` counts stretches. Like diarize() it runs in a child process (the
+    model call holds the interpreter lock) and sets ``last_error``."""
+    global last_error
+    last_error = ""
+    spans = list(spans or [])
+    if not spans:
+        return [], ""
+    if not is_available():
+        last_error = "unavailable"
+        return [], last_error
+    try:
+        joined, lengths = _spans_to_audio(audio, spans)
+    except Exception as e:
+        last_error = "bad audio"
+        logger.warning("Voice prints: the audio could not be read: %s", e)
+        return [], last_error
+    if not any(lengths):
+        return [None] * len(spans), ""
+    if diarization_proc.isolation_enabled():
+        vectors, error = diarization_proc.run_voices(joined, lengths, on_progress, should_cancel,
+                                                     sample_rate=SAMPLE_RATE)
+    else:
+        vectors, error = _embed_in_process(joined, lengths, on_progress, should_cancel)
+    last_error = error
+    return vectors, error
+
+
+def _embed_in_process(joined, lengths, on_progress, should_cancel):
+    """embed_spans without a child process (GUSAN_DIARIZE_IN_PROCESS=1: tests, debugging)."""
+    vectors = []
+    try:
+        extractor = build_extractor(diarization_proc.voice_threads())
+        pos = 0
+        for i, n in enumerate(lengths):
+            if diarization_proc.cancelled_for_quit():
+                return vectors, "app quitting"
+            if should_cancel is not None and should_cancel():
+                return vectors, "cancelled"
+            if n > 0:
+                vectors.append(voice_print(extractor, joined[pos:pos + n]))
+                pos += n
+            else:
+                vectors.append(None)
+            if on_progress is not None:
+                try:
+                    on_progress(i + 1, len(lengths))
+                except Exception:
+                    pass
+        return vectors, ""
+    except Exception as e:
+        logger.warning("Voice prints failed: %s", e)
+        return vectors, str(e)[:200] or type(e).__name__
 
 
 def attribute_segments(segments, turns, offset=0.0):
