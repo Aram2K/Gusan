@@ -424,7 +424,8 @@ class _RemoveButton(IconButton):
     Tab key reaches it even before it shows, and showing it is what the focus does)."""
 
     def __init__(self, row, name):
-        IconButton.__init__(self, "x", "Remove %s from People" % name, size=24, icon_size=13, color="muted", parent=row)
+        IconButton.__init__(self, "x", "Remove %s from People" % name, size=24, icon_size=16, color="text2", parent=row)
+        self.setIcon(icons.icon("x", 16, "text2", sw=2.2))        # (a stronger stroke: the x is small, and there only on hover)
         self.setToolTip(theme.plain_tip("Remove %s" % name))      # a name read off a screen is text, never markup
         self._row = row
 
