@@ -133,6 +133,40 @@ class TestSuccess(_Case):
         self.assertIs(call["oauth"], True)
         self.assertEqual(call["meta_line"], "Thu 8 Oct · 10:15 · 25 min 00 s · Anna, David · Gusan")
 
+    OLD_NOTES = ("## Summary\n- Ship Friday\n\n## Key decisions\n- None.\n\n## Action items\n"
+                 "- [ ] Send the file (Owner: Them, Due: )\n- [ ] Book (Owner: Anna, Due: Friday)\n\n"
+                 "## Open questions\n_None._\n")
+    CLEAN_NOTES = ("## Summary\n- Ship Friday\n\n## Action items\n- [ ] Send the file\n"
+                   "- [ ] Book (Owner: Anna, Due: Friday)\n")
+
+    def test_notes_from_before_are_cleaned_on_the_way_out_in_the_rest_route(self):
+        Path(self.folder, "notes.md").write_text(self.OLD_NOTES, encoding="utf-8")
+        f = Fakes()
+        f.send(self.folder, OAUTH)
+        self.assertEqual(f.calls[0]["notes"], self.CLEAN_NOTES)
+        self.assertEqual(Path(self.folder, "notes.md").read_text(encoding="utf-8"), self.OLD_NOTES)   # the file is left as it is
+
+    def test_the_same_in_the_hosted_route(self):
+        Path(self.folder, "notes.md").write_text(self.OLD_NOTES, encoding="utf-8")
+        mcp = {"notion_api_key": "tok-1", "notion_refresh_token": "ref-1", "notion_auth_mode": "mcp",
+               "notion_hub_page": HUB, "notion_parent_page": HUB}
+        sent = []
+
+        def send(creds, title, notes, transcript, line, *, parent, hub, persist):
+            sent.append(notes)
+            return {"url": URL}
+
+        res = notion_sync.send_meeting(self.folder, mcp, persist=lambda u: None, mcp_send=send)
+        self.assertTrue(res["ok"])
+        self.assertEqual(sent, [self.CLEAN_NOTES])
+
+    def test_notes_with_nothing_left_after_cleaning_still_send_the_transcript(self):
+        Path(self.folder, "notes.md").write_text("## Key decisions\n- None.\n", encoding="utf-8")
+        f = Fakes()
+        self.assertTrue(f.send(self.folder, OAUTH)["ok"])
+        self.assertEqual(f.calls[0]["notes"], "")
+        self.assertEqual(f.calls[0]["transcript"], "Anna: We ship Friday.")
+
     def test_an_automatic_send_is_the_notes_only_and_says_so(self):
         f = Fakes()
         f.send(self.folder, OAUTH, auto=True)

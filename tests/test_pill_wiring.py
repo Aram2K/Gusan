@@ -141,11 +141,11 @@ class TestPillWiring(unittest.TestCase):
         self.assertNotIn("process", self._names(log))
         self.assertEqual(self._call(log, "show_done"), ((True,), {}))
 
-    def test_tries_that_ran_out_paste_the_exact_words_plainly(self):
+    def test_free_smart_actions_still_run_after_the_old_try_count(self):
         tries = main.entitlements.FREE_SMART_ACTION_TRIES
         log = self._run("write an email to John", tier="free", used=tries)
-        self.assertNotIn("set_task", self._names(log))
-        self.assertEqual(self._call(log, "show_done"), ((True,), {}))
+        self.assertIn("set_task", self._names(log))
+        self.assertEqual(self._call(log, "show_done"), ((True,), {"kind": "email"}))
 
     def test_the_pill_words_never_break_a_take(self):
         with mock.patch("engine_choice.runs_on", side_effect=RuntimeError("boom")):

@@ -1,7 +1,9 @@
 // Managed cloud transcription proxy - the Pro moat.
 //
 // Flow: verify the caller's Supabase JWT -> confirm is_pro() server-side (paid
-// or trial) -> enforce a daily quota -> transcribe with a SERVER-held key ->
+// subscription, lifetime purchase, or admin — not a trial) -> enforce a daily
+// abuse cap (3000 requests/user/day; there is no monthly minute cap) ->
+// transcribe with a SERVER-held key ->
 // return the transcript. Keys never reach the client, so Pro cloud transcription
 // cannot be used without a valid account + entitlement, even though the app is
 // open source.
@@ -73,7 +75,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
-const DAILY_CAP = 3000; // requests/user/day
+const DAILY_CAP = 3000; // abuse ceiling, requests/user/day — not a product quota
 // The largest audio accepted, in base64 characters (about 18 MB of 16 kHz WAV, 9 minutes: a file piece
 // is at most 90 s, a dictation or live take a few minutes - apps before this limit sent any length, and
 // OpenAI itself stops at 25 MB). A request over it is a 413 before anything is paid for.
@@ -506,7 +508,7 @@ Deno.serve(async (req) => {
   const { data: userData, error: userErr } = await supa.auth.getUser();
   if (userErr || !userData?.user) return json({ error: "unauthorized" }, 401);
 
-  // Entitlement: paid subscription OR active trial (server-side truth).
+  // Entitlement: paid subscription, lifetime, or admin. Trials do not grant this.
   const { data: pro, error: proErr } = await supa.rpc("is_pro");
   if (proErr) return json({ error: "entitlement_check_failed" }, 500);
   if (pro !== true) return json({ error: "pro_required" }, 403);

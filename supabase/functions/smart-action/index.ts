@@ -2,8 +2,16 @@
 //
 // Pro users run Smart Actions (translate / rewrite / summarize / email /
 // meeting notes) and the Live Assistance through SERVER-held keys, so they never
-// need their own. Flow: verify the caller + is_pro() + daily quota (in
+// need their own. Flow: verify the caller + entitlement + daily quota (in
 // parallel - one round trip, not three) -> model -> text, streamed when asked.
+//
+// Free accounts are not Pro. They may still call this function for:
+//   * one cloud meeting note per calendar month (mode "meeting_notes",
+//     note_ref = the meeting id; a retry of the same id does not count again)
+//   * Live Assistant answers inside the one open session they started
+//     (mode "live_assist", session_id from begin_live_session)
+// Other modes stay Pro-only. The daily cap below is an abuse ceiling, not a
+// fair-use quota, and it still applies to Pro.
 //
 // Routing - each request tries the configured engines in order, moving on if
 // one is missing, fails, or (streamed) hasn't produced its first words in time
@@ -20,6 +28,10 @@
 // * Meeting notes (mode "meeting_notes"): OpenAI (OPENAI_NOTES_MODEL,
 //   OPENAI_NOTES_MS for the whole notes) -> Claude Sonnet 5.5 (thinking off,
 //   CLAUDE_NOTES_MS) -> Mistral Small -> Gemini Flash (NOTES_TAIL_MS each).
+//   The app now STREAMS the notes - they run to 5000 tokens for a long
+//   meeting - so no engine has a whole-answer limit: each gets NOTES_START_MS
+//   to its first words, and the answer is relayed as it is written. An older
+//   app sends no "stream" and keeps the budgets above.
 // * Everything else (the live recap, apps before 2.0 that send no mode):
 //   Mistral Small -> OpenAI (OPENAI_FAST_MODEL) -> Gemini Flash.
 // Not streamed, EVERY engine has a whole-answer time limit (its own, else
@@ -90,6 +102,11 @@ const WHOLE_CAP_MS = 20_000;
 const NON_STREAM_DEADLINE_MS = 40_000;
 const MIN_LEFT_MS = 3_000;
 const NOTES_TAIL_MS = 10_000;     // Mistral / Gemini behind the two premium engines for meeting notes
+const NOTES_START_MS = 12_000;    // streamed meeting notes: first words from each engine (a 35k-token input needs a few seconds)
+// Meeting notes scale with the meeting (a long one is up to ~2,200 words): the app asks for up to 5000 tokens.
+// Every other mode keeps its 2000-token ceiling.
+const NOTES_MAX_TOKENS = 6000;
+const MAX_TOKENS = 2000;
 // Alt+S and the actions it picks (actions.py ACTION_MODES). A Smart Action is
 // short and arrives whole, so a stalled GPU queue gets SMART_LIVE_MS before
 // Mistral answers instead - well inside the app's 45 s.
@@ -122,9 +139,12 @@ const OPENAI_NOTES_MS = 18_000;   // meeting notes, the whole answer (the two pr
 const claude = CLAUDE_KEY ? new Anthropic({ apiKey: CLAUDE_KEY, maxRetries: 0 }) : null;
 // Per isolate: has the Claude key been checked yet (a free models lookup, logged).
 let claudeChecked = false;
-// A cost-abuse ceiling, not a usage limit: ~10x a heavy day of dictation plus
-// Live Assistance answers (one per question asked in a call).
+// A cost-abuse ceiling, not a product quota: ~10x a heavy day of dictation plus
+// Live Assistance answers (one per question asked in a call). Pro has no
+// monthly minute cap; this per-day ceiling stays so a loop cannot run up the bill.
 const DAILY_CAP = 1000;
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // A long meeting transcript is well under 1 MB; screenshots are downscaled JPEGs.
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_MESSAGES = 200;
@@ -525,7 +545,7 @@ async function checkClaudeKey(): Promise<void> {
 
 async function routesFor(live: boolean, smart: boolean, notes: boolean, messages: unknown[],
                          maxTokens: number, stream: boolean): Promise<Route[]> {
-  const ms = live ? LIVE_FALLBACK_MS : smart ? SMART_START_MS : START_TIMEOUT_MS;
+  const ms = live ? LIVE_FALLBACK_MS : smart ? SMART_START_MS : notes ? NOTES_START_MS : START_TIMEOUT_MS;
   const gemini = GEMINI_KEY ? geminiRoutes(messages, maxTokens, stream, ms) : [];
   const mistral = MISTRAL_KEY ? [mistralRoute(messages, maxTokens, stream, ms)] : [];
   const openai = (model: string, wholeMs: number, temperature?: number): Route[] =>
@@ -533,7 +553,8 @@ async function routesFor(live: boolean, smart: boolean, notes: boolean, messages
   if (notes) {
     const c = claudeRoute(CLAUDE_NOTES_MODEL, messages, maxTokens, ms, CLAUDE_NOTES_MS);
     const tail = [...mistral, ...gemini].map((r) => ({ ...r, capMs: NOTES_TAIL_MS }));
-    return [...openai(OPENAI_NOTES_MODEL, OPENAI_NOTES_MS), ...(c ? [c] : []), ...tail];
+    // 0.2: the notes now carry more figures, dates and names, and the default temperature (1.0) lets them drift
+    return [...openai(OPENAI_NOTES_MODEL, OPENAI_NOTES_MS, 0.2), ...(c ? [c] : []), ...tail];
   }
   if (!live && !smart) return [...mistral, ...openai(OPENAI_FAST_MODEL, OPENAI_SMART_MS), ...gemini];
   const fast = claudeRoute(CLAUDE_FAST_MODEL, messages, maxTokens, ms, smart ? CLAUDE_SMART_MS : 0);
@@ -722,7 +743,7 @@ async function attempt(route: Route, body: Record<string, unknown>, stream: bool
 // Watches a relayed live answer without changing a byte: logs how long the
 // first words took and whether reasoning slipped through - a live model that
 // thinks is slow and can end with an empty answer.
-function observeStream(name: string, startedAt: number, model = "") {
+function observeStream(name: string, startedAt: number, model = "", label = "live answer") {
   const scanner = sseScanner();
   let firstChunkMs = -1;
   return new TransformStream<Uint8Array, Uint8Array>({
@@ -740,9 +761,9 @@ function observeStream(name: string, startedAt: number, model = "") {
       if (s.reasoning > 0 || s.thinkTags || s.content === 0) {
         // Thinking leaked (a reasoning field, or tags in the text - the app
         // strips those) or nothing came back. Logged for the founder only.
-        console.warn("live answer degraded", JSON.stringify(info));
+        console.warn(`${label} degraded`, JSON.stringify(info));
       } else {
-        console.log("live answer", JSON.stringify(info));
+        console.log(label, JSON.stringify(info));
       }
     },
   });
@@ -780,6 +801,8 @@ Deno.serve(async (req) => {
   const notes = body?.mode === "meeting_notes";
 
   const supa = createClient(SUPABASE_URL, ANON_KEY, { global: { headers: { Authorization: authHeader } } });
+  const sessionId = typeof body?.session_id === "string" ? body.session_id.trim() : "";
+  const noteRef = typeof body?.note_ref === "string" ? body.note_ref.slice(0, 200) : "";
   const [userRes, proRes, quotaRes] = await Promise.all([
     supa.auth.getUser(),
     supa.rpc("is_pro"),
@@ -788,7 +811,26 @@ Deno.serve(async (req) => {
   ]);
   if (userRes.error || !userRes.data?.user) return json({ error: "unauthorized" }, 401);
   if (proRes.error) return json({ error: "entitlement_check_failed" }, 500);
-  if (proRes.data !== true) return json({ error: "pro_required" }, 403);
+  if (proRes.data !== true) {
+    // Free: one cloud meeting note a month, and Live Assistant only inside
+    // the session begin_live_session() already opened. Everything else is Pro.
+    if (notes) {
+      const { data: allowed, error } = await supa.rpc("consume_meeting_note", { note_ref: noteRef });
+      if (error) return json({ error: "quota_check_failed" }, 500);
+      if (allowed !== true) {
+        return json({ error: "allowance_used", allowance: "meeting_notes" }, 402);
+      }
+    } else if (live || warmup) {
+      const id = UUID_RE.test(sessionId) ? sessionId : null;
+      const { data: open, error } = await supa.rpc("live_session_open", { p_session_id: id });
+      if (error) return json({ error: "quota_check_failed" }, 500);
+      if (open !== true) {
+        return json({ error: "allowance_used", allowance: "live_session" }, 402);
+      }
+    } else {
+      return json({ error: "pro_required" }, 403);
+    }
+  }
 
   if (warmup) {
     if (LIVE_URL && LIVE_TOKEN) {
@@ -806,10 +848,10 @@ Deno.serve(async (req) => {
   if (quotaRes.error) return json({ error: "quota_check_failed" }, 500);
   if (quotaRes.data !== true) return json({ error: "quota_exceeded" }, 429);
 
-  // A whole number from 1 to 2000; anything else (negative, zero, fractional,
+  // A whole number from 1 to 2000 (meeting notes: 6000); anything else (negative, zero, fractional,
   // infinite, text) is the default - never an error, never "no limit".
   const rawMax = Math.trunc(Number(body?.max_tokens));
-  const maxTokens = Number.isFinite(rawMax) && rawMax >= 1 ? Math.min(rawMax, 2000) : 600;
+  const maxTokens = Number.isFinite(rawMax) && rawMax >= 1 ? Math.min(rawMax, notes ? NOTES_MAX_TOKENS : MAX_TOKENS) : 600;
   const stream = body?.stream === true;
   if (!Array.isArray(body?.messages) || body.messages.length === 0 || body.messages.length > MAX_MESSAGES) {
     return json({ error: "no_messages" }, 400);
@@ -860,7 +902,9 @@ Deno.serve(async (req) => {
   if (ok === null) return json({ error: "action_failed" }, 502);
   if (stream && ok.body) {
     // Relay the OpenAI-style event stream as is - the app renders each delta.
-    const relayed = live ? ok.body.pipeThrough(observeStream(used, startedAt, usedModel)) : ok.body;
+    const relayed = live ? ok.body.pipeThrough(observeStream(used, startedAt, usedModel))
+      : notes ? ok.body.pipeThrough(observeStream(used, startedAt, usedModel, "meeting notes streamed"))
+      : ok.body;
     return new Response(relayed, {
       headers: { ...cors, "Content-Type": "text/event-stream", "Cache-Control": "no-cache",
                  "X-Answer-Family": usedFamily },

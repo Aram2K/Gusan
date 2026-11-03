@@ -41,6 +41,7 @@ SYNC_BG = False            # tests: run background work inline
 FLASH_MS = 1800            # how long "Copied" and friends stay up
 FLASH_ERROR_MS = 5000      # a failure to read: the Notion errors
 FLASH_MIN_W = 160          # the flash line wraps rather than get narrower than this
+NOTE_MS = 6000             # how long the one line about how a speaker pass ended stays up (the header's note)
 NOTION_THEN = "Send this meeting"       # the Notion sheet's button when it was opened from here
 NOTION_REASONS = ("auth", "no_access", "rate", "offline", "full")      # telemetry: why a send failed (else "other")
 ARTICLE_MAX_W = 620                 # the notes card stops growing here (it reads best at this width)
@@ -1197,7 +1198,8 @@ notes_plain = rich_text.notes_plain             # notes as plain paragraphs: no 
 
 
 class ActionItem(QWidget):
-    """One action item: checkbox, face, **Owner** task, due."""
+    """One action item: checkbox, face, **Owner** task, due. The face and the bold name are only for a person: parse_task
+    leaves out an empty or generic owner ('Them', 'Speaker 2', 'the other side'), so those items are just the task."""
 
     toggled = Signal(int, bool)
 
@@ -1218,9 +1220,12 @@ class ActionItem(QWidget):
         self.box.setCursor(Qt.PointingHandCursor)
         theme.focus_ring(self.box)
         lay.addWidget(self.box, 0, Qt.AlignVCenter)
-        if owner:
-            lay.addWidget(Faces([owner], 22, me=me, parent=self), 0, Qt.AlignVCenter)
         self._me = (me or "").strip().lower()
+        if owner:
+            # the person who recorded is drawn as in the sidebar, whether the notes say "You" or their name; two owners,
+            # two faces
+            faces = [(me or n) if n.lower() == "you" else n for n in self._owner_names()]
+            lay.addWidget(Faces(faces, 22, me=me, parent=self), 0, Qt.AlignVCenter)
         self.text_label = QLabel(self)
         self.text_label.setTextFormat(Qt.RichText)
         self.text_label.setWordWrap(True)
@@ -1228,15 +1233,21 @@ class ActionItem(QWidget):
         self.text_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         lay.addWidget(self.text_label, 1, Qt.AlignVCenter)
         self.due_label = tlabel(due, 12.5, 400, "muted")
+        self.due_label.setTextFormat(Qt.PlainText)          # words from the notes, never markup
         self.due_label.setVisible(bool(due))
         lay.addWidget(self.due_label, 0, Qt.AlignVCenter)
         self.box.toggled.connect(self._on_toggle)
         self._render()
 
+    def _owner_names(self):
+        return [n.strip() for n in (self.owner or "").split(", ") if n.strip()]
+
     def owner_shown(self):
-        if self.owner and self._me and self.owner.split()[0].lower() == self._me:
-            return "You"
-        return self.owner
+        """The owner as the chip says it: the viewer's own name is 'You' ('Aram, Marc' -> 'You, Marc'), the others stay."""
+        names = self._owner_names()
+        if self._me:
+            names = ["You" if n.split()[0].lower() == self._me else n for n in names]
+        return ", ".join(dict.fromkeys(names)) if names else (self.owner or "")
 
     def _render(self):
         done = self.box.isChecked()
@@ -1255,7 +1266,7 @@ class ActionItem(QWidget):
 
 
 class NotesDoc(QWidget):
-    """The rendered notes (Summary, Decisions, Action items, Open questions)."""
+    """The rendered notes (Summary, Decisions, Action items, Open questions, Discussion: its topics are sub-headings)."""
 
     task_toggled = Signal(int, bool)
     LINE = 23                   # 14.5 / 23 px, as the mockup's notes
@@ -1273,7 +1284,8 @@ class NotesDoc(QWidget):
 
     def render(self, md, banner=None, notices=(), written_by=None, blocks=None):
         """``blocks`` (instead of parsing ``md``): parse_notes' blocks, plus
-        ("html", rich text) paragraphs (the transcript shown when there are no notes)."""
+        ("html", rich text) paragraphs (the transcript shown when there are no notes). Parsed from ``md``, a section with
+        nothing under it is not shown and a topic under a section is a sub-heading (parse_notes(sections=True))."""
         clear_layout(self._lay)
         self.tasks = []
         lay = self._lay
@@ -1291,14 +1303,22 @@ class NotesDoc(QWidget):
             lay.addSpacing(10)
         first = True
         prev = None
-        for kind, data in (parse_notes(md) if blocks is None else blocks):
+        for kind, data in (parse_notes(md, sections=True) if blocks is None else blocks):
             if kind == "head":
                 if not first:
                     lay.addSpacing(20)
                 lb = tlabel(data, 18, 600, "ink", display=True, wrap=True)
+                lb.setTextFormat(Qt.PlainText)          # a heading the AI wrote is text, never markup
                 lb.setAccessibleName(data)
                 lay.addWidget(lb)
                 lay.addSpacing(10)
+            elif kind == "subhead":
+                lay.addSpacing(0 if prev in ("head", None) else 14)
+                lb = tlabel(data, 15, 600, "ink", wrap=True)
+                lb.setTextFormat(Qt.PlainText)
+                lb.setAccessibleName(data)
+                lay.addWidget(lb)
+                lay.addSpacing(5)
             elif kind == "task":
                 if prev == "task":
                     lay.addSpacing(4)
@@ -1397,6 +1417,10 @@ class NotesView(QWidget):
         self._flash.setSingleShot(True)
         self._flash.setInterval(FLASH_MS)
         self._flash.timeout.connect(self._end_flash)
+        self._note = QTimer(self)
+        self._note.setSingleShot(True)
+        self._note.setInterval(NOTE_MS)
+        self._note.timeout.connect(self._end_note)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1551,7 +1575,22 @@ class NotesView(QWidget):
         self.back_link.setFixedHeight(20)
         self.back_link.setAccessibleName("Back to Meetings")
         self.back_link.clicked.connect(lambda: self.page.show_list())
-        lay.addWidget(self.back_link, 0, Qt.AlignLeft)
+        # The note at the end of this row (how a speaker pass ended) has room to spare there whatever the
+        # window's width: the toolbar below is as wide as its buttons and a line beside them would push the
+        # page wider than a window of 1200 pixels or less.
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(12)
+        top.addWidget(self.back_link, 0, Qt.AlignLeft)
+        top.addStretch(1)
+        self.note_label = tlabel("", 12.5, 600, "ok")
+        self.note_label.setTextFormat(Qt.PlainText)
+        self.note_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.note_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.note_label.setMinimumWidth(0)
+        self.note_label.hide()
+        top.addWidget(self.note_label, 1000, Qt.AlignVCenter)
+        lay.addLayout(top)
         self.title_label = label("", "title", w)
         self.title_label.setTextFormat(Qt.PlainText)    # a calendar invite's title is text, never markup
         self.title_label.setFixedHeight(34)
@@ -1645,6 +1684,8 @@ class NotesView(QWidget):
                 self.chat.unbind()                   # ... and of its chat (a running answer ends in its own folder)
             except Exception:
                 logger.warning("The meeting chat could not be let go", exc_info=True)
+            self._note.stop()
+            self.note_label.hide()                   # (and what was said about the last one)
         # (only when what is on screen IS this meeting: a meeting still being opened has nothing
         # to keep, and the previous one's scroll position is not its own)
         shown = str((self.data or {}).get("folder") or "") == str(folder)
@@ -1776,6 +1817,8 @@ class NotesView(QWidget):
         self._meta.addStretch(1)
 
         notes = d.get("notes") or ""
+        if notes.strip() and not parse_notes(notes, sections=True):
+            notes = ""              # nothing but empty sections ("None."): shown like no notes, the transcript is still here
         busy = self.page.is_active_folder(self.folder)
         banner = None
         has_transcript = bool((d.get("transcript") or "").strip())
@@ -1870,7 +1913,11 @@ class NotesView(QWidget):
             self._people.addLayout(r)
         self.people_card.setVisible(bool(rows))
 
-    def _banner(self, title, text, tone="amber", button=None, slot=None):
+    def _banner(self, title, text, tone="amber", button=None, slot=None, progress=None):
+        """A calm banner at the top of the notes. ``progress``: None = no bar, -1 = a bar that just moves
+        (not known how long), 0..1 = a bar filled that far. The frame keeps its ``title_label``,
+        ``text_label`` (None without text), ``bar`` (None without progress) and ``button`` (when it has
+        one), so a banner that is on the page can be updated in place."""
         fr = QFrame()
         fr.setProperty("gusan", "banner")
         fr.setProperty("tone", tone)
@@ -1883,9 +1930,28 @@ class NotesView(QWidget):
         h.addWidget(icon_label(ic[0], 18, ic[1]), 0, Qt.AlignTop)
         col = QVBoxLayout()
         col.setSpacing(2)
-        col.addWidget(tlabel(title, 13.5, 600, "ink", wrap=True))
+        # (plain text: a title or a line can come from outside - a notes error - and is never markup)
+        fr.title_label = tlabel(title, 13.5, 600, "ink", wrap=True)
+        fr.title_label.setTextFormat(Qt.PlainText)
+        col.addWidget(fr.title_label)
+        fr.text_label = None
         if text:
-            col.addWidget(tlabel(text, 12.5, 400, "text2", wrap=True))
+            fr.text_label = tlabel(text, 12.5, 400, "text2", wrap=True)
+            fr.text_label.setTextFormat(Qt.PlainText)
+            col.addWidget(fr.text_label)
+        fr.bar = None
+        if progress is not None:
+            fr.bar = QProgressBar(fr)
+            fr.bar.setTextVisible(False)
+            fr.bar.setFixedHeight(6)
+            fr.bar.setAccessibleName("Progress")
+            if progress < 0:
+                fr.bar.setRange(0, 0)
+            else:
+                fr.bar.setRange(0, 1000)
+                fr.bar.setValue(int(max(0.0, min(1.0, progress)) * 1000))
+            col.addSpacing(5)
+            col.addWidget(fr.bar)
         h.addLayout(col, 1)
         if button:
             b = Button(button, "secondary", "s", parent=fr)
@@ -1924,6 +1990,19 @@ class NotesView(QWidget):
         self.flash_label.show()
         self._flash.start(ms or FLASH_MS)
 
+    def note(self, text, tone="ok", ms=None):
+        """A short line at the top right of the page (plain text, one line, never wider than the room it
+        has): how a speaker pass ended. Hidden again after ``ms`` and when another meeting opens."""
+        self.note_label.setText(text)
+        self.note_label.setToolTip(text)
+        set_tone(self.note_label, tone)
+        self.note_label.show()
+        self._note.start(ms or NOTE_MS)
+
+    def _end_note(self):
+        self.note_label.hide()
+        self.note_label.setText("")
+
     def _end_flash(self):
         self.flash_label.hide()
         self.copy_btn.setText(self._copy_label())
@@ -1935,7 +2014,7 @@ class NotesView(QWidget):
         notes = (self.data.get("notes") or "").strip()
         if not notes:
             return
-        ok = bool(rich_clipboard.copy_rich(notes))
+        ok = bool(rich_clipboard.copy_rich(rich_text.clean_notes(notes)))
         if ok:
             self.copy_btn.setText("Copied")
             self._flash.start(FLASH_MS)
@@ -1980,7 +2059,7 @@ class NotesView(QWidget):
                 return
             if not path.lower().endswith(".md"):
                 path += ".md"
-            text = "# %s\n\n%s\n\n%s\n" % (title, self._meta_line(), (d.get("notes") or "").strip())
+            text = "# %s\n\n%s\n\n%s\n" % (title, self._meta_line(), rich_text.clean_notes(d.get("notes") or "").strip())
 
             def work():
                 with open(path, "w", encoding="utf-8") as f:
@@ -2073,9 +2152,6 @@ class NotesView(QWidget):
 
     def continue_recording(self):
         if not self.folder:
-            return
-        if not self.page.is_pro():
-            self.page.call("_pro_upsell", UPSELL_RECORD)
             return
         if not self.page.ensure_consent():
             return
@@ -2254,6 +2330,7 @@ def _menu_offset(menu):
 
 def read_meeting(folder):
     """Everything the notes view shows, read off the GUI thread."""
+    import meeting_speakers
     import meeting_store
     meta = meeting_store.load_meta(folder)
     notes = meeting_store.load_notes(folder)
@@ -2278,10 +2355,14 @@ def read_meeting(folder):
     # The recording ends before the transcript does (a meeting past the ~2-hour cap):
     # the Transcript tab never suggests Identify speakers then (meeting_speakers_ui).
     cut_short = bool(parts) and meeting_store.recording_cut_short(meta, meeting_store.part_seconds(parts))
+    # Can the speaker pass still tell the people on the call apart from what the meeting kept (its
+    # segments and the call's sound)? Two small files read here, off the window's thread: the page
+    # offers "Identify speakers" for a meeting that still says "Them" only when it can.
+    can_name_call = bool(meeting_speakers.refinable(folder)) if "Them:" in transcript else False
     return {"folder": str(folder), "meta": meta, "title": str(meta.get("title") or "Untitled Meeting"),
             "notes": notes, "transcript": transcript, "my_notes": my_notes, "parts": parts,
             "people": list(people), "started": started, "duration_sec": duration,
-            "recording_cut_short": cut_short,
+            "recording_cut_short": cut_short, "can_name_call": can_name_call,
             "transcript_file": meeting_store.has_transcript_file(folder)}      # (else only the live pieces are there)
 
 

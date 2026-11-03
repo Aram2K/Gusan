@@ -133,18 +133,26 @@ Who said what (Gusan 2.0.1)
     ``_followup`` (speaker_followup.SpeakerFollowUp) runs meeting_speakers.
     refine_meeting in the background: "Them" -> "Speaker 1..N" from the saved segments
     and the call's saved sound, no second reading, transcript.txt replaced in one
-    atomic step (the old one kept as transcript.before_speakers.txt until then). It
-    runs only while the session is idle (no recording, no Stop, no Rewrite notes, no
-    Identify speakers) and no dictation / Audio to text job is active (polled every
-    5 s), stops at once when one starts and tries again when free (at most 5 times
-    per queued job, then the page keeps offering Identify speakers), is ended by Cancel
-    (cancel_speaker_followup), by quitting (shutdown_speaker_followup) and by the
-    meeting being deleted (stop_speaker_pass waits until it has let go of the folder;
-    refine_meeting also stops by itself when the folder is gone), is waited out by
-    Identify speakers by hand before that starts (same meeting, same backup file), and
-    never starts by itself at launch - only a meeting that just finished queues itself.
-    Progress is ``speakers_state(folder)`` ("" / "waiting" / "running") and the
-    ``speakers_changed(folder)`` signal; the notes are NOT written again afterwards
+    atomic step (the old one kept as transcript.before_speakers.txt until then). The people
+    are told apart by ONE VOICE PRINT PER STRETCH of the call's speech (voice_prints.py,
+    diarization.embed_spans): about two minutes for a 55 minute call where the sliding-window
+    diarizer needed three quarters of an hour. It runs only while the session is idle (no
+    recording, no Stop, no Rewrite notes, no Identify speakers) and no dictation / Audio to text
+    job is active (``_speaker_pass_blocker`` names what it waits for: "recording", "notes",
+    "dictation", "file"; looked at every 2 s), stops at once when one starts and goes on from
+    the voice prints it had when free (an interruption that got nowhere counts, at most 5 times
+    per queued job - one after a try that made progress does not - then the page keeps offering
+    Identify speakers, and the next one goes on from the prints kept), is ended by Cancel
+    (cancel_speaker_followup), by quitting
+    (shutdown_speaker_followup) and by the meeting being deleted (stop_speaker_pass waits until
+    it has let go of the folder; refine_meeting also stops by itself when the folder is gone), and
+    never starts by itself at launch - only a meeting that just finished queues itself (a launch
+    that finds one still on You / Them offers Identify speakers on the page).
+    Progress is read by polling: ``speakers_state(folder)`` ("" / "waiting" / "running"),
+    ``speakers_progress(folder)`` (what it waits for, the stage, a real percentage, the time
+    left, "stopping" after Cancel) and, once it ended, ``speakers_result(folder)`` (the one line
+    for the page: "Found 2 speakers on the call." ...); the ``speakers_changed(folder)`` signal
+    says that something started or ended. The notes are NOT written again afterwards
     (Rewrite notes does that). A microphone-only meeting (default_mic) and a mic +
     system sound meeting without its tracks keep the one slow pass at Stop.
   * ``identify_speakers(folder)`` adds the labels to any saved meeting that has a
@@ -156,7 +164,10 @@ Who said what (Gusan 2.0.1)
     ``error("speakers", why)``. A recording that ends before the transcript does
     (past the ~2-hour cap, or a part's sound not saved - meta
     ``recording_cut_short``, written at Stop) is refused: the new transcript would
-    stop where the recording does.
+    stop where the recording does. A meeting the background pass can still work on from its
+    saved segments (meeting_speakers.refinable) is not read again at all: Identify speakers
+    queues that same pass in front of the others (no refusal while a dictation runs - it
+    waits and says so).
   * An interrupted meeting (recording saved, no transcript.txt - only live pieces)
     is finished by retry_notes(folder=...) / write_pending_notes: the recording is
     read again, labelled and saved as transcript.txt, then the notes are written
@@ -190,6 +201,17 @@ What transcribes a session (Gusan 2.0.1)
     the people on the call apart from the segments kept at Stop (meeting_speakers.refine_meeting)
     and otherwise says the words were left as they are; finishing an interrupted session keeps
     its live pieces as the transcript; the Transcript tab doesn't suggest a re-read for one.
+Richer notes
+  * The notes scale with the meeting (notes_prompt.plan_for, from the words of what the engine is
+    given): a few sentences for a short one; a longer one gets a two-paragraph Summary and a
+    "## Discussion" LAST (### Topic headings, a few bullets each); Key decisions, Action items and
+    Open questions keep their places. They are always streamed (actions._notes_from_stream), so a long
+    meeting's notes never meet a whole-answer wait; an answer the engine cut off at its limit is
+    trimmed to its last whole line, kept, and said above the notes (``NOTES_CUT_NOTICE`` in meta
+    ``notes_notice``, never inside notes.md) - or, cut inside the Summary, is an error with "Write notes
+    again". _summarize_and_finish saves rich_text.clean_notes(notes): every action item in one shape
+    ('Owner: Them' / 'Owner: , Due: ' never survive, "You" becomes the profile first name), no empty
+    section. _notes_input tells an AI engine who "You" is (the profile name, never an email's front).
 """
 import importlib.util
 import json
@@ -208,6 +230,7 @@ import diarization
 import invite_context
 import meeting_speakers
 import meeting_store
+import rich_text
 import speaker_followup
 import speech_langs
 import storage
@@ -267,6 +290,12 @@ QUIT_CHUNK_WAIT = 3.0      # s: pieces being transcribed at Quit may still land
 # An interrupted meeting finished from its saved recording (see _recover_then_notes).
 RECOVERED_NOTICE = ("Gusan was closed before this meeting was finished, so the transcript was "
                     "rebuilt from the saved recording.")
+# The AI stopped writing at its limit: the notes are kept up to their last whole line (actions.CutShort).
+NOTES_CUT_NOTICE = ("The notes stopped early, so the last topic may be missing. "
+                    "Write them again from \u22ef \u203a Rewrite notes.")
+# ...and when it stopped before the Discussion, so that the rest of the notes (not one topic) is what is missing.
+NOTES_CUT_EARLY_NOTICE = ("The notes stopped early, so the end of them is missing. "
+                          "Write them again from ⋯ › Rewrite notes.")
 # The same for a Live Assistant session whose words came from a cloud engine: the recording is NOT
 # read again (that would replace them with this computer's much worse text, see _reread_plan).
 RECOVERED_CLOUD_NOTICE = ("Gusan was closed before this meeting was finished, so the transcript is "
@@ -616,7 +645,7 @@ class MeetingCore:
         self._sources_part = None
         self._followup_folder = ""
         self._followup = speaker_followup.SpeakerFollowUp(
-            is_busy=self._speaker_pass_blocked, run=self._run_speaker_pass,
+            is_busy=self._speaker_pass_blocker, run=self._run_speaker_pass,
             on_change=self._speakers_changed, spawn=lambda fn: self._spawn(fn))
         self._make_signals()
         self._piece.connect(self._on_piece)
@@ -2082,14 +2111,29 @@ class MeetingCore:
             "call. If the meeting was still going, check the microphone and the speaker output in "
             "Windows sound settings." % span)
 
+    def _recorder_name(self):
+        """The signed-in person's first name from their profile ('' for a guest or without one): who "You" is in the
+        transcript. Never made up from an email address."""
+        try:
+            import account_actions
+            return account_actions.first_name(self.app, email_fallback=False)
+        except Exception:
+            return ""
+
     def _notes_input(self, with_invite=True):
         """What the notes engine is given: the calendar invite's title, people and
         agenda (invite_context.notes_header - framed as data, empty for a generic
         title, nobody and no agenda) in front of the transcript, then the user's
-        own notes. The bare transcript when there is no invite context."""
+        own notes. For an AI engine, a transcript with "You:" lines also gets one
+        line saying who You is (the profile name). The bare transcript when there
+        is nothing to put in front of it."""
         transcript = self._final_transcript or ""
         header = (invite_context.notes_header(self._meeting_title, self._meeting_attendees,
                                               self._meeting_agenda) if with_invite else "")
+        if with_invite and re.search(r"(?m)^You:", transcript):
+            who = invite_context.recorder_line(self._recorder_name())
+            if who:
+                header = (header + "\n" + who) if header else who
         note_context = (header + "\n\nTranscript:\n" + transcript) if header else transcript
         if self._user_notes:
             note_context += ("\n\nAdditional visual meeting notes provided by "
@@ -2113,6 +2157,22 @@ class MeetingCore:
             # (which used to strand the whole recording).
             engine, engine_config = self.app._resolve_action_engine(
                 action_model=self._effective_notes_engine())
+            # Signed-in Free can spend their one cloud meeting note. The server
+            # counts it (note_ref is this meeting, so a retry does not take another).
+            if engine == actions.API_MANAGED_ID and not (engine_config or {}).get("_managed_token"):
+                token = None
+                auth = getattr(self.app, "auth", None)
+                if auth is not None and getattr(auth, "is_authenticated", False):
+                    try:
+                        token = auth.get_access_token()
+                    except Exception:
+                        token = None
+                if token:
+                    engine_config = dict(engine_config or {})
+                    engine_config["_managed_token"] = token
+            if engine == actions.API_MANAGED_ID and engine_config is not None:
+                engine_config = dict(engine_config)
+                engine_config["_note_ref"] = str(getattr(self, "_meeting_dir", "") or "")
             info = actions.ACTION_MODELS.get(engine, {})
             kind = info.get("kind")
             # Key check is PROVIDER-aware: a Google key only counts for the
@@ -2134,17 +2194,49 @@ class MeetingCore:
             # header (and its agenda bullets) goes only to an AI engine.
             note_context = self._notes_input(with_invite=used != actions.RULE_BASED_ID)
             self._emit_status("Writing notes…")
-            notes = actions.process(
-                note_context,
-                actions.ACTION_MEETING_NOTES,
-                source_lang=self._final_lang or "auto",
-                target_lang="en",
-                model=engine,
-                config=engine_config,
-            )
+            self._allowance_used = False
+            try:
+                notes = actions.process(
+                    note_context,
+                    actions.ACTION_MEETING_NOTES,
+                    source_lang=self._final_lang or "auto",
+                    target_lang="en",
+                    model=engine,
+                    config=engine_config,
+                )
+            except actions.ActionError as e:
+                if getattr(e, "code", "") != "allowance_used":
+                    raise
+                # The month's cloud note is spent. Say so, and still write notes
+                # with the built-in formatter so the recording isn't left blank.
+                self._allowance_used = True
+                downgraded_from = downgraded_from or "Gusan Cloud"
+                notes = actions.process(
+                    self._notes_input(with_invite=False),
+                    actions.ACTION_MEETING_NOTES,
+                    source_lang=self._final_lang or "auto",
+                    target_lang="en",
+                    model=actions.RULE_BASED_ID,
+                    config=engine_config,
+                )
+                used = actions.RULE_BASED_ID
+            # One clean shape for every action item and no empty section, whatever the engine wrote ('Owner: Them',
+            # 'Owner: , Due: ', 'None.'): notes.md, the history entry and every export start from this text. "You"
+            # becomes the person's own name, because notes are shared. A cut-off answer (CutShort) is said above them.
+            cut = bool(getattr(notes, "cut", False))
+            cleaned = rich_text.clean_notes(notes, me=self._recorder_name())
+            notes = cleaned if cleaned.strip() else notes          # never turn whatever the engine wrote into nothing
             self._summary_downgraded = bool(downgraded_from)
             self._notes_notice = ""
-            if downgraded_from:
+            if cut:
+                in_discussion = re.search(r"^#{2,3}\s*Discussion\b", notes, re.M | re.I)
+                self._notes_notice = NOTES_CUT_NOTICE if in_discussion else NOTES_CUT_EARLY_NOTICE
+            if getattr(self, "_allowance_used", False):
+                self._notes_notice = ("You've used this month's free cloud meeting note. "
+                                      "These notes come from the built-in formatter. "
+                                      "Gusan Pro includes unlimited cloud notes.")
+                downgraded_from = ""
+            elif downgraded_from:
                 reason = ("sign in with a Pro account to use it" if kind == "managed"
                           else "add its API key to use it")
                 # Shown above the notes and kept in meta - never written into
@@ -2289,6 +2381,14 @@ class MeetingCore:
 
         telemetry.track("meeting_notes_completed", {"minutes": self._meeting_minutes},
                         self._cfg(), APP_VERSION)
+        if getattr(self, "_allowance_used", False) and self.app is not None:
+            self._allowance_used = False
+            upsell = getattr(self.app, "_pro_upsell", None)
+            if callable(upsell):
+                try:
+                    upsell("Meeting notes")
+                except Exception:
+                    logger.debug("upgrade prompt failed", exc_info=True)
         self._emit_state()
         self.finished.emit(folder, notes, "")
         self._queue_speaker_pass()              # notes first, the people on the call after
@@ -2302,31 +2402,44 @@ class MeetingCore:
         if folder:
             self._followup.enqueue(folder)
 
-    def _speaker_pass_blocked(self):
-        """Any thread: does something need the computer more than the speaker pass?
-        A recording (a meeting or Live Assistant session, paused too), the Stop of
-        one (its recording is being read again, its notes written), notes being
-        rewritten (the local model uses the processor, and the transcript the notes
-        come from must not change under them), an Identify speakers run, a dictation
-        still being written, an Audio to text job."""
+    def _speaker_pass_blocker(self):
+        """Any thread: what needs the computer more than the speaker pass - and so what the
+        pass is waiting for ("" when nothing does). "recording": a meeting or Live Assistant
+        session being recorded (paused too). "notes": the Stop of one (its recording is being read
+        again, its notes written), notes being rewritten (the local model uses the processor, and
+        the transcript the notes come from must not change under them), an Identify speakers run.
+        "dictation": a dictation, or one still being written. "file": an Audio to text job. A check
+        that fails counts as busy ("busy")."""
         try:
-            if self.is_busy:
-                return True
+            if self.state == STATE_RECORDING:
+                return "recording"
+            if self.state == STATE_PROCESSING:
+                return "notes"
             app = self.app
             if app is None:
-                return False
-            return (getattr(app, "is_rec", False) is True or getattr(app, "_busy", False) is True
-                    or getattr(app, "_file_job_running", False) is True)
+                return ""
+            if getattr(app, "is_rec", False) is True or getattr(app, "_busy", False) is True:
+                return "dictation"
+            if getattr(app, "_file_job_running", False) is True:
+                return "file"
+            return ""
         except Exception:
-            return True
+            return "busy"
+
+    def _speaker_pass_blocked(self):
+        """Any thread: does something need the computer more than the speaker pass?"""
+        return bool(self._speaker_pass_blocker())
 
     def _run_speaker_pass(self, folder, should_cancel, status):
         """The follow-up's worker: one meeting's pass (meeting_speakers.refine_meeting).
         Uses nothing of the session's own meeting (a new one may be starting): the
-        folder, and Privacy mode as it is NOW."""
+        folder, and Privacy mode as it is NOW. ``status`` is the follow-up's PassStatus: its
+        progress and its dict of finished voice prints (kept between the tries of one job)
+        go on to the pass."""
         return meeting_speakers.refine_meeting(
             folder, privacy=bool(self._cfg().get("privacy_mode")), status=status,
-            should_cancel=should_cancel, names=self._speaker_names)
+            should_cancel=should_cancel, names=self._speaker_names,
+            progress=getattr(status, "progress", None), resume=getattr(status, "resume", None))
 
     def _speakers_changed(self, folder):
         try:
@@ -2360,6 +2473,24 @@ class MeetingCore:
         """"" / "waiting" / "running": whether the background speaker pass of
         ``folder`` (or of any meeting) is queued behind other work, or working now."""
         return self._followup.state(folder)
+
+    def speakers_progress(self, folder):
+        """What the page says about ``folder``'s speaker pass, as one dict (speaker_followup.snapshot):
+        the state, what it is waiting for, the stage and the real progress, the time left, and whether it
+        is stopping. Cheap: the page asks every second while its banner is up."""
+        try:
+            return self._followup.snapshot(folder)
+        except Exception:
+            logger.debug("speakers_progress failed", exc_info=True)
+            return {}
+
+    def speakers_result(self, folder):
+        """The one line to say now that ``folder``'s pass has ended - (text, tone) - or None. Given once."""
+        try:
+            return meeting_speakers.result_line(*self._followup.take_result(folder))
+        except Exception:
+            logger.debug("speakers_result failed", exc_info=True)
+            return None
 
     def cancel_speaker_followup(self, folder=None):
         """Stop the background speaker pass of ``folder`` (any, with none): the
@@ -2568,7 +2699,18 @@ class MeetingCore:
         for one whose recording ends before its transcript does (a meeting past
         the ~2-hour cap: ERR_CUT_SHORT, the transcript would lose the rest). Progress
         comes through ``status``; cancel_identify() stops it. Returns
-        (ok, code, message); a refusal also emits error(code, message)."""
+        (ok, code, message); a refusal also emits error(code, message).
+
+        A meeting whose names the speaker pass can still work out from what it kept (its segments
+        and the call's saved sound: meeting_speakers.refinable) is not read again: the same
+        background pass as after its notes is queued, in front of the others
+        (speaker_followup.enqueue(first=True)) - one banner, one progress, one Cancel, nothing
+        locked and no refusal: while a recording or a dictation needs the computer it waits and
+        says so. The re-read below is for the meetings that have to be read again."""
+        folder_path = Path(folder)
+        if folder_path.is_dir() and meeting_speakers.refinable(folder_path):
+            self._followup.enqueue(str(folder_path), first=True)       # (already queued or running: fine)
+            return True, "", ""
         app = self.app
         rec = getattr(app, "recorder", None) if app is not None else None
         if rec is None:
@@ -2600,8 +2742,9 @@ class MeetingCore:
         self._failed = False
         self.last_error = ""
         # The same meeting's background pass (queued after its notes) would do this very
-        # work: the user asked for it now, so that one stands down.
+        # work: the user asked for it now, so that one stands down (and says nothing about it).
         self._followup.cancel(folder)
+        self._followup.take_result(folder)
         self.state = STATE_PROCESSING
         self._emit_state()
         self._spawn(self._run_identify)
@@ -2636,7 +2779,18 @@ class MeetingCore:
         return True
 
     def _run_identify(self):
-        """Worker: the Identify speakers run (see identify_speakers). The old
+        """Worker: the Identify speakers run (see identify_speakers). Whatever happens inside, the run
+        ends through ``finished``: a failure before anything was touched must not leave the session
+        "processing" for ever with an Identifying banner nobody can clear."""
+        try:
+            self._identify_work()
+        except Exception:
+            logger.warning("Identify speakers failed", exc_info=True)
+            self._identify_error = self._identify_error or meeting_speakers.notice_for(meeting_speakers.R_ERROR)
+        self.proc_signals.finished.emit(self._final_notes or "", "")
+
+    def _identify_work(self):
+        """The Identify speakers run (see identify_speakers). The old
         transcript is copied to transcript.before_speakers.txt first; the new one
         replaces transcript.txt in one atomic step and only then is the copy
         removed (a cancelled run removes it too - nothing changed). A run that
@@ -2648,6 +2802,7 @@ class MeetingCore:
         # backup file and could write the transcript. Start only once it is really gone.
         if not self._followup.wait_idle(folder, 30.0):
             logger.warning("The background speaker pass of %s did not stop in time", Path(folder).name)
+        self._followup.take_result(folder)
         # identify_speakers refused a recording that ends before the transcript does;
         # once more right before anything is touched: the transcript (and its old
         # copy) must never be replaced by one that stops where the recording does.
@@ -2656,12 +2811,10 @@ class MeetingCore:
             logger.warning("Identify speakers stopped: the recording of %s ends before its transcript",
                            Path(folder).name)
             self._identify_error = cut
-            self.proc_signals.finished.emit(self._final_notes or "", "")
             return
         try:
             if meeting_store.load_meta(folder).get("transcribed_with") == TRANSCRIBED_CLOUD:
                 self._identify_cloud_words(folder)
-                self.proc_signals.finished.emit(self._final_notes or "", "")
                 return
             old_text = meeting_store.load_transcript(folder) if meeting_store.has_transcript_file(folder) else ""
             if old_text.strip():
@@ -2696,7 +2849,6 @@ class MeetingCore:
                 self._write_meta(notices=self.notices())
             except Exception:
                 pass
-        self.proc_signals.finished.emit(self._final_notes or "", "")
 
     def _identify_cloud_words(self, folder):
         """Identify speakers on a meeting whose words came from a cloud engine (a Live Assistant

@@ -1,17 +1,19 @@
 """
-Tier + entitlement logic for Transcribe.
+Tier + entitlement logic for Gusan.
 
 Three tiers:
   * guest - not signed in. Dictation runs on this computer, so it is never
-            limited - for anyone. Pro features are locked.
-  * free  - signed in, no active subscription. Pro features (meetings, smart
-            actions, managed cloud) are locked behind contextual upgrade
-            prompts; Smart Actions have a few free tries.
-  * pro   - signed in with an active subscription. Everything unlocked.
+            limited. Smart Actions ask you to sign in first.
+  * free  - signed in, no Gusan Pro subscription. Local dictation, Smart
+            Actions and file conversion (this computer, or your own key) are
+            unlimited. Cloud meeting notes and Live Assistant are metered on
+            the server (one each per calendar month).
+  * pro   - signed in with Gusan Pro (subscription or lifetime). Cloud is
+            unlimited apart from the server's daily abuse caps.
 
-The Smart Actions tries are counted locally in usage.json. Pro entitlement is
-always confirmed server-side by auth.AuthManager - this module only maps that
-state to tiers + feature gates. It never decides Pro on its own.
+Pro entitlement is always confirmed server-side by auth.AuthManager - this
+module only maps that state to tiers + feature gates. It never decides Pro
+on its own.
 """
 
 import logging
@@ -22,7 +24,9 @@ import storage
 
 logger = logging.getLogger("transcribe.entitlements")
 
-FREE_SMART_ACTION_TRIES = 5  # free/guest users get 5 Smart Actions to try, then it locks
+# Kept so older call sites still import it. Free Smart Actions are unlimited;
+# the server meters cloud meeting notes and Live Assistant instead.
+FREE_SMART_ACTION_TRIES = 5
 
 TIER_GUEST = "guest"
 TIER_FREE = "free"
@@ -34,11 +38,12 @@ TIER_PRO = "pro"
 # admin. The local "force tier" control is purely a preview toggle for admins and
 # never grants real server Pro (the cloud proxy still verifies entitlement).
 
-# Pro-only features.
+# Cloud transcription (Gusan Cloud speech) is Pro. Meetings and Smart Actions
+# run on the free plan; the server meters cloud meeting notes and Live Assistant.
 FEATURE_MEETINGS = "meetings"
 FEATURE_SMART_ACTIONS = "smart_actions"
 FEATURE_CLOUD = "cloud_transcription"
-PRO_FEATURES = {FEATURE_MEETINGS, FEATURE_SMART_ACTIONS, FEATURE_CLOUD}
+PRO_FEATURES = {FEATURE_CLOUD}
 
 _USAGE_PATH = storage.path_for("usage.json")
 
@@ -153,14 +158,12 @@ def smart_actions_remaining(auth=None, cfg=None):
 
 
 def can_use_smart_action(auth, cfg=None):
-    """Pro = unlimited. Signed-in free users get FREE_SMART_ACTION_TRIES (per
-    user). Guests must sign up first - creating an account is what grants the
-    5 free trials (so the trial is always tied to a user, never a device)."""
+    """Smart Actions are unlimited for anyone with an account (local or their
+    own key). Gusan Cloud Smart Actions stay on the server, which is Pro.
+    Guests sign in first so the action is tied to a person, not a device."""
     if has_pro_access(auth, cfg):
         return True
-    if tier(auth, cfg) == TIER_GUEST:
-        return False
-    return smart_actions_used(auth) < FREE_SMART_ACTION_TRIES
+    return tier(auth, cfg) != TIER_GUEST
 
 
 # ── Per-user API key / engine isolation ──────────────────────────────────────

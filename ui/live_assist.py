@@ -2483,10 +2483,34 @@ class LiveAssistOverlay(QWidget):
         self._refresh_hear()               # what Start would transcribe with follows the plan
 
     def _pro_blocks(self):
-        """Free and guests: Start is the Pro action - show the Pro window.
-        True when it blocked."""
+        """Free and guests: Start spends the month's one Live Assistant session.
+
+        True when it blocked. A controller without claim_live_session (tests,
+        and anything that can't ask the server) still opens the Pro window.
+        Pro, and a controller that can't say its plan, are not blocked."""
         if self._is_pro() is not False:
             return False
+        claim = getattr(self.app, "claim_live_session", None)
+        if callable(claim):
+            try:
+                result = claim()
+            except Exception:
+                logger.debug("Live Assistant: session claim failed", exc_info=True)
+                result = {"ok": False, "reason": "unavailable"}
+            if isinstance(result, dict) and result.get("ok"):
+                return False
+            if isinstance(result, dict) and result.get("reason") == "signed_out":
+                gate = getattr(self.app, "show_auth_gate", None)
+                if callable(gate):
+                    gate()
+                    return True
+            if isinstance(result, dict) and result.get("reason") == "unavailable":
+                self._set_status("Couldn't check your free session. Try again.")
+                return True
+            if isinstance(result, dict) and result.get("reason") == "allowance_used":
+                if hasattr(self.app, "_pro_upsell"):
+                    self.app._pro_upsell("Live Assistant session")
+                return True
         if hasattr(self.app, "_pro_upsell"):
             self.app._pro_upsell("Live Assistant")
         return True
@@ -3026,6 +3050,12 @@ class LiveAssistOverlay(QWidget):
         try:
             folder, source, had_content = self._session_facts(session)       # before the Stop changes them
             stopped = session.stop()
+            release = getattr(self.app, "release_live_session", None)
+            if callable(release):
+                try:
+                    release()                    # the month's free session is spent (the server counts it)
+                except Exception:
+                    logger.debug("Live Assistant: session release failed", exc_info=True)
             self._set_status("Stopped - your notes will be in Meetings.")
             # Stop on a Live Assistant session that recorded something takes the user to its meeting (Meetings >
             # notes, the chat beside them; the notes are still being written). A session started from the Meetings

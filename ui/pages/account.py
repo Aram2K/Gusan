@@ -20,9 +20,8 @@ Integration notes for Wave 4
   account_actions.delete_account on a worker; on success the page calls
   app.sign_out() and shows the server's message. The controller's
   sig_auth_changed -> main_win.refresh_account() then redraws this page.
-* Prices in the Free plan line ("3-day free trial · €7.99/mo or €59/yr") are
-  the mockup's copy; if they change, change PRICE_LINE (the Pro window has
-  its own copy in ui/pro_dialog.py).
+* Prices in the Free plan line are PRICE_LINE (the Pro window has its own
+  copy in ui/pro_dialog.py). There is no free trial.
 """
 
 import logging
@@ -39,8 +38,10 @@ from ui.pages import settings as S
 
 logger = logging.getLogger("transcribe")
 
-PRICE_LINE = "3-day free trial · €7.99/mo or €59/yr"
-FREE_SUB = "Dictation, audio to text and your dictionary."
+import pricing_policy
+
+PRICE_LINE = pricing_policy.PRICE_LINE
+FREE_SUB = "Dictation, Smart Actions and audio to text on this computer. One cloud meeting note and one Live Assistant session a month."
 # icon, name, detail (None = the green "Hidden on screen share" chip)
 PRO_FEATURES = (
     ("people", "Meetings with AI notes", "Record a call, get the notes"),
@@ -333,10 +334,10 @@ class AccountPage(QWidget):
         row = QHBoxLayout()
         row.setSpacing(8)
         self.tries_bar = None
-        if v.get("pro"):
+        if v.get("pro") or v.get("smart_tries_left") is None and v.get("signed_in"):
             row.addWidget(S.text_label("Smart Actions", 14, 600, role="h3", parent=card))
             row.addStretch(1)
-            self.usage_text = S.text_label("Unlimited", 13.5, 600, color="ok-tx", parent=card)
+            self.usage_text = S.text_label(v.get("smart_text") or "Unlimited", 13.5, 600, color="ok-tx", parent=card)
             row.addWidget(self.usage_text)
             card.add(row)
         else:

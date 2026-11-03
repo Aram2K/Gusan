@@ -36,7 +36,16 @@ async function cancelStripeSubscriptions(customerId: string): Promise<boolean> {
     if (!list.ok) return false;
     const data = await list.json();
     for (const sub of data?.data ?? []) {
-      if (["active", "trialing", "past_due", "unpaid"].includes(sub.status)) {
+      if (!["active", "trialing", "past_due", "unpaid"].includes(sub.status)) continue;
+      // A yearly commitment is managed by a subscription schedule. Cancelling
+      // the schedule cancels the subscription immediately, which is what
+      // deleting the account must do.
+      if (sub.schedule) {
+        await fetch(`https://api.stripe.com/v1/subscription_schedules/${sub.schedule}/cancel`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${STRIPE_KEY}` },
+        });
+      } else {
         await fetch(`https://api.stripe.com/v1/subscriptions/${sub.id}`, {
           method: "DELETE",
           headers: { Authorization: `Bearer ${STRIPE_KEY}` },

@@ -2,6 +2,7 @@ import re
 
 import action_api
 import local_llm
+import notes_prompt
 import smart_prompt
 import vocabulary
 
@@ -248,9 +249,13 @@ def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_I
                     text, ACTION_SMART_AUTO, token,
                     source_lang=source_lang, target_lang=target_lang,
                     vocab_block=vocab_block,
+                    session_id=(config or {}).get("_live_session_id") or "",
+                    note_ref=(config or {}).get("_note_ref") or "",
                 )
             except action_api.ActionAPIError as e:
-                raise ActionError(str(e)) from e
+                err = ActionError(str(e))
+                err.code = getattr(e, "code", "") or ""
+                raise err from e
 
         # Cloud engine: let API errors surface clearly (missing key, bad key,
         # network). We do NOT silently fall back to rule-based - the user
@@ -301,27 +306,42 @@ def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_I
         token = (config or {}).get("_managed_token")
         if token:
             try:
+                if mode == ACTION_MEETING_NOTES:
+                    return _notes_from_stream(lambda info: action_api.run_managed_action_stream(
+                        text, mode, token, _drop_token, source_lang=source_lang, target_lang=target_lang,
+                        vocab_block=vocab_block, image_b64=(config or {}).get("_image_png_b64"), info=info))
                 return action_api.run_managed_action(
                     text, mode, token, source_lang=source_lang, target_lang=target_lang,
                     vocab_block=vocab_block,
-                    image_b64=(config or {}).get("_image_png_b64"))
+                    image_b64=(config or {}).get("_image_png_b64"),
+                    session_id=(config or {}).get("_live_session_id") or "",
+                    note_ref=(config or {}).get("_note_ref") or "",
+                )
             except action_api.ActionAPIError as e:
-                raise ActionError(str(e)) from e
+                err = ActionError(str(e))
+                err.code = getattr(e, "code", "") or ""
+                raise err from e
 
     if ACTION_MODELS[model].get("kind") == "cloud":
         if not config:
             raise ActionError("Add your action API settings before using this action engine.")
         api_config = cloud_api_config(model, config)
         try:
+            if mode == ACTION_MEETING_NOTES:
+                return _notes_from_stream(lambda info: action_api.run_action_stream(
+                    text, mode, api_config, _drop_token, source_lang=source_lang, target_lang=target_lang, info=info))
             return action_api.run_action(text, mode, api_config, source_lang=source_lang, target_lang=target_lang)
         except action_api.ActionAPIError as e:
             raise ActionError(str(e)) from e
 
     if ACTION_MODELS[model].get("kind") == "local_llm" and local_llm.model_downloaded(model):
         try:
-            return local_llm.run_action(text, mode, source_lang=source_lang,
-                                        target_lang=target_lang, model_id=model,
-                                        vocab_block=vocab_block)
+            out = local_llm.run_action(text, mode, source_lang=source_lang,
+                                       target_lang=target_lang, model_id=model,
+                                       vocab_block=vocab_block)
+            if mode == ACTION_MEETING_NOTES:            # the on-computer model stopped at its limit: a CutShort
+                return _notes_result(out, getattr(out, "cut", False))
+            return out
         except local_llm.LocalModelLoadError as e:
             # A chosen model that won't load: say so (meetings show it with
             # Retry), never quietly swap in the built-in formatter.
@@ -354,6 +374,37 @@ def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_I
                     raise ActionError(str(e)) from e
             raise
     return text
+
+
+def _drop_token(_delta):
+    """The notes appear when they are finished: the streamed pieces are not shown."""
+
+
+NOTES_CUT_MESSAGE = "The AI stopped before the notes were finished. Try again."
+
+
+def _notes_result(text, cut):
+    """What an engine wrote as the meeting notes: without a wrapper (a code fence around it, 'Here are the notes:' in
+    front, 'Let me know ...' behind: notes_prompt.tidy_answer). When the model stopped at its token limit (or the
+    connection dropped late: ``cut``) the text is trimmed to its last whole line and comes back as a CutShort (a str with
+    .cut), which the session says above the notes; stopped inside the Summary, the notes are not worth keeping and it is
+    an error (the notes page offers 'Write notes again')."""
+    text = notes_prompt.tidy_answer((text or "").strip())
+    if not cut:
+        return text
+    kept = notes_prompt.finish_cut(text)
+    if not notes_prompt.past_the_summary(kept):
+        raise ActionError(NOTES_CUT_MESSAGE)
+    return action_api.CutShort(kept)
+
+
+def _notes_from_stream(call):
+    """Meeting notes through a streaming engine call (``call(info)``): a long meeting's notes take longer than any
+    whole-answer wait, so they are always streamed - the pieces are not shown, the finished text is returned (see
+    _notes_result for a cut or wrapped answer)."""
+    info = {}
+    text = call(info)
+    return _notes_result(text, info.get("cut"))
 
 
 NO_ENGINE_MESSAGE = ("No AI engine is connected. Sign in to Gusan Pro, or add an "
@@ -431,11 +482,16 @@ def process_stream(text, mode, on_token, source_lang="auto", target_lang="en",
                 text, mode, token, on_token, source_lang=source_lang,
                 target_lang=target_lang, vocab_block=vocab_block,
                 image_b64=(config or {}).get("_image_png_b64"),
-                image_status=(config or {}).get("_image_status"))
+                image_status=(config or {}).get("_image_status"),
+                session_id=(config or {}).get("_live_session_id") or "",
+                note_ref=(config or {}).get("_note_ref") or "",
+            )
     except local_llm.ContextTooLong as e:
         raise ContextTooLong(str(e)) from e
     except (local_llm.LocalLLMError, action_api.ActionAPIError) as e:
-        raise ActionError(str(e)) from e
+        err = ActionError(str(e))
+        err.code = getattr(e, "code", "") or ""
+        raise err from e
     raise ActionError(NO_ENGINE_MESSAGE)
 
 
@@ -495,7 +551,8 @@ def warm_up(model, config):
         if (config or {}).get("privacy_mode"):
             return
         if kind == "managed":
-            action_api.warm_up_managed((config or {}).get("_managed_token"))
+            action_api.warm_up_managed((config or {}).get("_managed_token"),
+                                       session_id=(config or {}).get("_live_session_id") or "")
         elif kind == "cloud" and config:
             action_api.warm_up(cloud_api_config(model, config))
     except Exception:
@@ -730,11 +787,28 @@ def _extract_action_items_heuristic(text):
     return items
 
 
+_SPEAKER_LABEL = re.compile(r"^[ \t]*(?:You|Them|Speaker\s+(?:\d+|\?))[ \t]*:[ \t]*", re.M)
+
+
+def _without_speaker_labels(text):
+    """A labelled transcript ("You: ...", "Them: ...", "Speaker 2: ...") as plain sentences: the labels are not words
+    of the talk, and a line without its full stop ends its sentence anyway."""
+    lines = []
+    for line in (text or "").split("\n"):
+        body = _SPEAKER_LABEL.sub("", line).strip()
+        if body:
+            lines.append(body if body[-1] in ".!?…:;," else body + ".")
+    return " ".join(lines)
+
+
 def _meeting_notes_extractive(text):
     """Best-effort notes when no LLM is available.
 
     Output mirrors the structure of the LLM prompt so downstream code can
-    treat both kinds of output the same way."""
+    treat both kinds of output the same way. Short on purpose: a summary and
+    the action items (no Discussion)."""
+    if _SPEAKER_LABEL.search(text or ""):
+        text = _without_speaker_labels(text)
     summary = _summarize_extractive(text)
     action_items = _extract_action_items_heuristic(text)
     parts = []

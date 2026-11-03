@@ -197,7 +197,9 @@ class AuthManager:
         self.subscription_status = None
         self.period_end = None        # ISO string or None
         self.cancel_at_period_end = False
-        self.trial_available = False   # true if the one-time trial was never started
+        self.trial_available = False   # trials are no longer offered
+        self.commitment_ends_at = None  # yearly plan: when the 12 months end
+        self.cancels_at = None
         self.is_admin = False          # server-authoritative admin flag
         self.last_error = ""           # why the last Google sign-in failed (for analytics)
         self.entitlement_known = False  # the server has answered: is_pro is real, not a default
@@ -213,9 +215,8 @@ class AuthManager:
 
     @property
     def on_trial(self):
-        """Pro through a trial: a Stripe trial (status 'trialing') or the
-        retired in-app trial (plan 'trial'). period_end is when it ends."""
-        return bool(self.is_pro and (self.plan == "trial" or self.subscription_status == "trialing"))
+        """Trials are no longer offered. Kept so older callers don't break."""
+        return False
 
     def _notify(self):
         cb = self._on_state_changed
@@ -718,6 +719,8 @@ class AuthManager:
                 bool(row.get("trial_available", False)),
                 bool(row.get("is_admin", False)),
                 status=row.get("status"),
+                commitment_ends_at=row.get("commitment_ends_at"),
+                cancels_at=row.get("cancels_at"),
             )
         else:
             self._set_entitlement(False, None, None, False, False, False)
@@ -729,7 +732,8 @@ class AuthManager:
     # no client path to grant Pro; the server RPC is locked down to match.
 
     def _set_entitlement(self, is_pro, plan, period_end, cancel_at_period_end,
-                         trial_available=False, is_admin=False, status=None):
+                         trial_available=False, is_admin=False, status=None,
+                         commitment_ends_at=None, cancels_at=None):
         with self._lock:
             self.is_pro = is_pro
             self.plan = plan
@@ -737,8 +741,10 @@ class AuthManager:
             self.subscription_status = status if isinstance(status, str) and status else None
             self.period_end = period_end
             self.cancel_at_period_end = cancel_at_period_end
-            self.trial_available = trial_available
+            self.trial_available = False
             self.is_admin = is_admin
+            self.commitment_ends_at = commitment_ends_at if isinstance(commitment_ends_at, str) else None
+            self.cancels_at = cancels_at if isinstance(cancels_at, str) else None
             self.entitlement_known = True
 
     def _reset_entitlement(self):
@@ -751,6 +757,8 @@ class AuthManager:
             self.cancel_at_period_end = False
             self.trial_available = False
             self.is_admin = False
+            self.commitment_ends_at = None
+            self.cancels_at = None
             self.entitlement_known = False
 
     # ── sign out ─────────────────────────────────────────────────────────────

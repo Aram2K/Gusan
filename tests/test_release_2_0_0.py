@@ -242,7 +242,7 @@ class TestNameAndVersion(unittest.TestCase):
     def test_app_name_and_version(self):
         import app_info
         self.assertEqual(app_info.APP_NAME, "Gusan")
-        self.assertEqual(app_info.APP_VERSION, "2.0.1")
+        self.assertEqual(app_info.APP_VERSION, "2.1.0")
 
     def test_version_is_plain_three_numbers(self):
         # main._parse_version reads a suffix such as "2.0.0-beta.1" as (0, 0, 0).
@@ -522,7 +522,7 @@ class TestBuild(unittest.TestCase):
         self.assertEqual(strings["OriginalFilename"], "TranscribeApp.exe")
         self.assertEqual(strings["FileVersion"], dotted)
         self.assertEqual(strings["ProductVersion"], dotted)
-        self.assertEqual(dotted, "2.0.1.0")
+        self.assertEqual(dotted, "2.1.0.0")
         nums = tuple(int(x) for x in dotted.split("."))
         self.assertEqual(info["ffi"]["filevers"], nums)
         self.assertEqual(info["ffi"]["prodvers"], nums)

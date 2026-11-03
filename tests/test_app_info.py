@@ -26,7 +26,7 @@ def _src(name):
 class TestAppInfo(unittest.TestCase):
     def test_name_and_version(self):
         self.assertEqual(app_info.APP_NAME, "Gusan")
-        self.assertEqual(app_info.APP_VERSION, "2.0.1")
+        self.assertEqual(app_info.APP_VERSION, "2.1.0")
 
     def test_version_is_plain_three_numbers(self):
         # main._parse_version turns a suffix like "-beta.1" into (0, 0, 0).
