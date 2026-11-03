@@ -14,7 +14,25 @@ if __name__ == "__main__" and sys.argv[1:2] == ["--diarize-worker"]:
     # run, which froze the window for minutes. Before anything heavy loads.
     import diarization_proc
     sys.exit(diarization_proc.worker_main(sys.argv[1:]))
+if __name__ == "__main__" and sys.argv[1:2] == ["--splash-worker"]:
+    # The loading card (startup_splash.py, splash_window.py) is this program started
+    # again as its own process, so it keeps moving while the app's window thread is
+    # busy. It needs only the Qt basics: before anything heavy loads, too.
+    import startup_splash
+    sys.exit(startup_splash.worker_main(sys.argv[2:]))
+import startup_splash                    # standard library only: loads in a few milliseconds
 if __name__ == "__main__":
+    # The single-instance port is taken first thing, for every launch: the imports
+    # below take seconds, and a second launch in that time (a double-click, the
+    # installer's Launch, a click while the start-at-login copy is still loading)
+    # must see this one. It hands its request over and ends here - that copy opens
+    # its own window, no second card, no second set of imports. The socket is kept as
+    # the app's lock (see the lock function below, called by main()).
+    if not startup_splash.claim_or_hand_over(sys.argv):
+        sys.exit(0)
+    # The loading card, before the imports too. Quiet launches (--background),
+    # source runs and tests get no card.
+    startup_splash.start(sys.argv)
     # The app runs this file as __main__. Services do `import main` /
     # `from main import ...` (file jobs, model checks): they
     # must get THIS module - a second copy would load its own config.
@@ -594,6 +612,11 @@ cfg = load_config()
 
 # ── Single-instance IPC ──────────────────────────────────────────────────────
 def acquire_single_instance_lock():
+    # The port was claimed before the first import (startup_splash.claim_or_hand_over):
+    # that socket is the lock. The bind below is for a launch that could not claim it.
+    sock = startup_splash.claimed_socket()
+    if sock is not None:
+        return sock
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         sock.bind(("127.0.0.1", SINGLE_INSTANCE_PORT))
@@ -647,6 +670,17 @@ def dispatch_ipc_action(controller, action):
         front = getattr(controller, "front_first_run_wizard", None)
         if callable(front) and front() is True:
             return
+        # First run, and the wizard was never built (its 500 ms start-up timer has not
+        # fired: a second launch is now handed over while the app is still starting):
+        # the wizard opens, never the app. onboarding_win is None only until then - a
+        # wizard closed with X keeps its reference and still gets the app.
+        if (getattr(controller, "onboarding_win", False) is None
+                and not controller.cfg.get("onboarding_done", False)):
+            try:
+                controller.show_onboarding()
+                return
+            except Exception:
+                logger.warning("The first-run wizard failed to open from a second launch", exc_info=True)
         controller.show_main()
 
 
@@ -5616,17 +5650,23 @@ class AppController(QObject):
         (a window nobody just asked for - an update that failed on its own, say):
         it comes up on top but the keyboard stays where it was, so a dictation
         or a sentence being typed never lands in it."""
-        set_attribute = getattr(w, "setAttribute", None)
-        if callable(set_attribute):
-            set_attribute(Qt.WA_ShowWithoutActivating, not activate)
-        if w.isMinimized():
-            if not activate:
-                return                  # they put it away: showing it again would take the keyboard
-            w.showNormal()
-        w.show()
-        w.raise_()
-        if activate:
-            w.activateWindow()
+        try:
+            set_attribute = getattr(w, "setAttribute", None)
+            if callable(set_attribute):
+                set_attribute(Qt.WA_ShowWithoutActivating, not activate)
+            if w.isMinimized():
+                if not activate:
+                    return              # they put it away: showing it again would take the keyboard
+                w.showNormal()
+            w.show()
+            w.raise_()
+            if activate:
+                w.activateWindow()
+        finally:
+            # A Gusan window of any kind is on screen (the app window, the first-run
+            # wizard): the loading card has done its job. show() is where a slow
+            # machine waits for seconds, so this is after it.
+            startup_splash.dismiss()
 
     def _ensure_main_window(self):
         """The Gusan window (ui/shell.py), built the first time it opens -
@@ -5642,6 +5682,12 @@ class AppController(QObject):
         """Open the app: the Gusan window on ``page`` (a ui.shell route such as
         "home" or "settings"; None keeps the page it was on, home the first
         time). ``opts`` go to the page (e.g. section="speech")."""
+        if getattr(self, "main_win", None) is None:
+            # The window is built now and shows only after a few seconds on a slow
+            # machine (a click on the tray icon after a quiet start, the end of the
+            # first-run wizard): the loading card covers that wait too. One that is
+            # already up from the launch is kept.
+            startup_splash.start_for_window()
         try:
             win = self._ensure_main_window()
             win.open(page or win.current_route() or "home", **opts)
@@ -5649,6 +5695,7 @@ class AppController(QObject):
             # The window itself couldn't be built (a page that fails shows its
             # own error card instead). Say so rather than doing nothing.
             logger.error("The Gusan window failed to open", exc_info=True)
+            startup_splash.dismiss()           # nothing will appear: the card must not wait for it
             try:
                 self.show_tray_hint(f"{APP_NAME} couldn't open its window",
                                     "Try again from the tray. If it keeps happening, restart the app.")
@@ -5707,8 +5754,12 @@ class AppController(QObject):
                     dl.probe_hardware()
                 except Exception:
                     logger.debug("hardware probe failed to start", exc_info=True)
-            from ui.onboarding_v2 import OnboardingWizard
-            wiz = OnboardingWizard(self)
+            try:
+                from ui.onboarding_v2 import OnboardingWizard
+                wiz = OnboardingWizard(self)
+            except Exception:
+                startup_splash.dismiss()       # no wizard will appear: the loading card must not wait for it
+                raise
             # Land in the app, not silently in the tray: first-run users
             # otherwise think it closed.
             wiz.accepted.connect(lambda: self.show_main("home"))
@@ -7175,6 +7226,21 @@ class AppController(QObject):
         except Exception:
             logger.debug("stopping the recording at quit failed", exc_info=True)
 
+    def _release_single_instance_lock(self):
+        """Let go of the single-instance port. A quit takes seconds (a recording is
+        stopped, the engines and PortAudio shut down, the interpreter ends), and
+        until the process is gone the port stays taken: a launch in that time would
+        hand its request over to a copy that is ending, and nothing would open.
+        Called once the quit can no longer be refused. A second launch that lands in
+        the milliseconds before this is the only one that can still be lost."""
+        sock = getattr(self, "lock_sock", None)
+        self.lock_sock = None
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
     def quit_app(self):
         """Tray Quit (and the end of an update install, Cmd+Q on a Mac, the
         updater's sig_quit). Asks first when it would end a meeting, its notes
@@ -7193,6 +7259,8 @@ class AppController(QObject):
         if not go:
             return False
         self._quitting = True
+        startup_splash.dismiss()            # a quit while the loading card is still up
+        self._release_single_instance_lock()    # a relaunch during the shutdown below starts a new app
         # Services first: a queued file job is cancelled (its worker stops at
         # the next check), the calendar's timers and a waiting sign-in end,
         # the mic check closes - on this thread, before PortAudio goes below.
@@ -7889,7 +7957,10 @@ def main():
     # 1. IPC Single-Instance check
     lock_sock = acquire_single_instance_lock()
     if not lock_sock:
-        # Another instance is running, wake it and exit
+        # Another instance is running, wake it and exit. (The port is normally claimed
+        # before the first import, so this is the rare launch that could not claim it
+        # there. It is not the app: no card.)
+        startup_splash.kill()
         action = launch_action(sys.argv)
         if action:
             signal_running_instance(action)
@@ -7970,6 +8041,7 @@ def main():
     # started there never fired and a second launch did nothing: hop to the GUI
     # thread through a queued signal instead.
     controller.sig_ipc_action.connect(_ipc_dispatch, Qt.QueuedConnection)
+    controller.lock_sock = lock_sock            # the quit lets go of the port (_release_single_instance_lock)
     start_ipc_server(lock_sock, controller.sig_ipc_action.emit)
 
     # Open the app on every launch. The only quiet launch is the Windows-startup
