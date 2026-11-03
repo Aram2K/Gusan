@@ -162,6 +162,7 @@ from live_context import others_of, start_session
 import invite_context
 import live_docs
 import live_rules
+import people_from_screen
 from rich_text import streaming_markdown  # noqa: F401  (it moved to rich_text: the meeting chat renders streams too)
 from ui import glass, live_docs_ui
 
@@ -1199,6 +1200,8 @@ class LiveAssistOverlay(QWidget):
     # stale result is dropped.
     sig_rule_partial = Signal(int, str, int)     # entry id, the result so far, generation
     sig_rule_done = Signal(int, str, str, int)   # entry id, the result, error, generation
+    # People from the screen: the clean names one look read (worker thread), and which session's it was.
+    sig_people = Signal(object, int)
     # The card's own state for a live_assist_* key changed (its buttons, a
     # public setter or a cfg sync): (config key, new value). Pages listen.
     settings_changed = Signal(str, object)
@@ -1297,6 +1300,12 @@ class LiveAssistOverlay(QWidget):
         self.sig_doc_ask.connect(self._on_doc_ask)
         self.sig_rule_partial.connect(self._on_rule_partial)
         self.sig_rule_done.connect(self._on_rule_done)
+        # People from the screen (people_from_screen.py): with Screen on, the names of the people on the call are read
+        # off the screenshot now and then and join the meeting's people. All of its work is off the GUI thread.
+        self.sig_people.connect(self._on_people)
+        self._attendees_dropped = False    # "Not this meeting" on the invite chip: the invite's people are not used
+        self._people = people_from_screen.ScreenReader(
+            ask=self._people_ask, probe=self._people_probe, deliver=self._people_deliver)
         self._first_token_at = 0.0
         self._build()
         self._doc_queue = live_docs_ui.AddQueue(self)
@@ -2903,7 +2912,10 @@ class LiveAssistOverlay(QWidget):
         had = self._invite
         self._invite_on, self._invite, self._invite_others = False, "", []
         self._title, self._attendees = "", ""
+        self._attendees_dropped = True
         session = getattr(self.app, "meeting_session", None) if self.app else None
+        # (the people read off the screen are not the invite's: they stay)
+        self._attendees = ", ".join(str(n) for n in (getattr(session, "screen_people", None) or []))
         setter = getattr(session, "set_agenda", None)
         if had and callable(setter):
             try:
@@ -3112,11 +3124,14 @@ class LiveAssistOverlay(QWidget):
             self._audio_polls = 0
             self.btn_audio.hide()
             self._title, self._attendees = title or "", attendees or ""
+            self._attendees_dropped = False
+            self._people.begin(people_from_screen.my_name(self.app))
             self.txt_summary.clear()
             self.txt_summary.setPlaceholderText("Listening…")
             self.lbl_status.setText("Context locked in for this session." if self._context
                                     else "")
         else:
+            self._people.end()                 # a look still running is dropped when it comes back
             self._set_fast_chunks(False)
             self._cancel_rules()               # what was still being worked on stops; the feed stays to read
             # The session is over: its invite chip goes and answers stop using the
@@ -3924,6 +3939,7 @@ class LiveAssistOverlay(QWidget):
         if (not attached and should_attach_screen(screen_on, force_screen)
                 and not self.app.cfg.get("privacy_mode")):
             image_b64 = capture_screen_b64(screen_to_capture(self.screen()))
+            self._people.note_shot(image_b64)     # (a look in the next minute reads this one instead of taking another)
         if force_screen and not image_b64:
             # Asking a model to "solve the screen" without one only gets a
             # confident, made-up answer.
@@ -3935,6 +3951,7 @@ class LiveAssistOverlay(QWidget):
         self._gen += 1
         gen = self._gen
         self._pending_auto = False
+        self._people.answer_started()             # the answer wins: a look that is running is dropped
         if self.rules_active():
             self._set_view("answer")          # a typed question's answer, with a way back to the feed
         self._screen_note = ""                # this answer's screen status, if any
@@ -4234,6 +4251,7 @@ class LiveAssistOverlay(QWidget):
         self.btn_screen.setToolTip(
             "Screen context: On. Every answer sees the screen you're working on "
             "(this card left out), so a question, task or error on it gets solved. "
+            "It also reads the names of the people on your call. "
             "Needs an AI engine that can read images. Click to turn off." if on else
             "Screen context: Off. Answers never see your screen - except when you "
             "press Solve screen. Click to turn on.")
@@ -4244,6 +4262,65 @@ class LiveAssistOverlay(QWidget):
         self._richify_tooltips()
         self.settings_changed.emit("live_assist_screen_auto", bool(on))
         self._store("live_assist_screen_auto", bool(on))
+
+    # ── people from the screen (people_from_screen.py) ──
+    def _people_tick(self):
+        """Once a second, GUI thread: the reader decides whether the screen is read for names now. It never reads in Privacy
+        Mode, nor with Screen off, nor while the card is hidden (a hidden card must not grab the screen behind the user's
+        back), nor while an answer is being written."""
+        reader = self._people
+        if not reader.active or not self.app:
+            return
+        try:
+            reader.tick(screen_on=self.btn_screen.isChecked(),
+                        privacy=bool(self.app.cfg.get("privacy_mode")),
+                        visible=self.isVisible() and self._meeting_active,
+                        answering=bool(self._suggesting),
+                        capture=lambda: capture_screen_b64(screen_to_capture(self.screen())))
+        except Exception:
+            logger.debug("People from the screen: the tick failed", exc_info=True)
+
+    def _people_ask(self, image_b64, cancelled):
+        """Worker thread: one screenshot asked of the engine that answers (the same route an answer takes)."""
+        engine, cfg = self._resolve_engine()
+        return people_from_screen.read_reply(image_b64, engine, cfg, cancelled=cancelled, actions_mod=actions)
+
+    def _people_probe(self):
+        """Worker thread: does the engine that answers read images? (A model on this computer does not.)"""
+        engine, cfg = self._resolve_engine()
+        return people_from_screen.can_read_images(engine, cfg, actions)
+
+    def _people_deliver(self, names, session):
+        """Worker thread: a look found these names. They go to the GUI thread."""
+        try:
+            self.sig_people.emit(list(names), int(session))
+        except RuntimeError:
+            pass                                # the card is gone
+
+    def _on_people(self, names, session):
+        """GUI thread: the names a look read join the meeting's people (the session merges them, saves them and tells
+        this card: set_attendees)."""
+        if session != self._people.session or not self._meeting_active:
+            return
+        meeting = getattr(self.app, "meeting_session", None) if self.app else None
+        adder = getattr(meeting, "add_screen_people", None)
+        if not callable(adder):
+            return
+        try:
+            adder(list(names), me=people_from_screen.my_name(self.app))
+            if len(getattr(meeting, "screen_people", None) or []) >= people_from_screen.MAX_PEOPLE:
+                self._people.note_full()
+        except Exception:
+            logger.debug("People from the screen: the names were not added", exc_info=True)
+
+    def set_attendees(self, text, screen=()):
+        """The meeting's people changed (names read off the screen joined them, or one was taken off): the answers from now
+        on name them. After "Not this meeting" on the invite chip only the people read off the screen are kept."""
+        text = str(text or "")
+        if self._attendees_dropped:
+            keep = {people_from_screen.first_key(n) for n in (screen or ())}
+            text = ", ".join(n for n in invite_context.cap_names(text) if people_from_screen.first_key(n) in keep)
+        self._attendees = text
 
     # ── the session's recording ──
     def _audio_parts(self):
@@ -4326,6 +4403,7 @@ class LiveAssistOverlay(QWidget):
         if self._meeting_active:
             self._update_timer()
             self._refresh_hear()          # what the cloud answered (and a piece that fell back) shows
+            self._people_tick()
         if self._audio_folder and not self._audio_ready:
             self._check_audio_ready()
         if self._suggesting:

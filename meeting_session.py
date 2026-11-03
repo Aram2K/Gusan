@@ -212,6 +212,18 @@ Richer notes
     again". _summarize_and_finish saves rich_text.clean_notes(notes): every action item in one shape
     ('Owner: Them' / 'Owner: , Due: ' never survive, "You" becomes the profile first name), no empty
     section. _notes_input tells an AI engine who "You" is (the profile name, never an email's front).
+People from the screen (people_from_screen.py)
+  * The Live Assistant card reads the names of the people on the call off its own screenshot (Screen on) and hands
+    them to ``add_screen_people(names)`` (GUI thread): they join the meeting's people - the invite's names first,
+    nobody twice by first name, never the user, never a name the user took off - and are written to meta at once
+    (attendees, attendees_list, attendees_screen), so the notes header, the live answers, "Ask about this meeting"
+    and a meeting finished after a crash all have them. ``people_changed`` says so; the card is told too
+    (``set_attendees``). ``forget_person(name)`` is the People card's remove: it also keeps the name in meta
+    ``attendees_removed`` (a continued meeting reads it back, and so does a rewrite).
+  * The speaker pass names the one voice it finds on the call after the one other person the meeting has, when the
+    screen is where that name came from (``_call_name``, people_from_screen.lone_other): "Speaker 1" becomes that
+    name; with two or more other names, or a name only typed in or on an invite, nothing is guessed and the labels
+    stay as they were.
 """
 import importlib.util
 import json
@@ -230,6 +242,7 @@ import diarization
 import invite_context
 import meeting_speakers
 import meeting_store
+import people_from_screen
 import rich_text
 import speaker_followup
 import speech_langs
@@ -322,6 +335,9 @@ _SIGNALS = (
     # A Stop's final transcript.txt (the You / Them labels in it) is on disk, before the notes: the
     # meeting open on the Meetings page reads it again, and its chat can answer (any thread).
     ("transcript_saved", (str,)),
+    # The meeting's people changed while it is recorded: names read off the call's screen joined them, or the user
+    # took one off (GUI thread).
+    ("people_changed", ()),
     # 1.9 names, read by main.py / Live Assistant: emitted from worker threads.
     ("sig_chunk", (str,)),
     ("sig_summary", (str,)),
@@ -580,6 +596,11 @@ class MeetingCore:
         self._final_lang = ""
         self._meeting_title = ""
         self._meeting_attendees = ""
+        # The people read off the call's screen (a part of the attendees: people_from_screen.py) and the names the
+        # user took off the People card (never added again); both live in meta.json (attendees_screen /
+        # attendees_removed) and are read back when a meeting is continued or its notes written again.
+        self._screen_people = []
+        self._people_removed = []
         self._summary_downgraded = False
         # Caveats about the transcript/recording itself (a part that couldn't
         # be transcribed, the recording cap) - kept across Retry.
@@ -930,6 +951,10 @@ class MeetingCore:
             attendees = meta.get("attendees") or ""
         self._meeting_title = (title or "").strip() or "Untitled Meeting"
         self._meeting_attendees = (attendees or "").strip()
+        # A continued meeting keeps what the screen told and what the user took off; a new one starts clean.
+        self._screen_people = list(meeting_store.screen_people(meta)) if resume_dir is not None else []
+        self._people_removed = (meeting_store.meta_names(meta, "attendees_removed")
+                                if resume_dir is not None else [])
 
         # Capture mode: this meeting's, else the saved one - healed (and the
         # heal saved, as 1.9 did) when this system can't capture it.
@@ -1154,6 +1179,99 @@ class MeetingCore:
         clears it. Never calls the card back - the card is the caller."""
         self._meeting_agenda = invite_context.clip_agenda(text)
         self._write_meta(agenda=self._meeting_agenda)      # best effort: never an error
+
+    # ── people from the screen (people_from_screen.py) ──
+    @property
+    def screen_people(self):
+        """The names of this meeting's people that were read off the call's screen (a part of ``attendees``)."""
+        return list(self._screen_people)
+
+    def add_screen_people(self, names, me=""):
+        """The Live Assistant read these names off the call's screen: they join the meeting's people while it is
+        recorded. Merged by people_from_screen.merge - the meeting's own (invite) names first and keeping their spelling,
+        nobody twice (one first name is one person), never the user (``me``, else the signed-in profile), never a name
+        the user took off, at most MAX_PEOPLE from the screen in all - and written to meta.json at once, so a crash
+        keeps them. Returns the names that were new ([] = nothing changed). GUI thread."""
+        if self.state != STATE_RECORDING or self._meeting_dir is None:
+            return []
+        room = people_from_screen.MAX_PEOPLE - len(self._screen_people)
+        if room <= 0:
+            return []
+        me = me or people_from_screen.my_name(self.app)
+        people, added = people_from_screen.merge(self._meeting_attendees, names, me=me,
+                                                 removed=self._people_removed, limit=room)
+        if not added:
+            return []
+        self._meeting_attendees = ", ".join(people)
+        self._screen_people = self._screen_people + added
+        meeting_store.update_meta(self._meeting_dir, attendees=self._meeting_attendees, attendees_list=people,
+                                  attendees_screen=list(self._screen_people))
+        self._people_changed()
+        return added
+
+    def forget_person(self, name, folder=None):
+        """The user took ``name`` off a meeting's People card (a name read off the screen that was wrong). It goes from the
+        meeting's meta and from the people every prompt is built from, and is never added again - by the screen, a
+        continued meeting or a rewrite of the notes. ``folder``: the meeting (default: the one this session holds).
+        True when it was written."""
+        target = folder if folder is not None else self._meeting_dir
+        if target is None:
+            return False
+        meta = meeting_store.forget_person(target, name)
+        if meta is None:
+            return False
+        if self._meeting_dir is not None and self._same_dir(target, self._meeting_dir):
+            self._meeting_attendees = str(meta.get("attendees") or "")
+            self._screen_people = meeting_store.screen_people(meta)
+            self._people_removed = meeting_store.meta_names(meta, "attendees_removed")
+            self._people_changed()
+        return True
+
+    @staticmethod
+    def _same_dir(a, b):
+        try:
+            return os.path.normcase(os.path.abspath(str(a))) == os.path.normcase(os.path.abspath(str(b)))
+        except Exception:
+            return str(a) == str(b)
+
+    def _people_changed(self):
+        """Tell the pages and the Live Assistant card that the people changed."""
+        try:
+            self.people_changed.emit()
+        except RuntimeError:
+            pass                                  # session already destroyed
+        card = getattr(self.app, "live_assist", None) if self.app is not None else None
+        setter = getattr(card, "set_attendees", None)
+        if callable(setter):
+            try:
+                setter(self._meeting_attendees, list(self._screen_people))
+            except Exception:
+                logger.debug("The Live Assistant card didn't take the people", exc_info=True)
+
+    def _call_kw(self, folder=None):
+        """{"call_name": the one other person's name} for a speaker-pass call, or {} (nothing to add: the call keeps
+        its Speaker N labels)."""
+        name = self._call_name(folder)
+        return {"call_name": name} if name else {}
+
+    def _call_name(self, folder=None):
+        """The one other person on the call by name, when the meeting has exactly one besides the user AND the screen is
+        where that name came from (it is in attendees_screen); else "". What the speaker pass calls the one voice it
+        finds on the call (people_from_screen.lone_other). A name that was only typed in or on an invite is not
+        enough: nobody saw that person on the call, and a meeting that never had its people read off the screen keeps
+        its "Speaker 1". Never raises."""
+        try:
+            if folder is not None:
+                meta = meeting_store.load_meta(folder)
+                people, screen = meeting_store.meta_people(meta), meeting_store.screen_people(meta)
+            else:
+                people, screen = meeting_store.split_attendees(self._meeting_attendees), self._screen_people
+            name = people_from_screen.lone_other(people, people_from_screen.my_name(self.app))
+            seen = {people_from_screen.first_key(n) for n in screen}
+            return name if name and people_from_screen.first_key(name) in seen else ""
+        except Exception:
+            logger.debug("The call's name could not be worked out", exc_info=True)
+            return ""
 
     # ── pause ──
     def pause(self):
@@ -1618,6 +1736,10 @@ class MeetingCore:
                 "attendees_list": meeting_store.split_attendees(self._meeting_attendees),
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             }
+            if self._screen_people:
+                fields["attendees_screen"] = list(self._screen_people)
+            if self._people_removed:
+                fields["attendees_removed"] = list(self._people_removed)
             if self._record_started_at:
                 fields["duration_sec"] = (self._duration_sec()
                                           + int(self._resume_prior_duration or 0))
@@ -1908,7 +2030,8 @@ class MeetingCore:
         out = meeting_speakers.build_transcript(
             rec, [meeting_speakers.Part(audio=audio, mic=mic, system=system, call_only=call_only)],
             language=self._decode_language(), privacy=bool(self._cfg().get("privacy_mode")),
-            status=self._emit_status, names=self._speaker_names, diarize=not notes_first,
+            status=self._emit_status, names=self._speaker_names, **self._call_kw(),
+            diarize=not notes_first,
             reader=reader, model=model)
         self._labels_from_pieces = bool(reader is not None and out.texts)
         if out.notice and not meeting_speakers.is_benign(out.reason):
@@ -2438,7 +2561,7 @@ class MeetingCore:
         go on to the pass."""
         return meeting_speakers.refine_meeting(
             folder, privacy=bool(self._cfg().get("privacy_mode")), status=status,
-            should_cancel=should_cancel, names=self._speaker_names,
+            should_cancel=should_cancel, names=self._speaker_names, **self._call_kw(folder),
             progress=getattr(status, "progress", None), resume=getattr(status, "resume", None))
 
     def _speakers_changed(self, folder):
@@ -2582,6 +2705,8 @@ class MeetingCore:
         self._chunks_path = self._meeting_dir / "chunks.jsonl"
         self._meeting_title = str(meta.get("title") or "Untitled Meeting")
         self._meeting_attendees = str(meta.get("attendees") or "")
+        self._screen_people = meeting_store.screen_people(meta)
+        self._people_removed = meeting_store.meta_names(meta, "attendees_removed")
         # Rewrite and Retry build the same header again from what the meeting kept.
         self._meeting_agenda = invite_context.clip_agenda(str(meta.get("agenda") or ""))
         self._final_transcript = transcript
@@ -2673,7 +2798,8 @@ class MeetingCore:
                 out = meeting_speakers.build_transcript(
                     self.app.recorder, self._saved_parts(folder), language=self._decode_language(),
                     privacy=bool(self._cfg().get("privacy_mode")), status=self._emit_status,
-                    names=self._speaker_names, **self._saved_speech_kwargs(folder))
+                    names=self._speaker_names, **self._call_kw(),
+                    **self._saved_speech_kwargs(folder))
                 self._add_notice(out.notice)
                 if out.texts:
                     text = self._join_parts(out.texts)
@@ -2823,7 +2949,7 @@ class MeetingCore:
             out = meeting_speakers.build_transcript(
                 self.app.recorder, self._saved_parts(folder), language=self._decode_language(),
                 privacy=bool(self._cfg().get("privacy_mode")), status=self._emit_status,
-                should_cancel=self._cancel_run.is_set, names=self._speaker_names,
+                should_cancel=self._cancel_run.is_set, names=self._speaker_names, **self._call_kw(),
                 **self._saved_speech_kwargs(folder))
             if out.cancelled:
                 logger.info("Identify speakers cancelled; %s is unchanged", folder)
@@ -2859,7 +2985,7 @@ class MeetingCore:
         says so and stays as it is."""
         result = meeting_speakers.refine_meeting(
             folder, privacy=bool(self._cfg().get("privacy_mode")), status=self._emit_status,
-            should_cancel=self._cancel_run.is_set, names=self._speaker_names)
+            should_cancel=self._cancel_run.is_set, names=self._speaker_names, **self._call_kw(folder))
         state = result.state
         if state in (meeting_speakers.PassResult.DONE, meeting_speakers.PassResult.CONCLUDED,
                      meeting_speakers.PassResult.FAILED):
@@ -3104,6 +3230,7 @@ if _QObject is not None:
         error = _QtSignal(str, str)
         speakers_changed = _QtSignal(str)
         transcript_saved = _QtSignal(str)
+        people_changed = _QtSignal()
         sig_chunk = _QtSignal(str)
         sig_summary = _QtSignal(str)
         sig_status = _QtSignal(str)

@@ -975,6 +975,11 @@ def answer_text(md, streaming=False):
 # thing: …" is speech, not a label (its colon would otherwise be dropped).
 SPEAKER_RE = re.compile(
     r"^((?:Speaker\s+(?:\d+|\?))|You|Them|[A-Z][\w.'-]{0,24}(?: [A-Z][\w.'-]{0,24}){0,2}):\s+(.*)$")
+# A name in another script - "Աննա Պետրոսյան", "Дмитрий", "Élodie" (the speaker pass calls the one other person on a call by
+# the name read off the screen): the same shape with any capital letter to start each word. Only the non-ASCII ones are
+# taken (the ASCII ones are SPEAKER_RE's), and every word must start with a capital (isupper), so a Cyrillic or Armenian
+# sentence with a colon in it is still speech.
+_UNI_LABEL_RE = re.compile(r"^([^\W\d_][\w.'’-]{0,24}(?: [^\W\d_][\w.'’-]{0,24}){0,2}):\s+(.*)$")
 _CLOSERS = "\"'”’»)]"
 # Where a sentence ends: . ! ? … ։ ՞ ؟ then closing quotes/brackets and a
 # space; 。！？ need no space after them.
@@ -989,9 +994,21 @@ def is_marker(line):
     return len(s) > 1 and s.startswith("—") and s.endswith("—")
 
 
+def match_label(line):
+    """The regex match of a line that starts with a speaker label (group 1 the label, group 2 the words), else None."""
+    line = line or ""
+    m = SPEAKER_RE.match(line)
+    if m:
+        return m
+    m = _UNI_LABEL_RE.match(line)
+    if m and any(ord(ch) > 127 for ch in m.group(1)) and all(w[:1].isupper() for w in m.group(1).split(" ")):
+        return m
+    return None
+
+
 def split_speaker(line):
     """'Speaker 1: Hello' -> ('Speaker 1', 'Hello'); ('', line) without a label."""
-    m = SPEAKER_RE.match((line or "").strip())
+    m = match_label((line or "").strip())
     return (m.group(1), m.group(2)) if m else ("", (line or "").strip())
 
 
@@ -1062,7 +1079,7 @@ def transcript_paragraphs(text, max_chars=550):
         if len(s) <= max_chars or is_marker(s):
             out.append(s)
             continue
-        m = SPEAKER_RE.match(s)
+        m = match_label(s)
         if m:
             prefix, body = s[:m.start(2)], m.group(2)
         else:
