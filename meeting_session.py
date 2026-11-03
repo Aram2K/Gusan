@@ -2161,7 +2161,7 @@ class MeetingCore:
             self._summary_downgraded = bool(downgraded_from)
             self._notes_notice = ""
             if cut:
-                in_discussion = re.search(r"^#{2,3}\s*Discussion", notes, re.M | re.I)
+                in_discussion = re.search(r"^#{2,3}\s*Discussion\b", notes, re.M | re.I)
                 self._notes_notice = NOTES_CUT_NOTICE if in_discussion else NOTES_CUT_EARLY_NOTICE
             if getattr(self, "_allowance_used", False):
                 self._notes_notice = ("You've used this month's free cloud meeting note. "
