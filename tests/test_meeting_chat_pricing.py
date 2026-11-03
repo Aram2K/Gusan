@@ -149,6 +149,12 @@ class TestAQuestionIsNeverMetered(_Meeting):
         self.ask(FREE, resolve=lambda pref: (actions.API_MANAGED_ID, shared))
         self.assertEqual(shared, {"_live_session_id": "live-1", "_managed_token": "tok", "privacy_mode": False})
 
+    def test_the_code_the_server_error_carries_is_enough_whatever_its_words(self):
+        err = actions.ActionError("Not available.")
+        err.code = "allowance_used"
+        out, _ = self.ask(PRO, stream=_Stream(error=err))
+        self.assertEqual((out.code, out.message), ("needs_pro", mc.NEEDS_PRO))
+
     def test_what_the_server_says_about_a_spent_allowance_is_the_same_calm_line(self):
         err = actions.ActionError("You've used this month's free Live Assistant session. Upgrade to Gusan Pro for "
                                   "unlimited sessions.")

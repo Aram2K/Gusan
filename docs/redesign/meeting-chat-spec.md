@@ -53,7 +53,9 @@ goes below the notes, the card is 440 px tall, a link "Ask about this meeting" u
 cursor in the box (the chat would otherwise be out of sight below the notes), and the toolbar's two longest buttons shorten
 ("Copy", "Continue"; their accessible names keep the long words) - which also fixes the old clipping at the 960 px minimum window.
 
-Inside: header + Clear chat; the conversation (user: right-aligned plain-text bubble, cut at 600 characters in the
+Inside: header + Clear chat (it asks first, in a prompt of its own; the chat that is cleared is the one of the meeting the
+question was asked on - if the page moved to another meeting while the prompt was open, that meeting's file is cleared and the
+one on screen is left alone); the conversation (user: right-aligned plain-text bubble, cut at 600 characters in the
 bubble, all of it kept and sent; answer: no bubble, real formatting - lists and bold, never raw symbols, never HTML from
 the model, never a link or a picture, long strings get break points); three starter questions while empty; the box (Enter
 sends, Shift+Enter new line, Esc stops an answer that is coming, 1-5 lines, 4,000 characters with a counter from 3,500);
