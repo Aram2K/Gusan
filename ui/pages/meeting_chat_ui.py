@@ -503,9 +503,19 @@ class ChatCard(Card):
         box.text = views.tlabel("", 13, 400, "text2", parent=box, wrap=True)
         box.text.setTextFormat(Qt.PlainText)
         lay.addWidget(box.text)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
         box.button = Button("Open settings", "secondary", "s", parent=box)     # (its words follow the gate)
-        box.button.clicked.connect(self._gate_action)
-        lay.addWidget(box.button, 0, Qt.AlignLeft)
+        box.button.clicked.connect(lambda: self._gate_action(0))
+        row.addWidget(box.button, 0, Qt.AlignLeft)
+        box.button2 = Button("Open settings", "ghost", "s", parent=box)       # (only for "needs Pro": the free way)
+        box.button2.clicked.connect(lambda: self._gate_action(1))
+        row.addWidget(box.button2, 0, Qt.AlignLeft)
+        row.addStretch(1)
+        box.buttons = QWidget(box)
+        box.buttons.setLayout(row)
+        lay.addWidget(box.buttons)
         box.hide()
         return box
 
@@ -650,14 +660,16 @@ class ChatCard(Card):
         self._intro.setVisible(ready)
         for chip in self._chips:
             chip.setVisible(ready)
-        action = self._gate_button(mode)
+        action, second = self._gate_button(mode), self._gate_second(mode)
         for box, shown in ((self._gate_in_empty, empty and not ready), (self.gate_bar, not empty and not ready)):
             box.text.setText(text)
             box.text.setVisible(bool(text))
-            if action:
-                box.button.setText(action[0])
-                box.button.setAccessibleName(action[0])
-            box.button.setVisible(bool(action))
+            for button, act in ((box.button, action), (box.button2, second)):
+                if act:
+                    button.setText(act[0])
+                    button.setAccessibleName(act[0])
+                button.setVisible(bool(act))
+            box.buttons.setVisible(bool(action or second))
             box.setVisible(shown)
         usable = self._ready()
         self.input.setEnabled(usable)
@@ -674,19 +686,30 @@ class ChatCard(Card):
         self.send_btn.setEnabled(self._ready() and not self._running and bool(self.input.toPlainText().strip()))
 
     def _gate_button(self, mode):
-        """(button text, what it does) for a gate that has a way out, else None."""
-        if mode in ("needs_pro", "privacy_no_model", "needs_download"):
+        """(button text, what it does) for a gate that has a way out, else None. Gusan Cloud answers questions for
+        Gusan Pro only (an own key or a model on this computer is free): "needs Pro" leads to the Pro window, with
+        Settings next to it for the free way."""
+        if mode == "needs_pro":
+            return ("See Gusan Pro", "pro")
+        if mode in ("privacy_no_model", "needs_download"):
             return ("Open settings", "settings")
         if mode == "signed_out":
             return ("Sign in", "sign_in")
         return None
 
-    def _gate_action(self):
-        what = (self._gate_button(self._gate[0]) or ("", ""))[1]
+    def _gate_second(self, mode):
+        """A second, quieter way out: for "needs Pro" the free one (an own key, an AI on this computer)."""
+        return ("Open settings", "settings") if mode == "needs_pro" else None
+
+    def _gate_action(self, which=0):
+        pick = self._gate_button if which == 0 else self._gate_second
+        what = (pick(self._gate[0]) or ("", ""))[1]
         if what == "settings":
             self.page.call("show_settings", "speech")
         elif what == "sign_in":
             self.page.call("show_auth_gate")
+        elif what == "pro":
+            self.page.call("_pro_upsell", "Ask about this meeting")
 
     def _sync_footer(self):
         c = self._choice
@@ -790,13 +813,22 @@ class ChatCard(Card):
         page = self.page
         cfg, pro, signed_in = dict(page.cfg()), page.is_pro(), self._signed_in()
         resolve = getattr(page.app, "_resolve_action_engine", None)
-        args = (req, folder, question, history, cfg, pro, signed_in, resolve)
+        args = (req, folder, question, history, cfg, pro, signed_in, resolve, self._recorder())
         if SYNC_ASK:
             self._work(*args)
         else:
             threading.Thread(target=self._work, args=args, daemon=True, name="gusan-chat").start()
 
-    def _work(self, req, folder, question, history, cfg, pro, signed_in, resolve):
+    def _recorder(self):
+        """The signed-in person's profile first name ("" for a guest or without one): who "You" is in the transcript,
+        the way the notes name them (never made up from an email address)."""
+        try:
+            import account_actions
+            return account_actions.first_name(self.page.app, email_fallback=False)
+        except Exception:
+            return ""
+
+    def _work(self, req, folder, question, history, cfg, pro, signed_in, resolve, me=""):
         """Worker thread: ask, and say how it ended."""
         last = [0.0]
 
@@ -820,7 +852,7 @@ class ChatCard(Card):
                 return actions.normalize_action_model(pref if pref is not None else _cfg.get("action_model")), _cfg
         try:
             ans = meeting_chat.ask(folder, question, history, cfg=cfg, pro=pro, resolve=resolve, on_text=on_text,
-                                   cancelled=cancelled, signed_in=signed_in)
+                                   cancelled=cancelled, signed_in=signed_in, me=me)
             result = ("ok", ans)
         except meeting_chat.Cancelled as c:
             result = ("stopped", c.text)
@@ -883,7 +915,7 @@ class ChatCard(Card):
         else:                                              # a calm sentence; the question stays, the failure is not kept
             code, sentence = value
             if row is not None:
-                row.show_error(sentence, retry=code != "allowance")
+                row.show_error(sentence, retry=code not in ("allowance", "needs_pro"))
                 self._error_row = row
                 _announce(row)
         self._sync()

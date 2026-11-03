@@ -115,6 +115,63 @@ def test_stop_on_a_live_session_that_recorded_asks_the_app_to_open_the_meeting_o
     assert c.lbl_status.text() == "Stopped - your notes will be in Meetings."
 
 
+class _PlanApp(_CardApp):
+    """The 2.1 controller: ``release_live_session`` ends the month's free Live Assistant session on the server."""
+
+    def __init__(self, log, boom=False):
+        super().__init__()
+        self.log, self.boom = log, boom
+
+    def release_live_session(self):
+        self.log.append("release")
+        if self.boom:
+            raise RuntimeError("the server is not there")
+
+    def open_meeting_after_live_stop(self, folder):
+        self.log.append("open")
+        return super().open_meeting_after_live_stop(folder)
+
+
+class _LoggedSession(_Session):
+    def __init__(self, log, **kw):
+        super().__init__(**kw)
+        self.log = log
+
+    def stop(self, *a, **k):
+        self.log.append("stop")
+        return super().stop(*a, **k)
+
+
+def test_stop_ends_the_free_session_first_and_only_then_takes_the_user_to_the_meeting(card):
+    log = []
+    c, app = card(_PlanApp(log))
+    _press_stop(c, app, _LoggedSession(log))
+    assert log == ["stop", "release", "open"]
+
+
+def test_a_release_that_fails_never_keeps_the_user_from_the_meeting(card):
+    log = []
+    c, app = card(_PlanApp(log, boom=True))
+    _press_stop(c, app, _LoggedSession(log))
+    assert log == ["stop", "release", "open"]
+    assert c.lbl_status.text() == "Stopped - your notes will be in Meetings."
+
+
+def test_a_session_that_recorded_nothing_or_started_elsewhere_still_releases_but_opens_nothing(card):
+    for kw in (dict(elapsed=2), dict(source="meetings"), dict(source="calendar")):
+        log = []
+        c, app = card(_PlanApp(log))
+        _press_stop(c, app, _LoggedSession(log, **kw), live_text="")
+        assert log == ["stop", "release"], kw
+
+
+def test_a_stop_that_did_not_stop_opens_nothing_even_with_the_release_in_place(card):
+    log = []
+    c, app = card(_PlanApp(log))
+    _press_stop(c, app, _LoggedSession(log, stop_result=False))
+    assert "open" not in log and log[0] == "stop"
+
+
 def test_the_jump_waits_for_the_card_to_repaint(card):
     c, app = card()
     app.meeting_session = _Session()

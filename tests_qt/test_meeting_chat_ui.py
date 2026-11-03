@@ -234,16 +234,18 @@ def test_a_meeting_the_app_never_finished_can_be_asked_about_from_what_exists(bu
     assert card._gate == ("ready", "")
 
 
-def test_free_is_asked_for_pro_or_a_key_and_the_button_opens_settings(build, meetings_root):
+def test_free_is_asked_for_pro_or_a_key_and_the_buttons_open_the_pro_window_and_settings(build, meetings_root):
     f = make_meeting(meetings_root)
     win, page, card, _s, app = build("free", f)
     assert card._gate == ("needs_pro", meeting_chat.NEEDS_PRO)
     assert not card.input.isEnabled()
-    btn = card._gate_in_empty.button
+    assert not any(c[0] == "_pro_upsell" for c in app.calls)         # calm Pro: no window pops up by itself
+    btn = card._gate_in_empty.button2
     assert btn.isVisibleTo(card) and btn.text() == "Open settings"
     btn.click()
     assert ("show_settings", "speech") in app.calls
-    assert not any(c[0] == "_pro_upsell" for c in app.calls)         # calm Pro: no window pops up
+    card._gate_in_empty.button.click()
+    assert ("_pro_upsell", "Ask about this meeting") in app.calls
     card.send("anything")
     assert card._msgs == []
 

@@ -60,6 +60,7 @@ RETRIES = 2                          # smaller prompts tried when an engine says
 RETRIES_OWN_KEY = 4                  # ... with the user's own key: nobody knows that provider's window
 SHRINK = 0.6
 SMALL_BUDGET = 8000                  # a prompt this small that is still too long: it is the engine, not the question
+ALLOWANCE_KEYS = ("_live_session_id", "_note_ref")      # what meters a free cloud note or Live Assistant session
 LEFT_OUT = "[… part of the meeting left out …]"
 TIME_GAP = 45.0                      # a time mark at the start of a line when this many seconds passed
 TIME_GAP_INSIDE = 60.0               # ... and inside a long line
@@ -72,7 +73,8 @@ STARTERS = ("What were the key decisions?", "What did I agree to do?", "Write a 
 NO_TRANSCRIPT = "There's no transcript for this meeting yet, so there's nothing to ask about."
 FINISHING = "Finishing the transcript… You can ask in a moment."
 INTRO = "Ask anything about what was said. Answers come from this meeting only."
-NEEDS_PRO = "Questions about a meeting need Pro, or your own key in Settings › Speech & AI."
+NEEDS_PRO = ("Questions about a meeting need Gusan Pro, or your own key or an AI on this computer "
+             "(Settings › Speech & AI).")
 SIGNED_OUT = "Sign in to ask questions about your meetings."
 PRIVACY_NO_MODEL = actions.LOCAL_ANSWERS_MESSAGE
 TOO_LONG = ("This meeting is too long for this AI model to read in one go. Try a more specific question, "
@@ -292,6 +294,7 @@ def time_marked(transcript, segments_doc, line_gap=TIME_GAP, inner_gap=TIME_GAP_
 
 # ── the meeting's material ───────────────────────────────────────────────────
 _LABELLED_RE = re.compile(r"(?m)^\s*(?:You|Them|Speaker\s+(?:\d+|\?))\s*:")
+_YOU_RE = re.compile(r"(?m)^\s*You\s*:")
 
 
 @dataclass
@@ -310,6 +313,7 @@ class Material:
     segments: object = None
     transcript_file: bool = False       # transcript.txt is on disk (else only the live pieces are)
     labelled: bool = False              # the transcript says who spoke (You / Them / Speaker N)
+    me: str = ""                        # the recorder's first name (the notes call "You" by it); "" when unknown
     _marked: object = None
 
     def marked(self):
@@ -380,6 +384,9 @@ def _meeting_text(m):
         facts.append("Language: mixed")
     if facts:
         lines.append("\n".join(facts))
+    who = invite_context.recorder_line(m.me) if (m.me and _YOU_RE.search(m.transcript or "")) else ""
+    if who:
+        lines.append(who)                    # the notes name the recorder; the transcript says "You"
     return "\n".join(lines) or "(no details)"
 
 
@@ -711,7 +718,8 @@ _ALLOWANCE_RE = re.compile(r"fair-use|daily|quota|rate.?limit|too many requests|
 _SERVER_CODE_RE = re.compile(r"action_failed|quota_check_failed|entitlement_check_failed|aren't set up")
 _SERVER_RE = re.compile(r"\b50[0-9]\b|bad gateway|service unavailable|server error|overloaded|internal error", re.I)
 _PRO_RE = re.compile(r"pro is required|sign in with (?:pro|your gusan)|sign in with a|requires? pro|"
-                     r"no ai engine is connected", re.I)
+                     r"no ai engine is connected|free cloud meeting note|free live assistant session|"
+                     r"upgrade to gusan pro", re.I)
 _KEY_RE = re.compile(r"api key|unauthori[sz]ed|invalid.*key|\b40[13]\b|authentication|permission", re.I)
 _AUTH_RE = re.compile(r"unauthori[sz]ed|\b401\b|authentication", re.I)
 AUTH = "Gusan Cloud didn't accept your sign-in. Sign in again from Account & plan."
@@ -806,7 +814,7 @@ class Answer:
 
 
 def ask(folder, question, history, *, cfg, pro, resolve, on_text=None, cancelled=None, stream=None,
-        signed_in=None, material=None):
+        signed_in=None, material=None, me=""):
     """One question about the meeting in ``folder``, answered from it. Blocking: call it on a worker thread.
 
     ``history``: the chat so far (meeting_store.load_chat's rows, without this question). ``cfg``: the app's
@@ -816,7 +824,14 @@ def ask(folder, question, history, *, cfg, pro, resolve, on_text=None, cancelled
     calm sentence for everything else. When an engine says the prompt was too big (before it wrote a word) a
     smaller one is sent, up to RETRIES times (RETRIES_OWN_KEY with the user's own key: nobody knows that
     provider's window), and the answer says how much of the meeting it saw. ``cancelled()`` is also asked
-    before the meeting is read, after the sign-in check and right before the request goes out."""
+    before the meeting is read, after the sign-in check and right before the request goes out.
+
+    Plans (Gusan 2.1): Gusan Cloud answers questions only for Gusan Pro - a free or signed-out user is never routed
+    to it (not even while a Live Assistant session holds the month's free cloud allowance) and a question never
+    carries the allowance fields (``_live_session_id``, ``_note_ref``): the chat is not metered, it is Pro. An own key
+    and a model on this computer work for everybody (a guest too). Whatever the server still says about the plan
+    ("allowance_used", "Pro is required") is the same calm needs-Pro line. ``me``: the recorder's first name (the
+    profile), so the model can tell that "You" in the transcript is whom the notes name."""
     started = time.monotonic()
     cfg = cfg or {}
     stream = stream or actions.process_stream
@@ -830,10 +845,16 @@ def ask(folder, question, history, *, cfg, pro, resolve, on_text=None, cancelled
     material = material or load_material(folder)
     if not (material.transcript or "").strip():
         raise ChatError("no_transcript", NO_TRANSCRIPT)
+    material.me = material.me or str(me or "")
     pref = meeting_session.notes_engine(cfg, pro, cfg.get("meeting_notes_model") or None)
     engine, config = resolve(pref)
     check()                                                 # (resolve can wait for a sign-in token)
-    config = config or cfg
+    config = dict(config or cfg)
+    for key in ALLOWANCE_KEYS:
+        config.pop(key, None)                               # this question is not a Live Assistant session or a note
+    if not pro:
+        config.pop("_managed_token", None)                  # Gusan Cloud is Pro: the engine is read again without it
+        engine = route_engine(pref, config, False)
     has_token = bool(config.get("_managed_token"))
     routed_managed = actions.ACTION_MODELS.get(engine, {}).get("kind") == "managed"
     if pro and routed_managed and not has_token and not config.get("privacy_mode"):
@@ -865,6 +886,8 @@ def ask(folder, question, history, *, cfg, pro, resolve, on_text=None, cancelled
                 message = TOO_LONG_SMALL if choice.kind == "own_key" and budget < SMALL_BUDGET else TOO_LONG
             else:
                 code, message = friendly_error(str(e), choice.kind)
+                if getattr(e, "code", "") == "allowance_used":
+                    code, message = "needs_pro", NEEDS_PRO      # the server meters the free allowances: a question is Pro
                 if isinstance(e, actions.ActionError):      # (its text can echo the request: only the kind is kept)
                     logger.warning("Ask about this meeting: the AI route failed (%s, %s)", type(e).__name__, code)
                 else:                                       # a bug, not a refusal: the log must show it

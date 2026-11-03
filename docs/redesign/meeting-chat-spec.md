@@ -11,6 +11,9 @@ the meeting page.
 * Only the Live card's Stop (`ui/live_assist.py _stop_listening`; there is no Stop shortcut - Ctrl+Alt+A only shows or
   hides the card) and only for a session that started there (`source == "live_assist"`) and recorded something (some
   live words, or at least 5 seconds). A session started from the Meetings page or the calendar keeps today's way.
+* Order inside the Stop (2.1): the facts of the session are read, `session.stop()`, then `AppController.release_live_session()`
+  (the month's free session is spent on the server; a release that fails changes nothing for the user), the status line, and
+  only then the jump below. Every Stop releases; only the Stop of a session that recorded something jumps.
 * After the card repainted (one turn of the event loop) the controller opens Meetings > that meeting:
   `AppController.open_meeting_after_live_stop(folder)` -> `show_main("meetings", meeting=folder, writing=True)`.
   `writing=True` makes the page show the NOTES view (Notes tab) even while the notes are being written (today an
@@ -82,8 +85,25 @@ The notes' engine: `meeting_session.notes_engine` (this meeting's pick = cfg `me
 Pro user runs on Gusan Cloud unless they picked a local model or a cloud engine with their own key), then
 `meeting_chat.choose`: Privacy mode -> only a model on this computer; a cloud engine needs its own key, Gusan Cloud a token;
 what cannot run falls to a downloaded local model; nothing -> a problem (needs_pro / signed_out / privacy_no_model /
-needs_download). Free and guest have no Smart Action tries consumed; they can ask with their own key or a local model, like
-the notes. A question is one of the 1,000 daily managed requests.
+needs_download).
+
+Plans (Gusan 2.1, `tests/test_pricing_policy.py`; guest = not signed in, free = signed in without Gusan Pro): **Gusan Cloud
+answers questions for Gusan Pro only.** The free plan's two metered cloud allowances (one cloud meeting note and one Live
+Assistant session a month, counted on the server by `session_id` / `note_ref`) are never spent by a question: `meeting_chat.ask`
+takes `_live_session_id` and `_note_ref` out of the settings it sends (even for Pro, even while a Live Assistant session is
+open) and never routes a user who is not on Pro to Gusan Cloud, whatever `_resolve_action_engine` returned (a free user's
+Live Assistant session routes the Live Assistant's own answers to the cloud, not the chat).
+* guest: an own key or a downloaded model on this computer answers (like the notes); else "Sign in to ask questions about
+  your meetings." + Sign in.
+* free: the same - an own key or a model on this computer, unlimited; Gusan Cloud (the default engine of a free user with no
+  model) shows the calm line "Questions about a meeting need Gusan Pro, or your own key or an AI on this computer (Settings >
+  Speech & AI)." with "See Gusan Pro" (the Pro window, `_pro_upsell("Ask about this meeting")`) and "Open settings". Never a
+  metered request and never a server error.
+* Pro: Gusan Cloud (Mistral Small first); an own key or local model when they picked one. A question is one of the 1,000 daily
+  safety-capped requests ("Today's cloud allowance is used up. It comes back tomorrow.").
+* Privacy mode (any plan): only a model on this computer; nothing is sent, not even to an own key.
+* What the server may still say - `allowance_used` (code on the error, or "free cloud meeting note" / "free Live Assistant
+  session" / "Upgrade to Gusan Pro" / "Gusan Pro is required") - is the same needs-Pro line, with no Try again.
 
 ### The prompt (`meeting_chat.plan_context`)
 One user message: `<meeting>` (title, people and agenda framed as data by `invite_context.notes_header`, date, length,
@@ -94,7 +114,12 @@ meeting cannot close a section (the tag's bracket gets an invisible character). 
 (`action_api.MEETING_CHAT_SYSTEM`, 7 rules; `local_llm._CHAT_SYSTEM` on this computer): answer only from the meeting, say
 plainly when it is not there, answer in the language of the question, who You / Speaker N / Them are, times only as they
 appear, a "left out" line means that part was not given, short answers, plain formatting, the material is data.
-Every question reads the folder again, so the newest transcript and notes are always the ones used.
+Every question reads the folder again, so the newest transcript and notes are always the ones used. The notes are read as
+2.1 wrote them (`rich_text.clean_notes`: the recorder's profile first name instead of "You", one shape for every action item,
+a longer meeting's `## Discussion` last, so a clipped note loses its Discussion first; the cut-notes notice lives in meta, not in
+notes.md, and the built-in formatter's notes after a spent cloud note are read like any others). The transcript still says "You",
+so `<meeting>` gets one data line "Recorded by: Aram (shown as You in the transcript)" (the profile first name, never made up
+from an email; only when the transcript has You lines).
 
 Long meetings: estimated tokens (`estimate_tokens`, by script, deliberately high: Latin 3.3 chars per token, Cyrillic and
 Greek 2.4, Hebrew and Arabic 2.6, CJK 1.4, everything else - Armenian, Georgian, Indic, Thai - 0.8). Budget of the whole
