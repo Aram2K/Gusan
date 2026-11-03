@@ -302,6 +302,18 @@ DEFAULT = {
     # One quiet line on Home for 1.x upgraders ("Transcribe is now Gusan…"):
     # set by _migrate_config, cleared once Home has shown it (or it was closed).
     "rename_note_pending": False,
+    # Settings › My API keys (api_keys.py): the saved keys ({"id", "name", "provider", "model",
+    # "base_url"}) and their secrets ({id: key}; save_config keeps those in the OS keyring). The key
+    # each card uses is copied into the slot the engines read (mistral_api_key, google_api_key,
+    # action_api_key); speech_key_id / writer_key_id say which saved key that was.
+    "api_keys": [],
+    "api_key_secrets": {},
+    "speech_key_id": "",
+    "writer_key_id": "",
+    # Gusan Cloud: the AI writer picked ("" = the server's order, DeepSeek first;
+    # engine_choice.CLOUD_WRITERS) and the speech profile for dictation and meetings.
+    "cloud_writer_model": "",
+    "managed_speech_profile": "fast",
     # Bumped when the config shape changes in a way that needs migration
     # (_migrate_config). 2 = Gusan 2.0; 3 = the Smart Actions shortcut (Alt+S).
     "config_schema_version": 3,
@@ -425,6 +437,10 @@ def _strip_user_secret_keys(store):
             if isinstance(v, str) and v.strip():
                 keys[k] = v
             clean[k] = ""
+        if isinstance(clean.get("api_key_secrets"), dict):
+            if clean["api_key_secrets"]:
+                keys["api_key_secrets"] = clean["api_key_secrets"]
+            clean["api_key_secrets"] = {}
         sanitized[owner] = clean
         if keys:
             blob[owner] = keys
@@ -529,6 +545,22 @@ def load_config():
         loaded["mistral_api_key"] = storage.read_secret(storage.MISTRAL_API_KEY_SECRET)
         _note_keyring_value(storage.MISTRAL_API_KEY_SECRET, loaded["mistral_api_key"])
 
+    # Settings › My API keys: each key's secret is its own keyring item (a copy left in
+    # config.json - the keyring refused it - is used as it is).
+    on_disk = loaded.get("api_key_secrets") if isinstance(loaded.get("api_key_secrets"), dict) else {}
+    secrets = {str(k): str(v) for k, v in on_disk.items() if v}
+    for e in loaded.get("api_keys") or []:
+        key_id = str(e.get("id") or "") if isinstance(e, dict) else ""
+        if key_id and not secrets.get(key_id):
+            try:
+                value = storage.read_secret(storage.api_key_secret_name(key_id))
+            except Exception:
+                value = ""
+            _note_keyring_value(storage.api_key_secret_name(key_id), value)
+            if value:
+                secrets[key_id] = value
+    loaded["api_key_secrets"] = secrets
+
     # Per-user stashed keys (account switching) live in the keyring as one JSON
     # blob; merge them back over the sanitized on-disk snapshots.
     try:
@@ -542,10 +574,18 @@ def load_config():
                     snap = store.get(owner)
                     if isinstance(snap, dict) and isinstance(keys, dict):
                         for k, v in keys.items():
-                            if k in _SECRET_CFG_KEYS and v and not snap.get(k):
+                            if (k in _SECRET_CFG_KEYS or k == "api_key_secrets") and v and not snap.get(k):
                                 snap[k] = v
     except Exception:
         logger.debug("Could not merge user secrets from keyring", exc_info=True)
+
+    # Keys saved the old way (one Mistral / Google / AI-writer slot) join Settings › My API keys
+    # once; the next save_config writes them. Never fatal: the slots keep working as they are.
+    try:
+        import api_keys
+        loaded.update(api_keys.slot_migration(loaded))
+    except Exception:
+        logger.debug("Could not move the saved API keys into the key list", exc_info=True)
 
     if ANALYTICS_CONSENT_PATH.exists() and not loaded.get("analytics_consent_applied"):
         if ANALYTICS_DECLINED_PATH.exists():
@@ -579,6 +619,19 @@ def save_config(c):
     for k, name in _NOTION_SECRETS.items():
         if _store_secret(name, (disk.get(k) or "").strip()):
             disk[k] = ""
+    # Settings › My API keys: one keyring item per saved key; a removed key's item is deleted.
+    key_secrets = disk.get("api_key_secrets") if isinstance(disk.get("api_key_secrets"), dict) else {}
+    ids = {str(e.get("id")) for e in (disk.get("api_keys") or []) if isinstance(e, dict) and e.get("id")}
+    kept = {}
+    for key_id in ids:
+        value = str(key_secrets.get(key_id) or "").strip()
+        if value and not _store_secret(storage.api_key_secret_name(key_id), value):
+            kept[key_id] = value                     # the keyring refused it: it stays on disk (as the slots do)
+    for name in [n for n in _keyring_known() if n.startswith(storage.API_KEY_SECRET_PREFIX)]:
+        if name[len(storage.API_KEY_SECRET_PREFIX):] not in ids:
+            _store_secret(name, "")                  # a key that was removed
+            _keyring_known().pop(name, None)
+    disk["api_key_secrets"] = kept
     # Per-user stashed keys (account switching) go to the keyring too - the
     # on-disk store keeps only the non-secret engine config per user.
     sanitized_store, keys_blob = _strip_user_secret_keys(disk.get("user_secrets"))
@@ -3495,7 +3548,10 @@ class AudioRecorder:
             import engine_choice
             provider = cfg.get("managed_provider", "gemini")
             live_model = getattr(self, "cloud_model_override", None)
-            asked_model = engine_choice.cloud_profile(live_model)
+            # A Live Assistant take carries its own profile; dictation and meetings use the one
+            # picked in Settings › Speech & AI (Fast / Best accuracy).
+            asked_model = engine_choice.cloud_profile(
+                live_model if live_model is not None else cfg.get(engine_choice.SPEECH_PROFILE_KEY))
             if live_model is not None or provider not in ("gemini", "mistral"):
                 provider = "gemini"
             if asked_model == engine_choice.CLOUD_BEST:

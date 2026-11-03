@@ -244,6 +244,7 @@ def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_I
                     vocab_block=vocab_block,
                     session_id=(config or {}).get("_live_session_id") or "",
                     note_ref=(config or {}).get("_note_ref") or "",
+                    prefer=(config or {}).get("cloud_writer_model") or "",
                 )
             except action_api.ActionAPIError as e:
                 err = ActionError(str(e))
@@ -305,6 +306,7 @@ def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_I
                     image_b64=(config or {}).get("_image_png_b64"),
                     session_id=(config or {}).get("_live_session_id") or "",
                     note_ref=(config or {}).get("_note_ref") or "",
+                    prefer=(config or {}).get("cloud_writer_model") or "",
                 )
             except action_api.ActionAPIError as e:
                 err = ActionError(str(e))
@@ -433,6 +435,7 @@ def process_stream(text, mode, on_token, source_lang="auto", target_lang="en",
                 image_status=(config or {}).get("_image_status"),
                 session_id=(config or {}).get("_live_session_id") or "",
                 note_ref=(config or {}).get("_note_ref") or "",
+                prefer=(config or {}).get("cloud_writer_model") or "",
             )
     except (local_llm.LocalLLMError, action_api.ActionAPIError) as e:
         err = ActionError(str(e))

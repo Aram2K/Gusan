@@ -1916,7 +1916,7 @@ class ModelStep(_Step):
         if info is None or dl is None or state in ("ready", "downloading"):
             _set_button(self.cta, "Next", kind="primary")
         else:
-            _set_button(self.cta, "Download %s · %s" % (info.plain, info.size), icon="download", kind="primary")
+            _set_button(self.cta, "Download %s · %s" % (info.real, info.size), icon="download", kind="primary")
 
     def show_problem(self, text):
         self.problem.setText(text or "")

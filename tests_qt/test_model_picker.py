@@ -423,7 +423,7 @@ def test_clicking_a_row_not_on_disk_asks_and_does_not_select(sa_page, asked):
     app.downloads = FakeDownloads(ready=("base",))
     box = sa_page(app).speech_combo
     _click_row(box, "large-v3-turbo")
-    assert asked.calls == [("Download Most accurate · Whisper Large v3 Turbo?",
+    assert asked.calls == [("Download Whisper Large v3 Turbo?",
                             "1.6 GB - Smart Actions will use it once it is ready.", "Download", "Not now")]
     assert box.currentData() == "base" and app.cfg["smart_actions_speech_model"] == "base"
     assert app.downloads.started == []
@@ -487,14 +487,14 @@ def test_keyboard_enter_on_a_row_not_on_disk_asks_too(sa_page, asked):
     view.setCurrentIndex(box.model().index(box.findData("medium"), 0))
     QTest.keyClick(view, Qt.Key_Return)
     QApplication.processEvents()
-    assert len(asked.calls) == 1 and asked.calls[0][0] == "Download Accurate · Whisper Medium?"
+    assert len(asked.calls) == 1 and asked.calls[0][0] == "Download Whisper Medium?"
     assert box.currentData() == "base"
 
 
 # ── the mini popups ──────────────────────────────────────────────────────────
 def test_download_popup_words(qapp):
     from ui.components import mini_prompt
-    assert mini_prompt.download_title("Balanced", "Whisper Small") == "Download Balanced · Whisper Small?"
+    assert mini_prompt.download_title("Balanced", "Whisper Small") == "Download Whisper Small?"   # the real name
     assert mini_prompt.download_title("Balanced") == "Download Balanced?"
     assert mini_prompt.download_body("460 MB") == "460 MB - Smart Actions will use it once it is ready."
     assert mini_prompt.download_body("") == "Smart Actions will use it once it is ready."
@@ -505,7 +505,7 @@ def _card(qapp, **kw):
     host = QWidget()
     host.resize(900, 600)
     host.show()
-    dlg = mini_prompt.MiniPrompt(host, kw.get("title", "Download Balanced · Whisper Small?"),
+    dlg = mini_prompt.MiniPrompt(host, kw.get("title", "Download Whisper Small?"),
                                  kw.get("body", "460 MB - Smart Actions will use it once it is ready."),
                                  kw.get("yes", "Download"), kw.get("no", "Not now"), icon=kw.get("icon", "download"))
     dlg.show()
@@ -516,8 +516,8 @@ def _card(qapp, **kw):
 def test_the_popup_has_names_and_a_default_button(qapp):
     host, dlg = _card(qapp)
     try:
-        assert dlg.isModal() and dlg.windowTitle() == "Download Balanced · Whisper Small?"
-        assert dlg.accessibleName() == "Download Balanced · Whisper Small?"
+        assert dlg.isModal() and dlg.windowTitle() == "Download Whisper Small?"
+        assert dlg.accessibleName() == "Download Whisper Small?"
         assert dlg.accessibleDescription().startswith("460 MB - ")
         assert dlg.yes_button.accessibleName() == "Download" and dlg.no_button.accessibleName() == "Not now"
         assert dlg.yes_button.isDefault() and not dlg.no_button.isDefault()

@@ -1099,12 +1099,12 @@ class DictationPage(QWidget):
             H.call(self.app, "_pro_upsell", res.get("upsell") or UPSELL_CLOUD)
         elif problem == "privacy_mode":
             if privacy_prompt.confirm_turn_off_privacy(self, engine_choice.GUSAN_CLOUD
-                                                       if value == engine_choice.DICTATION_CLOUD
+                                                       if engine_choice.dictation_speech_source(value) == "cloud"
                                                        else "your own key"):
                 self._apply_model(value, turn_off_privacy=True)
         elif problem == "needs_key":
-            # The key lives in Settings › Speech & AI › My API keys.
-            H.go(self, self.app, "settings", section="speech")
+            # The keys live in Settings › Speech & AI › My API keys.
+            H.go(self, self.app, "settings", section="speech", focus="api_keys")
         elif problem == "needs_download":
             self._download_model(value)
 
@@ -1479,6 +1479,10 @@ class DictationPage(QWidget):
         return self.width()
 
     def _reflow(self):
+        if getattr(self, "rail", None) is None:
+            # Still being built: the Model picker draws its chips while the rail is made, and
+            # that can resize the page before there is a rail to move. The first show reflows.
+            return
         stacked = self._available_width() < self.WIDE
         if stacked == self._stacked:
             return

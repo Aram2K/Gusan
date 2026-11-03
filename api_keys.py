@@ -379,3 +379,244 @@ def run_then(fn, *args, then=None, error=None, name="gusan-worker", **kwargs):
     on_done = (lambda result: relay.call.emit(then, result)) if then is not None else None
     on_error = (lambda exc: relay.call.emit(error, exc)) if error is not None else None
     return run_in_background(fn, *args, on_done=on_done, on_error=on_error, name=name, **kwargs)
+
+
+# ── Settings › My API keys: any number of named keys ────────────────────────
+# An entry is {"id", "name", "provider" (an engine_choice.WRITER_PROVIDERS id), "model",
+# "base_url"} in cfg["api_keys"]; its secret is cfg["api_key_secrets"][id] (main.save_config puts
+# that object in the OS keyring). The cards copy the key they use into the slot the engines read
+# (KEY_FIELDS), and remember which entry it was (speech_key_id / writer_key_id), so the engines
+# never changed. Everything here goes through app.set_settings (one save, one redraw).
+import uuid as _uuid
+
+# The providers a key can be for, in the order the "Provider" list shows them.
+ENTRY_PROVIDERS = ("api_mistral", "api_gemini", "api_openai_compatible", "api_anthropic", "api_cerebras")
+ENTRY_PROVIDER_LABELS = {
+    "api_mistral": "Mistral", "api_gemini": "Google Gemini",
+    "api_openai_compatible": "OpenAI or any compatible service", "api_anthropic": "Anthropic Claude",
+    "api_cerebras": "Cerebras",
+}
+
+
+def entries(cfg):
+    from engine_choice import key_entries
+    return key_entries(cfg)
+
+
+def entry(cfg, key_id):
+    for e in entries(cfg):
+        if e["id"] == key_id:
+            return e
+    return None
+
+
+def secret_of(cfg, key_id):
+    from engine_choice import key_secret
+    return key_secret(cfg, key_id)
+
+
+def provider_has_address(provider):
+    """True for a provider whose server address can be typed (OpenAI-compatible, Cerebras)."""
+    from engine_choice import WRITER_PROVIDERS
+    return (WRITER_PROVIDERS.get(provider) or {}).get("base_url") == "editable"
+
+
+def _clean_entry(key_id, name, provider, model, base_url):
+    from engine_choice import WRITER_PROVIDERS
+    info = WRITER_PROVIDERS[provider]
+    base = str(base_url or "").strip().rstrip("/") if provider_has_address(provider) else ""
+    if base == info["default_url"]:
+        base = ""
+    return {"id": key_id, "name": str(name or "").strip() or info["name"], "provider": provider,
+            "model": str(model or "").strip() or info["default"], "base_url": base}
+
+
+def entry_view(cfg, e):
+    """What a key row shows: {"title", "sub" ("Mistral · Ministral 14B"), "masked" ("Key ending
+    4f2"), "speech" (it can transcribe), "in_use" ("Speech", "AI writer", both or "")}."""
+    from engine_choice import SPEECH_KEY_PROVIDERS, model_display_name
+    key = secret_of(cfg, e["id"])
+    ending = key[-3:] if len(key) >= 8 else ""
+    uses = []
+    if (cfg or {}).get("speech_key_id") == e["id"] and (cfg or {}).get("backend") in ("mistral", "google"):
+        uses.append("Speech")
+    if (cfg or {}).get("writer_key_id") == e["id"]:
+        uses.append("AI writer")
+    provider = ENTRY_PROVIDER_LABELS.get(e["provider"], e["provider"])
+    if e["provider"] == "api_openai_compatible":
+        provider = "OpenAI-compatible"
+    return {"title": e.get("name") or provider,
+            "sub": "%s · %s" % (provider, model_display_name(e.get("model") or "")),
+            "masked": ("Key ending %s" % ending) if ending else ("Key saved" if key else "No key"),
+            "speech": e["provider"] in SPEECH_KEY_PROVIDERS, "in_use": " and ".join(uses)}
+
+
+def _apply(app, changes):
+    set_settings = getattr(app, "set_settings", None)
+    if callable(set_settings):
+        res = set_settings(changes) or {}
+        return all(bool(res.get(k, False)) for k in changes)
+    app.cfg.update(changes)
+    save = getattr(app, "save_config", None)
+    if callable(save):
+        save()
+    return True
+
+
+def _active_changes(cfg, e, secret):
+    """The slot copies for an entry the cards use now (its key or model changed)."""
+    from engine_choice import SPEECH_KEY_PROVIDERS, WRITER_PROVIDERS
+    out = {}
+    backend = SPEECH_KEY_PROVIDERS.get(e["provider"])
+    if cfg.get("speech_key_id") == e["id"] and backend and cfg.get("backend") == backend:
+        out["google_api_key" if backend == "google" else "mistral_api_key"] = secret
+    if cfg.get("writer_key_id") == e["id"]:
+        out[WRITER_PROVIDERS[e["provider"]]["key_field"]] = secret
+        out.update(action_model=e["provider"], action_api_model=e["model"], action_api_base_url=e["base_url"])
+        try:
+            import action_api
+            out["action_api_provider"] = action_api.normalize_provider(e["provider"])
+        except Exception:
+            pass
+    return out
+
+
+def add_entry(app, name, provider, model, key, base_url=""):
+    """Save a new key. Returns its id, or "" when it couldn't be saved."""
+    from engine_choice import WRITER_PROVIDERS
+    key = str(key or "").strip()
+    if provider not in WRITER_PROVIDERS or not key:
+        return ""
+    key_id = _uuid.uuid4().hex[:12]
+    e = _clean_entry(key_id, name, provider, model, base_url)
+    owner_changed = _stamp_owner(app)
+    lst = [dict(x) for x in entries(app.cfg)] + [e]
+    secrets = dict(app.cfg.get("api_key_secrets") or {})
+    secrets[key_id] = key
+    changes = {"api_keys": lst, "api_key_secrets": secrets}
+    changes.update(_fill_empty_slot(app.cfg, provider, key))
+    ok = _apply(app, changes)
+    if owner_changed:
+        save = getattr(app, "schedule_config_save", None)
+        if callable(save):
+            save()
+    return key_id if ok else ""
+
+
+def _fill_empty_slot(cfg, provider, key):
+    """A Mistral / Google key also fills its slot while that one is empty, as the old key rows did:
+    the pages that only look at the slot (Live Assistant, Audio to text: "your own key") see it."""
+    from engine_choice import SPEECH_KEY_PROVIDERS
+    backend = SPEECH_KEY_PROVIDERS.get(provider)
+    field = {"mistral": "mistral_api_key", "google": "google_api_key"}.get(backend)
+    if field and key and not str(cfg.get(field) or "").strip():
+        return {field: key}
+    return {}
+
+
+def update_entry(app, key_id, name, provider, model, key=None, base_url=""):
+    """Change a saved key (``key`` None or "": keep the secret). A key in use is copied again."""
+    from engine_choice import WRITER_PROVIDERS
+    old = entry(app.cfg, key_id)
+    if old is None or provider not in WRITER_PROVIDERS:
+        return False
+    e = _clean_entry(key_id, name, provider, model, base_url)
+    lst = [dict(e) if x["id"] == key_id else dict(x) for x in entries(app.cfg)]
+    secrets = dict(app.cfg.get("api_key_secrets") or {})
+    if str(key or "").strip():
+        secrets[key_id] = str(key).strip()
+    changes = {"api_keys": lst, "api_key_secrets": secrets}
+    changes.update(_active_changes(app.cfg, e, secrets.get(key_id, "")))
+    return _apply(app, changes)
+
+
+def remove_entry(app, key_id):
+    """Forget a saved key. A card that used it stops: speech goes back to this computer, the AI
+    writer's key slot is emptied (it then says it needs a key)."""
+    from engine_choice import SPEECH_KEY_PROVIDERS, WRITER_PROVIDERS
+    e = entry(app.cfg, key_id)
+    if e is None:
+        return False
+    cfg = app.cfg
+    lst = [dict(x) for x in entries(cfg) if x["id"] != key_id]
+    secrets = {k: v for k, v in (cfg.get("api_key_secrets") or {}).items() if k != key_id}
+    changes = {"api_keys": lst, "api_key_secrets": secrets}
+    backend = SPEECH_KEY_PROVIDERS.get(e["provider"])
+    if cfg.get("speech_key_id") == key_id:
+        changes["speech_key_id"] = ""
+        if backend and cfg.get("backend") == backend:
+            field = "google_api_key" if backend == "google" else "mistral_api_key"
+            changes[field] = ""
+            changes.update(_speech_fallback(cfg, field))
+    if cfg.get("writer_key_id") == key_id:
+        changes["writer_key_id"] = ""
+        changes[WRITER_PROVIDERS[e["provider"]]["key_field"]] = ""
+    # The slot still holding this key (filled when it was added): emptied too.
+    secret = secret_of(cfg, key_id)
+    for field in ("mistral_api_key", "google_api_key"):
+        if secret and str(cfg.get(field) or "").strip() == secret and field not in changes:
+            changes[field] = ""
+            changes.update(_speech_fallback(cfg, field))
+    return _apply(app, changes)
+
+
+def slot_migration(cfg):
+    """The changes that turn keys saved the old way (one Mistral, one Google, one AI-writer slot)
+    into entries of the list, once: each slot key no entry holds yet becomes one, and a card that
+    runs on it remembers it. {} when there is nothing to move."""
+    import actions
+    from engine_choice import WRITER_PROVIDERS, _norm_provider, writer_choice
+    cfg = cfg or {}
+    lst = [dict(x) for x in entries(cfg)]
+    secrets = dict(cfg.get("api_key_secrets") or {})
+    held = {v for v in secrets.values() if v}
+    changes = {}
+
+    def add(provider, key, name, model="", base=""):
+        key_id = _uuid.uuid4().hex[:12]
+        lst.append(_clean_entry(key_id, name, provider, model, base))
+        secrets[key_id] = key
+        held.add(key)
+        return key_id
+
+    def find(key):
+        for x in lst:
+            if secrets.get(x["id"]) == key:
+                return x["id"]
+        return ""
+
+    for field, provider, backend in (("mistral_api_key", actions.API_MISTRAL_ID, "mistral"),
+                                     ("google_api_key", actions.API_GEMINI_ID, "google")):
+        key = str(cfg.get(field) or "").strip()
+        if not key:
+            continue
+        key_id = find(key) or add(provider, key, WRITER_PROVIDERS[provider]["name"])
+        if cfg.get("backend") == backend and not cfg.get("speech_key_id"):
+            changes["speech_key_id"] = key_id
+    if writer_choice(cfg) == "own_key" and not cfg.get("writer_key_id"):
+        pid = _norm_provider(cfg.get("action_model"))
+        info = WRITER_PROVIDERS.get(pid)
+        if info:
+            key = str(cfg.get(info["key_field"]) or "").strip() or \
+                  str(cfg.get(info.get("key_fallback") or "") or "").strip()
+            if key:
+                key_id = find(key) or add(pid, key, info["name"], cfg.get("action_api_model"),
+                                          cfg.get("action_api_base_url"))
+                changes["writer_key_id"] = key_id
+    elif str(cfg.get("action_api_key") or "").strip() and not find(str(cfg["action_api_key"]).strip()):
+        pid = _norm_provider(cfg.get("action_api_provider")) or actions.API_OPENAI_ID
+        if pid in WRITER_PROVIDERS:
+            add(pid, str(cfg["action_api_key"]).strip(), WRITER_PROVIDERS[pid]["name"],
+                cfg.get("action_api_model"), cfg.get("action_api_base_url"))
+    if len(lst) != len(entries(cfg)):
+        changes.update(api_keys=lst, api_key_secrets=secrets)
+    return changes
+
+
+def test_entry(provider, key, model="", base_url=""):
+    """Test a key for the list's editor (blocking - call on a worker). Mistral checks it can
+    transcribe too (Voxtral) - the speech card may use it; the rest ping the provider's chat."""
+    import actions
+    if provider == actions.API_MISTRAL_ID:
+        return test_mistral(key)
+    return test_writer_key(provider, key, base_url or None, model or None)

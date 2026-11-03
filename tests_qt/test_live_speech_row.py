@@ -309,7 +309,7 @@ def test_a_model_not_on_disk_asks_then_downloads_and_picks_it(build, asked):
     app.downloads = FakeDownloads(ready=("base",))
     page.speech.refresh()
     _click_row(page.speech.combo, "large-v3-turbo")
-    assert asked.calls == [("Download Most accurate · Whisper Large v3 Turbo?",
+    assert asked.calls == [("Download Whisper Large v3 Turbo?",
                             "1.6 GB - The Live Assistant will use it once it is ready.", "Download", "Not now")]
     assert app.downloads.started == ["large-v3-turbo"]
     assert app.cfg["live_assist_speech_model"] == "large-v3-turbo"

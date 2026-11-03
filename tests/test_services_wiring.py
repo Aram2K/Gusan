@@ -1079,6 +1079,7 @@ class TestKeyringWritesOnlyChanges(unittest.TestCase):
             disk = json.load(f)
         self.assertEqual((disk["google_api_key"], disk["action_api_key"]), ("", ""))
         self.assertEqual((disk["notion_api_key"], disk["notion_refresh_token"]), ("", ""))
+        self.assertEqual(disk["api_key_secrets"], {})                   # Settings › My API keys: in the keyring
 
     def test_a_keyring_that_refuses_keeps_trying_and_the_key_stays_on_disk(self):
         writes = []
