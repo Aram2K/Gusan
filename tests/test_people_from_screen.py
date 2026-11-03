@@ -781,9 +781,14 @@ class TestTheSessionEndsWhileALookRuns(unittest.TestCase):
         old = r.jobs.pop(0)
         r.reader.end()
         r.reader.begin("Aram", now=100)
-        old()
+        self.assertEqual(r.tick(130), "probing")
+        r.jobs.pop(0)()                                          # (the new session's engine check)
+        self.assertEqual(r.tick(131), "looking")                 # the new session's own look is out
+        self.assertTrue(r.reader.busy)
+        old()                                                    # the old one comes back late
         self.assertEqual(r.delivered, [])
-        self.assertEqual((r.reader.looks, r.reader.busy), (0, False))
+        self.assertTrue(r.reader.busy)                           # ...and does not end the new one's look
+        self.assertEqual((r.reader.looks, r.reader.stopped, r.asked), (0, "", []))
 
 
 class TestNothingLeaksThroughTheLog(unittest.TestCase):

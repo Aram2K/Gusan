@@ -671,7 +671,8 @@ class ScreenReader:
         ms = int((time.monotonic() - started) * 1000)
         deliver = None
         with self._lock:
-            stale = token != self._session or not self._active
+            if token != self._session or not self._active:
+                return                     # the session it belonged to is over: nothing of this look is kept or told
             self._busy = False
             if outcome == "same":
                 self._next_check_at = self._clock() + self.RECHECK_S
@@ -698,7 +699,7 @@ class ScreenReader:
                     self._stopped = self._stopped or "empty"
                 if self._looks >= self.MAX_LOOKS:
                     self._stopped = self._stopped or "looks"
-                if not stale and self._deliver is not None:
+                if self._deliver is not None:
                     deliver = self._deliver
         if outcome in ("ok", "failed"):
             logger.info("People from the screen: look %d %s in %d ms, %d names", self._looks, outcome, ms, len(names))
