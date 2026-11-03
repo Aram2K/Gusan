@@ -5732,6 +5732,42 @@ class AppController(QObject):
         the live view opens by itself while a meeting records)."""
         return self.show_main("meetings")
 
+    def open_meeting_after_live_stop(self, folder):
+        """GUI thread: the user pressed Stop on a Live Assistant session that recorded something. Gusan comes to
+        the front on Meetings > that meeting (its notes view; the notes are still being written and fill in by
+        themselves, and the chat beside them can answer from the transcript). Returns True when the window opened.
+
+        Screen share safety: the Live Assistant card can be hidden from screen share (cfg live_assist_private,
+        the default), and this window must not show the notes and the chat in the middle of a share. So with the
+        card private: where the OS can keep a window out of captures (Windows 10 2004+, not Remote Desktop) the
+        window is hidden from share BEFORE it is shown and the OS's answer is checked again after; where it
+        cannot promise that (macOS only does its best, an older Windows, Remote Desktop) - or refused - nothing
+        opens: a tray notice says the notes are being written and a click on it opens the meeting (the user's
+        own choice, not ours). With the card not private the window simply opens."""
+        if getattr(self, "_quitting", False) or not folder:
+            return False
+        folder = str(folder)
+
+        def open_it():
+            return self.show_main("meetings", meeting=folder, writing=True)
+
+        if not bool(self.cfg.get("live_assist_private", True)):
+            return open_it() is not None
+        try:
+            from ui import glass
+            if glass.capture_exclusion_supported() and not glass.is_remote_session():
+                win = self._ensure_main_window()
+                if win.hide_from_share(True):                         # excluded while it is still hidden
+                    shown = open_it()
+                    if shown is not None and glass.is_excluded_from_capture(win):
+                        return True
+                    win.hide()                                        # the OS did not keep its word: away it goes
+                    win.hide_from_share(False)
+        except Exception:
+            logger.warning("Opening the meeting hidden from screen share failed", exc_info=True)
+        self.show_tray_hint(f"{APP_NAME} is writing your notes", "Click to open the meeting.", on_click=open_it)
+        return False
+
     def show_onboarding(self):
         """The 5-step welcome (ui/onboarding_v2) - first run only. An onboarded
         user (every 1.9 upgrader) gets the app instead and never sees it.

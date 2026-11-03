@@ -19,7 +19,7 @@ from collections import deque
 
 from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication, QIcon, QLinearGradient, QPainter
-from PySide6.QtWidgets import (QCheckBox, QFileDialog, QFrame, QHBoxLayout,
+from PySide6.QtWidgets import (QBoxLayout, QCheckBox, QFileDialog, QFrame, QHBoxLayout,
                                QLabel, QMenu, QPlainTextEdit, QProgressBar, QScrollArea,
                                QSizePolicy, QStackedWidget, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
@@ -41,8 +41,14 @@ SYNC_BG = False            # tests: run background work inline
 FLASH_MS = 1800            # how long "Copied" and friends stay up
 FLASH_ERROR_MS = 5000      # a failure to read: the Notion errors
 FLASH_MIN_W = 160          # the flash line wraps rather than get narrower than this
+NOTE_MS = 6000             # how long the one line about how a speaker pass ended stays up (the header's note)
 NOTION_THEN = "Send this meeting"       # the Notion sheet's button when it was opened from here
 NOTION_REASONS = ("auth", "no_access", "rate", "offline", "full")      # telemetry: why a send failed (else "other")
+ARTICLE_MAX_W = 620                 # the notes card stops growing here (it reads best at this width)
+CHAT_MIN_W, CHAT_MAX_W = 320, 520   # the notes view's right column (the chat above People and the recording)
+CHAT_H, CHAT_H_NARROW = 420, 440    # the chat card's height: at least, and when it sits below the notes
+NARROW_W, WIDE_W = 830, 846         # the page is narrower than this: the column goes below the notes (the second
+                                    # number is where it goes back: no flicker while a scroll bar comes and goes)
 
 # ── words ────────────────────────────────────────────────────────────────────
 LANGS = (("auto", "Detect automatically"), ("multi", "Mixed languages"), ("en", "English"),
@@ -1192,7 +1198,8 @@ notes_plain = rich_text.notes_plain             # notes as plain paragraphs: no 
 
 
 class ActionItem(QWidget):
-    """One action item: checkbox, face, **Owner** task, due."""
+    """One action item: checkbox, face, **Owner** task, due. The face and the bold name are only for a person: parse_task
+    leaves out an empty or generic owner ('Them', 'Speaker 2', 'the other side'), so those items are just the task."""
 
     toggled = Signal(int, bool)
 
@@ -1213,9 +1220,12 @@ class ActionItem(QWidget):
         self.box.setCursor(Qt.PointingHandCursor)
         theme.focus_ring(self.box)
         lay.addWidget(self.box, 0, Qt.AlignVCenter)
-        if owner:
-            lay.addWidget(Faces([owner], 22, me=me, parent=self), 0, Qt.AlignVCenter)
         self._me = (me or "").strip().lower()
+        if owner:
+            # the person who recorded is drawn as in the sidebar, whether the notes say "You" or their name; two owners,
+            # two faces
+            faces = [(me or n) if n.lower() == "you" else n for n in self._owner_names()]
+            lay.addWidget(Faces(faces, 22, me=me, parent=self), 0, Qt.AlignVCenter)
         self.text_label = QLabel(self)
         self.text_label.setTextFormat(Qt.RichText)
         self.text_label.setWordWrap(True)
@@ -1223,15 +1233,21 @@ class ActionItem(QWidget):
         self.text_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         lay.addWidget(self.text_label, 1, Qt.AlignVCenter)
         self.due_label = tlabel(due, 12.5, 400, "muted")
+        self.due_label.setTextFormat(Qt.PlainText)          # words from the notes, never markup
         self.due_label.setVisible(bool(due))
         lay.addWidget(self.due_label, 0, Qt.AlignVCenter)
         self.box.toggled.connect(self._on_toggle)
         self._render()
 
+    def _owner_names(self):
+        return [n.strip() for n in (self.owner or "").split(", ") if n.strip()]
+
     def owner_shown(self):
-        if self.owner and self._me and self.owner.split()[0].lower() == self._me:
-            return "You"
-        return self.owner
+        """The owner as the chip says it: the viewer's own name is 'You' ('Aram, Marc' -> 'You, Marc'), the others stay."""
+        names = self._owner_names()
+        if self._me:
+            names = ["You" if n.split()[0].lower() == self._me else n for n in names]
+        return ", ".join(dict.fromkeys(names)) if names else (self.owner or "")
 
     def _render(self):
         done = self.box.isChecked()
@@ -1250,7 +1266,7 @@ class ActionItem(QWidget):
 
 
 class NotesDoc(QWidget):
-    """The rendered notes (Summary, Decisions, Action items, Open questions)."""
+    """The rendered notes (Summary, Decisions, Action items, Open questions, Discussion: its topics are sub-headings)."""
 
     task_toggled = Signal(int, bool)
     LINE = 23                   # 14.5 / 23 px, as the mockup's notes
@@ -1268,7 +1284,8 @@ class NotesDoc(QWidget):
 
     def render(self, md, banner=None, notices=(), written_by=None, blocks=None):
         """``blocks`` (instead of parsing ``md``): parse_notes' blocks, plus
-        ("html", rich text) paragraphs (the transcript shown when there are no notes)."""
+        ("html", rich text) paragraphs (the transcript shown when there are no notes). Parsed from ``md``, a section with
+        nothing under it is not shown and a topic under a section is a sub-heading (parse_notes(sections=True))."""
         clear_layout(self._lay)
         self.tasks = []
         lay = self._lay
@@ -1286,14 +1303,22 @@ class NotesDoc(QWidget):
             lay.addSpacing(10)
         first = True
         prev = None
-        for kind, data in (parse_notes(md) if blocks is None else blocks):
+        for kind, data in (parse_notes(md, sections=True) if blocks is None else blocks):
             if kind == "head":
                 if not first:
                     lay.addSpacing(20)
                 lb = tlabel(data, 18, 600, "ink", display=True, wrap=True)
+                lb.setTextFormat(Qt.PlainText)          # a heading the AI wrote is text, never markup
                 lb.setAccessibleName(data)
                 lay.addWidget(lb)
                 lay.addSpacing(10)
+            elif kind == "subhead":
+                lay.addSpacing(0 if prev in ("head", None) else 14)
+                lb = tlabel(data, 15, 600, "ink", wrap=True)
+                lb.setTextFormat(Qt.PlainText)
+                lb.setAccessibleName(data)
+                lay.addWidget(lb)
+                lay.addSpacing(5)
             elif kind == "task":
                 if prev == "task":
                     lay.addSpacing(4)
@@ -1392,19 +1417,45 @@ class NotesView(QWidget):
         self._flash.setSingleShot(True)
         self._flash.setInterval(FLASH_MS)
         self._flash.timeout.connect(self._end_flash)
+        self._note = QTimer(self)
+        self._note.setSingleShot(True)
+        self._note.setInterval(NOTE_MS)
+        self._note.timeout.connect(self._end_note)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         root.addWidget(self._build_header())
         root.addLayout(self._build_toolbar())
-        body = QHBoxLayout()
-        body.setContentsMargins(32, 0, 32, 28)
+        # Narrow window: the chat is below the notes, out of sight - a link under the toolbar takes the reader to it.
+        self._ask_row = QWidget(self)
+        arow = QHBoxLayout(self._ask_row)
+        arow.setContentsMargins(32, 0, 32, 10)
+        self.ask_link = Button("Ask about this meeting", "link", "s", icon="chev_d", parent=self._ask_row)
+        self.ask_link.setIcon(icons.icon("chev_d", 14, "blue-tx", sw=2))
+        self.ask_link.setIconSize(QSize(14, 14))
+        self.ask_link.setAccessibleName("Go to the questions about this meeting")
+        self.ask_link.clicked.connect(self.show_chat)
+        arow.addWidget(self.ask_link, 0, Qt.AlignLeft)
+        arow.addStretch(1)
+        self._ask_row.hide()
+        root.addWidget(self._ask_row)
+        # The notes and the column beside them sit in one box that stops growing at ARTICLE_MAX_W + CHAT_MAX_W: on a
+        # big screen the two cards stay together on the title's left edge (the room left over is on the right), not
+        # spread out with a gap between them.
+        outer = QHBoxLayout()
+        outer.setContentsMargins(32, 0, 32, 28)
+        outer.setSpacing(0)
+        self._cols = QWidget(self)
+        body = QHBoxLayout(self._cols)
+        body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(24)
+        self._body = body
+        self._narrow = False            # the side column sits below the notes (see resizeEvent)
         self.article = white_card(16, "card", self)
         self.article.setAccessibleName("Meeting notes")
         self.article.setMinimumWidth(380)
-        self.article.setMaximumWidth(620)
+        self.article.setMaximumWidth(ARTICLE_MAX_W)
         self.article.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         al = QVBoxLayout(self.article)
         al.setContentsMargins(1, 1, 1, 1)
@@ -1443,7 +1494,9 @@ class NotesView(QWidget):
         side = QVBoxLayout()
         side.setContentsMargins(0, 0, 0, 0)
         side.setSpacing(16)
-        side.addStretch(1)
+        from ui.pages import meeting_chat_ui            # (it imports this module: loaded here, not at the top)
+        self.chat = meeting_chat_ui.ChatCard(self)      # "Ask about this meeting" fills the room above People
+        side.addWidget(self.chat, 1)
         self.people_card = Card(self, pad=(18, 16), gap=12)
         self.people_card.setAccessibleName("People")
         self.people_card.add(label("People", "h3", self.people_card))
@@ -1455,10 +1508,59 @@ class NotesView(QWidget):
         side.addWidget(self.audio_card)
         sidew = QWidget(self)
         sidew.setLayout(side)
-        sidew.setMinimumWidth(280)
+        sidew.setMinimumWidth(CHAT_MIN_W)
+        sidew.setMaximumWidth(CHAT_MAX_W)
+        self._side = sidew
         body.addWidget(sidew, 0)
-        root.addLayout(body, 1)
+        self._cols.setMaximumWidth(ARTICLE_MAX_W + 24 + CHAT_MAX_W)
+        outer.addWidget(self._cols, 1000)
+        outer.addStretch(1)
+        self._outer = outer
+        root.addLayout(outer, 1)
         meeting_speakers_ui.install(self)          # ⋯ › Identify speakers, and its line in the Transcript tab
+
+    # ── the two columns ──
+    def resizeEvent(self, e):                                       # noqa: N802 (Qt name)
+        super().resizeEvent(e)
+        self._fit_columns()
+
+    def _fit_columns(self, force=False):
+        """Wide: the notes, and the chat with People and the recording beside them. Narrow (the 960 px window
+        and below): the notes on top and the column below them - and the toolbar's two longest buttons shorten,
+        so it fits the viewport (it needed 817 px)."""
+        w = self.width()
+        narrow = w < NARROW_W or (self._narrow and w < WIDE_W)
+        if narrow == self._narrow and not force:
+            return
+        self._narrow = narrow
+        self._body.setDirection(QBoxLayout.TopToBottom if narrow else QBoxLayout.LeftToRight)
+        self._ask_row.setVisible(narrow)
+        self._outer.setStretch(1, 0 if narrow else 1)      # (narrow: the column takes every pixel)
+        self._cols.setMaximumWidth(16777215 if narrow else ARTICLE_MAX_W + 24 + CHAT_MAX_W)
+        self.article.setMaximumWidth(16777215 if narrow else ARTICLE_MAX_W)
+        self.article.setMinimumHeight(460 if narrow else 0)
+        self._side.setMaximumWidth(16777215 if narrow else CHAT_MAX_W)
+        self._side.setMinimumWidth(0 if narrow else CHAT_MIN_W)
+        if narrow:
+            self.chat.setFixedHeight(CHAT_H_NARROW)
+        else:
+            self.chat.setMinimumHeight(CHAT_H)
+            self.chat.setMaximumHeight(16777215)
+        self.copy_btn.setText(self._copy_label())
+        self.continue_btn.setText("Continue" if narrow else "Continue recording")
+
+    def _copy_label(self):
+        return "Copy" if self._narrow else "Copy notes"
+
+    def show_chat(self):
+        """Scroll the page to the questions about this meeting and put the cursor in the box (the narrow layout,
+        where the chat sits below the notes)."""
+        w = self.parentWidget()
+        while w is not None and not isinstance(w, QScrollArea):
+            w = w.parentWidget()
+        if w is not None:
+            w.ensureWidgetVisible(self.chat, 0, 16)
+        self.chat.focus_input()
 
     # ── building ──
     def _build_header(self):
@@ -1473,7 +1575,22 @@ class NotesView(QWidget):
         self.back_link.setFixedHeight(20)
         self.back_link.setAccessibleName("Back to Meetings")
         self.back_link.clicked.connect(lambda: self.page.show_list())
-        lay.addWidget(self.back_link, 0, Qt.AlignLeft)
+        # The note at the end of this row (how a speaker pass ended) has room to spare there whatever the
+        # window's width: the toolbar below is as wide as its buttons and a line beside them would push the
+        # page wider than a window of 1200 pixels or less.
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(12)
+        top.addWidget(self.back_link, 0, Qt.AlignLeft)
+        top.addStretch(1)
+        self.note_label = tlabel("", 12.5, 600, "ok")
+        self.note_label.setTextFormat(Qt.PlainText)
+        self.note_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.note_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.note_label.setMinimumWidth(0)
+        self.note_label.hide()
+        top.addWidget(self.note_label, 1000, Qt.AlignVCenter)
+        lay.addLayout(top)
         self.title_label = label("", "title", w)
         self.title_label.setTextFormat(Qt.PlainText)    # a calendar invite's title is text, never markup
         self.title_label.setFixedHeight(34)
@@ -1563,6 +1680,12 @@ class NotesView(QWidget):
         same = str(folder) == self.folder
         if not same:
             self.audio_player.stop(release=True)     # another meeting: let go of this recording
+            try:
+                self.chat.unbind()                   # ... and of its chat (a running answer ends in its own folder)
+            except Exception:
+                logger.warning("The meeting chat could not be let go", exc_info=True)
+            self._note.stop()
+            self.note_label.hide()                   # (and what was said about the last one)
         # (only when what is on screen IS this meeting: a meeting still being opened has nothing
         # to keep, and the previous one's scroll position is not its own)
         shown = str((self.data or {}).get("folder") or "") == str(folder)
@@ -1694,6 +1817,8 @@ class NotesView(QWidget):
         self._meta.addStretch(1)
 
         notes = d.get("notes") or ""
+        if notes.strip() and not parse_notes(notes, sections=True):
+            notes = ""              # nothing but empty sections ("None."): shown like no notes, the transcript is still here
         busy = self.page.is_active_folder(self.folder)
         banner = None
         has_transcript = bool((d.get("transcript") or "").strip())
@@ -1750,7 +1875,25 @@ class NotesView(QWidget):
         self.audio_player.set_parts(audio, d.get("duration_sec") or 0)     # the same parts: keeps playing
         self.copy_btn.setEnabled(bool(notes.strip()))
         self.sync_actions()
+        try:
+            self.chat.bind(self.folder, d, busy, self._transcript_final(busy))
+        except Exception:                                  # the page must finish drawing whatever the chat's gate says
+            logger.warning("The meeting chat could not be set up", exc_info=True)
         meeting_speakers_ui.after_render(self)
+
+    def _transcript_final(self, busy):
+        """False while a Stop still has to write this meeting's final transcript.txt (the plain one that lands
+        earlier has no speaker labels): the chat waits for it."""
+        if not busy:
+            return True
+        s = self.page.session()
+        fn = getattr(s, "transcript_final", None)
+        if not callable(fn):
+            return True
+        try:
+            return bool(fn(self.folder))
+        except Exception:
+            return True
 
     def _render_people(self, people):
         clear_layout(self._people)
@@ -1770,7 +1913,11 @@ class NotesView(QWidget):
             self._people.addLayout(r)
         self.people_card.setVisible(bool(rows))
 
-    def _banner(self, title, text, tone="amber", button=None, slot=None):
+    def _banner(self, title, text, tone="amber", button=None, slot=None, progress=None):
+        """A calm banner at the top of the notes. ``progress``: None = no bar, -1 = a bar that just moves
+        (not known how long), 0..1 = a bar filled that far. The frame keeps its ``title_label``,
+        ``text_label`` (None without text), ``bar`` (None without progress) and ``button`` (when it has
+        one), so a banner that is on the page can be updated in place."""
         fr = QFrame()
         fr.setProperty("gusan", "banner")
         fr.setProperty("tone", tone)
@@ -1783,9 +1930,28 @@ class NotesView(QWidget):
         h.addWidget(icon_label(ic[0], 18, ic[1]), 0, Qt.AlignTop)
         col = QVBoxLayout()
         col.setSpacing(2)
-        col.addWidget(tlabel(title, 13.5, 600, "ink", wrap=True))
+        # (plain text: a title or a line can come from outside - a notes error - and is never markup)
+        fr.title_label = tlabel(title, 13.5, 600, "ink", wrap=True)
+        fr.title_label.setTextFormat(Qt.PlainText)
+        col.addWidget(fr.title_label)
+        fr.text_label = None
         if text:
-            col.addWidget(tlabel(text, 12.5, 400, "text2", wrap=True))
+            fr.text_label = tlabel(text, 12.5, 400, "text2", wrap=True)
+            fr.text_label.setTextFormat(Qt.PlainText)
+            col.addWidget(fr.text_label)
+        fr.bar = None
+        if progress is not None:
+            fr.bar = QProgressBar(fr)
+            fr.bar.setTextVisible(False)
+            fr.bar.setFixedHeight(6)
+            fr.bar.setAccessibleName("Progress")
+            if progress < 0:
+                fr.bar.setRange(0, 0)
+            else:
+                fr.bar.setRange(0, 1000)
+                fr.bar.setValue(int(max(0.0, min(1.0, progress)) * 1000))
+            col.addSpacing(5)
+            col.addWidget(fr.bar)
         h.addLayout(col, 1)
         if button:
             b = Button(button, "secondary", "s", parent=fr)
@@ -1824,9 +1990,22 @@ class NotesView(QWidget):
         self.flash_label.show()
         self._flash.start(ms or FLASH_MS)
 
+    def note(self, text, tone="ok", ms=None):
+        """A short line at the top right of the page (plain text, one line, never wider than the room it
+        has): how a speaker pass ended. Hidden again after ``ms`` and when another meeting opens."""
+        self.note_label.setText(text)
+        self.note_label.setToolTip(text)
+        set_tone(self.note_label, tone)
+        self.note_label.show()
+        self._note.start(ms or NOTE_MS)
+
+    def _end_note(self):
+        self.note_label.hide()
+        self.note_label.setText("")
+
     def _end_flash(self):
         self.flash_label.hide()
-        self.copy_btn.setText("Copy notes")
+        self.copy_btn.setText(self._copy_label())
         self._flash.setInterval(FLASH_MS)       # the next "Copied" is short again
 
     def copy_notes(self):
@@ -1835,7 +2014,7 @@ class NotesView(QWidget):
         notes = (self.data.get("notes") or "").strip()
         if not notes:
             return
-        ok = bool(rich_clipboard.copy_rich(notes))
+        ok = bool(rich_clipboard.copy_rich(rich_text.clean_notes(notes)))
         if ok:
             self.copy_btn.setText("Copied")
             self._flash.start(FLASH_MS)
@@ -1853,7 +2032,10 @@ class NotesView(QWidget):
             return
         title = d.get("title") or "Meeting"
         from docx_export import safe_filename
-        stem = safe_filename(title, "Meeting notes")
+        # The Save dialog is a window of its own that a screen share can see: while this window is hidden from the
+        # share (after a Live Assistant Stop) it is not offered the meeting's name.
+        hidden = bool(getattr(self.window(), "hidden_from_share", False))
+        stem = safe_filename("" if hidden else title, "Meeting notes")
         docs = os.path.join(os.path.expanduser("~"), "Documents")
         base = docs if os.path.isdir(docs) else os.path.expanduser("~")
         if kind == "word":
@@ -1877,7 +2059,7 @@ class NotesView(QWidget):
                 return
             if not path.lower().endswith(".md"):
                 path += ".md"
-            text = "# %s\n\n%s\n\n%s\n" % (title, self._meta_line(), (d.get("notes") or "").strip())
+            text = "# %s\n\n%s\n\n%s\n" % (title, self._meta_line(), rich_text.clean_notes(d.get("notes") or "").strip())
 
             def work():
                 with open(path, "w", encoding="utf-8") as f:
@@ -2053,6 +2235,7 @@ class NotesView(QWidget):
         meeting = dict(self.data or {}, dir=folder)
         # A loaded recording holds its file open: Windows would refuse the move.
         self.audio_player.stop(release=True)
+        self.chat.release()                          # nothing more is written into a folder that is going away
         s = self.page.session()
         deleter = self.page.list_view.meetings.deleter
 
@@ -2074,6 +2257,8 @@ class NotesView(QWidget):
                 self.folder = None
                 self.audio_player.set_parts([])
                 self.page.show_list(refresh=True)
+            else:
+                self.render_keeping_view()           # it stays: its chat (let go of above) comes back
         self._bg.run(work, done)
 
     def _is_folder(self, folder):
@@ -2088,12 +2273,14 @@ class NotesView(QWidget):
         let go of the file first (Windows will not move a folder that has a file open)."""
         if self._is_folder(folder):
             self.audio_player.stop(release=True)
+            self.chat.release()
 
     def forget_folder(self, folder):
         """``folder`` left the library (the list deleted it): this view no longer shows it."""
         if self._is_folder(folder):
             self.folder = None
             self.audio_player.set_parts([])
+            self.chat.release()
 
     def play(self):
         """Play or pause the recording, right here."""
@@ -2143,6 +2330,7 @@ def _menu_offset(menu):
 
 def read_meeting(folder):
     """Everything the notes view shows, read off the GUI thread."""
+    import meeting_speakers
     import meeting_store
     meta = meeting_store.load_meta(folder)
     notes = meeting_store.load_notes(folder)
@@ -2167,10 +2355,15 @@ def read_meeting(folder):
     # The recording ends before the transcript does (a meeting past the ~2-hour cap):
     # the Transcript tab never suggests Identify speakers then (meeting_speakers_ui).
     cut_short = bool(parts) and meeting_store.recording_cut_short(meta, meeting_store.part_seconds(parts))
+    # Can the speaker pass still tell the people on the call apart from what the meeting kept (its
+    # segments and the call's sound)? Two small files read here, off the window's thread: the page
+    # offers "Identify speakers" for a meeting that still says "Them" only when it can.
+    can_name_call = bool(meeting_speakers.refinable(folder)) if "Them:" in transcript else False
     return {"folder": str(folder), "meta": meta, "title": str(meta.get("title") or "Untitled Meeting"),
             "notes": notes, "transcript": transcript, "my_notes": my_notes, "parts": parts,
             "people": list(people), "started": started, "duration_sec": duration,
-            "recording_cut_short": cut_short}
+            "recording_cut_short": cut_short, "can_name_call": can_name_call,
+            "transcript_file": meeting_store.has_transcript_file(folder)}      # (else only the live pieces are there)
 
 
 _SPK_RE = rich_text.SPEAKER_RE          # "Speaker 1: …", "You: …", "Anna: …"

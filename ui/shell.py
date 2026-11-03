@@ -12,20 +12,30 @@ ui/pages/__init__.py for the optional page hooks (on_open, on_setting_changed,
 refresh_account).
 
 Closing the window only hides it: the tray app keeps running.
+
+Hidden from screen shares (hide_from_share): when the Live Assistant is private and a Stop brings this window to
+the front (AppController.open_meeting_after_live_stop), the window is kept out of screen shares and recordings
+(ui/glass.py) BEFORE it is shown, so not one frame of the notes or the chat reaches a share. A slim bar says so and
+has "Show" (one press lets a share see it again). It stays on while the window is open - going to another page
+does not lift it, that would show more, not less - and is lifted when the window is closed to the tray, when the
+Live Assistant's "Hide from screen share" is turned off, or by Show. The themed prompts opened over this window
+(Rename, Delete, Clear chat ...) are windows of their own and are kept out too (ui/components/mini_prompt.py asks
+this window); the system's Save dialog is not - it is not offered the meeting's name. Menus and tooltips are not
+kept out (a known gap).
 """
 
 import logging
 import traceback
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import (QHBoxLayout, QMainWindow, QScrollArea, QSizePolicy, QStackedWidget,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QMainWindow, QScrollArea, QSizePolicy,
+                               QStackedWidget, QVBoxLayout, QWidget)
 
 import account_actions
 from app_info import APP_NAME
-from ui import theme
-from ui.components import Button, Card, IconTile, PageHeader, Sidebar, label
+from ui import glass, theme
+from ui.components import Button, Card, IconTile, PageHeader, Sidebar, icons, label
 
 logger = logging.getLogger("transcribe")
 
@@ -178,13 +188,21 @@ class ErrorPage(QWidget):
             logger.debug("copy failed", exc_info=True)
 
 
+SHARE_BAR_TEXT = "Hidden on screen share while the Live Assistant is private."
+SHARE_BAR_TIP = ("Gusan hides this window from screen shares while the Live Assistant is private. "
+                 "Your own screenshots and recordings of it stay blank too. Press Show to let a share see it.")
+
+
 class MainWindow(QMainWindow):
+    share_hidden_changed = Signal(bool)      # the window went out of / came back into screen shares
+
     def __init__(self, main_app, parent=None):
         super().__init__(parent)
         self.app = main_app
         self._pages = {}            # route -> page widget
         self._holders = {}          # route -> the widget in the stack (scroll area or page)
         self._route = None
+        self._share_hidden = False
         self.setWindowTitle(APP_NAME)
         theme.apply(self)
         self.setMinimumSize(*MIN_SIZE)
@@ -203,9 +221,71 @@ class MainWindow(QMainWindow):
         h.addWidget(self.sidebar)
         self.stack = QStackedWidget(root)
         self.stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        h.addWidget(self.stack, 1)
+        column = QWidget(root)
+        col = QVBoxLayout(column)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
+        self._share_bar = self._build_share_bar(column)
+        col.addWidget(self._share_bar)
+        col.addWidget(self.stack, 1)
+        h.addWidget(column, 1)
         self.setCentralWidget(root)
         self.refresh_account()
+
+    def _build_share_bar(self, parent):
+        bar = QFrame(parent)
+        bar.setObjectName("shareBar")
+        bar.setStyleSheet("QFrame#shareBar { background: %s; border: none; border-bottom: 1px solid %s; }"
+                          % (theme.qss_color("ok-sub"), theme.qss_color("ok-line")))
+        bar.setAccessibleName("Hidden on screen share")
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(32, 6, 24, 6)
+        lay.setSpacing(8)
+        ic = QLabel(bar)
+        ic.setPixmap(icons.pixmap("incognito", 15, "ok-tx", sw=2))
+        ic.setFixedSize(15, 15)
+        lay.addWidget(ic)
+        text = label(SHARE_BAR_TEXT, "muted", bar)
+        text.setStyleSheet("color: %s; background: transparent;" % theme.qss_color("ok-tx"))
+        text.setToolTip(theme.plain_tip(SHARE_BAR_TIP))
+        lay.addWidget(text)
+        lay.addStretch(1)
+        self.share_show_btn = Button("Show", "link", "s", parent=bar)
+        self.share_show_btn.setAccessibleName("Show this window on screen share")
+        self.share_show_btn.setToolTip(theme.plain_tip(SHARE_BAR_TIP))
+        self.share_show_btn.clicked.connect(lambda: self.hide_from_share(False))
+        lay.addWidget(self.share_show_btn)
+        bar.hide()
+        return bar
+
+    # ── screen share ──
+    @property
+    def hidden_from_share(self):
+        """True while the OS keeps this window out of screen shares and recordings (hide_from_share)."""
+        return self._share_hidden
+
+    def hide_from_share(self, on=True):
+        """Keep this window out of screen shares and recordings (``on``) or let them see it again. Returns whether
+        it is hidden now: True only when the OS confirmed it (ui/glass.py - Windows 10 2004+; never claimed
+        otherwise). Called BEFORE the window is shown (its native window is made here, hidden), so nothing
+        of it ever reaches a share. Never persisted: a restart is always normal."""
+        hidden = False
+        if on:
+            try:
+                self.winId()                         # the native window, before it is shown
+                hidden = bool(glass.exclude_from_capture(self, True))
+            except Exception:
+                logger.debug("hiding the window from screen share failed", exc_info=True)
+        elif self._share_hidden:
+            try:
+                glass.exclude_from_capture(self, False)
+            except Exception:
+                logger.debug("showing the window to screen share failed", exc_info=True)
+        if hidden != self._share_hidden:
+            self._share_hidden = hidden
+            self._share_bar.setVisible(hidden)
+            self.share_hidden_changed.emit(hidden)
+        return hidden
 
     # ── routing ──
     def current_route(self):
@@ -299,6 +379,10 @@ class MainWindow(QMainWindow):
 
     def on_setting_changed(self, key):
         """AppController.sig_setting_changed lands here; every built page hears it."""
+        if key == "live_assist_private" and self._share_hidden:
+            cfg = getattr(self.app, "cfg", None) or {}
+            if not cfg.get("live_assist_private", True):
+                self.hide_from_share(False)          # the user turned "Hide from screen share" off
         for route, page in list(self._pages.items()):
             hook = getattr(page, "on_setting_changed", None)
             if callable(hook):
@@ -333,4 +417,5 @@ class MainWindow(QMainWindow):
             event.accept()
             return
         event.ignore()
+        self.hide_from_share(False)                  # shown again from the tray it is a normal window
         self.hide()

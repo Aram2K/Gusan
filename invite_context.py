@@ -194,6 +194,13 @@ def notes_header(title="", attendees="", agenda=""):
     return "\n".join(lines)
 
 
+def recorder_line(name):
+    """The data line that tells the notes engine who "You" is in the transcript: the person who recorded the meeting
+    (their profile first name). "" without a name."""
+    who = one_line(name, MAX_NAME_CHARS)
+    return "Recorded by: %s (shown as You in the transcript)" % who if who else ""
+
+
 def invite_block(agenda):
     """The Live Assistant's own section for the invite text (decision 12),
     framed as data; "" for an empty agenda."""

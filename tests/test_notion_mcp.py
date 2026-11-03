@@ -39,6 +39,7 @@ import notion_connect as nc
 import notion_export as ne
 import notion_mcp as nm
 import notion_sync
+import rich_text
 import storage
 from notion_connect import ConnectCancelled, ConnectError
 from notion_export import NotionAuthError, NotionError, NotionNotFoundError
@@ -3001,7 +3002,10 @@ class TestSyncRouting(NetCase):
         self.assertEqual((seen["creds"].access, seen["creds"].refresh, seen["creds"].client_id),
                          (cfg["notion_api_key"], cfg["notion_refresh_token"], "cid1"))
         self.assertEqual((seen["title"], seen["parent"], seen["hub"]), ("Weekly sync", "", ""))
-        self.assertEqual(seen["notes"], NOTES)
+        # what is sent is the notes as every surface shows them: a table an engine wrote anyway is a list (rich_text.clean_notes)
+        self.assertEqual(seen["notes"], rich_text.clean_notes(NOTES))
+        self.assertIn("- [ ] Announce (Owner: Sara)", seen["notes"])
+        self.assertNotIn("| Sara |", seen["notes"])
         self.assertIn("Anna: We ship Friday.", seen["transcript"])
         seen["persist"]({"notion_hub_page": "x"})                                       # forwarded to the caller's persist
         self.assertEqual(self.persist.calls[-1], {"notion_hub_page": "x"})

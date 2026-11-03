@@ -28,6 +28,10 @@
 // * Meeting notes (mode "meeting_notes"): OpenAI (OPENAI_NOTES_MODEL,
 //   OPENAI_NOTES_MS for the whole notes) -> Claude Sonnet 5.5 (thinking off,
 //   CLAUDE_NOTES_MS) -> Mistral Small -> Gemini Flash (NOTES_TAIL_MS each).
+//   The app now STREAMS the notes - they run to 5000 tokens for a long
+//   meeting - so no engine has a whole-answer limit: each gets NOTES_START_MS
+//   to its first words, and the answer is relayed as it is written. An older
+//   app sends no "stream" and keeps the budgets above.
 // * Everything else (the live recap, apps before 2.0 that send no mode):
 //   Mistral Small -> OpenAI (OPENAI_FAST_MODEL) -> Gemini Flash.
 // Not streamed, EVERY engine has a whole-answer time limit (its own, else
@@ -98,6 +102,11 @@ const WHOLE_CAP_MS = 20_000;
 const NON_STREAM_DEADLINE_MS = 40_000;
 const MIN_LEFT_MS = 3_000;
 const NOTES_TAIL_MS = 10_000;     // Mistral / Gemini behind the two premium engines for meeting notes
+const NOTES_START_MS = 12_000;    // streamed meeting notes: first words from each engine (a 35k-token input needs a few seconds)
+// Meeting notes scale with the meeting (a long one is up to ~2,200 words): the app asks for up to 5000 tokens.
+// Every other mode keeps its 2000-token ceiling.
+const NOTES_MAX_TOKENS = 6000;
+const MAX_TOKENS = 2000;
 // Alt+S and the actions it picks (actions.py ACTION_MODES). A Smart Action is
 // short and arrives whole, so a stalled GPU queue gets SMART_LIVE_MS before
 // Mistral answers instead - well inside the app's 45 s.
@@ -536,7 +545,7 @@ async function checkClaudeKey(): Promise<void> {
 
 async function routesFor(live: boolean, smart: boolean, notes: boolean, messages: unknown[],
                          maxTokens: number, stream: boolean): Promise<Route[]> {
-  const ms = live ? LIVE_FALLBACK_MS : smart ? SMART_START_MS : START_TIMEOUT_MS;
+  const ms = live ? LIVE_FALLBACK_MS : smart ? SMART_START_MS : notes ? NOTES_START_MS : START_TIMEOUT_MS;
   const gemini = GEMINI_KEY ? geminiRoutes(messages, maxTokens, stream, ms) : [];
   const mistral = MISTRAL_KEY ? [mistralRoute(messages, maxTokens, stream, ms)] : [];
   const openai = (model: string, wholeMs: number, temperature?: number): Route[] =>
@@ -544,7 +553,8 @@ async function routesFor(live: boolean, smart: boolean, notes: boolean, messages
   if (notes) {
     const c = claudeRoute(CLAUDE_NOTES_MODEL, messages, maxTokens, ms, CLAUDE_NOTES_MS);
     const tail = [...mistral, ...gemini].map((r) => ({ ...r, capMs: NOTES_TAIL_MS }));
-    return [...openai(OPENAI_NOTES_MODEL, OPENAI_NOTES_MS), ...(c ? [c] : []), ...tail];
+    // 0.2: the notes now carry more figures, dates and names, and the default temperature (1.0) lets them drift
+    return [...openai(OPENAI_NOTES_MODEL, OPENAI_NOTES_MS, 0.2), ...(c ? [c] : []), ...tail];
   }
   if (!live && !smart) return [...mistral, ...openai(OPENAI_FAST_MODEL, OPENAI_SMART_MS), ...gemini];
   const fast = claudeRoute(CLAUDE_FAST_MODEL, messages, maxTokens, ms, smart ? CLAUDE_SMART_MS : 0);
@@ -733,7 +743,7 @@ async function attempt(route: Route, body: Record<string, unknown>, stream: bool
 // Watches a relayed live answer without changing a byte: logs how long the
 // first words took and whether reasoning slipped through - a live model that
 // thinks is slow and can end with an empty answer.
-function observeStream(name: string, startedAt: number, model = "") {
+function observeStream(name: string, startedAt: number, model = "", label = "live answer") {
   const scanner = sseScanner();
   let firstChunkMs = -1;
   return new TransformStream<Uint8Array, Uint8Array>({
@@ -751,9 +761,9 @@ function observeStream(name: string, startedAt: number, model = "") {
       if (s.reasoning > 0 || s.thinkTags || s.content === 0) {
         // Thinking leaked (a reasoning field, or tags in the text - the app
         // strips those) or nothing came back. Logged for the founder only.
-        console.warn("live answer degraded", JSON.stringify(info));
+        console.warn(`${label} degraded`, JSON.stringify(info));
       } else {
-        console.log("live answer", JSON.stringify(info));
+        console.log(label, JSON.stringify(info));
       }
     },
   });
@@ -838,10 +848,10 @@ Deno.serve(async (req) => {
   if (quotaRes.error) return json({ error: "quota_check_failed" }, 500);
   if (quotaRes.data !== true) return json({ error: "quota_exceeded" }, 429);
 
-  // A whole number from 1 to 2000; anything else (negative, zero, fractional,
+  // A whole number from 1 to 2000 (meeting notes: 6000); anything else (negative, zero, fractional,
   // infinite, text) is the default - never an error, never "no limit".
   const rawMax = Math.trunc(Number(body?.max_tokens));
-  const maxTokens = Number.isFinite(rawMax) && rawMax >= 1 ? Math.min(rawMax, 2000) : 600;
+  const maxTokens = Number.isFinite(rawMax) && rawMax >= 1 ? Math.min(rawMax, notes ? NOTES_MAX_TOKENS : MAX_TOKENS) : 600;
   const stream = body?.stream === true;
   if (!Array.isArray(body?.messages) || body.messages.length === 0 || body.messages.length > MAX_MESSAGES) {
     return json({ error: "no_messages" }, 400);
@@ -892,7 +902,9 @@ Deno.serve(async (req) => {
   if (ok === null) return json({ error: "action_failed" }, 502);
   if (stream && ok.body) {
     // Relay the OpenAI-style event stream as is - the app renders each delta.
-    const relayed = live ? ok.body.pipeThrough(observeStream(used, startedAt, usedModel)) : ok.body;
+    const relayed = live ? ok.body.pipeThrough(observeStream(used, startedAt, usedModel))
+      : notes ? ok.body.pipeThrough(observeStream(used, startedAt, usedModel, "meeting notes streamed"))
+      : ok.body;
     return new Response(relayed, {
       headers: { ...cors, "Content-Type": "text/event-stream", "Cache-Control": "no-cache",
                  "X-Answer-Family": usedFamily },

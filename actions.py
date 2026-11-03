@@ -2,6 +2,7 @@ import re
 
 import action_api
 import local_llm
+import notes_prompt
 import smart_prompt
 import vocabulary
 
@@ -16,6 +17,7 @@ ACTION_MEETING_NOTES = "meeting_notes"
 ACTION_LIVE_ASSIST = "live_assist"       # real-time copilot (ui/live_assist.py)
 ACTION_LIVE_RECAP = "live_recap"         # rolling "so far" summary during a call
 ACTION_LIVE_RULE = "live_rule"           # the Live Assistant's standing instruction run on every piece of the talk
+ACTION_MEETING_CHAT = "meeting_chat"     # "Ask about this meeting" (meeting_chat.py): free-form questions on one meeting
 
 RULE_BASED_ID = "rule_based"
 API_OPENAI_ID = "api_openai_compatible"
@@ -179,10 +181,15 @@ class ActionError(RuntimeError):
     pass
 
 
+class ContextTooLong(ActionError):
+    """The prompt does not fit the engine's window (the on-computer model's fixed 8192 tokens): nothing was
+    generated, so a caller can send a smaller one (meeting_chat re-plans)."""
+
+
 _ACTION_MODE_WHITELIST = {
     ACTION_TRANSCRIBE_ONLY, ACTION_SMART_AUTO, ACTION_WRITE_EMAIL,
     ACTION_MAKE_TODO, ACTION_TRANSLATE, ACTION_SUMMARIZE, ACTION_MEETING_NOTES,
-    ACTION_LIVE_ASSIST, ACTION_LIVE_RECAP, ACTION_LIVE_RULE,
+    ACTION_LIVE_ASSIST, ACTION_LIVE_RECAP, ACTION_LIVE_RULE, ACTION_MEETING_CHAT,
 }
 
 
@@ -299,6 +306,10 @@ def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_I
         token = (config or {}).get("_managed_token")
         if token:
             try:
+                if mode == ACTION_MEETING_NOTES:
+                    return _notes_from_stream(lambda info: action_api.run_managed_action_stream(
+                        text, mode, token, _drop_token, source_lang=source_lang, target_lang=target_lang,
+                        vocab_block=vocab_block, image_b64=(config or {}).get("_image_png_b64"), info=info))
                 return action_api.run_managed_action(
                     text, mode, token, source_lang=source_lang, target_lang=target_lang,
                     vocab_block=vocab_block,
@@ -316,15 +327,21 @@ def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_I
             raise ActionError("Add your action API settings before using this action engine.")
         api_config = cloud_api_config(model, config)
         try:
+            if mode == ACTION_MEETING_NOTES:
+                return _notes_from_stream(lambda info: action_api.run_action_stream(
+                    text, mode, api_config, _drop_token, source_lang=source_lang, target_lang=target_lang, info=info))
             return action_api.run_action(text, mode, api_config, source_lang=source_lang, target_lang=target_lang)
         except action_api.ActionAPIError as e:
             raise ActionError(str(e)) from e
 
     if ACTION_MODELS[model].get("kind") == "local_llm" and local_llm.model_downloaded(model):
         try:
-            return local_llm.run_action(text, mode, source_lang=source_lang,
-                                        target_lang=target_lang, model_id=model,
-                                        vocab_block=vocab_block)
+            out = local_llm.run_action(text, mode, source_lang=source_lang,
+                                       target_lang=target_lang, model_id=model,
+                                       vocab_block=vocab_block)
+            if mode == ACTION_MEETING_NOTES:            # the on-computer model stopped at its limit: a CutShort
+                return _notes_result(out, getattr(out, "cut", False))
+            return out
         except local_llm.LocalModelLoadError as e:
             # A chosen model that won't load: say so (meetings show it with
             # Retry), never quietly swap in the built-in formatter.
@@ -359,6 +376,37 @@ def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_I
     return text
 
 
+def _drop_token(_delta):
+    """The notes appear when they are finished: the streamed pieces are not shown."""
+
+
+NOTES_CUT_MESSAGE = "The AI stopped before the notes were finished. Try again."
+
+
+def _notes_result(text, cut):
+    """What an engine wrote as the meeting notes: without a wrapper (a code fence around it, 'Here are the notes:' in
+    front, 'Let me know ...' behind: notes_prompt.tidy_answer). When the model stopped at its token limit (or the
+    connection dropped late: ``cut``) the text is trimmed to its last whole line and comes back as a CutShort (a str with
+    .cut), which the session says above the notes; stopped inside the Summary, the notes are not worth keeping and it is
+    an error (the notes page offers 'Write notes again')."""
+    text = notes_prompt.tidy_answer((text or "").strip())
+    if not cut:
+        return text
+    kept = notes_prompt.finish_cut(text)
+    if not notes_prompt.past_the_summary(kept):
+        raise ActionError(NOTES_CUT_MESSAGE)
+    return action_api.CutShort(kept)
+
+
+def _notes_from_stream(call):
+    """Meeting notes through a streaming engine call (``call(info)``): a long meeting's notes take longer than any
+    whole-answer wait, so they are always streamed - the pieces are not shown, the finished text is returned (see
+    _notes_result for a cut or wrapped answer)."""
+    info = {}
+    text = call(info)
+    return _notes_result(text, info.get("cut"))
+
+
 NO_ENGINE_MESSAGE = ("No AI engine is connected. Sign in to Gusan Pro, or add an "
                      "API key in Settings › Speech & AI.")
 # Live answers kept on this computer ("Answers written by: This computer", or
@@ -385,6 +433,7 @@ def process_stream(text, mode, on_token, source_lang="auto", target_lang="en",
     degrades to keyword extraction is worse than one that says it needs an
     engine. Raises ActionError with NO_ENGINE_MESSAGE when nothing real can
     run. Managed (Pro) calls stream through the server too."""
+    action_api.begin_stream()           # stream_end() says how THIS one ended
     mode = normalize_action_mode(mode)
     model = normalize_action_model(model)
     kind = ACTION_MODELS.get(model, {}).get("kind")
@@ -400,7 +449,7 @@ def process_stream(text, mode, on_token, source_lang="auto", target_lang="en",
     # The glossary fixes spellings when a transcript is REWRITTEN (notes,
     # emails...). Live answers and recaps are the model's own words - a list of
     # names there only tempts it to drop them in.
-    vocab_block = ("" if mode in (ACTION_LIVE_ASSIST, ACTION_LIVE_RECAP, ACTION_LIVE_RULE)
+    vocab_block = ("" if mode in (ACTION_LIVE_ASSIST, ACTION_LIVE_RECAP, ACTION_LIVE_RULE, ACTION_MEETING_CHAT)
                    else vocabulary.spelling_authority_block(config or {}))
     if vocab_block and config is not None:
         config = {**config, "_vocab_block": vocab_block}
@@ -411,9 +460,12 @@ def process_stream(text, mode, on_token, source_lang="auto", target_lang="en",
                 label = local_llm.MODEL_CATALOG.get(model, {}).get("label", model)
                 raise ActionError(f"{label} isn't downloaded yet - download it in "
                                   "Settings › Speech & AI, or choose a cloud engine.")
-            return local_llm.run_action_stream(
+            out = local_llm.run_action_stream(
                 text, mode, on_token, source_lang=source_lang, target_lang=target_lang,
                 model_id=model, vocab_block=vocab_block)
+            if local_llm.stream_cut():
+                action_api.note_stream_end(cut=True)         # stopped at its output cap: may be cut short
+            return out
         if kind == "cloud":
             if not config:
                 raise ActionError(NO_ENGINE_MESSAGE)
@@ -434,11 +486,32 @@ def process_stream(text, mode, on_token, source_lang="auto", target_lang="en",
                 session_id=(config or {}).get("_live_session_id") or "",
                 note_ref=(config or {}).get("_note_ref") or "",
             )
+    except local_llm.ContextTooLong as e:
+        raise ContextTooLong(str(e)) from e
     except (local_llm.LocalLLMError, action_api.ActionAPIError) as e:
         err = ActionError(str(e))
         err.code = getattr(e, "code", "") or ""
         raise err from e
     raise ActionError(NO_ENGINE_MESSAGE)
+
+
+# The daily allowance of the Gusan Cloud AI is used up (the server's 429). One sentence, one place: the Live
+# Assistant and "Ask about this meeting" say it the same way. (No "limit": the app never uses that word.)
+CLOUD_ALLOWANCE_USED = "Today's cloud allowance is used up. It comes back tomorrow."
+
+
+def usable_engine(engine, config, downloaded=None):
+    """``engine`` when it can really run with what ``config`` holds - a cloud engine needs its own key, the
+    managed one a token (``_managed_token``), a local model is taken as it is - else the first downloaded
+    local model, or None (the built-in formatter is never an answer). ``downloaded``: a model id -> bool
+    (default: what is on disk)."""
+    config = config or {}
+    kind = ACTION_MODELS.get(engine, {}).get("kind")
+    if (engine == RULE_BASED_ID or kind is None
+            or (kind == "cloud" and not engine_has_key(engine, config))
+            or (kind == "managed" and not config.get("_managed_token"))):
+        return _first_downloaded_local_model() if downloaded is None else _first_downloaded_local_model(downloaded)
+    return engine
 
 
 def live_engine(engine, config):
@@ -455,14 +528,9 @@ def live_engine(engine, config):
     if config.get("privacy_mode") or config.get("live_assist_writer") == "local":
         # On-device only: a local model or nothing - never the server.
         return engine if kind == "local_llm" else _first_downloaded_local_model()
-    has_token = bool(config.get("_managed_token"))
-    if has_token:
+    if config.get("_managed_token"):
         return API_MANAGED_ID
-    if (engine == RULE_BASED_ID or kind is None
-            or (kind == "cloud" and not engine_has_key(engine, config))
-            or (kind == "managed" and not has_token)):
-        return _first_downloaded_local_model()
-    return engine
+    return usable_engine(engine, config)
 
 
 def warm_up(model, config):
@@ -520,10 +588,11 @@ def _live_assist_basic(text):
     return "\n".join(lines)
 
 
-def _first_downloaded_local_model():
+def _first_downloaded_local_model(downloaded=None):
+    check = downloaded or local_llm.model_downloaded
     for model_id in local_llm.MODEL_CATALOG:
         try:
-            if local_llm.model_downloaded(model_id):
+            if check(model_id):
                 return model_id
         except local_llm.LocalLLMError:
             pass
@@ -718,11 +787,28 @@ def _extract_action_items_heuristic(text):
     return items
 
 
+_SPEAKER_LABEL = re.compile(r"^[ \t]*(?:You|Them|Speaker\s+(?:\d+|\?))[ \t]*:[ \t]*", re.M)
+
+
+def _without_speaker_labels(text):
+    """A labelled transcript ("You: ...", "Them: ...", "Speaker 2: ...") as plain sentences: the labels are not words
+    of the talk, and a line without its full stop ends its sentence anyway."""
+    lines = []
+    for line in (text or "").split("\n"):
+        body = _SPEAKER_LABEL.sub("", line).strip()
+        if body:
+            lines.append(body if body[-1] in ".!?…:;," else body + ".")
+    return " ".join(lines)
+
+
 def _meeting_notes_extractive(text):
     """Best-effort notes when no LLM is available.
 
     Output mirrors the structure of the LLM prompt so downstream code can
-    treat both kinds of output the same way."""
+    treat both kinds of output the same way. Short on purpose: a summary and
+    the action items (no Discussion)."""
+    if _SPEAKER_LABEL.search(text or ""):
+        text = _without_speaker_labels(text)
     summary = _summarize_extractive(text)
     action_items = _extract_action_items_heuristic(text)
     parts = []

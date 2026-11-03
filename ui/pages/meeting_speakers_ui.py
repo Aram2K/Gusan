@@ -14,17 +14,32 @@ session reports ``finished``.
 
 A fourth piece belongs to the names that come after a meeting's notes: the notes
 are written at once ("You" / "Them") and the session then tells the people on the
-call apart in the background (MeetingSession.speakers_state). While that waits or
-works, the meeting's notes view carries one calm banner with Cancel
-(working_banner) and the suggestion line stays away; when it has ended the page
-reloads the meeting (MeetingsPage._on_speakers_changed). A meeting whose "Them" was
-never told apart - the pass was cancelled, interrupted too often, or failed - keeps
-the suggestion line, so one click still does it (call_untold).
+call apart in the background (MeetingSession.speakers_state / speakers_progress). The
+meeting's notes view carries one calm banner meanwhile (working_banner), and it is
+honest about what is happening:
+
+  * waiting: "Speaker names are next", with what it waits for (your dictation, your
+    recording, a file conversion, the notes, another meeting) - never "Identifying";
+  * working: "Identifying speakers", first "Getting ready", then the real percentage, a
+    bar and the time left, with Cancel (the very first time, "Getting the speaker model" with the
+    real percentage of the download - Cancel works there too);
+  * stopping: "Stopping..." from Cancel until the worker has really stopped.
+
+The banner looks at the pass again every second (tick): its words follow in place, and
+a pass that is gone reloads the meeting by itself - a lost signal can not leave a banner
+behind. When it has ended the page reloads the meeting and says in one line what came
+of it (MeetingsPage._on_speakers_changed, say_result: "Found 2 speakers on the call.").
+
+A meeting whose "Them" was never told apart - the pass was cancelled, gave up, failed,
+or the app was closed during it (nothing starts again at launch) - gets "Speakers aren't
+told apart yet" with an Identify speakers button on the Notes tab (untold_banner,
+needs_names) and keeps the suggestion line on the Transcript tab (call_untold).
 """
 import html as html_mod
 import logging
 import re
 
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QAction
 
 import meeting_speakers
@@ -182,12 +197,31 @@ def busy_banner(view):
     (with Cancel), finishing an interrupted meeting, or writing the notes."""
     s = view.page.session()
     if bool(getattr(s, "identifying", False)):
-        return view._banner(getattr(s, "busy_label", "Identifying speakers…"),
-                            "It reads the recording again to tell who spoke. This takes a few "
-                            "minutes for a long meeting - you can leave this page.",
+        cloud = ((getattr(view, "data", None) or {}).get("meta") or {}).get("transcribed_with") == "cloud"
+        if cloud:
+            # (its words came from a cloud engine: the recording is never read again for them)
+            text = ("Gusan is telling the people on the call apart. This takes a few minutes for a long "
+                    "meeting - you can leave this page.")
+        else:
+            text = ("It reads the recording again to tell who spoke. This takes a few minutes for a long "
+                    "meeting - you can leave this page.")
+        return view._banner(getattr(s, "busy_label", "Identifying speakers…"), text,
                             "blue", "Cancel", lambda: cancel(view))
     label = getattr(s, "busy_label", "") or "Writing notes…"
-    return view._banner(label, "The notes show up here when they're ready.", "blue")
+    text = "The notes show up here when they're ready."
+    if _long_meeting(view):
+        text += " A long meeting can take a minute."            # richer notes for a long meeting take a little longer
+    return view._banner(label, text, "blue")
+
+
+LONG_MEETING_SEC = 30 * 60
+
+
+def _long_meeting(view):
+    try:
+        return float((getattr(view, "data", None) or {}).get("duration_sec") or 0) >= LONG_MEETING_SEC
+    except (TypeError, ValueError):
+        return False
 
 
 def followup_state(view):
@@ -202,33 +236,248 @@ def followup_state(view):
         return ""
 
 
+def snapshot(view):
+    """The background pass of the meeting shown, as one dict (the session's speakers_progress:
+    state, what it waits for, stage, progress, time left, stopping) - or, for a session that can
+    only tell the state, the state alone."""
+    try:
+        s = view.page.session()
+        fn = getattr(s, "speakers_progress", None)
+        if callable(fn) and view.folder:
+            snap = fn(view.folder)
+            if isinstance(snap, dict) and snap:
+                return snap
+    except Exception:
+        logger.debug("speakers_progress failed", exc_info=True)
+    return {"state": followup_state(view)}
+
+
 def cancel_followup(view):
-    """Cancel on the working banner: the meeting stays "You" and "Them"."""
+    """Cancel on the working banner. A pass that is waiting is dropped at once; one that is working
+    needs a moment to stop (the banner says "Stopping…" until it has); either way the page says
+    "Stopped." when it is over and offers Identify speakers again (untold_banner)."""
     s = view.page.session()
     try:
         if s is not None and s.cancel_speaker_followup(view.folder):
-            view.flash("Stopped. Speaker names can be added from ⋯ › Identify speakers.", "ok", ms=6000)
+            view.render_keeping_view()                      # "Stopping..." - or, when it is over already, the offer
+            if not followup_state(view):
+                say_result(view, view.folder, default=(meeting_speakers.LINE_STOPPED, "ok"))
     except Exception:
         logger.debug("cancel_speaker_followup failed", exc_info=True)
 
 
+# ── the words of the working banner (pure: tested without a window) ──────────
+
+TITLE_WAITING = "Speaker names are next"
+TITLE_WORKING = "Identifying speakers…"
+TITLE_PERCENT = "Identifying speakers · %d%%"
+TITLE_STOPPING = "Stopping…"
+TITLE_DOWNLOAD = "Getting the speaker model…"
+TITLE_DOWNLOAD_PERCENT = "Getting the speaker model · %d%%"
+TEXT_DOWNLOAD = "It is downloaded once."
+TITLE_UNTOLD = "Speakers aren't told apart yet"
+TEXT_UNTOLD = "The people on the call show as “Them”."
+NOTES_READY = "The notes are ready."
+THEM_BECOMES = "“Them” becomes Speaker 1, 2 and so on."
+TICK_MS = 1000                  # how often a working banner looks at the pass again
+RESULT_FLASH_MS = 6000          # how long the line about how it ended stays up
+BAR_STEPS = 1000                # the progress bar's range (NotesView._banner uses the same)
+_WAITING = {
+    "recording": "Waiting for your recording to finish.",
+    "dictation": "Waiting for your dictation to finish.",
+    "file": "Waiting for the file conversion to finish.",
+    "notes": "Waiting for the notes to finish.",
+    "queue": "Waiting for another meeting to finish.",
+    "busy": "Waiting for your other work to finish.",
+}
+
+
+def waiting_text(reason):
+    """What a queued pass is waiting for, in words (a reason this file does not know is "just about to
+    start" - nothing that comes from outside ever becomes copy)."""
+    return _WAITING.get(str(reason or ""), "Starting in a moment.")
+
+
+def eta_text(seconds):
+    """The time left, in words: "About 2 min left." ("Less than a minute left." under 45 s); "" when
+    there is no estimate (None, not a number, negative)."""
+    try:
+        s = float(seconds)
+    except (TypeError, ValueError):
+        return ""
+    if s != s or s < 0.0:
+        return ""
+    if s < 45.0:
+        return "Less than a minute left."
+    return "About %d min left." % max(1, int(s / 60.0 + 0.5))
+
+
+def working_lines(snap):
+    """(title, line, progress) of a pass that is working: not started yet = "Getting ready." with an endless
+    bar (progress -1); then the real percentage in the title, "Them" becomes ... and the time left, with
+    the bar at ``progress`` (0..1)."""
+    frac = snap.get("fraction")
+    try:
+        frac = None if frac is None else float(frac)
+    except (TypeError, ValueError):
+        frac = None
+    if frac is not None:
+        frac = None if frac != frac else max(0.0, min(1.0, frac))        # (not a number: not known)
+    if snap.get("stage") == "download":
+        # the speaker model comes down once, on the very first pass: say so, with the real percentage
+        line = "%s %s" % (NOTES_READY, TEXT_DOWNLOAD)
+        if frac is None:
+            return TITLE_DOWNLOAD, line, -1
+        return TITLE_DOWNLOAD_PERCENT % int(frac * 100), line, frac
+    if frac is None:
+        return TITLE_WORKING, "%s Getting ready." % NOTES_READY, -1
+    line = "%s %s" % (NOTES_READY, THEM_BECOMES)
+    eta = eta_text(snap.get("eta_s"))
+    if eta:
+        line += " " + eta
+    return TITLE_PERCENT % int(frac * 100), line, frac
+
+
+def _group(snap):
+    """"" (no pass), "waiting", "working" (starting or running: the one banner with a bar, updated in
+    place) or "stopping" (Cancel was pressed, the worker has not ended)."""
+    if not str((snap or {}).get("state") or ""):
+        return ""
+    if snap.get("stopping"):
+        return "stopping"
+    return "waiting" if snap.get("state") == "waiting" else "working"
+
+
+def needs_names(data):
+    """The meeting still tells "You" and "Them" and nothing has told the people on the call apart: "Them"
+    lines, no "Speaker N" line, no pass that reached its end (``speakers_at``) - and it can be done: the
+    saved segments and the call's sound are there (``can_name_call``, worked out when the meeting is
+    read), or it is a meeting whose recording can be read again. This is also what a restart leaves: the
+    pass is never started again by itself at launch, so the page says so and offers it."""
+    data = data or {}
+    text = data.get("transcript") or ""
+    if not _THEM_RE.search(text) or _SPEAKER_RE.search(text):
+        return False
+    meta = data.get("meta") or {}
+    if meta.get("speakers_at"):
+        return False
+    if data.get("can_name_call", True):
+        return True
+    if meta.get("transcribed_with") == "cloud":
+        return False                       # its words are kept; with nothing saved to work from there is nothing to do
+    return has_recording(data) and not recording_cut_short(data)
+
+
+def untold_banner(view):
+    """"Speakers aren't told apart yet" - a calm banner with the one action, for a meeting whose pass was
+    cancelled, gave up, failed or was never started again after a restart."""
+    fr = view._banner(TITLE_UNTOLD, TEXT_UNTOLD, "neutral", "Identify speakers", lambda: identify(view))
+    fr.group = "untold"
+    return fr
+
+
 def working_banner(view):
-    """The banner of a meeting whose speaker names are being added in the
-    background, after its notes (None when nothing is). The notes are already
-    there; it says so, and Cancel leaves the meeting as it is."""
-    state = followup_state(view)
-    if state == "running":
-        return view._banner("Identifying speakers…",
-                            "The notes are ready. Gusan is telling the people on the call apart, so "
-                            "“Them” becomes Speaker 1, 2 and so on. This takes a few minutes for a long "
-                            "meeting - you can leave this page.",
-                            "blue", "Cancel", lambda: cancel_followup(view))
-    if state == "waiting":
-        return view._banner("Speaker names are next",
-                            "The notes are ready. Gusan adds who said what when you're not recording "
-                            "or dictating.",
-                            "blue", "Cancel", lambda: cancel_followup(view))
-    return None
+    """The banner of a meeting whose speaker names are being added in the background, after its notes
+    (None when nothing is to be said). Waiting says what it waits for; working shows the real percentage,
+    a bar and the time left, with Cancel; stopping says so. The notes are already there. Without a pass
+    queued or running, a meeting that still tells "Them" gets the calm "not told apart yet" banner."""
+    snap = snapshot(view)
+    group = _group(snap)
+    if not group:
+        s = view.page.session()
+        if callable(getattr(s, "identify_speakers", None)) and needs_names(getattr(view, "data", None)):
+            return untold_banner(view)
+        return None
+    cancel_slot = lambda: cancel_followup(view)             # noqa: E731
+    if group == "waiting":
+        fr = view._banner(TITLE_WAITING, "%s %s" % (NOTES_READY, waiting_text(snap.get("waiting_for"))),
+                          "blue", "Cancel", cancel_slot)
+    elif group == "stopping":
+        fr = view._banner(TITLE_STOPPING, "", "blue")
+    else:
+        title, line, progress = working_lines(snap)
+        fr = view._banner(title, line, "blue", "Cancel", cancel_slot, progress=progress)
+    fr.group = group
+    timer = QTimer(fr)                                       # (a child of the banner: gone with it)
+    timer.setInterval(TICK_MS)
+    timer.timeout.connect(lambda: tick(view, fr))
+    timer.start()
+    fr.timer = timer
+    return fr
+
+
+def tick(view, frame):
+    """A working banner looks at the pass again, once a second: the words and the bar follow it in
+    place; a change of kind (waiting -> working, working -> stopping) draws the page once more; and a
+    pass that is gone - whatever became of the signal that should have said so - reloads the meeting,
+    so a banner can never stay behind."""
+    try:
+        if getattr(view, "banner", None) is not frame or frame.isHidden():
+            frame.timer.stop()                              # a newer render replaced this banner (or took it off)
+            return
+        snap = snapshot(view)
+        group = _group(snap)
+        if not group:
+            frame.timer.stop()
+            folder = view.folder
+            view.reload(keep_view=True)
+            say_result(view, folder)
+            return
+        if group != getattr(frame, "group", ""):
+            frame.timer.stop()
+            view.render_keeping_view()
+            return
+        _update(frame, group, snap)
+    except RuntimeError:
+        pass                                                # the widget went away between two events
+    except Exception:
+        logger.debug("speaker banner tick failed", exc_info=True)
+
+
+def _update(frame, group, snap):
+    """Put the pass's words and progress into a banner that is already on the page."""
+    if group == "waiting":
+        title, line, progress = TITLE_WAITING, "%s %s" % (NOTES_READY, waiting_text(snap.get("waiting_for"))), None
+    else:
+        title, line, progress = working_lines(snap)
+    if frame.title_label.text() != title:
+        frame.title_label.setText(title)
+        frame.setAccessibleName(title)
+    if frame.text_label is not None and frame.text_label.text() != line:
+        frame.text_label.setText(line)
+    bar = getattr(frame, "bar", None)
+    if bar is not None and progress is not None:
+        if progress < 0:
+            if bar.maximum() != 0:
+                bar.setRange(0, 0)
+        else:
+            if bar.maximum() != BAR_STEPS:
+                bar.setRange(0, BAR_STEPS)
+            bar.setValue(int(progress * BAR_STEPS))
+
+
+def say_line(view, line):
+    """``line`` - (text, tone) from the session, or None - for a few seconds, at the top right of the page
+    (the page's note: it has room there in a narrow window, where a line beside the toolbar's buttons would
+    push the page wider than the window)."""
+    if line:
+        text, tone = line
+        say = getattr(view, "note", None) or view.flash
+        say(text, tone, ms=RESULT_FLASH_MS)
+
+
+def say_result(view, folder, default=None):
+    """The one line about how a pass ended - "Found 2 speakers on the call." - in the page's note. Given once
+    by the session (it keeps nothing); ``default`` is said when it has none."""
+    s = view.page.session()
+    line = None
+    fn = getattr(s, "speakers_result", None)
+    if callable(fn):
+        try:
+            line = fn(folder)
+        except Exception:
+            logger.debug("speakers_result failed", exc_info=True)
+    say_line(view, line if line is not None else default)
 
 
 def after_render(view):
