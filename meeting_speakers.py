@@ -56,6 +56,7 @@ from pathlib import Path
 
 import diarization
 import meeting_store
+import rich_text
 import speaker_labels
 import voice_prints
 
@@ -281,17 +282,37 @@ def _ensure_speaker_tool(d, privacy, say, out, tell=None, cancelled=None):
     return None
 
 
-def _render(d, labeled_parts, names, out):
+def _lone_name(call_name):
+    """``call_name`` as a speaker label, or "" when it is not one: one clean line that the transcript view reads as a
+    label (rich_text.split_speaker) - else the line would show as plain speech."""
+    name = str(call_name or "").strip()
+    if not name or len(name) > 40 or any(ch.isspace() and ch != " " for ch in name) or "  " in name:
+        return ""
+    label, body = rich_text.split_speaker(name + ": x")
+    return name if label == name and body == "x" else ""
+
+
+def _render(d, labeled_parts, names, out, call_name=""):
     """Fill ``out`` from the labelled parts: the speakers' numbering (consistent
-    across parts) and one transcript per part. False when every text is empty."""
+    across parts) and one transcript per part. False when every text is empty.
+
+    ``call_name``: the one other person the meeting has, read off the call's screen (meeting_session._call_name).
+    When the call's sound held exactly ONE voice besides "You" (a mic + system sound meeting, or the call's sound
+    alone), that voice is called by it instead of "Speaker 1". With two or more voices nobody is named: which is
+    which would be a guess."""
     base = speaker_labels.speaker_names(names) if out.mode in ("sources", "call") else dict(names or {})
     flat = [seg for ls in labeled_parts for seg in ls]
     label_map = d.speaker_label_map(flat, names=base)
+    found = len(label_map)
+    lone = _lone_name(call_name) if (found == 1 and out.mode in ("sources", "call")) else ""
+    if lone:
+        base[next(iter(label_map))] = lone          # (the pass found one person on the call: its name)
+        label_map = d.speaker_label_map(flat, names=base)
     all_names = dict(label_map)
     all_names.update(base)
     out.parts = labeled_parts
     out.texts = [d.build_speaker_transcript(ls, names=all_names).strip() for ls in labeled_parts]
-    out.speakers = len(label_map)
+    out.speakers = found
     if not any(out.texts):
         out.texts = []
         return False
@@ -300,7 +321,7 @@ def _render(d, labeled_parts, names, out):
 
 def build_transcript(rec, parts, *, language=None, privacy=False, status=None,
                      should_cancel=None, names=None, diarizer=None, diarize=True,
-                     reader=None, model=None):
+                     reader=None, model=None, call_name=""):
     """Label ``parts`` (a list of Part) and return an Outcome whose ``texts`` are
     the speaker transcripts, one per part.
 
@@ -462,7 +483,7 @@ def build_transcript(rec, parts, *, language=None, privacy=False, status=None,
             else:
                 labeled = d.attribute_segments(r["segments"], turns, offset=r["offset"])
             labeled_parts.append(labeled)
-        if not _render(d, labeled_parts, names, out):
+        if not _render(d, labeled_parts, names, out, call_name):
             return _fail(out, R_NO_SEGMENTS, "the labelled transcript is empty")
         out.timings["total"] = round(time.monotonic() - t_start, 1)
         flat = [seg for ls in labeled_parts for seg in ls]
@@ -741,7 +762,7 @@ def _turns_by_voices(d, parts, out, say, tell, should_cancel, cancelled, resume)
 
 
 def name_the_call(parts, *, privacy=False, status=None, should_cancel=None, names=None,
-                  diarizer=None, progress=None, resume=None):
+                  diarizer=None, progress=None, resume=None, call_name=""):
     """The second half of the speaker pass: tell the people on the call apart.
 
     ``parts``: a list of CallPart - the segments already read and labelled by source
@@ -807,7 +828,7 @@ def name_the_call(parts, *, privacy=False, status=None, should_cancel=None, name
                       for s in part.segments]
             labeled_parts.append(speaker_labels.attribute(
                 segments, [], [], turns, labels=labels, offset=offset))
-        if not _render(d, labeled_parts, names, out):
+        if not _render(d, labeled_parts, names, out, call_name):
             return _fail(out, R_NO_SEGMENTS, "the labelled transcript is empty")
         out.timings["total"] = round(time.monotonic() - t_start, 1)
         logger.info("Speaker names done: parts=%d segments=%d call=%.0fs units=%d call-speakers=%d shares=%s "
@@ -1017,7 +1038,7 @@ def result_line(result, how=""):
 
 
 def refine_meeting(folder, *, privacy=False, status=None, should_cancel=None, names=None,
-                   diarizer=None, progress=None, resume=None):
+                   diarizer=None, progress=None, resume=None, call_name=""):
     """The background speaker pass for one saved meeting: "Them" -> "Speaker 1..N".
 
     Reads segments.json (written at Stop) and the call's saved sound, runs
@@ -1058,7 +1079,8 @@ def refine_meeting(folder, *, privacy=False, status=None, should_cancel=None, na
 
         kept = meeting_store.keep_before_speakers(folder, current)
         out = name_the_call(parts, privacy=privacy, status=status, should_cancel=should_cancel,
-                            names=names, diarizer=diarizer, progress=progress, resume=resume)
+                            names=names, diarizer=diarizer, progress=progress, resume=resume,
+                            call_name=call_name)
         try:
             result = _finish_pass(folder, data, used, out)
         except Exception as e:

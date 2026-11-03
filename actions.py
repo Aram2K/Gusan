@@ -18,6 +18,7 @@ ACTION_LIVE_ASSIST = "live_assist"       # real-time copilot (ui/live_assist.py)
 ACTION_LIVE_RECAP = "live_recap"         # rolling "so far" summary during a call
 ACTION_LIVE_RULE = "live_rule"           # the Live Assistant's standing instruction run on every piece of the talk
 ACTION_MEETING_CHAT = "meeting_chat"     # "Ask about this meeting" (meeting_chat.py): free-form questions on one meeting
+ACTION_LIVE_PEOPLE = "live_people"       # the names of the people on the call, read off the Live Assistant's screenshot
 
 RULE_BASED_ID = "rule_based"
 API_OPENAI_ID = "api_openai_compatible"
@@ -189,7 +190,7 @@ class ContextTooLong(ActionError):
 _ACTION_MODE_WHITELIST = {
     ACTION_TRANSCRIBE_ONLY, ACTION_SMART_AUTO, ACTION_WRITE_EMAIL,
     ACTION_MAKE_TODO, ACTION_TRANSLATE, ACTION_SUMMARIZE, ACTION_MEETING_NOTES,
-    ACTION_LIVE_ASSIST, ACTION_LIVE_RECAP, ACTION_LIVE_RULE, ACTION_MEETING_CHAT,
+    ACTION_LIVE_ASSIST, ACTION_LIVE_RECAP, ACTION_LIVE_RULE, ACTION_MEETING_CHAT, ACTION_LIVE_PEOPLE,
 }
 
 
@@ -449,7 +450,8 @@ def process_stream(text, mode, on_token, source_lang="auto", target_lang="en",
     # The glossary fixes spellings when a transcript is REWRITTEN (notes,
     # emails...). Live answers and recaps are the model's own words - a list of
     # names there only tempts it to drop them in.
-    vocab_block = ("" if mode in (ACTION_LIVE_ASSIST, ACTION_LIVE_RECAP, ACTION_LIVE_RULE, ACTION_MEETING_CHAT)
+    vocab_block = ("" if mode in (ACTION_LIVE_ASSIST, ACTION_LIVE_RECAP, ACTION_LIVE_RULE, ACTION_MEETING_CHAT,
+                                  ACTION_LIVE_PEOPLE)
                    else vocabulary.spelling_authority_block(config or {}))
     if vocab_block and config is not None:
         config = {**config, "_vocab_block": vocab_block}

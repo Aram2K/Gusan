@@ -19,7 +19,7 @@ from collections import deque
 
 from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication, QIcon, QLinearGradient, QPainter
-from PySide6.QtWidgets import (QBoxLayout, QCheckBox, QFileDialog, QFrame, QHBoxLayout,
+from PySide6.QtWidgets import (QBoxLayout, QCheckBox, QFileDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout,
                                QLabel, QMenu, QPlainTextEdit, QProgressBar, QScrollArea,
                                QSizePolicy, QStackedWidget, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
@@ -417,6 +417,74 @@ class Faces(QWidget):
             p.setPen(fg)
             p.drawText(outer, Qt.AlignCenter, name.strip()[:1].upper() or "?")
         p.end()
+
+
+class _RemoveButton(IconButton):
+    """The little x of a People row. Quiet: it shows while the pointer is on the row or this button has the keyboard (the
+    Tab key reaches it even before it shows, and showing it is what the focus does)."""
+
+    def __init__(self, row, name):
+        IconButton.__init__(self, "x", "Remove %s from People" % name, size=24, icon_size=13, color="muted", parent=row)
+        self.setToolTip(theme.plain_tip("Remove %s" % name))      # a name read off a screen is text, never markup
+        self._row = row
+
+    def focusInEvent(self, e):                                      # noqa: N802 (Qt name)
+        super().focusInEvent(e)
+        self._row.sync_reveal()
+
+    def focusOutEvent(self, e):                                     # noqa: N802 (Qt name)
+        super().focusOutEvent(e)
+        self._row.sync_reveal()
+
+
+class PersonRow(QWidget):
+    """One person of the People card: the face with the initial, the name (ending in "…" when it is long) and "You" on the
+    user's own row. A name that was read off the call's screen can be wrong - small tiles, nicknames - so its row has a quiet
+    remove control (``removable``); removing asks nothing and emits ``remove_requested(name)``."""
+
+    remove_requested = Signal(str)
+
+    def __init__(self, name, me="", removable=False, parent=None):
+        super().__init__(parent)
+        self.name = name
+        self.remove_btn = None
+        self.setAttribute(Qt.WA_Hover, True)
+        r = QHBoxLayout(self)
+        r.setContentsMargins(0, 0, 0, 0)
+        r.setSpacing(10)
+        r.addWidget(Faces([name], 28, me=me), 0, Qt.AlignVCenter)
+        self.who = ElidedLabel(name)                       # a guest's name from an invite or a screen: plain text
+        self.who.setProperty("mtone", "text")
+        self.who.setFont(theme.font(13.5, 600))
+        r.addWidget(self.who, 1, Qt.AlignVCenter)
+        self.is_me = bool(me and name.split()[0].lower() == me.lower())
+        if self.is_me:
+            self.you = label("You", "muted")
+            r.addWidget(self.you, 0, Qt.AlignVCenter)
+        if removable and not self.is_me:
+            self.remove_btn = _RemoveButton(self, name)
+            self.remove_btn.clicked.connect(lambda _=False: self.remove_requested.emit(self.name))
+            self._fade = QGraphicsOpacityEffect(self.remove_btn)
+            self.remove_btn.setGraphicsEffect(self._fade)
+            r.addWidget(self.remove_btn, 0, Qt.AlignVCenter)
+            self.sync_reveal()
+        self.setAccessibleName(name + (", you" if self.is_me else ""))
+
+    def sync_reveal(self):
+        """The x at full strength while the pointer is on the row or the x has the keyboard; invisible (but still in the
+        tab order, and still there for a screen reader) otherwise."""
+        if self.remove_btn is None:
+            return
+        on = self.underMouse() or self.remove_btn.hasFocus()
+        self._fade.setOpacity(1.0 if on else 0.0)
+
+    def enterEvent(self, e):                                        # noqa: N802 (Qt name)
+        super().enterEvent(e)
+        self.sync_reveal()
+
+    def leaveEvent(self, e):                                        # noqa: N802 (Qt name)
+        super().leaveEvent(e)
+        self.sync_reveal()
 
 
 def hline(parent=None):
@@ -1001,13 +1069,12 @@ class LiveView(QWidget):
     def sync_model(self):
         self.transcript.set_model(runs_on(self.app, "dictation"))
 
-    def sync(self):
-        """Read everything from the session (on show, on a phase change)."""
+    def sync_people(self):
+        """The header's sub-line: who is on the call and the language. Called again when the people change (names read off
+        the call's screen join them while it is recorded). Returns the session's snapshot ({} without one)."""
         s = self.page.session()
         if s is None:
-            return
-        title = getattr(s, "title", "") or "Meeting"
-        self.header.set_title(title)
+            return {}
         people = []
         try:
             import meeting_store
@@ -1022,6 +1089,16 @@ class LiveView(QWidget):
         lang = lang_name(snap.get("language") or getattr(s, "_session_language", "") or "")
         sub = " · ".join(p for p in (", ".join(people), lang) if p)
         self.header.set_sub(sub)
+        return snap
+
+    def sync(self):
+        """Read everything from the session (on show, on a phase change)."""
+        s = self.page.session()
+        if s is None:
+            return
+        title = getattr(s, "title", "") or "Meeting"
+        self.header.set_title(title)
+        snap = self.sync_people()
         self._consent_wanted = self.consent_wanted(snap)
         mode = snap.get("audio_mode") or getattr(s, "_session_audio_mode", "") or ""
         self.transcript.set_speaker_labels(mode == "smart_meeting")
@@ -1896,22 +1973,40 @@ class NotesView(QWidget):
             return True
 
     def _render_people(self, people):
+        """The People card: everybody the meeting has, the user's own row ("You") last when the people do not already hold
+        them. A name read off the call's screen (meta ``attendees_screen``) has a quiet remove control."""
         clear_layout(self._people)
         me = self.page.me()
-        rows = list(people)
-        if me and not any(p.split()[0].lower() == me.lower() for p in rows if p.strip()):
+        rows = [p for p in people if str(p).strip()]
+        if me and not any(p.split()[0].lower() == me.lower() for p in rows):
             rows.append(me)
+        from people_from_screen import first_key
+        screen = {first_key(n) for n in ((self.data or {}).get("screen_people") or [])}
         for name in rows:
-            r = QHBoxLayout()
-            r.setSpacing(10)
-            r.addWidget(Faces([name], 28, me=me), 0, Qt.AlignVCenter)
-            who = tlabel(name, 13.5, 600, "text")
-            who.setTextFormat(Qt.PlainText)             # a guest's name from an invite
-            r.addWidget(who, 1, Qt.AlignVCenter)
-            if me and name.split()[0].lower() == me.lower():
-                r.addWidget(label("You", "muted"), 0, Qt.AlignVCenter)
-            self._people.addLayout(r)
+            row = PersonRow(name, me=me, removable=first_key(name) in screen, parent=self.people_card)
+            row.remove_requested.connect(self._remove_person)
+            self._people.addWidget(row)
         self.people_card.setVisible(bool(rows))
+
+    def _remove_person(self, name):
+        """The x on a person read off the screen: it leaves the meeting's people for good - the notes written again
+        and a continued meeting do not bring it back. The page reads the meeting again to show it."""
+        folder = self.folder
+        if not folder or not str(name).strip():
+            return
+        session = self.page.session()
+        forget = getattr(session, "forget_person", None)
+        try:
+            if callable(forget):
+                done = forget(name, folder)
+            else:
+                import meeting_store
+                done = meeting_store.forget_person(folder, name) is not None
+        except Exception:
+            logger.warning("Could not take a person off the People card", exc_info=True)
+            return
+        if done:
+            self.reload(keep_view=True)
 
     def _banner(self, title, text, tone="amber", button=None, slot=None, progress=None):
         """A calm banner at the top of the notes. ``progress``: None = no bar, -1 = a bar that just moves
@@ -2361,7 +2456,8 @@ def read_meeting(folder):
     can_name_call = bool(meeting_speakers.refinable(folder)) if "Them:" in transcript else False
     return {"folder": str(folder), "meta": meta, "title": str(meta.get("title") or "Untitled Meeting"),
             "notes": notes, "transcript": transcript, "my_notes": my_notes, "parts": parts,
-            "people": list(people), "started": started, "duration_sec": duration,
+            "people": list(people), "screen_people": meeting_store.screen_people(meta),
+            "started": started, "duration_sec": duration,
             "recording_cut_short": cut_short, "can_name_call": can_name_call,
             "transcript_file": meeting_store.has_transcript_file(folder)}      # (else only the live pieces are there)
 

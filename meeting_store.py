@@ -20,7 +20,11 @@ meta.json keys (all optional - older builds wrote only the first four):
   notes engine), notes_error, seen (False until the user opened the finished
   notes), calendar_event_id, attendees_list, source ("page", "live_assist",
   "calendar", "classic"), recording_cut_short (True: the saved recording ends
-  before the transcript does - see recording_cut_short).
+  before the transcript does - see recording_cut_short), attendees_screen
+  (the names of people read off the call's screen during a Live Assistant
+  session, a part of attendees_list: people_from_screen.py), attendees_removed
+  (names the user took off the People card: the screen is never trusted for
+  them again, not in a continued meeting either).
 Meta is only ever changed through ``update_meta`` (read, merge, atomic
 write), so keys written by one step survive every other step.
 """
@@ -109,9 +113,18 @@ def update_meta(folder, **fields):
     Keys not named are kept (an older build's, or another step's). A value of
     None removes that key. Returns the merged dict, or None when the folder
     can't be written."""
+    return edit_meta(folder, lambda _meta: fields)
+
+
+def edit_meta(folder, change):
+    """``update_meta`` for a change that depends on what the file holds right now: ``change(meta)`` gets the current
+    meta (a copy) and returns the fields to merge ({} or None: nothing; a value of None removes that key). It runs
+    under the same lock as every other meta write, so nothing written meanwhile is lost. Returns the merged dict, or
+    None when the folder can't be written."""
     folder = Path(folder)
     with _META_LOCK:
         meta = load_meta(folder)
+        fields = change(dict(meta)) or {}
         for key, value in fields.items():
             if value is None:
                 meta.pop(key, None)
@@ -122,6 +135,55 @@ def update_meta(folder, **fields):
         except OSError:
             return None
     return meta
+
+
+def meta_people(meta):
+    """The people a meeting's meta holds: attendees_list, else the attendees string split into names."""
+    meta = meta if isinstance(meta, dict) else {}
+    people = meta.get("attendees_list")
+    if isinstance(people, list) and all(isinstance(p, str) for p in people):
+        return list(people)
+    return split_attendees(meta.get("attendees") or "")
+
+
+def meta_names(meta, key):
+    """The list of names a meta key holds (attendees_screen, attendees_removed): only the non-empty strings."""
+    value = meta.get(key) if isinstance(meta, dict) else None
+    return [str(v) for v in value if isinstance(v, str) and v.strip()] if isinstance(value, list) else []
+
+
+def screen_people(meta):
+    """The people of a meeting that were read off the call's screen (still on its People list), in order."""
+    import people_from_screen
+    meta = meta if isinstance(meta, dict) else {}
+    keys = {people_from_screen.first_key(p) for p in meta_people(meta)}
+    return [n for n in meta_names(meta, "attendees_screen") if people_from_screen.first_key(n) in keys]
+
+
+PEOPLE_REMOVED_MAX = 50
+
+
+def forget_person(folder, name):
+    """The user took ``name`` off the meeting's People card: it leaves the people (and the attendees string every prompt is
+    built from), and is kept in ``attendees_removed`` so a name read off the screen is not put back - not by a
+    continued meeting, not by a rewrite of the notes. Everybody with that first name goes (one first name is one
+    person here). Returns the merged meta, or None when the name is empty or the folder can't be written."""
+    import people_from_screen
+    key = people_from_screen.first_key(name)
+    if not key:
+        return None
+    shown = str(name).strip()[:80]
+
+    def change(meta):
+        people = meta_people(meta)
+        kept = [p for p in people if people_from_screen.first_key(p) != key]
+        removed = meta_names(meta, "attendees_removed")
+        if not any(people_from_screen.first_key(r) == key for r in removed):
+            removed.append(shown)
+        screen = [n for n in meta_names(meta, "attendees_screen") if people_from_screen.first_key(n) != key]
+        return {"attendees": ", ".join(kept), "attendees_list": kept,
+                "attendees_screen": screen or None, "attendees_removed": removed[-PEOPLE_REMOVED_MAX:]}
+    return edit_meta(folder, change)
 
 
 def split_attendees(text):

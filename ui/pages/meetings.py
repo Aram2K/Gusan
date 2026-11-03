@@ -372,7 +372,7 @@ class MeetingsPage(QWidget):
                            ("recap", self.live_view.set_recap), ("status", self.live_view.set_status),
                            ("levels", self.live_view.set_levels), ("finished", self._on_finished),
                            ("error", self._on_error), ("speakers_changed", self._on_speakers_changed),
-                           ("transcript_saved", self._on_transcript_saved)):
+                           ("transcript_saved", self._on_transcript_saved), ("people_changed", self._on_people)):
             sig = getattr(s, name, None)
             if sig is None:
                 continue
@@ -647,6 +647,10 @@ class MeetingsPage(QWidget):
 
     def _on_line(self, piece, who=""):
         self.live_view.add_line(piece, who)
+
+    def _on_people(self):
+        """Names read off the call's screen joined the meeting (or one was taken off): the header says who is on the call."""
+        self.live_view.sync_people()
 
     def _on_finished(self, folder, notes, error):
         self.list_changed()
