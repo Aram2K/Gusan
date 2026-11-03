@@ -289,6 +289,15 @@ jobs:
         shell: pwsh
         run: Compress-Archive -Path dist\TranscribeApp\* -DestinationPath TranscribeApp-Windows.zip
 
+      # The installer plays an intro video on its Installing page through a tiny
+      # program (installer/player). It is built with the C# compiler that ships
+      # with Windows. If this step fails the installer is still made, with the
+      # picture slideshow instead of the video (installer.iss checks for the exe).
+      - name: Build the installer video player
+        shell: pwsh
+        continue-on-error: true
+        run: ./installer/player/build.ps1
+
       - name: Build Inno Setup installer
         shell: pwsh
         run: |

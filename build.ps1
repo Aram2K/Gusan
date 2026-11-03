@@ -140,7 +140,8 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "Multimedia plugin: $mm"
     # multimedia-check:end
     Write-Host ""
-    Write-Host "The installer: ISCC.exe /DMyAppVersion=$appVersion installer\installer.iss" -ForegroundColor Yellow
+    Write-Host "The installer: installer\player\build.ps1 (its intro video player), then" -ForegroundColor Yellow
+    Write-Host "               ISCC.exe /DMyAppVersion=$appVersion installer\installer.iss" -ForegroundColor Yellow
 } else {
     Write-Host "Build failed. Check errors above." -ForegroundColor Red
     exit 1

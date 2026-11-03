@@ -32,8 +32,11 @@ ROOT = Path(__file__).resolve().parent.parent
 INSTALLER = ROOT / "installer"
 ISS = INSTALLER / "installer.iss"
 WIZARD = INSTALLER / "wizard"
+PLAYER = INSTALLER / "player"
+VIDEO = WIZARD / "gusan_intro.mp4"
 
 MAX_WIZARD_BYTES = 4_000_000          # all pictures together, as stored in [Files]
+MAX_VIDEO_BYTES = 8_000_000           # the intro video (installer/make_wizard_video.py)
 
 # Inno Setup 6.6+ image areas at 100 / 125 / 150 / 175 / 200 / 225 / 250 percent
 # (https://jrsoftware.org/ishelp/topic_setup_wizardimagefile.htm and
@@ -84,6 +87,8 @@ def _file_sources(text):
     out = []
     for line in _section(text, "Files"):
         m = re.match(r'Source:\s*"([^"]+)"', line)
+        if not m:                           # a preprocessor line (#if HaveVideo ... #endif)
+            continue
         flags = re.search(r"Flags:\s*([^;]*)", line)
         out.append((m.group(1), flags.group(1).split() if flags else []))
     return out
@@ -180,8 +185,9 @@ class TestPictures(unittest.TestCase):
             self.assertEqual(_png_size(path), (1000, 400), path.name)
 
     def test_all_pictures_together_stay_small(self):
-        total = sum(p.stat().st_size for p in WIZARD.rglob("*") if p.is_file())
-        self.assertLess(total, MAX_WIZARD_BYTES, "installer/wizard is %.2f MB" % (total / 1e6))
+        # The pictures only: the video (and the player built next to it) has a budget of its own.
+        total = sum(p.stat().st_size for p in WIZARD.rglob("*.png"))
+        self.assertLess(total, MAX_WIZARD_BYTES, "the pictures in installer/wizard are %.2f MB" % (total / 1e6))
 
 
 class TestFrameList(unittest.TestCase):
@@ -210,9 +216,10 @@ class TestFrameList(unittest.TestCase):
         for src, flags in frames:
             self.assertIn("dontcopy", flags, src)
             self.assertIn("noencryption", flags, src)
-        # Solid compression: Setup unpacks everything above a file it extracts.
+        # Solid compression: Setup unpacks everything above a file it extracts. The video and its
+        # player (2 files) come first, then the pictures, then the program files.
         self.assertEqual([i for i, (src, _f) in enumerate(sources) if src.startswith("..")],
-                         [len(frames)])
+                         [2 + len(frames)])
         self.assertIn("solidbreak", frames[0][1])
 
     def test_the_program_files_line_is_unchanged(self):
@@ -274,9 +281,9 @@ class TestSlideshowCode(unittest.TestCase):
         for call in ("ExtractTemporaryFile", "TBitmapImage.Create", "SetTimer(", "CreateCallback", ".Parent"):
             at = body.find(call)
             self.assertGreater(at, guard.end(), call)
-        # ... and only StartSlides does those things.
+        # ... and only StartSlides does those things (StartVideo extracts the video, with a guard of its own).
         for name, other in self.routines.items():
-            if name in ("StartSlides", "SetTimer", "KillTimer"):
+            if name in ("StartSlides", "StartVideo", "SetTimer", "KillTimer"):
                 continue
             for call in ("ExtractTemporaryFile", "TBitmapImage.Create", "SetTimer(", "CreateCallback"):
                 self.assertNotIn(call, other, "%s must not call %s" % (name, call))
@@ -297,13 +304,13 @@ class TestSlideshowCode(unittest.TestCase):
     def test_the_slideshow_stops_on_every_way_out(self):
         # The end of the install ...
         step = self._body("CurStepChanged")
-        self.assertRegex(step, r"if\s+CurStep\s*=\s*ssPostInstall\s+then\s+StopSlides;")
+        self.assertRegex(step, r"if\s+CurStep\s*=\s*ssPostInstall\s+then\s+begin\s+StopSlides;\s+StopVideo;\s+end;")
         self.assertLess(step.index("StopSlides"), step.index("SaveStringToFile"))
         # ... the next page (the finish page) ...
         page = self._body("CurPageChanged")
         self.assertLess(page.index("else"), page.index("StopSlides"))
         # ... and Setup ending without either of them (Cancel, an error).
-        self.assertRegex(self._body("DeinitializeSetup"), r"begin\s+StopSlides;\s+end;")
+        self.assertRegex(self._body("DeinitializeSetup"), r"begin\s+StopSlides;\s+StopVideo;\s+end;")
 
     def test_stopping_never_raises_and_releases_the_picture(self):
         body = self._body("StopSlides")
@@ -332,18 +339,21 @@ class TestSlideshowCode(unittest.TestCase):
         self.assertRegex(body[stop:], r"(?s)except\s+Log\(''\s*\+\s*GetExceptionMessage\);\s+StopSlides;\s+end;")
 
     def test_the_picture_is_sized_from_the_live_controls_and_is_5_to_2(self):
-        body = self._body("StartSlides")
+        box = self._body("SlideBox")           # shared by the video and the pictures
         for live in ("WizardForm.ProgressGauge.Width", "WizardForm.ProgressGauge.Top",
                      "WizardForm.ProgressGauge.Height", "WizardForm.InstallingPage.Height"):
-            self.assertIn(live, body)
-        self.assertIn("H := W * 2 div 5;", body)
-        self.assertIn("W := H * 5 div 2;", body)
+            self.assertIn(live, box)
+        self.assertIn("Height := Width * 2 div 5;", box)
+        self.assertIn("Width := Height * 5 div 2;", box)
+        body = self._body("StartSlides")
+        self.assertIn("SlideBox(", body)
         self.assertIn("Stretch := True", body)
         # Set up before it is shown: Parent is the last property set.
         self.assertGreater(body.index(".Parent :="), body.index(".Height :="))
         # No hard-coded design size (the wizard is 120 percent of it).
-        self.assertNotIn("ScaleX(", body)
-        self.assertNotIn("417", body)
+        for part in (box, body):
+            self.assertNotIn("ScaleX(", part)
+            self.assertNotIn("417", part)
 
     def test_pictures_are_loaded_one_at_a_time_from_the_temporary_folder(self):
         show = self._body("ShowSlide")
@@ -351,6 +361,103 @@ class TestSlideshowCode(unittest.TestCase):
         self.assertIn("ExpandConstant('{tmp}')", _read(ISS))
         self.assertNotIn("Bitmap.LoadFromFile", self.code)        # that one is for .bmp files
         self.assertEqual(len(re.findall(r"\bLoadFromFile\b", self.code)), 1)
+
+
+class TestVideo(unittest.TestCase):
+    """The intro video of the Installing page and the program that plays it.
+
+    A slideshow that Setup draws itself moves about once a second (its timer only runs between two files), so the
+    video is played by a program of its own. Not testable here: that the player really plays (it was run against
+    a real Setup window by hand) and how it looks at each screen scale."""
+
+    def setUp(self):
+        self.text = _read(ISS)
+        self.code = _code(self.text)
+        self.routines = _routines(self.code)
+        self.cs = _read(PLAYER / "GusanSlides.cs")
+
+    def _body(self, name):
+        return self.routines[name]
+
+    def test_the_video_is_a_1000_by_400_h264_mp4_that_stays_small(self):
+        data = VIDEO.read_bytes()
+        self.assertEqual(data[4:8], b"ftyp")
+        self.assertLess(len(data), MAX_VIDEO_BYTES)
+        head = data[:65536]
+        self.assertIn(b"moov", head)                 # the header comes first: it starts at once
+        at = head.index(b"avc1", head.index(b"stsd"))   # H.264 (not the brand in ftyp): Windows plays it everywhere
+        self.assertEqual(struct.unpack(">HH", head[at + 4 + 24:at + 4 + 28]), (1000, 400))
+
+    def test_the_sources_and_the_build_script_are_there(self):
+        for name in ("GusanSlides.cs", "app.manifest", "build.ps1"):
+            self.assertTrue((PLAYER / name).is_file(), name)
+        build = _read(PLAYER / "build.ps1")
+        self.assertIn("csc.exe", build)
+        self.assertIn("wizard\\GusanSlides.exe", build)
+
+    def test_the_script_includes_the_video_only_when_both_files_exist(self):
+        self.assertIn("#define HaveVideo 0", self.text)
+        self.assertEqual(len(re.findall(r'#ifexist AddBackslash\(SourcePath\) \+ "wizard\\', self.text)), 2)
+        files = re.search(r"(?s)\[Files\](.*?)\[Icons\]", self.text).group(1)
+        self.assertRegex(files, r'(?s)#if HaveVideo\s+Source: "wizard\\gusan_intro\.mp4".*?\s+'
+                                r'Source: "wizard\\GusanSlides\.exe".*?\s+#endif')
+        sources = dict(_file_sources(self.text))
+        for name in ("wizard\\gusan_intro.mp4", "wizard\\GusanSlides.exe"):
+            self.assertIn("dontcopy", sources[name], name)       # compiled in, never installed
+            self.assertIn("noencryption", sources[name], name)
+        self.assertIn("nocompression", sources["wizard\\gusan_intro.mp4"])   # mp4 is compressed already
+        names = [src for src, _f in _file_sources(self.text)]
+        self.assertEqual(names[:2], ["wizard\\gusan_intro.mp4", "wizard\\GusanSlides.exe"])
+
+    def test_the_video_is_started_once_and_never_in_a_silent_install(self):
+        body = self._body("StartVideo")
+        guard = re.search(r"if\s+WizardSilent\s+or\s+VideoLaunched\s+then\s+Exit;\s+VideoLaunched\s*:=\s*True;", body)
+        self.assertTrue(guard, "StartVideo must leave at once when silent or already tried, and mark the try")
+        start, stop = body.index("try"), body.index("except")
+        self.assertGreater(start, guard.end())
+        for call in ("SlideBox(", "ExtractTemporaryFile", "Exec("):
+            self.assertTrue(start < body.index(call) < stop, call)
+        # An error just means: no video (the pictures are shown).
+        self.assertRegex(body[stop:], r"(?s)except\s+Log\(''\s*\+\s*GetExceptionMessage\);\s+end;\s+end;")
+        self.assertIn("ewNoWait", self.text)
+        self.assertEqual(len(re.findall(r"\bStartVideo\b", self.code)), 2)      # the routine and one call
+        self.assertRegex(self._body("InitializeWizard"), r"StartVideo;\s+end;")
+
+    def test_setup_and_the_player_agree_on_the_arguments_and_the_window_titles(self):
+        for arg in ("--owner", "--page", "--x", "--y", "--w", "--h", "--video"):
+            self.assertIn(arg + " ", self.text)
+            self.assertIn('"%s"' % arg, self.cs)
+        titles = re.findall(r"VideoTitle\w+\s*=\s*'(\w+)'", self.text)
+        self.assertEqual(len(titles), 2)
+        for title in titles:
+            self.assertIn('"%s"' % title, self.cs)
+
+    def test_the_video_stops_on_every_way_out(self):
+        self.assertIn("PostMessageW(H, $0010, 0, 0)", self.text)      # WM_CLOSE
+        self.assertRegex(self._body("CurStepChanged"), r"ssPostInstall\s+then\s+begin\s+StopSlides;\s+StopVideo;")
+        self.assertRegex(self._body("DeinitializeSetup"), r"StopVideo;\s+end;")
+        # It waits until the player is gone: Setup deletes {tmp}, where the player is, when it ends.
+        self.assertIn("Sleep(50)", self.text)
+
+    def test_the_pictures_are_only_the_fallback(self):
+        start = self._body("StartSlides")
+        self.assertRegex(start, r"if\s+VideoPlaying\s+then\s+Exit;")
+        # The video came up late: the pictures stop and it takes over.
+        tick = self._body("SlideTimerProc")
+        self.assertRegex(tick, r"(?s)if\s+VideoPlaying\s+then\s+begin\s+StopSlides;\s+Exit;")
+
+    def test_the_player_never_takes_focus_ends_with_setup_and_stays_offline(self):
+        for part in ("WS_EX_NOACTIVATE", "WS_EX_TOOLWINDOW", "HTTRANSPARENT", "ShowInTaskbar = false",
+                     "ShowActivated = false", "IsWindow(opt.Owner)", "Application.Current.Shutdown"):
+            self.assertIn(part, self.cs)
+        self.assertNotIn("System.Net", self.cs)
+        self.assertNotIn("Process.Start", self.cs)
+
+    def test_the_release_build_makes_the_player_before_the_installer(self):
+        workflow = _read(ROOT / ".github" / "workflows" / "build.yml")
+        self.assertIn("./installer/player/build.ps1", workflow)
+        self.assertLess(workflow.index("./installer/player/build.ps1"), workflow.index("installer\\installer.iss"))
+        self.assertIn("installer/wizard/GusanSlides.exe", _read(ROOT / ".gitignore"))
 
 
 class TestFinishPage(unittest.TestCase):

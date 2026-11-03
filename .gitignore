@@ -21,5 +21,8 @@ build/
 # CI-generated icon
 assets/icon.ico
 
+# Built from installer/player by installer/player/build.ps1 (CI does it before Inno Setup)
+installer/wizard/GusanSlides.exe
+
 # Supabase CLI local state
 supabase/.temp/

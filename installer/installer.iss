@@ -31,6 +31,21 @@
   #error Inno Setup 6.5.2 or newer is needed to compile this script (PNG wizard pictures)
 #endif
 
+; The intro video of the Installing page and the little program that plays it
+; (installer\make_wizard_video.py draws the mp4, installer\player\build.ps1
+; builds the exe). Without the exe (a build that skipped build.ps1) Setup is
+; made without the video and shows the picture slideshow instead.
+#define HaveVideo 0
+#ifexist AddBackslash(SourcePath) + "wizard\gusan_intro.mp4"
+  #ifexist AddBackslash(SourcePath) + "wizard\GusanSlides.exe"
+    #undef HaveVideo
+    #define HaveVideo 1
+  #endif
+#endif
+#if HaveVideo == 0
+  #pragma message "No installer\wizard\GusanSlides.exe / gusan_intro.mp4: this Setup shows the picture slideshow only."
+#endif
+
 [Setup]
 AppId={{8E3B7C8A-9D54-4F61-9F6C-2E8C7F0A1B23}
 AppName={#MyAppName}
@@ -106,7 +121,15 @@ Type: files; Name: "{autodesktop}\{#MyOldAppName}.lnk"
 ; login off for those users. This installer never creates a startup shortcut.
 
 [Files]
-; The slideshow pictures: compiled into Setup but never installed (dontcopy).
+; The intro video and its player: compiled into Setup but never installed
+; (dontcopy). [Code] extracts both to {tmp} when the wizard opens and starts the
+; player, which puts the video on the Installing page (see StartVideo). The
+; mp4 is compressed already, so it is stored as it is.
+#if HaveVideo
+Source: "wizard\gusan_intro.mp4"; Flags: dontcopy noencryption nocompression solidbreak
+Source: "wizard\GusanSlides.exe"; Flags: dontcopy noencryption
+#endif
+; The slideshow pictures: the fallback when the video can't play. Compiled into Setup but never installed (dontcopy).
 ; [Code] extracts them to {tmp} while the Installing page shows; Setup deletes
 ; them when it exits. They stay at the top of this section on purpose: with
 ; solid compression Setup must unpack every file listed above the one it
@@ -193,10 +216,22 @@ function SetTimer(hWnd, nIDEvent, uElapse, lpTimerFunc: LongWord): LongWord;
   external 'SetTimer@user32.dll stdcall';
 function KillTimer(hWnd, nIDEvent: LongWord): BOOL;
   external 'KillTimer@user32.dll stdcall';
+// The first parameter is a LongWord so that 0 reaches Windows as NULL (any class).
+function FindWindowByTitle(ClassName: LongWord; WindowName: String): LongWord;
+  external 'FindWindowW@user32.dll stdcall';
+function PostMessageW(hWnd, Msg, wParam, lParam: LongWord): BOOL;
+  external 'PostMessageW@user32.dll stdcall';
+
+const
+  // The window titles of the video player (installer\player\GusanSlides.cs).
+  VideoTitleStarting = 'GusanSlidesStarting';
+  VideoTitleReady = 'GusanSlidesVideo';
 
 var
   AnalyticsPage: TInputOptionWizardPage;
   UpgradeInstall: Boolean;
+  VideoLaunched: Boolean;
+  SlideCheck: Integer;
   SlideTimer: LongWord;
   SlideImage: TBitmapImage;
   SlideFiles: array of String;
@@ -256,6 +291,93 @@ begin
     except
       Log('Slideshow: ' + GetExceptionMessage);
     end;
+  end;
+end;
+
+// ── The video ────────────────────────────────────────────────────────────────
+// Setup unpacks files on the thread that runs its timers, so a slideshow Setup
+// draws itself can only change a picture between two files: about once a
+// second. The video is therefore played by a program of its own
+// (installer\player\GusanSlides.cs) that puts a window on the Installing page,
+// owned by the wizard, and keeps playing while Setup works. It is started when
+// the wizard opens (so it has loaded by the time the page shows), hides itself
+// when the page isn't on screen and ends when Setup's window is gone. If it
+// can't play, the pictures below are shown instead.
+function VideoPlaying: Boolean;
+begin
+  Result := FindWindowByTitle(0, VideoTitleReady) <> 0;
+end;
+
+function VideoStarting: Boolean;
+begin
+  Result := FindWindowByTitle(0, VideoTitleStarting) <> 0;
+end;
+
+// Where the video or the pictures go on the Installing page, in pixels from the
+// page's top left corner: 5:2, as wide as the progress bar if there is room,
+// else smaller (the wizard is bigger than its design size and the sizes change
+// with the screen scale). False if the page has no room for them.
+function SlideBox(var Left, Top, Width, Height: Integer): Boolean;
+var
+  Room: Integer;
+begin
+  Width := WizardForm.ProgressGauge.Width;
+  Top := WizardForm.ProgressGauge.Top + WizardForm.ProgressGauge.Height + ScaleY(10);
+  Room := WizardForm.InstallingPage.Height - Top - ScaleY(4);
+  Height := Width * 2 div 5;
+  if Height > Room then
+    Height := Room;
+  Width := Height * 5 div 2;
+  Left := WizardForm.ProgressGauge.Left + (WizardForm.ProgressGauge.Width - Width) div 2;
+  Result := Height >= ScaleY(100);
+end;
+
+// Starts the player. Once per Setup, not in /SILENT or /VERYSILENT. Any error
+// just means: no video (the pictures are shown).
+procedure StartVideo;
+var
+  L, T, W, H, ResultCode: Integer;
+  Args: String;
+begin
+  if WizardSilent or VideoLaunched then
+    Exit;
+  VideoLaunched := True;
+  try
+    if not SlideBox(L, T, W, H) then
+      Exit;
+    ExtractTemporaryFile('gusan_intro.mp4');
+    ExtractTemporaryFile('GusanSlides.exe');
+    Args := '--owner ' + IntToStr(WizardForm.Handle) +
+      ' --page ' + IntToStr(WizardForm.InstallingPage.Handle) +
+      ' --x ' + IntToStr(L) + ' --y ' + IntToStr(T) +
+      ' --w ' + IntToStr(W) + ' --h ' + IntToStr(H) +
+      ' --video "' + ExpandConstant('{tmp}') + '\gusan_intro.mp4"';
+    if not Exec(ExpandConstant('{tmp}') + '\GusanSlides.exe', Args, ExpandConstant('{tmp}'),
+                SW_HIDE, ewNoWait, ResultCode) then
+      Log('Video: the player did not start (' + IntToStr(ResultCode) + ')');
+  except
+    Log('Video: ' + GetExceptionMessage);
+  end;
+end;
+
+// Closes the player and waits (up to 2 s) until it is gone: Setup deletes {tmp},
+// where the player and the video are, when it ends. Safe to call at any time.
+procedure StopVideo;
+var
+  H: LongWord;
+  I: Integer;
+begin
+  H := FindWindowByTitle(0, VideoTitleReady);
+  if H = 0 then
+    H := FindWindowByTitle(0, VideoTitleStarting);
+  if H = 0 then
+    Exit;
+  PostMessageW(H, $0010, 0, 0);   // WM_CLOSE
+  for I := 1 to 40 do
+  begin
+    if (not VideoPlaying) and (not VideoStarting) then
+      Break;
+    Sleep(50);
   end;
 end;
 
@@ -322,6 +444,17 @@ begin
   if (SlideTimer = 0) or (SlideImage = nil) or (WizardForm = nil) then
     Exit;
   try
+    // The video came up after all (it was slow to open): it takes over.
+    SlideCheck := SlideCheck + 1;
+    if SlideCheck >= 10 then
+    begin
+      SlideCheck := 0;
+      if VideoPlaying then
+      begin
+        StopSlides;
+        Exit;
+      end;
+    end;
     SlideWait := SlideWait - 1;
     if SlideWait <= 0 then
     begin
@@ -339,33 +472,38 @@ end;
 // Not in silent installs. Any error just means: no slideshow.
 procedure StartSlides;
 var
-  I, W, H, T, Room: Integer;
+  I, L, W, H, T: Integer;
 begin
   if WizardSilent then
     Exit;
   if SlideTimer <> 0 then
     Exit;
+  // The video is on if its player is up. If it is still opening (the wizard was
+  // clicked through in a second) it gets 1 s; after that the pictures start
+  // and the timer hands over to the video if it comes up later.
+  if VideoLaunched then
+  begin
+    I := 0;
+    while (I < 20) and VideoStarting and (not VideoPlaying) do
+    begin
+      Sleep(50);
+      I := I + 1;
+    end;
+    if VideoPlaying then
+      Exit;
+  end;
   try
-    // The pictures are 5:2. The size comes from the progress bar and the page
-    // (the wizard is bigger than its design size and the sizes change with
-    // the screen scale): as wide as the bar if there is room, else smaller.
-    // The pictures are 1000x400: crisp up to about 175% screen scale, then
-    // Stretch enlarges them (about 1.1x at 200%, 1.36x at 250%): slightly soft.
-    W := WizardForm.ProgressGauge.Width;
-    T := WizardForm.ProgressGauge.Top + WizardForm.ProgressGauge.Height + ScaleY(10);
-    Room := WizardForm.InstallingPage.Height - T - ScaleY(4);
-    H := W * 2 div 5;
-    if H > Room then
-      H := Room;
-    W := H * 5 div 2;
-    if H >= ScaleY(100) then
+    // The pictures are 5:2 (SlideBox). They are 1000x400: crisp up to about
+    // 175% screen scale, then Stretch enlarges them (about 1.1x at 200%, 1.36x
+    // at 250%): slightly soft.
+    if SlideBox(L, T, W, H) then
     begin
       LoadSlideList;
       for I := 0 to SlideCount - 1 do
         ExtractTemporaryFile(SlideFiles[I]);
       SlideImage := TBitmapImage.Create(WizardForm);
       SlideImage.Stretch := True;
-      SlideImage.Left := WizardForm.ProgressGauge.Left + (WizardForm.ProgressGauge.Width - W) div 2;
+      SlideImage.Left := L;
       SlideImage.Top := T;
       SlideImage.Width := W;
       SlideImage.Height := H;
@@ -392,6 +530,8 @@ begin
   );
   AnalyticsPage.Add('Share anonymous usage analytics (recommended)');
   AnalyticsPage.Values[0] := True;
+  // Has loaded by the time the Installing page shows.
+  StartVideo;
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
@@ -413,9 +553,12 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   ConsentDir, Choice: string;
 begin
-  // The install is done: the slideshow ends before anything else happens here.
+  // The install is done: the video / slideshow ends before anything else happens here.
   if CurStep = ssPostInstall then
+  begin
     StopSlides;
+    StopVideo;
+  end;
   if (CurStep = ssPostInstall) and (not IsUpgrade) then
   begin
     // The start-at-login box, next to the exe (autostart.INSTALL_DEFAULT_NAME)
@@ -483,4 +626,5 @@ end;
 procedure DeinitializeSetup;
 begin
   StopSlides;
+  StopVideo;
 end;
