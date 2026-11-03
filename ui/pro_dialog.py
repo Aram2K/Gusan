@@ -1,11 +1,12 @@
 # The "Go Pro" window, in the website's look (gusan.aibuben.xyz/#pricing): one plan toggle whose
 # dark thumb slides along a single track, the plans side by side in a strip you swipe or scroll
-# (the neighbours peek in at the edges), what Pro gives, one button to checkout.
+# (the neighbours peek in at the edges) - each card says its price, what it gives and what it
+# commits you to - and one button to checkout.
 
 from PySide6.QtCore import (QEasingCurve, QEvent, QObject, QPropertyAnimation, QRectF, QSize, Qt,
                             QTimer, Signal)
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath
-from PySide6.QtWidgets import (QDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QLayout,
                                QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 import account_actions
@@ -16,23 +17,27 @@ VIOLET_DARK = "#9333ea"
 INK = "#0f172a"
 MUTED = "#64748b"
 
-# Each plan as its card shows it: (name, price, per, struck "was" price, one detail line, the line
-# under the button). The full commitment / withdrawal wording is in Stripe Checkout
-# (pricing_policy.checkout_extras): here it is said once, plainly, under the button.
-PLANS = {
-    "yearly": ("Yearly", "€9.99", "/month", "€15.99", "€9.99 each month for 12 months (€119.88)",
-               "12-month commitment, then €9.99 a month until you cancel. Secure checkout by Stripe."),
-    "monthly": ("Monthly", "€15.99", "/month", None, "Billed every month",
-                "€15.99 a month. Cancel anytime. Secure checkout by Stripe."),
-    "lifetime": ("Lifetime", "€199", "once", None, "Pay once, keep Pro for good",
-                 "One payment, for the first 200 people. Secure checkout by Stripe."),
-}
-PLAN_ORDER = ("yearly", "monthly", "lifetime")
-YEARLY_SAVING = "−38%"
+# Each plan as its card shows it: (name, price, per, struck "was" price, one detail line, what it
+# gives, the line at the foot of the card). The full commitment / withdrawal wording is in Stripe
+# Checkout (pricing_policy.checkout_extras): the card says it once, plainly.
 BENEFITS = ("Meeting recording with AI notes", "Smart Actions by voice",
             "Fast cloud transcription", "Priority models and support")
+LIFETIME_BENEFITS = ("Every Pro feature you have today", "All future Pro features included",
+                     "No monthly bill, ever", "Priority models and support")
+PLANS = {
+    "yearly": ("Yearly", "€9.99", "/month", "€15.99", "€9.99 each month for 12 months (€119.88)",
+               BENEFITS, "12-month commitment, then €9.99 a month until you cancel."),
+    "monthly": ("Monthly", "€15.99", "/month", None, "Billed every month",
+                BENEFITS, "Cancel anytime."),
+    "lifetime": ("Lifetime", "€199", "once", None, "Pay once, Pro for life",
+                 LIFETIME_BENEFITS, "One payment, for the first 200 people."),
+}
+PLAN_ORDER = ("yearly", "monthly", "lifetime")
+DEFAULT_PLAN = "yearly"                     # what a buyer sees first, as on the website
+YEARLY_SAVING = "−38%"
+SECURE = "Secure checkout by Stripe"
 
-CARD_W = 262          # a plan card; the strip shows one whole and a good slice of each neighbour
+CARD_W = 284          # a plan card; the strip shows one whole and a slice of each neighbour
 CARD_GAP = 12
 DIM = 0.45            # a neighbour card's opacity
 SLIDE_MS = 260
@@ -189,53 +194,91 @@ class PlanToggle(QWidget):
 
 
 class PlanCard(QFrame):
-    """One plan in the strip: its name, the price (and the struck price it replaces), one line."""
+    """One plan in the strip, centred: its name, the price (and the struck price it replaces), one
+    line, what it gives, and what it commits you to."""
     clicked = Signal(str)
 
     def __init__(self, plan_id, parent=None):
         super().__init__(parent)
         self.plan_id = plan_id
-        name, price, per, was, detail, _foot = PLANS[plan_id]
+        name, price, per, was, detail, benefits, foot = PLANS[plan_id]
         self.setObjectName("proPlanCard")
         self.setFixedWidth(CARD_W)
         self.setCursor(Qt.PointingHandCursor)
         self.setAccessibleName("%s plan, %s %s" % (name, price, per))
+        clear = " border: none; background: transparent;"
         v = QVBoxLayout(self)
-        v.setContentsMargins(20, 16, 20, 16)
+        v.setContentsMargins(18, 16, 18, 16)
         v.setSpacing(4)
         title = QLabel(name.upper(), self)
-        title.setStyleSheet("font-size: 11px; font-weight: 800; letter-spacing: 1.5px; color: %s;"
-                            " border: none; background: transparent;" % VIOLET)
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("font-size: 11px; font-weight: 800; letter-spacing: 1.5px; color: %s;%s"
+                            % (VIOLET, clear))
         v.addWidget(title)
         row = QHBoxLayout()
         row.setSpacing(8)
+        row.addStretch(1)
         if was:
             w = QLabel("<s>%s</s>" % was, self)
-            w.setStyleSheet("font-size: 15px; color: #94a3b8; border: none; background: transparent;")
+            w.setStyleSheet("font-size: 15px; color: #94a3b8;" + clear)
             row.addWidget(w, 0, Qt.AlignBottom)
         self.price_label = QLabel(price, self)
-        self.price_label.setStyleSheet("font-size: 32px; font-weight: 800; color: %s; border: none;"
-                                       " background: transparent;" % INK)
+        self.price_label.setStyleSheet("font-size: 32px; font-weight: 800; color: %s;%s" % (INK, clear))
         self.price_label.setMinimumHeight(42)        # the digits are never clipped
         row.addWidget(self.price_label, 0, Qt.AlignBottom)
         p = QLabel(per, self)
-        p.setStyleSheet("font-size: 13px; color: %s; border: none; background: transparent;"
-                        " padding-bottom: 6px;" % MUTED)
+        p.setStyleSheet("font-size: 13px; color: %s; padding-bottom: 6px;%s" % (MUTED, clear))
         row.addWidget(p, 0, Qt.AlignBottom)
         row.addStretch(1)
         v.addLayout(row)
         d = QLabel(detail, self)
+        d.setAlignment(Qt.AlignCenter)
         d.setWordWrap(True)
-        d.setStyleSheet("font-size: 12.5px; color: %s; border: none; background: transparent;" % MUTED)
+        d.setStyleSheet("font-size: 12.5px; color: %s;%s" % (MUTED, clear))
         v.addWidget(d)
         # Lifetime: the spots left ("143 of 200 left"), filled in when the server answers.
         self.extra = QLabel("", self)
-        self.extra.setStyleSheet("font-size: 12.5px; font-weight: 700; color: %s; border: none;"
-                                 " background: transparent;" % INK)
+        self.extra.setAlignment(Qt.AlignCenter)
+        self.extra.setStyleSheet("font-size: 12.5px; font-weight: 700; color: %s;%s" % (INK, clear))
         self.extra.hide()
         v.addWidget(self.extra)
+        v.addSpacing(10)
+        # What it gives: a block of ticks, centred in the card (each line left-aligned in it).
+        ticks = QWidget(self)
+        ticks.setStyleSheet("background: transparent;")
+        tv = QVBoxLayout(ticks)
+        tv.setContentsMargins(0, 0, 0, 0)
+        tv.setSpacing(6)
+        for text in benefits:
+            r = QHBoxLayout()
+            r.setSpacing(8)
+            tick = QLabel("✓", ticks)
+            tick.setStyleSheet("font-size: 13px; font-weight: 800; color: %s;%s" % (VIOLET, clear))
+            r.addWidget(tick, 0, Qt.AlignTop)
+            lab = QLabel(text, ticks)
+            lab.setStyleSheet("font-size: 13.5px; color: %s;%s" % (INK, clear))
+            r.addWidget(lab, 0)
+            r.addStretch(1)
+            tv.addLayout(r)
+        centre = QHBoxLayout()
+        centre.addStretch(1)
+        centre.addWidget(ticks)
+        centre.addStretch(1)
+        v.addLayout(centre)
+        v.addSpacing(10)
+        self.foot = QLabel(foot, self)
+        self.foot.setAlignment(Qt.AlignCenter)
+        self.foot.setWordWrap(True)
+        self.foot.setStyleSheet("font-size: 12px; color: %s;%s" % (MUTED, clear))
+        v.addWidget(self.foot)
         v.addStretch(1)
         self.set_current(False)
+
+    def needed_height(self):
+        """The height its text needs at CARD_W (wrapped lines included)."""
+        lay = self.layout()
+        h = lay.totalHeightForWidth(CARD_W) if lay.hasHeightForWidth() else -1
+        return max(h, self.sizeHint().height(), self.minimumSizeHint().height())
 
     def set_current(self, on):
         self.setStyleSheet(
@@ -278,7 +321,7 @@ class PlanStrip(QScrollArea):
         self._rest.timeout.connect(self.snap)
         self._drag = None                              # (start x, start value, moved)
         self.horizontalScrollBar().valueChanged.connect(self._scrolled)
-        h = max(c.sizeHint().height() for c in cards)
+        h = max(c.needed_height() for c in cards)
         for c in cards:
             c.setFixedHeight(h)
         self.setFixedHeight(h + 4)
@@ -368,7 +411,7 @@ class ProDialog(QDialog):
         # opens over it (never behind it).
         super().__init__(parent)
         self.app = main_app
-        self._plan = "yearly"  # the committed yearly price leads, as on the website
+        self._plan = DEFAULT_PLAN
         self.setWindowTitle("Gusan Pro")
         self.setFixedWidth(420)
         if self.app and hasattr(self.app, "style_content"):
@@ -377,6 +420,7 @@ class ProDialog(QDialog):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self.adjustSize()                              # as tall as its content, on every system font
         from ui.winfit import settle_on_screen
         settle_on_screen(self)
         self.strip.go_to(PLAN_ORDER.index(self._plan), animate=False)
@@ -386,6 +430,8 @@ class ProDialog(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 22, 0, 18)
         root.setSpacing(14)
+        # Never smaller than what it shows: a wrapped line can't squeeze another onto the button.
+        root.setSizeConstraint(QLayout.SetMinimumSize)
         side = 24
 
         title = QLabel("Gusan Pro", self)
@@ -420,25 +466,14 @@ class ProDialog(QDialog):
 
         body = QVBoxLayout()
         body.setContentsMargins(side + 8, 0, side + 8, 0)
-        body.setSpacing(7)
-        for text in BENEFITS:
-            row = QHBoxLayout()
-            row.setSpacing(10)
-            tick = QLabel("✓", self)
-            tick.setStyleSheet("font-size: 14px; font-weight: 800; color: %s;" % VIOLET)
-            row.addWidget(tick, 0, Qt.AlignTop)
-            lab = QLabel(text, self)
-            lab.setWordWrap(True)
-            lab.setStyleSheet("font-size: 14px; color: %s;" % INK)
-            row.addWidget(lab, 1)
-            body.addLayout(row)
-        body.addSpacing(6)
+        body.setSpacing(6)
         self.btn_go = QPushButton(pricing_policy.CHECKOUT_BUTTON, self)
         self.btn_go.setObjectName("primaryButton")
         self.btn_go.setMinimumHeight(44)
         self.btn_go.setCursor(Qt.PointingHandCursor)
         self.btn_go.clicked.connect(self._go)
         body.addWidget(self.btn_go)
+        # Under the button: "Secure checkout by Stripe" (or, for a guest, sign in first).
         self.note = QLabel("", self)
         self.note.setAlignment(Qt.AlignCenter)
         self.note.setWordWrap(True)
@@ -463,7 +498,7 @@ class ProDialog(QDialog):
         foot.addStretch(1)
         root.addLayout(foot)
 
-        self._select_plan("yearly", move=False)
+        self._select_plan(DEFAULT_PLAN, move=False)
         self._ask_spots()
 
     def _feature_line(self, feature):
@@ -554,7 +589,7 @@ class ProDialog(QDialog):
             "QPushButton { font-size: 15px; font-weight: 700; color: #ffffff; border-radius: 12px;"
             " background-color: %s; border: 1px solid %s; }"
             "QPushButton:hover { background-color: %s; }" % (VIOLET, VIOLET_DARK, VIOLET_DARK))
-        self.note.setText(PLANS[self._plan][5])
+        self.note.setText(SECURE + ".")
 
     def _go(self):
         if not self.app:

@@ -307,7 +307,10 @@ def test_the_pro_window_for_free_checks_out_without_a_trial(qapp):
     dlg = _pro_dialog(make_stub_app("free"))
     assert dlg.btn_go.text() == "Continue to checkout"
     assert "a855f7" in dlg.btn_go.styleSheet()
-    assert "Stripe" in dlg.note.text() and "12-month" in dlg.note.text()
+    assert dlg._plan == "yearly"                                         # what a buyer sees first
+    assert "Stripe" in dlg.note.text()
+    assert "12-month commitment" in dlg.cards["yearly"].foot.text()      # each plan says its own terms
+    assert "All future Pro features included" in [w.text() for w in dlg.cards["lifetime"].findChildren(QLabel)]
     assert "free" not in dlg.note.text().lower()
     dlg.deleteLater()
 
