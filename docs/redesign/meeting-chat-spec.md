@@ -59,8 +59,8 @@ one on screen is left alone); the conversation (user: right-aligned plain-text b
 bubble, all of it kept and sent; answer: no bubble, real formatting - lists and bold, never raw symbols, never HTML from
 the model, never a link or a picture, long strings get break points); three starter questions while empty; the box (Enter
 sends, Shift+Enter new line, Esc stops an answer that is coming, 1-5 lines, 4,000 characters with a counter from 3,500);
-Send / Stop (one width - the wider of the two needs, at least 90 px, read once the card is in the window so "Stop" is never cut off - and 44 px tall like the box; Send is grey until something is written); one footer line "<who
-answers> - AI can be wrong." (Privacy mode: "Stays on this computer."). Each answer's Copy has a little less air on its left than other ghost buttons, so its icon sits near the answer's edge. A starter question does not throw away a draft. A
+Send / Stop (one width - the wider of the two needs, at least 90 px, read once the card is in the window so "Stop" is never cut off - and 44 px tall like the box; Send is grey until something is written); one footer line, the name of the AI that answers
+ (privacy mode adds "Stays on this computer."; there is no "AI can be wrong" note). Each answer's Copy has a little less air on its left than other ghost buttons, so its icon sits near the answer's edge. A starter question does not throw away a draft. A
 question's bubble is as wide as its words, up to the row. The conversation is a tab stop with a ring when the keyboard is on
 it; each answer's Copy and Try again follow it in the keyboard order, then the box, Send, Stop. Selected words copy without the
 invisible break points (a copied address pastes as the address); the Copy button copies the raw answer. A hairline marks the

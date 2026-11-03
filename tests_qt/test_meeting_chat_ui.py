@@ -195,7 +195,7 @@ def test_ready_shows_the_intro_three_starters_and_who_answers(build, meetings_ro
     assert all(c.isVisibleTo(card) for c in card._chips)
     assert card._intro.isVisibleTo(card)
     assert not card.clear_btn.isVisibleTo(card)
-    assert card.foot.full_text() == "Gusan Cloud \u00b7 Mistral Small \u00b7 AI can be wrong."
+    assert card.foot.full_text() == "Gusan Cloud \u00b7 Mistral Small"
     assert "Hiring" not in card.foot.full_text()
 
 

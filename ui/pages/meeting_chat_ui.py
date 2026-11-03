@@ -67,7 +67,6 @@ WAITING_LOCAL = "Waiting for the AI on this computer…"
 WRITING = "Writing…"
 STOPPED = "Stopped"
 NO_ANSWER_YET = "No answer yet"
-FOOTER_NOTE = "AI can be wrong."
 LOCAL_NOTE = "Stays on this computer."
 CLEAR_TITLE = "Clear this chat?"
 CLEAR_TEXT = "The questions and answers about this meeting are removed. The meeting itself stays."
@@ -719,8 +718,8 @@ class ChatCard(Card):
             return
         icon = {"cloud": "cloud", "local": "laptop", "own_key": "key"}.get(c.kind, "cloud")
         self._foot_icon.setPixmap(views.glyph(icon, 14, "faint", 1.8))
-        note = LOCAL_NOTE if c.kind == "local" and (self.page.cfg() or {}).get("privacy_mode") else FOOTER_NOTE
-        self.foot.setText("%s · %s" % (c.label, note))
+        private = c.kind == "local" and (self.page.cfg() or {}).get("privacy_mode")
+        self.foot.setText("%s · %s" % (c.label, LOCAL_NOTE) if private else c.label)
 
     # ── the box ──
     def _on_text(self):
