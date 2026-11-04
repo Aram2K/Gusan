@@ -300,21 +300,9 @@ def test_every_view_has_named_controls(shell, meetings_root):
 
 
 # ── Pro gate, consent, the session ───────────────────────────────────────────
-@pytest.mark.parametrize("tier", ["free", "guest"])
-def test_record_is_pro(shell, meetings_root, tier):
-    """Free and guests: Record opens the Pro window - no consent notice, no recording."""
+def test_free_record_starts(shell, meetings_root):
     session = FakeSession()
-    win, app = shell(tier, meeting_session=session)
-    page = _open(win)
-    page.list_view.start_card.record_btn.click()
-    assert ("_pro_upsell", "Meeting recording") in app.calls
-    assert not any(c[0] == "start" for c in session.calls)
-    assert page.current_view() == "list"
-
-
-def test_pro_record_starts(shell, meetings_root):
-    session = FakeSession()
-    win, app = shell("pro", meeting_session=session)
+    win, app = shell("free", meeting_session=session)
     page = _open(win)
     page.list_view.start_card.record_btn.click()
     assert ("_pro_upsell", "Meeting recording") not in app.calls

@@ -509,20 +509,16 @@ def test_a_calendar_reminder_is_the_toast(ctl, monkeypatch):
         assert ctl._calendar_busy() is True                      # one toast at a time
         ctl._on_calendar_remind(dict(m, id="ev2"))
         assert ctl._reminder is toast                            # reused
-        # Recording is Pro: a guest's Record closes the toast and gets the Pro window.
+        # Recording is free, so this reaches the consent notice. Refuse it:
+        # the real notice is modal and would sit forever offscreen. A plain
+        # Record is not a Pro upsell.
         import ui.recording_prompts as rp
         monkeypatch.setattr(rp, "ensure_recording_consent", lambda parent, app: False)
         assert ctl.record_from_calendar(m) is False
-        assert upsells == ["Meeting recording"]
+        assert upsells == []
         assert not toast.isVisible()
         assert ctl.meeting_session.is_busy is False
         assert ctl._calendar_busy() is False
-        # Pro reaches the consent notice instead. Refuse it: the real notice is
-        # modal and would sit forever offscreen.
-        monkeypatch.setattr(ctl, "is_pro", lambda: True)
-        assert ctl.record_from_calendar(m) is False
-        assert upsells == ["Meeting recording"]
-        assert ctl.meeting_session.is_busy is False
     finally:
         toast.hide_reminder()
 

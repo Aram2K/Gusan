@@ -214,7 +214,7 @@ GAP_MARK = "[...]"
 USER_ANSWER_HOLD_S = 12
 
 # Free / guest with no key of their own and no downloaded local model.
-NEEDS_PRO_ANSWERS = "Live Assistant comes with Gusan Pro."
+NEEDS_PRO_ANSWERS = "Answers need Pro, or your own key in Settings › Speech & AI."
 
 ASK_PLACEHOLDER = "Ask anything about the call or your screen…"
 ASK_SENT = "✓ Sent - answering…"
@@ -2492,10 +2492,34 @@ class LiveAssistOverlay(QWidget):
         self._refresh_hear()               # what Start would transcribe with follows the plan
 
     def _pro_blocks(self):
-        """Free and guests may open the card and look around; Start is Pro: the Pro window.
-        True when it blocked. Pro, and a controller that can't say its plan, are not blocked."""
+        """Free and guests: Start spends the month's one Live Assistant session.
+
+        True when it blocked. A controller without claim_live_session (tests,
+        and anything that can't ask the server) still opens the Pro window.
+        Pro, and a controller that can't say its plan, are not blocked."""
         if self._is_pro() is not False:
             return False
+        claim = getattr(self.app, "claim_live_session", None)
+        if callable(claim):
+            try:
+                result = claim()
+            except Exception:
+                logger.debug("Live Assistant: session claim failed", exc_info=True)
+                result = {"ok": False, "reason": "unavailable"}
+            if isinstance(result, dict) and result.get("ok"):
+                return False
+            if isinstance(result, dict) and result.get("reason") == "signed_out":
+                gate = getattr(self.app, "show_auth_gate", None)
+                if callable(gate):
+                    gate()
+                    return True
+            if isinstance(result, dict) and result.get("reason") == "unavailable":
+                self._set_status("Couldn't check your free session. Try again.")
+                return True
+            if isinstance(result, dict) and result.get("reason") == "allowance_used":
+                if hasattr(self.app, "_pro_upsell"):
+                    self.app._pro_upsell("Live Assistant session")
+                return True
         if hasattr(self.app, "_pro_upsell"):
             self.app._pro_upsell("Live Assistant")
         return True
@@ -3891,7 +3915,7 @@ class LiveAssistOverlay(QWidget):
             return
         if auto and self.rules_active():
             return                                # every sentence already gets its result (Live results)
-        if self._free_cannot_ask(auto):
+        if self._no_answer_engine_for_free():
             return                                # said so in the answer box; nothing went out
         if auto and ((self._suggesting and not getattr(self, "_suggest_auto", False))
                      or time.time() < getattr(self, "_hold_until", 0.0)):
@@ -3961,16 +3985,25 @@ class LiveAssistOverlay(QWidget):
                                  "ctx_args": ctx_args, "history_docs": tuple(self._qa_docs)},
                          daemon=True).start()
 
-    def _free_cannot_ask(self, auto=False):
-        """Free and guests open the card to look around: Ask / Answer / Solve screen are Pro.
-        The answer box says so (nothing is sent) and a click opens the Pro window. True when it
-        blocked; Pro, and a controller that can't say its plan, are never blocked."""
+    def _no_answer_engine_for_free(self):
+        """Free and guests open the card to look around: with their own key or
+        a downloaded local model Ask / Answer / Solve screen work as ever; with
+        neither, say so in the answer box at once (instead of "Thinking…" and a
+        failure) and send nothing. True when it said so."""
         if self._is_pro() is not False:
             return False
+        try:
+            engine, cfg = self._resolve_engine()
+        except Exception:
+            logger.debug("Live Assistant: engine check failed", exc_info=True)
+            return False
+        if engine is not None:
+            return False
         self._stop_stream_render()
-        self.txt_suggestion.setPlainText(NEEDS_PRO_ANSWERS)
-        if not auto and hasattr(self.app, "_pro_upsell"):
-            self.app._pro_upsell("Live Assistant")
+        self.txt_suggestion.setPlainText(
+            actions.no_live_engine_message(cfg)
+            if (cfg or {}).get("privacy_mode") or (cfg or {}).get("live_assist_writer") == "local"
+            else NEEDS_PRO_ANSWERS)
         return True
 
     def _resolve_engine(self):

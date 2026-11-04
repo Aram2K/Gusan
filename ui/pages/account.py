@@ -41,7 +41,7 @@ logger = logging.getLogger("transcribe")
 import pricing_policy
 
 PRICE_LINE = pricing_policy.PRICE_LINE
-FREE_SUB = "Dictation, Smart Actions and audio to text on this computer. Meetings and the Live Assistant come with Pro."
+FREE_SUB = "Dictation, Smart Actions and audio to text on this computer. One cloud meeting note and one Live Assistant session a month."
 # icon, name, detail (None = the green "Hidden on screen share" chip)
 PRO_FEATURES = (
     ("people", "Meetings with AI notes", "Record a call, get the notes"),

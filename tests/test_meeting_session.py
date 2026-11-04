@@ -489,7 +489,7 @@ class TestOutcome(_Base):
         self.assertFalse(listed["seen"])
 
     def test_an_engine_that_is_not_set_up_degrades_with_a_notice_outside_the_notes(self):
-        app = _App(pro=True, action_model="api_anthropic")        # cloud, no key
+        app = _App(pro=False, action_model="api_anthropic")       # cloud, no key
         s = self._record(app, notes="## Summary\n- formatter notes")
         self.assertEqual(s._proc.call_args[1]["model"], "rule_based")
         self.assertTrue(s._summary_downgraded)
@@ -3237,21 +3237,9 @@ class TestLiveSessionStart(_Base):
             self.assertEqual(app.recorder.started["speech"], want, pick)
             self.assertEqual(app.prewarmed, [{"speech": want}], pick)
 
-    def test_a_free_plan_never_records(self):
-        """Recording a meeting is Pro, from every place that starts one (the Meetings page, a
-        calendar reminder, the Live Assistant): the Pro window, and the recorder never starts."""
-        for source in ("page", "calendar", "live_assist"):
-            app = _App(pro=False)
-            ups = []
-            app._pro_upsell = lambda feature=None, ups=ups: ups.append(feature)
-            s = self.session(app)
-            ok, code, _msg = s.start("Call", source=source)
-            self.assertEqual((ok, code, ups), (False, "pro_required", ["Meeting recording"]), source)
-            self.assertFalse(app.recorder.started, source)
-
-    def test_other_languages_start_exactly_as_before(self):
-        for lang in ("en", "fr"):                      # (Armenian on Pro: Gusan Cloud, the test above)
-            app, s = self._start("live_assist", pro=True, live_assist_language=lang, backend="local")
+    def test_free_armenian_and_other_languages_start_exactly_as_before(self):
+        for pro, lang in ((False, "hy"), (True, "en"), (False, "en")):
+            app, s = self._start("live_assist", pro=pro, live_assist_language=lang, backend="local")
             self.assertEqual(app.recorder.started, {"capture_mode": "default_mic", "language": lang})
             self.assertEqual(app.prewarmed, [{}])                    # the plain prewarm, no speech
             self.assertIsNone(s._session_speech)

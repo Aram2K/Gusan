@@ -1,7 +1,7 @@
 """Live Assistant for everyone: Open works for Free and guests (the real floating
 card, never the Pro window), the PRO pill sits beside the page title and beside the
-card's title (hidden for Pro, it follows a plan change). Start, Ask, Answer and Solve
-screen are Pro: for Free they say so and open the Pro window, and nothing is sent."""
+card's title (hidden for Pro, it follows a plan change), and Start is where Free
+meets the Pro window. Nothing else on the card is a dead click for Free."""
 import time
 from types import SimpleNamespace
 from unittest import mock
@@ -357,8 +357,8 @@ def test_start_for_pro_goes_ahead(card):
     assert app.upsells == [] and len(started) == 1 and started[0]["source"] == "live_assist"
 
 
-# ── asking is Pro too ────────────────────────────────────────────────────────
-NO_ENGINE = "Live Assistant comes with Gusan Pro."
+# ── nothing else is a dead click for Free ────────────────────────────────────
+NO_ENGINE = "Answers need Pro, or your own key in Settings › Speech & AI."
 
 
 @pytest.fixture
@@ -371,12 +371,12 @@ def _resolves(app, engine, cfg=None):
     app._resolve_action_engine = lambda: (engine, dict(app.cfg, **(cfg or {})))
 
 
-def test_the_line_is_short_and_plain(card):
+def test_the_no_engine_line_is_short_and_plain(card):
     from ui import live_assist
     assert live_assist.NEEDS_PRO_ANSWERS == NO_ENGINE
 
 
-def test_free_asks_open_the_pro_window_and_send_nothing(card, no_local_model):
+def test_free_without_a_key_or_model_gets_a_line_not_a_dead_click(card, no_local_model):
     import actions
     c, app = card(pro=False)
     _resolves(app, actions.RULE_BASED_ID)
@@ -384,40 +384,62 @@ def test_free_asks_open_the_pro_window_and_send_nothing(card, no_local_model):
     with mock.patch("ui.live_assist.threading.Thread") as thread, \
             mock.patch("ui.live_assist.capture_screen_b64") as grab:
         gen = c._gen
-        clicks = 0
         for button in c.quick_buttons:                      # Answer, Follow-ups, Solve screen
             c.txt_suggestion.setPlainText("")
             button.click()
-            clicks += 1
             assert c.txt_suggestion.toPlainText() == NO_ENGINE, button.text()
         c.txt_suggestion.setPlainText("")
         c.btn_suggest.click()                               # the send button with nothing typed
-        clicks += 1
         assert c.txt_suggestion.toPlainText() == NO_ENGINE
         c.input_ask.setText("What is a mutex?")
+        c.txt_suggestion.setPlainText("")
         c.btn_suggest.click()                               # ...and with a question typed
-        clicks += 1
         assert c.txt_suggestion.toPlainText() == NO_ENGINE
         assert c.input_ask.text() == "What is a mutex?"     # the question stays, nothing "went out"
-        c.suggest("", auto=True)                            # never a Pro window on its own
-        assert not thread.called and not grab.called and c._gen == gen
-    assert app.upsells == ["Live Assistant"] * clicks
+        c.suggest("", auto=True)
+        assert c.txt_suggestion.toPlainText() == NO_ENGINE
+        assert not thread.called                            # nothing was sent anywhere
+        assert not grab.called                              # and no screen was captured for it
+        assert c._gen == gen
+    assert app.upsells == []                                # the Pro window is Start's job alone
 
 
-@pytest.mark.parametrize("engine, cfg, local", [
-    ("api_cerebras", {"action_api_key": "csk-test"}, None),     # their own key
-    ("rule_based", {}, "qwen_tiny"),                            # a downloaded local model
-    ("rule_based", {"privacy_mode": True}, None),               # Privacy mode
-])
-def test_a_key_a_local_model_or_privacy_mode_do_not_change_it(card, monkeypatch, engine, cfg, local):
+def test_guests_get_the_same_line(card, no_local_model):
     import actions
-    monkeypatch.setattr(actions, "_first_downloaded_local_model", lambda: local)
-    c, app = card(pro=False, **cfg)
-    _resolves(app, engine, cfg)
+    c, app = card(pro=False)                                # a guest is simply "not Pro" to the card
+    _resolves(app, actions.RULE_BASED_ID)
+    with mock.patch("ui.live_assist.threading.Thread") as thread:
+        c.suggest("Hello?")
+    assert c.txt_suggestion.toPlainText() == NO_ENGINE and not thread.called
+
+
+def test_free_with_their_own_key_still_asks_as_before(card, no_local_model):
+    import actions
+    c, app = card(pro=False)
+    _resolves(app, actions.API_CEREBRAS_ID, {"action_api_key": "csk-test"})
     with mock.patch("ui.live_assist.threading.Thread") as thread:
         c.suggest("What is a mutex?")
-    assert c.txt_suggestion.toPlainText() == NO_ENGINE and not thread.called
-    assert app.upsells == ["Live Assistant"]
+    assert thread.called and c.txt_suggestion.toPlainText() == "Thinking…"
+    assert c._gen == 1
+
+
+def test_free_with_a_downloaded_local_model_still_asks_as_before(card, monkeypatch):
+    import actions
+    monkeypatch.setattr(actions, "_first_downloaded_local_model", lambda: "qwen_tiny")
+    c, app = card(pro=False)
+    _resolves(app, actions.RULE_BASED_ID)
+    with mock.patch("ui.live_assist.threading.Thread") as thread:
+        c.suggest("What is a mutex?")
+    assert thread.called and c.txt_suggestion.toPlainText() == "Thinking…"
+
+
+def test_privacy_mode_without_a_local_model_names_the_download(card, no_local_model):
+    import actions
+    c, app = card(pro=False, privacy_mode=True)
+    _resolves(app, actions.RULE_BASED_ID)
+    with mock.patch("ui.live_assist.threading.Thread") as thread:
+        c.suggest("Hello?")
+    assert c.txt_suggestion.toPlainText() == actions.LOCAL_ANSWERS_MESSAGE and not thread.called
 
 
 def test_pro_is_never_stopped_by_the_free_check(card):
@@ -430,13 +452,15 @@ def test_pro_is_never_stopped_by_the_free_check(card):
     assert c.txt_suggestion.toPlainText() == "Thinking…"
 
 
-def test_a_controller_that_cannot_say_its_plan_is_not_blocked(card):
+def test_a_failing_engine_check_never_blocks(card):
     c, app = card(pro=False)
-    c._is_pro = lambda: None                                # no is_pro on the controller
-    app._resolve_action_engine = lambda: ("managed", {})
+
+    def boom():
+        raise RuntimeError("no engine table")
+    app._resolve_action_engine = boom
     with mock.patch("ui.live_assist.threading.Thread") as thread:
         c.suggest("What is a mutex?")
-    assert thread.called and app.upsells == []
+    assert thread.called                                    # the old path decides, as before
 
 
 # ── every other way to open it ───────────────────────────────────────────────
