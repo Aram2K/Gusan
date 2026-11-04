@@ -788,5 +788,93 @@ class TestArmenianModelHints(unittest.TestCase):
                                              False, None, False), "")
 
 
+
+class TestDictationSpeechPicker(unittest.TestCase):
+    """The Dictation page's Model list and Settings' Speech card: one choice."""
+    KEYS = {"api_keys": [{"id": "k1", "name": "Work Mistral", "provider": "api_mistral", "model": "", "base_url": ""},
+                         {"id": "k2", "name": "My OpenAI", "provider": "api_openai_compatible",
+                          "model": "gpt-5.4-mini", "base_url": ""}],
+            "api_key_secrets": {"k1": "mk-secret-1", "k2": "sk-secret-2"}}
+
+    def test_every_choice_is_listed_in_its_group(self):
+        rows = ec.dictation_speech_rows(self.KEYS, pro=False)
+        values = [r["value"] for r in rows]
+        self.assertEqual(values[:6], ["tiny", "base", "small", "medium", "large-v3-turbo", "large-v3"])
+        self.assertEqual(values[-3:], ["cloud", "cloud:best", "key:k1"])      # only a key that can transcribe
+        cloud = rows[values.index("cloud:best")]
+        self.assertEqual((cloud["group"], cloud["tags"], cloud["title"]),
+                         (ec.GROUP_GUSAN_CLOUD, ("cloud", "pro"), "Best accuracy"))
+        self.assertIn("Work Mistral", rows[values.index("key:k1")]["title"])
+        self.assertEqual((rows[0]["speed"], rows[0]["accuracy"]), (5, 2))       # the dots of Whisper Tiny
+
+    def test_a_source_keeps_its_group_only(self):
+        self.assertEqual([r["value"] for r in ec.dictation_speech_rows({}, source="cloud")], ["cloud", "cloud:best"])
+        self.assertEqual(ec.dictation_speech_rows({}, source="own_key"), [])   # no saved key: nothing to list
+
+    def test_value_follows_the_settings(self):
+        self.assertEqual(ec.dictation_speech_value({"whisper_model": "small"}), "small")
+        self.assertEqual(ec.dictation_speech_value({"backend": "managed"}), "cloud")
+        self.assertEqual(ec.dictation_speech_value({"backend": "managed", "managed_speech_profile": "best"}),
+                         "cloud:best")
+        self.assertEqual(ec.dictation_speech_value({"backend": "google"}), "own:google")
+        self.assertEqual(ec.dictation_speech_value(dict(self.KEYS, backend="mistral", speech_key_id="k1")), "key:k1")
+        self.assertEqual(ec.dictation_speech_value({"backend": "managed", "privacy_mode": True,
+                                                    "whisper_model": "base"}), "base")
+
+    def test_a_pick_writes_what_speech_runs_on_writes(self):
+        self.assertEqual(ec.set_dictation_speech({}, "medium")["changes"],
+                         {"backend": "local", "whisper_model": "medium"})
+        self.assertEqual(ec.set_dictation_speech({}, "cloud", pro=False)["problem"], "pro")
+        best = ec.set_dictation_speech({}, "cloud:best", pro=True)["changes"]
+        self.assertEqual((best["backend"], best["managed_speech_profile"]), ("managed", "best"))
+        self.assertEqual(ec.set_dictation_speech({}, "cloud", pro=True)["changes"]["managed_speech_profile"], "fast")
+        key = ec.set_dictation_speech(self.KEYS, "key:k1")["changes"]
+        self.assertEqual((key["backend"], key["mistral_api_key"], key["speech_key_id"]), ("mistral", "mk-secret-1", "k1"))
+        self.assertEqual(ec.set_dictation_speech(dict(self.KEYS, api_key_secrets={}), "key:k1")["problem"], "needs_key")
+        self.assertEqual(ec.set_dictation_speech({}, "small", downloaded=lambda m: False)["problem"],
+                         "needs_download")
+
+    def test_the_cloud_profile_names_what_runs(self):
+        self.assertEqual(ec.speech_engine({"backend": "managed", "managed_speech_profile": "best"}, True)["model_name"],
+                         "Best accuracy")
+
+
+class TestWriterPicker(unittest.TestCase):
+    KEYS = TestDictationSpeechPicker.KEYS
+
+    def test_rows_per_choice(self):
+        cloud = [r["value"] for r in ec.writer_rows({}, choice="cloud")]
+        self.assertEqual(cloud, ["cloud", "cloud:openai", "cloud:claude", "cloud:mistral", "cloud:gemini"])
+        self.assertEqual([r["value"] for r in ec.writer_rows({}, choice="local")], list(ec.hardware.LOCAL_AI_INFO))
+        self.assertEqual(ec.writer_rows({}, choice="own_key"), [])             # no key saved: nothing to list
+        own = ec.writer_rows(self.KEYS, choice="own_key")
+        self.assertEqual([r["value"] for r in own], ["key:k1", "key:k2"])      # every key can write
+        self.assertEqual(own[1]["title"], "GPT-5.4 mini · My OpenAI")
+
+    def test_value_round_trips(self):
+        self.assertEqual(ec.parse_writer_value("cloud"), ("cloud", None, None))
+        self.assertEqual(ec.parse_writer_value("cloud:claude"), ("cloud", None, "claude"))
+        self.assertEqual(ec.parse_writer_value("key:k2"), ("key", "k2", None))
+        self.assertEqual(ec.parse_writer_value("qwen_3b"), ("local", None, "qwen_3b"))
+        self.assertEqual(ec.writer_value({"action_model": "qwen_3b"}), "qwen_3b")
+        self.assertEqual(ec.writer_value({"action_model": "managed", "cloud_writer_model": "claude"}), "cloud:claude")
+
+    def test_picks_write_the_engine_settings(self):
+        res = ec.set_writer_value({}, "cloud:claude", pro=True)
+        self.assertEqual((res["changes"]["action_model"], res["changes"]["cloud_writer_model"]),
+                         (actions.API_MANAGED_ID, "claude"))
+        self.assertEqual(ec.set_writer_value({}, "cloud", pro=True)["changes"]["cloud_writer_model"], "")
+        self.assertEqual(ec.set_writer_value({}, "cloud:gemini", pro=False)["problem"], "pro")
+        key = ec.set_writer_value(self.KEYS, "key:k2")["changes"]
+        self.assertEqual((key["action_model"], key["action_api_key"], key["action_api_model"], key["writer_key_id"]),
+                         (actions.API_OPENAI_ID, "sk-secret-2", "gpt-5.4-mini", "k2"))
+        gem = dict(self.KEYS, api_keys=[{"id": "g", "name": "G", "provider": "api_gemini", "model": "",
+                                         "base_url": ""}], api_key_secrets={"g": "AIza-1"})
+        self.assertEqual(ec.set_writer_value(gem, "key:g")["changes"]["google_api_key"], "AIza-1")
+
+    def test_the_cloud_writer_is_named(self):
+        self.assertEqual(ec.cloud_writer_name({"cloud_writer_model": "openai"}), "OpenAI GPT")
+        self.assertEqual(ec.cloud_writer_name({"cloud_writer_model": "nonsense"}), "DeepSeek V4.1 Flash")
+
 if __name__ == "__main__":
     unittest.main()

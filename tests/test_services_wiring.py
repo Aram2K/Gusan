@@ -71,7 +71,7 @@ class TestConfigMigration(unittest.TestCase):
         c = self._load({"language": "multi"})
         self.assertEqual(c["file_language"], "multi")
         self.assertEqual(c["config_schema_version"], 3)
-        self.assertEqual(c["smart_actions_hotkey"], "alt+s")      # the Smart Actions shortcut
+        self.assertEqual(c["smart_actions_hotkey"], main.hotkeys.SMART_ACTIONS_DEFAULT)  # the Smart Actions shortcut
 
     def test_a_2_0_config_is_left_alone(self):
         c = self._load({"language": "ru", "config_schema_version": 2})
@@ -1117,6 +1117,7 @@ class TestKeyringWritesOnlyChanges(unittest.TestCase):
             disk = json.load(f)
         self.assertEqual((disk["google_api_key"], disk["action_api_key"]), ("", ""))
         self.assertEqual((disk["notion_api_key"], disk["notion_refresh_token"]), ("", ""))
+        self.assertEqual(disk["api_key_secrets"], {})                   # Settings › My API keys: in the keyring
 
     def test_a_keyring_that_refuses_keeps_trying_and_the_key_stays_on_disk(self):
         writes = []

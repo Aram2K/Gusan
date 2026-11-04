@@ -29,13 +29,13 @@ Speech is turned into text on your computer by default.
 
 | | |
 |---|---|
-| 🎙 **Dictation** `Alt+R` | Press, speak, press Enter: your words land at the cursor, in any app. Filler words like "um" are removed (you can turn that off). Works in 99 languages (Whisper), detected automatically. |
-| ✍️ **Smart Actions** `Alt+S` · Pro | Say what you want ("email Anna: the demo moves to Thursday") and get the finished text with real formatting. Five free tries with a free account, written by a local AI model or your own key; Pro uses Gusan Cloud. |
+| 🎙 **Dictation** `Alt+R` (`Control+R` on a Mac) | Press, speak, press Enter: your words land at the cursor, in any app. Filler words like "um" are removed (you can turn that off). Works in 99 languages (Whisper), detected automatically. |
+| ✍️ **Smart Actions** `Alt+S` (`Control+S` on a Mac) · Pro | Say what you want ("email Anna: the demo moves to Thursday") and get the finished text with real formatting. Five free tries with a free account, written by a local AI model or your own key; Pro uses Gusan Cloud. |
 | 🎧 **Meetings** · Pro | Records both sides of a call on Windows (your microphone on a Mac), labels who spoke and writes notes with action items. Export to Word, Markdown or Notion. |
 | 🕶 **Live Assistant** `Ctrl+Alt+A` · Pro | A private copilot over your calls: live transcript, answers the moment you're asked something, aware of your screen. On a Mac it hears your microphone only. |
 | 📄 **Audio to text** | Drop an audio or video file of any length. Get a transcript with speakers and timestamps, and a Word file if you want one. |
 
-Also: mixed languages in one sentence · a dictionary for names and terms · your recent dictations, meetings and files on the Home page · a tray icon · start at login. (On a Mac, `Alt` is `Option`.)
+Also: mixed languages in one sentence · a dictionary for names and terms · your recent dictations, meetings and files on the Home page · a tray icon · start at login. (On a Mac, `Alt` in the other shortcuts is `Option`.)
 
 ## Private by default
 
@@ -48,7 +48,7 @@ Also: mixed languages in one sentence · a dictionary for names and terms · you
 
 ## Free and Pro
 
-**Free:** unlimited dictation, Smart Actions and audio to text on this computer (or with your own key). One cloud meeting note and one Live Assistant session each calendar month.
+**Free:** unlimited dictation, Smart Actions and audio to text on this computer (or with your own key). Meetings and the Live Assistant come with Gusan Pro (on Free you can open the Live Assistant to look around).
 **Gusan Pro:** unlimited Gusan Cloud transcription, meeting notes, Live Assistant and Smart Actions. €15.99/month, €9.99/month with a 12-month commitment, or €199 lifetime for the first 200 people. See [pricing](https://gusan.aibuben.xyz/#pricing).
 
 ## Install

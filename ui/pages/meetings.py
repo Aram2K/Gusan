@@ -596,14 +596,17 @@ class MeetingsPage(QWidget):
     def record(self):
         """Record a meeting: consent notice -> session.start.
 
-        Recording is free. A cloud meeting note is metered (one a month) when
-        the notes engine is Gusan Cloud; the server says so, and the app asks
-        to upgrade."""
+        Recording is Pro: a Free or guest plan gets the Pro window instead (before the
+        consent notice)."""
         card = self.list_view.start_card
         card.show_error("")
         s = self.session()
         if s is not None and getattr(s, "phase", "") in ("recording", "paused"):
             self.show_live()
+            return False
+        from meeting_session import MeetingSession, PRO_RECORD_FEATURE
+        if MeetingSession.plan_blocks(self.app):
+            self.call("_pro_upsell", PRO_RECORD_FEATURE)
             return False
         if not self.ensure_consent():
             return False

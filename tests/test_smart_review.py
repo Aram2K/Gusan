@@ -170,19 +170,19 @@ class TestAltSArmedEndToEnd(unittest.TestCase):
 
     def test_a_fresh_install(self):
         cfg, ok, added = self._arm()                                  # no config.json yet
-        self.assertEqual((cfg["smart_actions_hotkey"], cfg["hotkey"]), ("alt+s", "alt+r"))
-        self.assertEqual((ok, added), (True, ["alt+s"]))
+        self.assertEqual((cfg["smart_actions_hotkey"], cfg["hotkey"]), (main.hotkeys.SMART_ACTIONS_DEFAULT, main.hotkeys.DICTATION_DEFAULT))
+        self.assertEqual((ok, added), (True, [main.hotkeys.SMART_ACTIONS_DEFAULT]))
 
     def test_a_1_9_4_config(self):
         cfg, ok, added = self._arm({"hotkey": "alt+r", "live_assist_hotkey": "ctrl+alt+a",
                                     "output_action": "smart_auto", "config_schema_version": 1,
                                     "whisper_model": "small"})
-        self.assertEqual((cfg["smart_actions_hotkey"], cfg["config_schema_version"]), ("alt+s", 3))
+        self.assertEqual((cfg["smart_actions_hotkey"], cfg["config_schema_version"]), (main.hotkeys.SMART_ACTIONS_DEFAULT, 3))
         self.assertEqual(cfg["output_action"], "smart_auto")          # kept for 1.9.x (never read)
-        self.assertEqual((ok, added), (True, ["alt+s"]))
+        self.assertEqual((ok, added), (True, [main.hotkeys.SMART_ACTIONS_DEFAULT]))
 
     def test_a_1_9_4_config_whose_dictation_key_is_alt_s(self):
-        cfg, ok, added = self._arm({"hotkey": "alt+s", "config_schema_version": 1})
+        cfg, ok, added = self._arm({"hotkey": main.hotkeys.SMART_ACTIONS_DEFAULT, "config_schema_version": 1})
         self.assertEqual(cfg["smart_actions_hotkey"], "")             # the page shows "Set shortcut"
         self.assertEqual((ok, added), (False, []))
 

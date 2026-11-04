@@ -72,6 +72,7 @@ from PySide6.QtGui import QFontMetricsF, QGuiApplication, QLinearGradient, QPain
 from PySide6.QtWidgets import (QAbstractButton, QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout, QLabel,
                                QLayout, QLineEdit, QSizePolicy, QVBoxLayout, QWidget)
 
+import hotkeys
 import rich_text
 from ui import theme
 from ui.components import Button, Card, Chip, IconButton, Keycaps, PageHeader, ProTag, clipboard, icons, label
@@ -132,7 +133,7 @@ def cfg_of(app):
     return cfg if isinstance(cfg, dict) else {}
 
 
-SMART_HOTKEY_DEFAULT = "alt+s"          # main.DEFAULT["smart_actions_hotkey"] (D2)
+SMART_HOTKEY_DEFAULT = hotkeys.SMART_ACTIONS_DEFAULT          # main.DEFAULT["smart_actions_hotkey"] (D2)
 
 
 def smart_hotkey(app):
@@ -1314,7 +1315,7 @@ class HomePage(QWidget):
         lay = QHBoxLayout()
         lay.setContentsMargins(0, 6, 0, 4)
         lay.setSpacing(36)
-        self.hero_keys = HeroKeys(cfg_of(self.app).get("hotkey", "alt+r"), 92, 38, self, max_width=380)
+        self.hero_keys = HeroKeys(cfg_of(self.app).get("hotkey", hotkeys.DICTATION_DEFAULT), 92, 38, self, max_width=380)
         lay.addWidget(self.hero_keys, 0, Qt.AlignVCenter)
         col = QVBoxLayout()
         col.setSpacing(10)
@@ -1349,7 +1350,7 @@ class HomePage(QWidget):
             lb.setPixmap(icons.pixmap(name, 22, token))
             return lb
 
-        dict_keys = KeysOrText(cfg_of(self.app).get("hotkey", "alt+r"))
+        dict_keys = KeysOrText(cfg_of(self.app).get("hotkey", hotkeys.DICTATION_DEFAULT))
         self.tile_dictate = Tile(icon("mic", "blue"), "Dictate", dict_keys)
         # D7: the Smart Actions shortcut's keycaps, like the Dictate tile.
         smart_keys = KeysOrText(smart_hotkey(self.app), empty_text="Set shortcut")
@@ -1492,7 +1493,7 @@ class HomePage(QWidget):
     # ── hero ──
     def _update_hero(self):
         cfg = cfg_of(self.app)
-        hk = cfg.get("hotkey", "alt+r")
+        hk = cfg.get("hotkey", hotkeys.DICTATION_DEFAULT)
         self.hero_keys.set_hotkey(hk)
         try:
             self.tile_dictate.sub.set_hotkey(hk)
@@ -1689,7 +1690,7 @@ class HomePage(QWidget):
             elif cfg.get("save_history", True) is False:
                 text = "History is off."
             else:
-                hk = " + ".join(keycap_labels(cfg_of(self.app).get("hotkey", "alt+r"))) or "your shortcut"
+                hk = " + ".join(keycap_labels(cfg_of(self.app).get("hotkey", hotkeys.DICTATION_DEFAULT))) or "your shortcut"
                 text = "Nothing yet. Press %s in any app and talk." % hk
             self.list_lay.addWidget(self._empty(text))
             return

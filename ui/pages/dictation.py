@@ -69,11 +69,13 @@ from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QCheckBox, QComboB
                                QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout, QLabel, QMenu, QPlainTextEdit,
                                QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
-from ui import privacy_prompt, theme
+import hotkeys
+from ui import hy_model, privacy_prompt, theme
 from ui.components import (Button, Card, Divider, IconButton, Keycaps, PageHeader, SettingRow, SettingsRail,
                            Toggle, icons, label, mini_prompt, row_actions)
 from ui.components.controls import keycap_labels
 from ui.components.hotkey_capture import HotkeyCaptureButton
+from ui.components.model_combo import MARK_DOWNLOAD, PlainNameCombo, combo as _rail_combo
 from ui.pages import home as H
 
 logger = logging.getLogger("transcribe")
@@ -94,10 +96,14 @@ MIX_LANGUAGES = [("en", "English"), ("ar", "Arabic"), ("hy", "Armenian"), ("fr",
 MIX_HINT = "Tick two or more. Each word stays in the language you spoke."
 
 UPSELL_CLOUD = "Fast cloud transcription"
+# The rail's "Model" picker (engine_choice.dictation_speech_rows): the same choice as
+# Settings › Speech & AI › Speech. As wide as Language, so the two line up (the longest names
+# shorten in the middle; the open list shows them whole).
+MODEL_COMBO_WIDTH = 176
 
 # The quiet line under the practice box (D7).
 SMART_HOTKEY_KEY = "smart_actions_hotkey"
-SMART_HOTKEY_DEFAULT = "alt+s"                 # main.DEFAULT (D2)
+SMART_HOTKEY_DEFAULT = hotkeys.SMART_ACTIONS_DEFAULT                 # main.DEFAULT (D2)
 SMART_LINE = "For emails, lists and translations press"
 SMART_LINE_NO_KEY = "For emails, lists and translations, use"
 SMART_LINK = "Smart Actions"
@@ -588,7 +594,7 @@ class DictationPage(QWidget):
         lcol = QVBoxLayout()
         lcol.setContentsMargins(0, 0, 0, 0)
         lcol.setSpacing(20)
-        self.hero_keys = H.HeroKeys(H.cfg_of(self.app).get("hotkey", "alt+r"), 76, 31, card, max_width=236)
+        self.hero_keys = H.HeroKeys(H.cfg_of(self.app).get("hotkey", hotkeys.DICTATION_DEFAULT), 76, 31, card, max_width=236)
         lcol.addWidget(self.hero_keys, 0, Qt.AlignLeft)
         self.hero_caption = H.text_label("Press to talk.\nPress again to paste.", 20, 600, "ink", display=True,
                                          parent=card)
@@ -715,7 +721,7 @@ class DictationPage(QWidget):
     def _build_rail(self):
         cfg = H.cfg_of(self.app)
         rail = SettingsRail("Dictation settings", icon="gear", parent=self)
-        self.shortcut = HotkeyCaptureButton(cfg.get("hotkey", "alt+r"), accessible_name="Dictation shortcut")
+        self.shortcut = HotkeyCaptureButton(cfg.get("hotkey", hotkeys.DICTATION_DEFAULT), accessible_name="Dictation shortcut")
         self.shortcut.captured.connect(self._on_hotkey_captured)
         self.shortcut.refused.connect(self._show_shortcut_problem)
         self.shortcut.capturing_changed.connect(self._on_capturing)
@@ -758,6 +764,15 @@ class DictationPage(QWidget):
             grid.addWidget(cb, i // 3, i % 3)
         self.row_mix = rail.add_row(SettingRow("Languages you mix", self.mix_box, hint=MIX_HINT, stacked=True))
         self.row_mix.setVisible(str(cfg.get("language") or "auto") == "multi")
+
+        # What transcribes: every model on this computer, Gusan Cloud (PRO) and your own keys.
+        self.model_combo = _rail_combo(PlainNameCombo(), "Speech model", width=MODEL_COMBO_WIDTH)
+        self.model_combo.enable_row_marks()   # whole rows: chips and a download icon at the right
+        self.model_combo.setPlaceholderText("Select a model")       # the model set isn't on this computer
+        self._pending_model = None            # a pick waiting for its download
+        self._fill_model_combo()
+        self.model_combo.currentIndexChanged.connect(self._on_model)
+        self.row_model = rail.add_row(SettingRow("Model", self.model_combo))
 
         self.toggles = {}
 
@@ -814,7 +829,14 @@ class DictationPage(QWidget):
     def _on_recording_changed(self, *_):
         self._poll_recording()
 
-    def _on_download_event(self, *_):
+    def _on_download_event(self, *args):
+        # finished(name, state, msg): a pick that waited for its download is used now.
+        if (len(args) >= 2 and self._pending_model and args[0] == self._pending_model
+                and args[1] in ("ready", "failed")):
+            mid, self._pending_model = self._pending_model, None
+            if args[1] == "ready":
+                self._apply_model(mid)
+        self._mark_model_rows()
         self._update_runs_on()
 
     # ── config -> controls ──
@@ -823,7 +845,7 @@ class DictationPage(QWidget):
         cfg = H.cfg_of(self.app)
         self._syncing = True
         try:
-            hk = cfg.get("hotkey", "alt+r")
+            hk = cfg.get("hotkey", hotkeys.DICTATION_DEFAULT)
             self.hero_keys.set_hotkey(hk)
             if not self.shortcut.is_capturing():
                 self.shortcut.set_hotkey(hk)
@@ -844,6 +866,7 @@ class DictationPage(QWidget):
             self.bar_preview.set_look(bar_theme(cfg))
             self._sync_smart_line()
             self._sync_cloud()
+            self._fill_model_combo()
             self._update_runs_on()
             self._update_private_hint()
         finally:
@@ -970,6 +993,128 @@ class DictationPage(QWidget):
         if self._apply("overlay_theme", key):
             self.bar_preview.set_look("dark" if key == "dark" else "light")
 
+    # ── Model (the dictation speech model) ──
+    def _model_rows(self):
+        try:
+            import engine_choice
+            return engine_choice.dictation_speech_rows(H.cfg_of(self.app), H.is_pro(self.app))
+        except Exception:
+            logger.debug("dictation_speech_rows failed", exc_info=True)
+            return []
+
+    def _model_value(self):
+        try:
+            import engine_choice
+            return engine_choice.dictation_speech_value(H.cfg_of(self.app))
+        except Exception:
+            return str(H.cfg_of(self.app).get("whisper_model") or "base")
+
+    def _fill_model_combo(self):
+        """The rows, then what is really set selected (never a pick that did not happen)."""
+        box = self.model_combo
+        box.blockSignals(True)
+        try:
+            box.fill_rows(self._model_rows())
+            value = self._model_value()
+            idx = box.findData(value) if value else -1
+            try:
+                import hardware
+                if hardware.is_speech_id(value) and self._model_state(value) in ("missing", "failed"):
+                    idx = -1      # not on this computer: "Select a model" - a pick asks to download it
+            except Exception:
+                pass
+            box.setCurrentIndex(idx if idx >= 0 and not box.is_heading(idx) else -1)
+        finally:
+            box.blockSignals(False)
+        self._mark_model_rows()
+
+    def _model_state(self, mid):
+        """A local model's state in app.downloads ("ready", "missing", ...), or None when unknown."""
+        dl = getattr(self.app, "downloads", None)
+        if dl is None or not callable(getattr(dl, "state", None)):
+            return None
+        try:
+            return dl.state(mid)
+        except Exception:
+            return None
+
+    def _mark_model_rows(self):
+        """A download icon (and its size) on a local model that is not on this computer."""
+        box = self.model_combo
+        try:
+            import hardware
+        except Exception:
+            return
+        for i in range(box.count()):
+            if box.is_heading(i):
+                continue
+            value = str(box.itemData(i) or "")
+            mark, note = "", ""
+            if hardware.is_speech_id(value) and self._model_state(value) in ("missing", "failed"):
+                mark = MARK_DOWNLOAD
+                note = getattr(hardware.info(value), "size", "") or ""
+            box.set_choice_mark(i, mark, note)
+
+    def _on_model(self, _i):
+        """A row was picked. Anything that has to ask first (Pro, Privacy mode, a download, a
+        missing key) puts the real choice back at once, then asks."""
+        if self._syncing:
+            return
+        value = str(self.model_combo.currentData() or "")
+        self._fill_model_combo()                      # back to what is really set, until it applies
+        if not value:
+            return
+        import hardware
+        if hardware.is_speech_id(value) and self._model_state(value) in ("missing", "failed"):
+            if hy_model.is_hy(value):
+                ok = hy_model.confirm_download(self, "Dictation")
+            else:
+                info = hardware.MODEL_INFO.get(value)
+                ok = mini_prompt.confirm_download(self, getattr(info, "plain", "") or value,
+                                                  getattr(info, "real", ""), getattr(info, "size", ""))
+            if ok:
+                self._download_model(value)
+            return
+        self._apply_model(value)
+
+    def _download_model(self, mid):
+        dl = getattr(self.app, "downloads", None)
+        try:
+            started = bool(dl.start(mid))
+        except Exception:
+            logger.warning("Speech model download failed to start", exc_info=True)
+            started = False
+        if started or self._model_state(mid) == "downloading":
+            self._pending_model = mid                 # used once it is on this computer
+        elif self._model_state(mid) == "ready":
+            self._apply_model(mid)
+        self._mark_model_rows()
+
+    def _apply_model(self, value, turn_off_privacy=False):
+        import engine_choice
+        dl = getattr(self.app, "downloads", None)
+        downloaded = (lambda m: self._model_state(m) == "ready") if dl is not None else None
+        res = engine_choice.set_dictation_speech(self.app, value, downloaded=downloaded,
+                                                 turn_off_privacy=turn_off_privacy)
+        problem = res.get("problem")
+        if res.get("ok"):
+            changes = res.get("changes") or {}
+            if changes:
+                H.call(self.app, "set_settings", changes)
+            QTimer.singleShot(0, self.sync_from_cfg)
+        elif problem == "pro":
+            H.call(self.app, "_pro_upsell", res.get("upsell") or UPSELL_CLOUD)
+        elif problem == "privacy_mode":
+            if privacy_prompt.confirm_turn_off_privacy(self, engine_choice.GUSAN_CLOUD
+                                                       if engine_choice.dictation_speech_source(value) == "cloud"
+                                                       else "your own key"):
+                self._apply_model(value, turn_off_privacy=True)
+        elif problem == "needs_key":
+            # The keys live in Settings › Speech & AI › My API keys.
+            H.go(self, self.app, "settings", section="speech", focus="api_keys")
+        elif problem == "needs_download":
+            self._download_model(value)
+
     def _on_cloud(self, on):
         if self._syncing:
             return
@@ -1026,7 +1171,7 @@ class DictationPage(QWidget):
 
     def _on_hotkey_captured(self, combo):
         cfg = H.cfg_of(self.app)
-        old = cfg.get("hotkey", "alt+r")
+        old = cfg.get("hotkey", hotkeys.DICTATION_DEFAULT)
         ok = H.call(self.app, "set_setting", "hotkey", combo)
         if ok:
             self._show_shortcut_problem("")
@@ -1341,6 +1486,10 @@ class DictationPage(QWidget):
         return self.width()
 
     def _reflow(self):
+        if getattr(self, "rail", None) is None:
+            # Still being built: the Model picker draws its chips while the rail is made, and
+            # that can resize the page before there is a rail to move. The first show reflows.
+            return
         stacked = self._available_width() < self.WIDE
         if stacked == self._stacked:
             return

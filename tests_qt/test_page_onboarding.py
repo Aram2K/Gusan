@@ -287,7 +287,7 @@ def test_model_step_uses_the_hardware_probe(wizard):
     assert m.cards["base"].note_text() == ""
     assert "Whisper Small" in m.cards["small"].accessibleName()
     assert "Best for your computer" in m.cards["small"].accessibleName()
-    assert m.cta.text() == "Download Balanced · 460 MB"
+    assert m.cta.text() == "Download Whisper Small · 460 MB"
     labels = _texts(m)
     for txt in ("Pick your speech model", "Whisper Base · 140 MB", "Whisper Small · 460 MB",
                 "Whisper Large v3 Turbo · 1.6 GB", "Fast · Cloud", "Whisper Tiny · 75 MB",
@@ -301,9 +301,9 @@ def test_model_cta_follows_the_pick(wizard):
     w, app = wizard()
     w.go("model")
     m = w.model
-    for mid, text in (("base", "Download Fast · 140 MB"), ("large-v3-turbo", "Download Most accurate · 1.6 GB"),
-                      ("tiny", "Download Lightest · 75 MB"), ("medium", "Download Accurate · 1.4 GB"),
-                      ("large-v3", "Download Maximum · 3 GB")):
+    for mid, text in (("base", "Download Whisper Base · 140 MB"), ("large-v3-turbo", "Download Whisper Large v3 Turbo · 1.6 GB"),
+                      ("tiny", "Download Whisper Tiny · 75 MB"), ("medium", "Download Whisper Medium · 1.4 GB"),
+                      ("large-v3", "Download Whisper Large v3 · 3 GB")):
         m.buttons()[mid].click()
         assert m.selected() == mid
         assert m.cta.text() == text
@@ -526,7 +526,7 @@ def test_hardware_that_never_answers_drops_checking(wizard):
     assert "Checking…" in chip_texts() and w._hw_timer.isActive()
     w._hw_timer.timeout.emit()                         # 15 s later, still nothing
     assert "Checking…" not in chip_texts() and not m.your_computer.isVisibleTo(m)
-    assert m.selected() == "base" and m.cta.text() == "Download Fast · 140 MB"
+    assert m.selected() == "base" and m.cta.text() == "Download Whisper Base · 140 MB"
     app.downloads.hardware_ready.emit(snapshot())      # a late answer still fills the chips
     assert chip_texts()[:3] == ["i7-1260P · 12 cores", "16 GB memory", "Intel Iris Xe"]
     assert m.your_computer.isVisibleTo(m) and m.selected() == "small"
@@ -604,7 +604,7 @@ def test_keyboard_focus_follows_the_steps(wizard):
     from PySide6.QtTest import QTest
     QTest.keyClick(w.model.cards["small"], Qt.Key_Right)       # a radio group: arrows pick
     assert w.model.selected() == "large-v3-turbo" and w.focusWidget() is w.model.cards["large-v3-turbo"]
-    assert w.model.cta.text() == "Download Most accurate · 1.6 GB"
+    assert w.model.cta.text() == "Download Whisper Large v3 Turbo · 1.6 GB"
     QTest.keyClick(w.model.cards["large-v3-turbo"], Qt.Key_Left)
     assert w.model.selected() == "small"
     w.activateWindow()

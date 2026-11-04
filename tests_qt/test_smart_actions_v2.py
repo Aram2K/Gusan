@@ -236,7 +236,7 @@ def test_a_whisper_model_not_on_disk_asks_then_downloads_and_is_saved(page_for, 
     assert combo.choice_mark(combo.findData("small")) == "download"        # the icon at the row's right
     assert combo.choice_mark(combo.findData("base")) == ""                 # on disk: nothing
     combo.setCurrentIndex(combo.findData("small"))
-    assert asked.calls == [("Download Balanced · Whisper Small?",
+    assert asked.calls == [("Download Whisper Small?",
                             "460 MB - Smart Actions will use it once it is ready.", "Download", "Not now")]
     assert app.downloads.started == ["small"]
     assert settings(app, "smart_actions_speech_model") == [("set_setting", "smart_actions_speech_model", "small")]
@@ -264,7 +264,7 @@ def test_not_now_leaves_everything_unchanged(page_for, asked):
     combo = page.speech_combo
     assert combo.currentData() == "base"
     combo.setCurrentIndex(combo.findData("medium"))
-    assert len(asked.calls) == 1 and asked.calls[0][0] == "Download Accurate · Whisper Medium?"
+    assert len(asked.calls) == 1 and asked.calls[0][0] == "Download Whisper Medium?"
     assert asked.calls[0][1].startswith("1.4 GB - ")
     assert app.downloads.started == []
     assert not settings(app, "smart_actions_speech_model")

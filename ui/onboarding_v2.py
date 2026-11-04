@@ -89,6 +89,7 @@ from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QCheckBox, QComboB
                                QWidget)
 
 import hardware
+import hotkeys
 import mic_monitor
 from app_info import APP_NAME
 from ui import theme
@@ -168,7 +169,7 @@ def hotkey_refusal(cfg, combo):
     cfg = cfg or {}
     combo_n = _norm_hotkey(combo)
     shown = " + ".join(keycap_labels(combo)) or str(combo or "")
-    smart = cfg.get("smart_actions_hotkey", "alt+s")          # main.DEFAULT when missing
+    smart = cfg.get("smart_actions_hotkey", hotkeys.SMART_ACTIONS_DEFAULT)          # main.DEFAULT when missing
     if combo_n and combo_n == _norm_hotkey(smart):
         return "%s runs Smart Actions. Pick another." % shown
     if combo_n and combo_n == _norm_hotkey(cfg.get("live_assist_hotkey")):
@@ -1248,7 +1249,7 @@ class LitKeys(QWidget):
     KEY = 64
     MARGIN = 8                  # room for the glow and the shadow
 
-    def __init__(self, hotkey="alt+r", parent=None):
+    def __init__(self, hotkey=hotkeys.DICTATION_DEFAULT, parent=None):
         super().__init__(parent)
         self._keys = []
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
@@ -1328,7 +1329,7 @@ class BigKeys(QWidget):
     MARGIN = 12
     GAP = 8
 
-    def __init__(self, hotkey="alt+r", parent=None):
+    def __init__(self, hotkey=hotkeys.DICTATION_DEFAULT, parent=None):
         super().__init__(parent)
         self._keys = []
         self._widths = []
@@ -1662,7 +1663,7 @@ class HelloStep(_Step):
         v.addSpacing(34 - m)
         keys = QHBoxLayout()
         keys.setSpacing(18 - m)
-        self.keys = BigKeys(_cfg(app).get("hotkey") or "alt+r", parent=self.hero)
+        self.keys = BigKeys(_cfg(app).get("hotkey") or hotkeys.DICTATION_DEFAULT, parent=self.hero)
         keys.addWidget(self.keys, 0, Qt.AlignVCenter)
         keys.addWidget(text_label("in any app", 15, 400, "muted", parent=self.hero), 0, Qt.AlignVCenter)
         keys.addStretch(1)
@@ -1698,7 +1699,7 @@ class HelloStep(_Step):
         self.screen.set_animate(on)
 
     def refresh(self):
-        self.keys.set_hotkey(_cfg(self.app).get("hotkey") or "alt+r")
+        self.keys.set_hotkey(_cfg(self.app).get("hotkey") or hotkeys.DICTATION_DEFAULT)
         self.signin_row.setVisible(not _signed_in(self.app))
 
     def enter(self):
@@ -1916,7 +1917,7 @@ class ModelStep(_Step):
         if info is None or dl is None or state in ("ready", "downloading"):
             _set_button(self.cta, "Next", kind="primary")
         else:
-            _set_button(self.cta, "Download %s · %s" % (info.plain, info.size), icon="download", kind="primary")
+            _set_button(self.cta, "Download %s · %s" % (info.real, info.size), icon="download", kind="primary")
 
     def show_problem(self, text):
         self.problem.setText(text or "")
@@ -2103,7 +2104,7 @@ class TryStep(_Step):
 
         indent(title_label("Try it", 44, 50, left))
         lv.addSpacing(30 - kg)
-        hk = _cfg(app).get("hotkey") or "alt+r"
+        hk = _cfg(app).get("hotkey") or hotkeys.DICTATION_DEFAULT
         self.keys = LitKeys(hk, left)
         lv.addWidget(self.keys, 0, Qt.AlignLeft)
         lv.addSpacing(24 - kg)
@@ -2172,7 +2173,7 @@ class TryStep(_Step):
         self.refresh()
 
     def refresh(self):
-        hk = _cfg(self.app).get("hotkey") or "alt+r"
+        hk = _cfg(self.app).get("hotkey") or hotkeys.DICTATION_DEFAULT
         self.keys.set_hotkey(hk)
         if not self.shortcut.is_capturing():
             self.shortcut.set_hotkey(hk)
@@ -2970,7 +2971,7 @@ class OnboardingWizard(QDialog):
     # ── step 4 ──
     def hotkey_captured(self, combo):
         app = self.app
-        old = _cfg(app).get("hotkey") or "alt+r"
+        old = _cfg(app).get("hotkey") or hotkeys.DICTATION_DEFAULT
         ok = _call(app, "set_setting", "hotkey", combo)
         if ok:
             self.try_.show_shortcut_problem("")

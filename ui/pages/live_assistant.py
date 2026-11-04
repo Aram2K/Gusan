@@ -102,6 +102,7 @@ from PySide6.QtWidgets import (QBoxLayout, QButtonGroup, QComboBox, QFrame, QGra
                                QLabel, QLayout, QPlainTextEdit, QRadioButton, QSizePolicy, QSlider,
                                QVBoxLayout, QWidget)
 
+import hotkeys
 import live_context
 from ui import live_docs_ui, theme
 from ui.components import (Button, Card, Chip, IconButton, PageHeader, ProTag, Segmented,
@@ -2199,7 +2200,7 @@ class LiveAssistantPage(QWidget):
         self._sync_key("live_assist_hotkey")        # back to what is really set
         shown = " + ".join(keycap_labels(combo)) or combo
         cfg = self._cfg_dict()
-        smart = cfg.get("smart_actions_hotkey", "alt+s")      # main.DEFAULT when the key is missing
+        smart = cfg.get("smart_actions_hotkey", hotkeys.SMART_ACTIONS_DEFAULT)      # main.DEFAULT when the key is missing
         if _norm_hotkey(combo) and _norm_hotkey(combo) == _norm_hotkey(cfg.get("hotkey")):
             self.shortcut.set_error(SHORTCUT_IS_DICTATION % shown)
         elif _norm_hotkey(combo) and _norm_hotkey(combo) == _norm_hotkey(smart):

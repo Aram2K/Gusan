@@ -444,9 +444,9 @@ def ask_text(parent, title, label_text, text="", ok_label="Save", cancel_label="
 
 
 def download_title(plain, real=""):
-    """'Download Balanced · Whisper Small?' (the plain name first, as everywhere)."""
-    name = " · ".join(x for x in (plain, real) if x)
-    return "Download %s?" % name
+    """'Download Whisper Small?': the real model's name (what the person will see in every list),
+    the plain word ("Balanced") only when there is no real name."""
+    return "Download %s?" % (real or plain)
 
 
 def download_body(size=""):

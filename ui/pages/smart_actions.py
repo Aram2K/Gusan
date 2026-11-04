@@ -1,7 +1,7 @@
 """Smart Actions page (Gusan 2.0): say what you want, the AI writes it.
 
 Smart Actions have their own shortcut (cfg ``smart_actions_hotkey``, default
-"alt+s", Option+S on a Mac); the dictation shortcut (Alt+R) always pastes the
+"alt+s", Control+S on a Mac); the dictation shortcut (Alt+R) always pastes the
 exact words. There is no on/off switch: the hero draws the Smart Actions
 shortcut as big keycaps, "Press, say what you want, press again." and a muted
 "<Alt + R> pastes your exact words." (the real dictation keys). Free users see
@@ -94,6 +94,7 @@ from PySide6.QtWidgets import (QButtonGroup, QFrame, QGraphicsOpacityEffect, QGr
                                QHBoxLayout, QLabel, QRadioButton, QSizePolicy, QTextEdit, QVBoxLayout,
                                QWidget)
 
+import hotkeys
 import rich_text
 from ui import hy_model, privacy_prompt, theme
 from ui.components import (Button, Card, IconButton, Keycaps, PageHeader, ProTag, SettingRow,
@@ -110,7 +111,7 @@ UPSELL = "Smart Actions"
 UPSELL_SPEECH = "Fast cloud transcription"
 ACTION_OFF = "transcribe_only"
 HOTKEY_KEY = "smart_actions_hotkey"
-DEFAULT_HOTKEY = "alt+s"
+DEFAULT_HOTKEY = hotkeys.SMART_ACTIONS_DEFAULT
 SPEECH_KEY = "smart_actions_speech_model"      # engine_choice.SMART_SPEECH_KEY
 SPEECH_CLOUD = "cloud"                          # engine_choice.SMART_SPEECH_CLOUD
 SPEECH_COMBO_WIDTH = 260                        # room for a real model name and its chips
@@ -237,7 +238,7 @@ def _frame(parent, name, css):
 
 
 def link_button(text, parent=None):
-    """A link with a trailing chevron ("More options in Speech & AI ›")."""
+    """A link with a trailing chevron ("Speech & AI settings ›")."""
     b = Button(text.replace("&", "&&"), "link", "s", parent=parent)
     b.setAccessibleName(text)
     b.setFont(theme.font(13, 600))
@@ -318,12 +319,12 @@ def _first_name(app):
 def smart_hotkey(app):
     """The Smart Actions shortcut (config form); "" when none is set (e.g. it
     clashed with the dictation key at the upgrade). A missing key is the
-    default (main.DEFAULT "alt+s")."""
+    default (hotkeys.SMART_ACTIONS_DEFAULT: "alt+s", "ctrl+s" on a Mac)."""
     return str(_cfg(app).get(HOTKEY_KEY, DEFAULT_HOTKEY) or "").strip().lower()
 
 
 def dictation_hotkey(app):
-    return str(_cfg(app).get("hotkey") or "alt+r").strip().lower()
+    return str(_cfg(app).get("hotkey") or hotkeys.DICTATION_DEFAULT).strip().lower()
 
 
 def _keys_text(hotkey):
@@ -1147,7 +1148,7 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
         foot = QWidget(rail)
         fh = QHBoxLayout(foot)
         fh.setContentsMargins(0, 0, 0, 0)
-        more = link_button("More options in Speech & AI", foot)
+        more = link_button("Speech & AI settings", foot)
         more.clicked.connect(lambda: self._open_route("settings", section="speech", focus="writer"))
         fh.addWidget(more)
         fh.addStretch(1)
@@ -1590,7 +1591,7 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
         hk = _norm(hk)
         shown = _keys_text(hk)
         problem = ""
-        if hk and hk == _norm(cfg.get("hotkey") or "alt+r"):
+        if hk and hk == _norm(cfg.get("hotkey") or hotkeys.DICTATION_DEFAULT):
             problem = "%s starts dictation. Pick another." % shown
         elif hk and hk == _norm(cfg.get("live_assist_hotkey")):
             problem = "%s opens Live Assistant. Pick another." % shown

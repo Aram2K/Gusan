@@ -671,7 +671,7 @@ def server_mode(mode):
 
 def run_managed_action(text, mode, token, source_lang="auto", target_lang="en",
                        vocab_block="", image_b64=None, image_status=None,
-                       session_id="", note_ref=""):
+                       session_id="", note_ref="", prefer=""):
     """Pro Smart Actions via the server (no BYO key): we build the messages here
     and the edge function runs them on the founder's keys. ``mode`` picks the
     model there: Smart Actions go to DeepSeek V4.1 Flash, meeting notes and the
@@ -688,7 +688,7 @@ def run_managed_action(text, mode, token, source_lang="auto", target_lang="en",
 
     def _post(msgs):
         body = {"messages": msgs, "max_tokens": _max_tokens_for(mode, text), "mode": server_mode(mode)}
-        body.update(_managed_extra(session_id, note_ref))
+        body.update(_managed_extra(session_id, note_ref, prefer))
         return requests.post(
             SMART_ACTION_URL,
             json=body,
@@ -710,12 +710,20 @@ def run_managed_action(text, mode, token, source_lang="auto", target_lang="en",
     return text
 
 
-def _managed_extra(session_id="", note_ref=""):
+# The Gusan Cloud AI writers the app can ask for (cfg "cloud_writer_model"; "" = the server's own
+# order). The server puts that engine first and keeps the rest as the fallback.
+CLOUD_WRITER_FAMILIES = ("deepseek", "openai", "claude", "mistral", "gemini")
+
+
+def _managed_extra(session_id="", note_ref="", prefer=""):
     extra = {}
     if session_id:
         extra["session_id"] = session_id
     if note_ref:
         extra["note_ref"] = note_ref
+    prefer = str(prefer or "").strip().lower()
+    if prefer in CLOUD_WRITER_FAMILIES:
+        extra["model"] = prefer
     return extra
 
 
@@ -744,7 +752,7 @@ def _raise_for_managed_status(resp):
 
 def run_managed_action_stream(text, mode, token, on_token, source_lang="auto",
                               target_lang="en", vocab_block="", image_b64=None,
-                              image_status=None, session_id="", note_ref="", info=None):
+                              image_status=None, session_id="", note_ref="", info=None, prefer=""):
     """Streaming Pro Smart Actions: the server relays the model's event stream,
     so the first words show as soon as they are generated. A server that
     predates streaming answers with plain JSON, delivered in one piece.
@@ -759,7 +767,7 @@ def run_managed_action_stream(text, mode, token, on_token, source_lang="auto",
     def _post(msgs):
         body = {"messages": msgs, "max_tokens": _max_tokens_for(mode, text),
                 "mode": server_mode(mode), "stream": True}
-        body.update(_managed_extra(session_id, note_ref))
+        body.update(_managed_extra(session_id, note_ref, prefer))
         return requests.post(
             SMART_ACTION_URL,
             json=body,

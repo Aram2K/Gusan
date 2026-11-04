@@ -106,9 +106,13 @@ DROP_TITLE = "Drop audio or video here"
 DROP_FORMATS = "MP3, WAV, M4A, FLAC or video · any length"
 RAIL_TITLE = "Audio to text settings"
 MODEL_COMBO_WIDTH = 260                  # room for a real model name and its chips
-RAIL_FOOT = "On this computer. Nothing is uploaded."
-RAIL_FOOT_CLOUD = "Sent to Gusan Cloud to transcribe."
+# Where the audio goes, said plainly (the footer of the rail; its icon: shield / cloud / key).
+RAIL_FOOT = "Private: stays on this computer."
+RAIL_FOOT_CLOUD = "Sent securely to Gusan Cloud."
 RAIL_FOOT_OWN = "Sent to {name} with your key."
+# The Word file: a copy of the transcript next to the audio (file_jobs: "<name> transcript.docx").
+WORD_LABEL = "Also save a Word file"
+WORD_HINT = ".docx, next to your audio file"
 PRIVACY_HINT = "Privacy mode keeps it on this computer."    # as on Smart Actions
 UPSELL_SPEECH = engine_choice.UPSELL_SPEECH                 # "Fast cloud transcription"
 FILES_TITLE = "Your files"
@@ -1211,14 +1215,11 @@ class AudioToTextPage(QWidget):
         self.lang_combo = QComboBox(rail)
         for code, name in LANGUAGES:
             self.lang_combo.addItem(name, code)
-        _combo(self.lang_combo, "Language", width=150)
-        # As wide as its longest name needs: the stylesheet (not applied yet at
-        # build time) leaves about width - 76 px for the text (padding, border, chevron).
-        fm = self.lang_combo.fontMetrics()
-        longest = max(fm.horizontalAdvance(name) for _c, name in LANGUAGES)
-        self.lang_combo.setFixedWidth(max(150, longest + 78))
+        # Under its name and as wide as Accuracy's box: the longest name ("Detect automatically")
+        # never runs past the rail, whatever the system font.
+        _combo(self.lang_combo, "Language", width=MODEL_COMBO_WIDTH)
         self.lang_combo.currentIndexChanged.connect(self._on_lang_changed)
-        rail.add_row(SettingRow("Language", self.lang_combo))
+        rail.add_row(SettingRow("Language", self.lang_combo, stacked=True))
 
         self.speakers_toggle = Toggle("Speaker labels", True, rail)
         self.speakers_toggle.toggled.connect(lambda on: self._set(K_SPK, bool(on)))
@@ -1226,9 +1227,9 @@ class AudioToTextPage(QWidget):
         self.timestamps_toggle = Toggle("Timestamps", True, rail)
         self.timestamps_toggle.toggled.connect(lambda on: self._set(K_TS, bool(on)))
         rail.add_row(SettingRow("Timestamps", self.timestamps_toggle))
-        self.word_toggle = Toggle("Save as Word", True, rail)
+        self.word_toggle = Toggle(WORD_LABEL, True, rail)
         self.word_toggle.toggled.connect(lambda on: self._set(K_WORD, bool(on)))
-        rail.add_row(SettingRow("Save as Word", self.word_toggle))
+        rail.add_row(SettingRow(WORD_LABEL, self.word_toggle, hint=WORD_HINT))
 
         foot = QWidget(rail)
         fl = QHBoxLayout(foot)
@@ -1237,8 +1238,9 @@ class AudioToTextPage(QWidget):
         self.rail_foot_icon = label("", "muted", foot)       # shield / cloud / key
         self._foot_icon = "shield"
         self.rail_foot_icon.setPixmap(icons.pixmap("shield", 15, "muted"))
-        fl.addWidget(self.rail_foot_icon)
+        fl.addWidget(self.rail_foot_icon, 0, Qt.AlignTop)
         self.rail_foot = label(RAIL_FOOT, "muted", foot)
+        self.rail_foot.setWordWrap(True)                   # never cut off: a long name wraps
         fl.addWidget(self.rail_foot, 1)
         rail.set_foot(foot)
         return rail

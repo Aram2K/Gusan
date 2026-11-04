@@ -51,8 +51,8 @@ class ModelInfo:
     size_mb: int        # the same in MB, for sums and comparisons
     memory_gb: int      # memory it needs ("4 GB memory")
     more_sizes: bool = False   # speech: listed under "More sizes"
-    speed: int = 0      # speech: 1-5 bars on the model cards (5 = fastest)
-    accuracy: int = 0   # speech: 1-5 bars (5 = most accurate)
+    speed: int = 0      # 1-5 dots in the model lists (5 = fastest); speech and local AI models
+    accuracy: int = 0   # 1-5 dots (5 = most accurate)
     speed_rank: int = 0  # speech: main.MODELS speed_rank (1 = fastest), for speed_phrase
 
     def label(self, with_size=False):
@@ -87,10 +87,11 @@ MORE_SPEECH_MODELS = tuple(m for m in SPEECH_MODEL_IDS if MODEL_INFO[m].more_siz
 # Local AI writer (Smart Actions, meeting notes, Live Assistant on this computer).
 # Ids are local_llm's; sizes and memory match local_llm.MODEL_CATALOG.
 LOCAL_AI_INFO = {
-    "qwen_tiny": ModelInfo("qwen_tiny", WRITER, "Small", "Qwen 1.5B", "1.12 GB", 1117, 8),
-    "qwen_3b": ModelInfo("qwen_3b", WRITER, "Medium", "Qwen 3B", "2.1 GB", 2105, 12),
-    "qwen_7b": ModelInfo("qwen_7b", WRITER, "Large", "Qwen 7B", "4.68 GB", 4683, 16),
-    "gemma_2b": ModelInfo("gemma_2b", WRITER, "Alternative", "Gemma 2 2B", "1.71 GB", 1709, 8),
+    "qwen_tiny": ModelInfo("qwen_tiny", WRITER, "Small", "Qwen 1.5B", "1.12 GB", 1117, 8, speed=5, accuracy=2),
+    "qwen_3b": ModelInfo("qwen_3b", WRITER, "Medium", "Qwen 3B", "2.1 GB", 2105, 12, speed=4, accuracy=3),
+    "qwen_7b": ModelInfo("qwen_7b", WRITER, "Large", "Qwen 7B", "4.68 GB", 4683, 16, speed=2, accuracy=4),
+    "gemma_2b": ModelInfo("gemma_2b", WRITER, "Alternative", "Gemma 2 2B", "1.71 GB", 1709, 8, speed=4,
+                          accuracy=3),
 }
 LOCAL_AI_MODEL_IDS = tuple(LOCAL_AI_INFO)
 # 1.9.x ids still found in old configs (local_llm.LEGACY_MODEL_IDS).

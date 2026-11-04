@@ -16,6 +16,7 @@ module only maps that state to tiers + feature gates. It never decides Pro
 on its own.
 """
 
+import copy
 import logging
 import os
 import sys
@@ -174,14 +175,23 @@ USER_SCOPED_SECRET_KEYS = (
     "google_api_key", "action_api_key", "mistral_api_key",
     "action_model", "action_api_provider", "action_api_base_url",
     "action_api_model", "backend", "managed_provider",
+    # Settings › My API keys: the saved keys, their secrets and which one each card uses.
+    "api_keys", "api_key_secrets", "speech_key_id", "writer_key_id",
 )
 USER_SCOPED_SECRET_DEFAULTS = {
     "google_api_key": "", "action_api_key": "", "mistral_api_key": "",
     "action_model": "rule_based", "action_api_provider": "openai_compatible",
     "action_api_base_url": "", "action_api_model": "",
     "backend": "local", "managed_provider": "gemini",
+    "api_keys": [], "api_key_secrets": {}, "speech_key_id": "", "writer_key_id": "",
 }
-_SECRET_VALUE_KEYS = ("google_api_key", "action_api_key", "mistral_api_key")
+_SECRET_VALUE_KEYS = ("google_api_key", "action_api_key", "mistral_api_key", "api_key_secrets")
+
+
+def _scoped(cfg, k):
+    """One user-scoped value, copied (a list / dict default is never shared between users)."""
+    v = cfg.get(k, USER_SCOPED_SECRET_DEFAULTS[k])
+    return copy.deepcopy(v) if isinstance(v, (list, dict)) else v
 
 
 def user_secret_id(auth):
@@ -208,16 +218,16 @@ def reconcile_user_secrets(cfg, current_owner):
     if not isinstance(store, dict):
         store = {}
     if prev is None:
-        snapshot = {k: cfg.get(k, USER_SCOPED_SECRET_DEFAULTS[k]) for k in USER_SCOPED_SECRET_KEYS}
+        snapshot = {k: _scoped(cfg, k) for k in USER_SCOPED_SECRET_KEYS}
         if any(snapshot.get(k) for k in _SECRET_VALUE_KEYS):
             store[current_owner] = snapshot
         cfg["user_secrets"] = store
         cfg["secrets_owner"] = current_owner
         return False
-    store[prev] = {k: cfg.get(k, USER_SCOPED_SECRET_DEFAULTS[k]) for k in USER_SCOPED_SECRET_KEYS}
-    incoming = store.get(current_owner) or dict(USER_SCOPED_SECRET_DEFAULTS)
+    store[prev] = {k: _scoped(cfg, k) for k in USER_SCOPED_SECRET_KEYS}
+    incoming = store.get(current_owner) or {}
     for k in USER_SCOPED_SECRET_KEYS:
-        cfg[k] = incoming.get(k, USER_SCOPED_SECRET_DEFAULTS[k])
+        cfg[k] = _scoped(incoming, k)
     cfg["user_secrets"] = store
     cfg["secrets_owner"] = current_owner
     return True

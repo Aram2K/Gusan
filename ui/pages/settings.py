@@ -31,7 +31,7 @@ Integration notes for Wave 4
      input_device_index      already in DEFAULT: an int PyAudio index (default
                              host API) or None for the default microphone.
    Read only: hotkey, smart_actions_hotkey (the Smart Actions page's key,
-   default "alt+s", "" = none set; SMART_SHORTCUT_KEYS) and
+   default "alt+s" ("ctrl+s" on a Mac), "" = none set; SMART_SHORTCUT_KEYS) and
    live_assist_hotkey, listed in that order (Dictate, Smart Actions, Live
    Assistant). A shortcut row opens its page with focus="hotkey": Dictation
    and Smart Actions put the keyboard focus on their shortcut control; Live
@@ -94,8 +94,8 @@ import time
 
 from PySide6.QtCore import QCoreApplication, QEvent, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPen
-from PySide6.QtWidgets import (QAbstractButton, QBoxLayout, QComboBox, QDialog, QFrame, QGraphicsDropShadowEffect,
-                               QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu, QPlainTextEdit,
+from PySide6.QtWidgets import (QAbstractButton, QBoxLayout, QComboBox, QDialog, QFrame,
+                               QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
                                QProgressBar, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 import account_actions
@@ -103,13 +103,14 @@ import api_keys
 import engine_choice
 import hardware
 import history_actions
+import hotkeys
 import speech_hy
 import updater
 from app_info import APP_NAME, APP_VERSION
 from ui import hy_model, theme
-from ui.components import (Avatar, Button, Card, Chip, Divider, IconButton, IconTile, Keycap, NavItem,
+from ui.components import (Avatar, Button, Card, Chip, Divider, IconTile, Keycap, NavItem,
                            PageHeader, Segmented, SettingRow, Toggle, icons, label, mini_prompt)
-from ui.components.badges import ProTag
+from ui.components.model_combo import MARK_DOWNLOAD, NOTE_ROLE, PlainNameCombo
 from ui.components.controls import keycap_labels
 
 logger = logging.getLogger("transcribe")
@@ -133,8 +134,8 @@ SHOW_APP_LOOK = False
 SMART_SHORTCUT_KEYS = ("smart_actions_hotkey",)        # ui/pages/smart_actions.py HOTKEY_KEY
 # (cfg keys, icon, name, route, link text, default hotkey)
 SHORTCUTS = (
-    (("hotkey",), "mic", "Dictate", "dictation", "Dictation", "alt+r"),
-    (SMART_SHORTCUT_KEYS, "wand", "Smart Actions", "smart_actions", "Smart Actions", "alt+s"),
+    (("hotkey",), "mic", "Dictate", "dictation", "Dictation", hotkeys.DICTATION_DEFAULT),
+    (SMART_SHORTCUT_KEYS, "wand", "Smart Actions", "smart_actions", "Smart Actions", hotkeys.SMART_ACTIONS_DEFAULT),
     (("live_assist_hotkey",), "incognito", "Live Assistant", "live_assistant", "Live Assistant", "ctrl+alt+a"),
 )
 SMART_SPEECH_KEY = engine_choice.SMART_SPEECH_KEY      # Smart Actions' "Transcribes with"
@@ -149,6 +150,19 @@ WHAT_WE_COLLECT = ("Anonymous: which features you use, the app version, your sys
 SPEECH_KEYS = (("mistral_api_key", "Mistral"), ("google_api_key", "Google Gemini"))
 # The Gusan Cloud writer tile: Smart Actions and Live Assistant share one model.
 CLOUD_WRITER_HINTS = (engine_choice.CLOUD_SMART_MODEL, "%s for meeting notes" % engine_choice.CLOUD_WRITER_MODEL)
+# Speech & AI's two cards: "Runs on" (where the model runs) in each card's order.
+SPEECH_SOURCES_UI = (("local", engine_choice.THIS_COMPUTER), ("cloud", engine_choice.GUSAN_CLOUD),
+                     ("own_key", engine_choice.OWN_KEY))
+WRITER_SOURCES_UI = SPEECH_SOURCES_UI          # the same order in both cards
+SPEECH_KIND = "Speech-to-text (STT)"
+SPEECH_HELP = ("The speech-to-text (STT) model turns your voice into text. "
+               "Dictation and meetings use it.")
+WRITER_KIND = "Language model (LLM)"
+WRITER_HELP = ("The large language model (LLM) writes for you: Smart Actions, meeting notes "
+               "and the Live Assistant's answers. On Gusan Cloud, the model you pick answers "
+               "first; meeting notes use Gusan's own choice.")
+PICK_A_MODEL = "Select a model"
+PAUSED_TEXT = "Off while Privacy mode is on"
 
 # Settings keys whose change redraws something here (anything else is ignored).
 _WATCHED = {
@@ -913,364 +927,6 @@ class PyAudioLevel:
 
 
 # ── Speech & AI ──────────────────────────────────────────────────────────────
-class _Bars(QWidget):
-    def __init__(self, level, n=5, parent=None):
-        super().__init__(parent)
-        self._level, self._n = int(level), int(n)
-        self.setFixedSize(n * 14 + (n - 1) * 3, 6)
-
-    def paintEvent(self, _e):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
-        p.setPen(Qt.NoPen)
-        for i in range(self._n):
-            p.setBrush(theme.qcolor("blue-l" if i < self._level else "line"))
-            p.drawRoundedRect(QRectF(i * 17, 0, 14, 6), 3, 3)
-        p.end()
-
-
-class Meter(QWidget):
-    """'Speed ▮▮▮▮▯' - readable by screen readers as 'Speed: 4 of 5'."""
-
-    def __init__(self, name, level, parent=None):
-        super().__init__(parent)
-        self.setAccessibleName("%s: %d of 5" % (name, level))
-        self.setFixedHeight(20)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(8)
-        lb = text_label(name, 12, color="muted", parent=self)
-        lb.setFixedWidth(64)
-        lay.addWidget(lb, 0, Qt.AlignVCenter)
-        lay.addWidget(_Bars(level, parent=self), 0, Qt.AlignVCenter)
-        lay.addStretch(1)
-
-
-class Ribbon(QWidget):
-    """The blue 'Best for your computer' ribbon that sits on a card's top edge."""
-
-    def __init__(self, text, parent=None):
-        super().__init__(parent)
-        self._text = text
-        self._font = theme.font(11.5, 700)
-        from PySide6.QtGui import QFontMetrics
-        tw = QFontMetrics(self._font).horizontalAdvance(text)
-        self.setFixedSize(10 + 12 + 5 + tw + 11, 22)
-        self.setAccessibleName(text)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        eff = QGraphicsDropShadowEffect(self)
-        eff.setBlurRadius(6)
-        eff.setOffset(0, 2)
-        eff.setColor(theme.qcolor("rgba(15,23,42,0.08)"))
-        self.setGraphicsEffect(eff)
-
-    def text(self):
-        return self._text
-
-    def paintEvent(self, _e):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
-        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        p.setPen(QPen(theme.qcolor("blue-h"), 1))
-        p.setBrush(theme.qcolor("blue"))
-        p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
-        p.drawPixmap(10, 5, icons.pixmap("check", 12, "#ffffff", sw=2.4))
-        p.setPen(QColor("#ffffff"))
-        p.setFont(self._font)
-        p.drawText(QRectF(27, 0, self.width() - 27, self.height()), Qt.AlignVCenter | Qt.AlignLeft, self._text)
-        p.end()
-
-
-class CardsRow(QWidget):
-    """A row of cards with room above for the recommendation ribbon."""
-
-    def __init__(self, gap=12, top=12, parent=None):
-        super().__init__(parent)
-        self._top = top
-        self.lay = QHBoxLayout(self)
-        self.lay.setContentsMargins(0, top, 0, 0)
-        self.lay.setSpacing(gap)
-        self.ribbon = Ribbon("Best for your computer", self)
-        self.ribbon.hide()
-        self._target = None
-
-    def add(self, w):
-        self.lay.addWidget(w, 1)
-        w.installEventFilter(self)
-        return w
-
-    def set_recommended(self, widget, room=None):
-        self._target = widget
-        if room is not None:
-            self.lay.setContentsMargins(0, self._top if room else 0, 0, 0)
-        self.ribbon.setVisible(widget is not None)
-        self._place()
-
-    def recommended(self):
-        return self._target
-
-    def eventFilter(self, obj, ev):
-        if obj is self._target and ev.type() in (QEvent.Move, QEvent.Resize, QEvent.Show):
-            self._place()
-        return False
-
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        self._place()
-
-    def _place(self):
-        t = self._target
-        if t is None:
-            return
-        self.ribbon.move(t.x() + 14, max(0, t.y() - 12))
-        self.ribbon.raise_()
-
-
-class ModelCard(QFrame):
-    """A speech model card: plain name big, the real Whisper model and size
-    under it, speed/accuracy bars, and one action at the bottom."""
-    download = Signal(str)
-    use = Signal(str)
-    remove = Signal(str)
-
-    def __init__(self, mid, parent=None):
-        super().__init__(parent)
-        self.mid = mid
-        self.info = hardware.MODEL_INFO[mid]
-        self._selected = False
-        self._key = None
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.setMinimumWidth(0)
-        self.setAccessibleName("%s, %s, %s" % (self.info.plain, self.info.real, self.info.size))
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 20, 16, 16)
-        lay.setSpacing(2)
-        top = QHBoxLayout()
-        top.setSpacing(8)
-        self.name_label = text_label(self.info.plain, 19, 600, role="h2", display=True, parent=self)
-        self.name_label.setFixedHeight(26)
-        top.addWidget(self.name_label, 0, Qt.AlignVCenter)
-        top.addStretch(1)
-        self.mark = icon_label("check_circle", 20, "blue", sw=2, parent=self)
-        self.mark.setAccessibleName("Selected")
-        top.addWidget(self.mark, 0, Qt.AlignVCenter)
-        lay.addLayout(top)
-        # Wraps in a narrow window instead of widening the card past the page.
-        # No-break spaces keep "1.6 GB" whole and the dot on the first line.
-        self.model_label = text_label("%s · %s" % (self.info.real, self.info.size.replace(" ", " ")),
-                                      12.5, role="model", parent=self, wrap=True)
-        lay.addWidget(self.model_label)
-        meters = QVBoxLayout()
-        meters.setContentsMargins(0, 12, 0, 0)
-        meters.setSpacing(2)
-        meters.addWidget(Meter("Speed", self.info.speed, self))
-        meters.addWidget(Meter("Accuracy", self.info.accuracy, self))
-        lay.addLayout(meters)
-        self.note = text_label("", 12, role="hint", parent=self, wrap=True)
-        self.note.hide()
-        lay.addWidget(self.note)
-        lay.addStretch(1)
-        self.action = QWidget(self)
-        self.action_lay = QHBoxLayout(self.action)
-        self.action_lay.setContentsMargins(0, 14, 0, 0)
-        self.action_lay.setSpacing(6)
-        lay.addWidget(self.action)
-        self.progress = None
-        self.progress_text = None
-        self.buttons = {}
-        self._apply_selected(False)
-
-    def _apply_selected(self, on):
-        self._selected = bool(on)
-        self.mark.setVisible(self._selected)
-        if self._selected:
-            eff = QGraphicsDropShadowEffect(self)
-            eff.setBlurRadius(28)
-            eff.setOffset(0, 10)
-            eff.setColor(theme.qcolor("rgba(37,99,235,0.14)"))
-            self.setGraphicsEffect(eff)
-        else:
-            self.setGraphicsEffect(None)
-        self.update()
-
-    def is_selected(self):
-        return self._selected
-
-    def paintEvent(self, _e):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
-        if self._selected:
-            p.setPen(QPen(theme.qcolor("blue-l"), 2))
-            p.setBrush(QColor("#ffffff"))
-            r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
-        else:
-            p.setPen(QPen(theme.qcolor("line"), 1))
-            p.setBrush(theme.qcolor("rgba(255,255,255,0.72)"))
-            r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        p.drawRoundedRect(r, 14, 14)
-        p.end()
-
-    def set_note(self, text):
-        self.note.setText(text or "")
-        self.note.setVisible(bool(text))
-
-    def set_state(self, state, selected=False, in_use_text="In use", pct=None, error="", removing=False,
-                  enabled=True):
-        """state: missing | downloading | ready | failed."""
-        if selected != self._selected:
-            self._apply_selected(selected)
-        key = (state, bool(selected), in_use_text, bool(removing), error or "", bool(enabled))
-        if key == self._key and state == "downloading":
-            self._set_progress(pct)
-            return
-        if key == self._key:
-            return
-        self._key = key
-        clear_layout(self.action_lay)
-        self.buttons = {}
-        self.progress = self.progress_text = None
-        plain = self.info.plain
-        if removing:
-            self.action_lay.addWidget(text_label("Removing…", 13, role="muted", parent=self.action))
-            self.action_lay.addStretch(1)
-        elif state == "downloading":
-            col = QVBoxLayout()
-            col.setSpacing(6)
-            self.progress_text = text_label("Downloading…", 12, role="muted", parent=self.action)
-            self.progress = QProgressBar(self.action)
-            self.progress.setRange(0, 100)
-            self.progress.setTextVisible(False)
-            self.progress.setFixedHeight(6)
-            self.progress.setAccessibleName("Downloading %s" % plain)
-            col.addWidget(self.progress_text)
-            col.addWidget(self.progress)
-            self.action_lay.addLayout(col, 1)
-            self._set_progress(pct)
-        elif state == "failed":
-            col = QVBoxLayout()
-            col.setSpacing(6)
-            err = text_label(error or "The download stopped. Try again.", 12, role="error", parent=self.action,
-                             wrap=True)
-            col.addWidget(err)
-            b = Button("Try again", "secondary", "s", icon="refresh", parent=self.action)
-            b.setAccessibleName("Download %s again" % plain)
-            b.clicked.connect(lambda _=False: self.download.emit(self.mid))
-            self.buttons["download"] = b
-            col.addWidget(b, 0, Qt.AlignLeft)
-            self.action_lay.addLayout(col, 1)
-        elif state == "ready":
-            if selected:
-                self.action_lay.addWidget(icon_label("check", 15, "ok", sw=2.6, parent=self.action), 0,
-                                          Qt.AlignVCenter)
-                t = text_label(in_use_text, 13, 700, color="ok-tx", parent=self.action)
-                self.action_lay.addWidget(t, 0, Qt.AlignVCenter)
-            else:
-                b = Button("Use", "secondary", "s", parent=self.action)
-                b.setAccessibleName("Use %s" % plain)
-                b.clicked.connect(lambda _=False: self.use.emit(self.mid))
-                self.buttons["use"] = b
-                self.action_lay.addWidget(b, 0, Qt.AlignVCenter)
-            self.action_lay.addStretch(1)
-            r = Button("Remove", "ghost", "s", parent=self.action)
-            r.setAccessibleName("Remove %s" % plain)
-            r.clicked.connect(lambda _=False: self.remove.emit(self.mid))
-            self.buttons["remove"] = r
-            self.action_lay.addWidget(r, 0, Qt.AlignVCenter)
-        else:
-            b = Button("Download", "secondary", "s", icon="download", parent=self.action)
-            b.setAccessibleName("Download %s (%s, %s)" % (plain, self.info.real, self.info.size))
-            b.setEnabled(bool(enabled))
-            b.clicked.connect(lambda _=False: self.download.emit(self.mid))
-            self.buttons["download"] = b
-            self.action_lay.addWidget(b, 0, Qt.AlignVCenter)
-            self.action_lay.addStretch(1)
-
-    def _set_progress(self, pct):
-        if self.progress is None:
-            return
-        if pct is None:
-            self.progress.setRange(0, 0)
-            self.progress_text.setText("Downloading…")
-        else:
-            self.progress.setRange(0, 100)
-            self.progress.setValue(int(pct))
-            self.progress_text.setText("Downloading · %d%%" % int(pct))
-
-
-class SizeTile(_Painted):
-    """One of the 'More sizes' models: plain name, real model and size, and
-    what a click does (download / use) at the end."""
-    activated = Signal(str)
-    remove = Signal(str)
-
-    def __init__(self, mid, parent=None):
-        super().__init__(parent)
-        self.mid = mid
-        self.info = hardware.MODEL_INFO[mid]
-        self._state = ("missing", False)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 8, 12, 8)
-        lay.setSpacing(10)
-        col = QVBoxLayout()
-        col.setSpacing(0)
-        name = text_label(self.info.plain, 13, 600, role="label", parent=self)
-        name.setFixedHeight(18)
-        col.addWidget(name)
-        model = text_label("%s · %s" % (self.info.real, self.info.size), 12, role="model", parent=self)
-        model.setFixedHeight(16)
-        col.addWidget(model)
-        lay.addLayout(col, 1)
-        self.trail = QLabel(self)
-        self.trail.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        lay.addWidget(self.trail, 0, Qt.AlignVCenter)
-        self.remove_button = IconButton("trash", "Remove %s" % self.info.plain, size=26, icon_size=15,
-                                        color="muted", parent=self)
-        self.remove_button.clicked.connect(lambda _=False: self.remove.emit(self.mid))
-        self.remove_button.hide()
-        lay.addWidget(self.remove_button, 0, Qt.AlignVCenter)
-        for ch in self.findChildren(QLabel):
-            ch.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.clicked.connect(lambda _=False: self.activated.emit(self.mid))
-        self.set_state("missing")
-
-    def box(self):
-        state, selected = self._state
-        if selected:
-            return "#ffffff", "blue-l", 1
-        return "rgba(255,255,255,0.72)", ("line2" if self.underMouse() else "line"), 1
-
-    def set_state(self, state, selected=False, pct=None, removing=False, enabled=True):
-        self._state = (state, bool(selected))
-        i = self.info
-        self.trail.setStyleSheet("")
-        self.trail.setPixmap(icons.pixmap("download", 16, "muted"))
-        name = "Download %s (%s, %s)" % (i.plain, i.real, i.size)
-        if removing:
-            self.trail.setText("Removing…")
-            self.trail.setFont(theme.font(12))
-            tint(self.trail, "muted")
-            name = "%s (%s), removing" % (i.plain, i.real)
-        elif state == "downloading":
-            self.trail.setText("%d%%" % pct if pct is not None else "…")
-            self.trail.setFont(theme.font(12, 600))
-            tint(self.trail, "muted")
-            name = "%s (%s), downloading" % (i.plain, i.real)
-        elif state == "failed":
-            self.trail.setPixmap(icons.pixmap("alert", 16, "red-tx", sw=2))
-            name = "Download %s (%s, %s) again" % (i.plain, i.real, i.size)
-        elif state == "ready" and selected:
-            self.trail.setPixmap(icons.pixmap("check", 16, "blue-tx", sw=2.2))
-            name = "%s (%s), in use" % (i.plain, i.real)
-        elif state == "ready":
-            self.trail.setText("Use")
-            self.trail.setFont(theme.font(12.5, 600))
-            tint(self.trail, "blue-tx")
-            name = "Use %s (%s)" % (i.plain, i.real)
-        self.setAccessibleName(name)
-        self.remove_button.setVisible(state == "ready" and not selected and not removing)
-        self.setEnabled(bool(enabled) or state == "ready")
-        self.update()
 
 
 class GpuCard(_Box):
@@ -1381,578 +1037,440 @@ class GpuCard(_Box):
             self.sub.setText("Downloading · %d%%" % int(pct))
 
 
-class ArmenianCard(_Box):
-    """The Armenian speech model (speech_hy.py): one wide card under the Whisper sizes - its real name
-    (NVIDIA is credited in it), "Armenian only · about 105 MB · free, works offline", and the action of
-    the moment: Download / progress + Cancel / Use / In use + Remove / Try again. Hidden until the model
-    is on this computer or has somewhere to be downloaded from (speech_hy.listed)."""
-    download = Signal()
-    cancel = Signal()
-    use = Signal()
-    remove = Signal()
-
-    def __init__(self, parent=None):
-        super().__init__("rgba(255,255,255,0.72)", "line", 1, 12, parent)
-        self.setAccessibleName("Armenian speech model")
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(14, 10, 14, 10)
-        lay.setSpacing(12)
-        lay.addWidget(IconTile("mic", size=32, icon_size=18, radius=10, parent=self), 0, Qt.AlignVCenter)
-        col = QVBoxLayout()
-        col.setSpacing(0)
-        self.title = text_label(hardware.HY_INFO.real, 13.5, 600, role="label", parent=self)
-        self.sub = text_label("", 12, role="model", parent=self, wrap=True)
-        col.addWidget(self.title)
-        col.addWidget(self.sub)
-        lay.addLayout(col, 1)
-        self.action = QWidget(self)
-        self.action_lay = QHBoxLayout(self.action)
-        self.action_lay.setContentsMargins(0, 0, 0, 0)
-        self.action_lay.setSpacing(8)
-        lay.addWidget(self.action, 0, Qt.AlignVCenter)
-        self.progress = None
-        self.buttons = {}
-        self._key = None
-
-    def set_state(self, state, selected=False, pct=None, error="", removing=False, enabled=True):
-        """state: missing | downloading | ready | failed."""
-        key = (state, bool(selected), error or "", bool(removing), bool(enabled))
-        if key == self._key and state == "downloading":
-            self._progress(pct)
-            return
-        if key == self._key:
-            return
-        self._key = key
-        clear_layout(self.action_lay)
-        self.buttons = {}
-        self.progress = None
-        real = hardware.HY_INFO.real
-        size = hardware.HY_INFO.size
-        self.sub.setStyleSheet("")
-        self.sub.setText(engine_choice.HY_ROW_NOTE_READY if state == "ready"
-                         else engine_choice.HY_ROW_NOTE.format(size=size))
-        if removing:
-            self.action_lay.addWidget(text_label("Removing…", 13, role="muted", parent=self.action))
-        elif state == "downloading":
-            self.progress = QProgressBar(self.action)
-            self.progress.setTextVisible(False)
-            self.progress.setFixedSize(120, 6)
-            self.progress.setAccessibleName("Downloading %s" % real)
-            self.action_lay.addWidget(self.progress, 0, Qt.AlignVCenter)
-            b = Button("Cancel", "ghost", "s", parent=self.action)
-            b.setAccessibleName("Cancel the download of %s" % real)
-            b.clicked.connect(lambda _=False: self.cancel.emit())
-            self.buttons["cancel"] = b
-            self.action_lay.addWidget(b)
-            self._progress(pct)
-        elif state == "failed":
-            self.sub.setText(error or "The download stopped. Try again.")
-            tint(self.sub, "red-tx")
-            b = Button("Try again", "secondary", "s", icon="refresh", parent=self.action)
-            b.setAccessibleName("Download %s again" % real)
-            b.clicked.connect(lambda _=False: self.download.emit())
-            self.buttons["download"] = b
-            self.action_lay.addWidget(b)
-        elif state == "ready":
-            if selected:
-                self.action_lay.addWidget(Chip("In use", "ok", "check", parent=self.action))
-            else:
-                b = Button("Use", "secondary", "s", parent=self.action)
-                b.setAccessibleName("Use %s" % real)
-                b.clicked.connect(lambda _=False: self.use.emit())
-                self.buttons["use"] = b
-                self.action_lay.addWidget(b)
-            r = Button("Remove", "ghost", "s", parent=self.action)
-            r.setAccessibleName("Remove %s" % real)
-            r.clicked.connect(lambda _=False: self.remove.emit())
-            self.buttons["remove"] = r
-            self.action_lay.addWidget(r)
-        else:
-            b = Button("Download", "secondary", "s", icon="download", parent=self.action)
-            b.setAccessibleName("Download %s (%s)" % (real, size))
-            b.setEnabled(bool(enabled))
-            b.clicked.connect(lambda _=False: self.download.emit())
-            self.buttons["download"] = b
-            self.action_lay.addWidget(b)
-
-    def _progress(self, pct):
-        if self.progress is None:
-            return
-        if pct is None:
-            self.progress.setRange(0, 0)
-            self.sub.setText("Downloading…")
-        else:
-            self.progress.setRange(0, 100)
-            self.progress.setValue(int(pct))
-            self.sub.setText("Downloading · %d%%" % int(pct))
-
-
-class OptionTile(_Painted):
-    """A radio choice drawn as a tile: name (+ PRO), hint line(s), optional
-    extra widget (e.g. the AI writer sizes). The page decides the selection."""
-    RADIUS = 12
-
-    def __init__(self, group, name, pro=False, parent=None):
-        super().__init__(parent)
-        self.setCheckable(True)
-        self.setAutoExclusive(False)
-        self.group, self.name = group, name
-        self.pro = bool(pro)
-        self._paused = False
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.setAccessibleName("%s: %s%s" % (group, name, " (Pro)" if pro else ""))
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(14 + 18 + 12, 13, 14, 13)       # 12 px padding + the 1 px edge
-        lay.setSpacing(0)
-        col = QVBoxLayout()
-        col.setSpacing(1)
-        trow = QHBoxLayout()
-        trow.setSpacing(6)
-        self.name_label = text_label(name, 13.5, 600, role="label", parent=self)
-        self.name_label.setMinimumHeight(20)
-        trow.addWidget(self.name_label, 0, Qt.AlignVCenter)
-        self.pro_tag = None
-        if pro:
-            self.pro_tag = ProTag("s", parent=self)
-            trow.addWidget(self.pro_tag, 0, Qt.AlignVCenter)
-        trow.addStretch(1)
-        col.addLayout(trow)
-        self.hint_box = QVBoxLayout()
-        self.hint_box.setSpacing(1)
-        col.addLayout(self.hint_box)
-        self.extra_box = QVBoxLayout()
-        self.extra_box.setSpacing(0)
-        col.addLayout(self.extra_box)
-        lay.addLayout(col, 1)
-        self.hint_labels = []
-        self._hints = None
-        self.extra = None
-
-    def set_hints(self, lines):
-        """lines: [text | (icon, text)]."""
-        lines = list(lines or [])
-        if lines == self._hints:
-            return
-        self._hints = lines
-        clear_layout(self.hint_box)
-        self.hint_labels = []
-        for line in lines:
-            icon, text = (line if isinstance(line, tuple) else (None, line))
-            lb = text_label(text, 12, role="hint", parent=self)
-            lb.setFixedHeight(17)
-            lb.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            self.hint_labels.append(lb)
-            if icon:
-                row = QHBoxLayout()
-                row.setSpacing(4)
-                row.addWidget(icon_label(icon, 13, "muted", parent=self), 0, Qt.AlignVCenter)
-                row.addWidget(lb, 0, Qt.AlignVCenter)
-                row.addStretch(1)
-                self.hint_box.addLayout(row)
-            else:
-                self.hint_box.addWidget(lb)
-        desc = " · ".join(lb.text() for lb in self.hint_labels)
-        self.setAccessibleDescription(desc)
-
-    def hints(self):
-        return [lb.text() for lb in self.hint_labels]
-
-    def set_extra(self, widget):
-        self.extra = widget
-        widget.setParent(self)
-        self.extra_box.addWidget(widget)
-
-    def set_paused(self, paused):
-        self._paused = bool(paused)
-        self.update()
-
-    def box(self):
-        if self.isChecked():
-            return "#ffffff", "blue-l", 1
-        return "rgba(255,255,255,0.80)", ("line2" if self.underMouse() else "line"), 1
-
-    def paint_extra(self, p):
-        if self.isChecked():
-            p.setPen(QPen(theme.qcolor("rgba(59,130,246,0.12)"), 3))
-            p.setBrush(Qt.NoBrush)
-            p.drawRoundedRect(QRectF(self.rect()).adjusted(2.5, 2.5, -2.5, -2.5), 10, 10)
-        # the radio (accent-color: var(--blue))
-        if self._paused:
-            p.setOpacity(0.45)
-        c = QRectF(14, 14, 18, 18)
-        if self.isChecked():
-            p.setPen(QPen(theme.qcolor("blue"), 2))
-            p.setBrush(QColor("#ffffff"))
-            p.drawEllipse(c.adjusted(1, 1, -1, -1))
-            p.setPen(Qt.NoPen)
-            p.setBrush(theme.qcolor("blue"))
-            p.drawEllipse(c.adjusted(5, 5, -5, -5))
-        else:
-            p.setPen(QPen(theme.qcolor("blue-l" if self.underMouse() else "muted"), 1.5))
-            p.setBrush(QColor("#ffffff"))
-            p.drawEllipse(c.adjusted(0.75, 0.75, -0.75, -0.75))
-        p.setOpacity(1.0)
-
-
-class WriterSize(_Painted):
-    """One local AI writer model inside 'This computer' (Small / Medium / Large / Gemma)."""
-    RADIUS = 8
-    activated = Signal(str)
-    remove = Signal(str)
-
-    def __init__(self, mid, parent=None):
-        super().__init__(parent)
-        self.mid = mid
-        i = hardware.LOCAL_AI_INFO[mid]
-        self.info = i
-        self.title = i.plain if i.plain != "Alternative" else i.real
-        sub = "%s · %s" % (i.real, i.size) if self.title != i.real else i.size
-        self._sel = False
-        self._state = "missing"
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(10, 7, 10, 7)                   # 6 px padding + the 1 px edge
-        lay.setSpacing(0)
-        top = QHBoxLayout()
-        top.setSpacing(4)
-        title = text_label(self.title, 12.5, 600, role="label", parent=self)
-        title.setFixedHeight(18)
-        top.addWidget(title, 0, Qt.AlignVCenter)
-        top.addStretch(1)
-        self.mark = QLabel(self)
-        top.addWidget(self.mark, 0, Qt.AlignVCenter)
-        lay.addLayout(top)
-        sub_label = text_label(sub, 11.5, role="model", parent=self)
-        sub_label.setFixedHeight(16)
-        lay.addWidget(sub_label)
-        for ch in self.findChildren(QLabel):
-            ch.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.clicked.connect(lambda _=False: self.activated.emit(self.mid))
-        self.set_state("missing")
-
-    def box(self):
-        if self._sel:
-            return "blue-sub", "blue-l", 1
-        return "#ffffff", ("line2" if self.underMouse() else "line"), 1
-
-    def contextMenuEvent(self, e):
-        if self._state != "ready":
-            return
-        menu = QMenu(self)
-        act = menu.addAction("Remove %s" % self.title)
-        if menu.exec(e.globalPos()) is act:
-            self.remove.emit(self.mid)
-
-    def set_state(self, state, selected=False, pct=None):
-        self._state = state
-        self._sel = bool(selected and state == "ready")
-        self.mark.setStyleSheet("")
-        self.mark.setText("")
-        if state == "downloading":
-            self.mark.setText("%d%%" % pct if pct is not None else "…")
-            self.mark.setFont(theme.font(11, 600))
-            tint(self.mark, "muted")
-            name = "%s (%s), downloading" % (self.title, self.info.real)
-        elif state == "ready" and self._sel:
-            self.mark.setPixmap(icons.pixmap("check", 13, "blue-tx", sw=2.4))
-            name = "%s (%s), in use" % (self.title, self.info.real)
-        elif state == "ready":
-            self.mark.clear()
-            name = "Use %s (%s)" % (self.title, self.info.real)
-        else:
-            self.mark.setPixmap(icons.pixmap("alert" if state == "failed" else "download", 13,
-                                             "red-tx" if state == "failed" else "muted"))
-            name = "Download %s (%s, %s)" % (self.title, self.info.real, self.info.size)
-        self.setAccessibleName(name)
-        self.update()
-
-    def is_selected(self):
-        return self._sel
-
-
-class KeyRow(QFrame):
-    """One of 'My API keys': the key shown masked (Key ending 4f2), Replace /
-    Remove / Add key, and an inline editor that tests the key as it is pasted."""
-    save = Signal(str, str)        # field, key
+class ApiKeyRow(QFrame):
+    """One saved key of "My API keys": the name the person gave it, its provider and model, the
+    key shown masked, whether it worked when tested, which card uses it; Test / Edit / Remove."""
+    test = Signal(str)            # key id
+    edit = Signal(str)
     removed = Signal(str)
-    test = Signal(str, str)        # field, key
 
-    def __init__(self, field, name, parent=None):
+    def __init__(self, entry, view, parent=None):
         super().__init__(parent)
         self.setProperty("gusan", "row")
         self.setProperty("last", False)
-        self.field, self.name = field, name
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(0, 12, 0, 12)
-        lay.setSpacing(16)
-        self.name_label = text_label(name, 13.5, 600, role="label", parent=self)
-        self.name_label.setFixedWidth(180)
-        lay.addWidget(self.name_label, 0, Qt.AlignVCenter)
-
-        self.view = QWidget(self)
-        vl = QHBoxLayout(self.view)
-        vl.setContentsMargins(0, 0, 0, 0)
-        vl.setSpacing(8)
-        self.key_icon = icon_label("key", 16, "muted", parent=self.view)
-        vl.addWidget(self.key_icon, 0, Qt.AlignVCenter)
-        self.text = text_label("", 13.5, parent=self.view)
-        vl.addWidget(self.text, 0, Qt.AlignVCenter)
-        self.chip = Chip("Works", "ok", "check", parent=self.view)
-        vl.addWidget(self.chip, 0, Qt.AlignVCenter)
-        vl.addStretch(1)
-        lay.addWidget(self.view, 1)
-
-        self.edit = QWidget(self)
-        el = QHBoxLayout(self.edit)
-        el.setContentsMargins(0, 0, 0, 0)
-        el.setSpacing(8)
-        self.input = field_font(QLineEdit(self.edit))
-        self.input.setEchoMode(QLineEdit.Password)
-        self.input.setPlaceholderText("Paste your %s key" % name)
-        self.input.setAccessibleName("%s key" % name)
-        self.input.setFixedHeight(32)
-        self.input.textChanged.connect(self._changed)
-        self.input.returnPressed.connect(self._save)
-        el.addWidget(self.input, 1)
-        self.status = text_label("", 12, 600, parent=self.edit)
-        self.status.setAccessibleName("Key check")
-        el.addWidget(self.status, 0, Qt.AlignVCenter)
-        lay.addWidget(self.edit, 1)
-        self.edit.hide()
-
-        self.actions = QWidget(self)
-        al = QHBoxLayout(self.actions)
-        al.setContentsMargins(0, 0, 0, 0)
-        al.setSpacing(4)
-        self.replace_button = Button("Replace", "ghost", "s", parent=self.actions)
-        self.replace_button.setAccessibleName("Replace the %s key" % name)
-        self.replace_button.clicked.connect(self.open_editor)
-        self.remove_button = Button("Remove", "ghost", "s", parent=self.actions)
-        self.remove_button.setAccessibleName("Remove the %s key" % name)
-        self.remove_button.clicked.connect(lambda _=False: self.removed.emit(self.field))
-        self.add_button = Button("Add key", "secondary", "s", icon="plus", parent=self.actions)
-        self.add_button.setAccessibleName("Add a %s key" % name)
-        self.add_button.clicked.connect(self.open_editor)
-        self.save_button = Button("Save", "primary", "s", parent=self.actions)
-        self.save_button.setAccessibleName("Save the %s key" % name)
-        self.save_button.clicked.connect(self._save)
-        self.cancel_button = Button("Cancel", "ghost", "s", parent=self.actions)
-        self.cancel_button.setAccessibleName("Cancel")
-        self.cancel_button.clicked.connect(self.close_editor)
-        for b in (self.replace_button, self.remove_button, self.add_button, self.save_button,
-                  self.cancel_button):
-            al.addWidget(b)
-        lay.addWidget(self.actions, 0, Qt.AlignVCenter)
-
-        self._timer = QTimer(self)
-        self._timer.setSingleShot(True)
-        self._timer.setInterval(500)
-        self._timer.timeout.connect(self._fire_test)
-        self._editing = False
-        self._has_key = False
-        self.last_result = None          # (key, ok, message) of the newest test
-        self.show_view({"has_key": False, "text": "No key yet"}, None)
+        self.key_id = entry["id"]
+        # Two lines, so a narrow window never has to scroll sideways: the name, which card uses
+        # it and the buttons; under it the provider and model, the masked key and its test.
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 10, 0, 10)
+        lay.setSpacing(2)
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        self.title = text_label(view["title"], 13.5, 600, role="label", parent=self)
+        top.addWidget(self.title, 0, Qt.AlignVCenter)
+        self.use_chip = Chip("", "blue", parent=self)
+        self.use_chip.setVisible(bool(view.get("in_use")))
+        self.use_chip.setText(view.get("in_use") or "")
+        self.use_chip.setToolTip("Used by %s now" % view.get("in_use") if view.get("in_use") else "")
+        top.addWidget(self.use_chip, 0, Qt.AlignVCenter)
+        top.addStretch(1)
+        name = view["title"]
+        self.test_button = Button("Test", "ghost", "s", parent=self)
+        self.test_button.setAccessibleName("Test the key %s" % name)
+        self.test_button.clicked.connect(lambda _=False: self.test.emit(self.key_id))
+        self.edit_button = Button("Edit", "ghost", "s", parent=self)
+        self.edit_button.setAccessibleName("Edit the key %s" % name)
+        self.edit_button.clicked.connect(lambda _=False: self.edit.emit(self.key_id))
+        self.remove_button = Button("Remove", "ghost", "s", parent=self)
+        self.remove_button.setAccessibleName("Remove the key %s" % name)
+        self.remove_button.clicked.connect(lambda _=False: self.removed.emit(self.key_id))
+        for b in (self.test_button, self.edit_button, self.remove_button):
+            top.addWidget(b, 0, Qt.AlignVCenter)
+        lay.addLayout(top)
+        bottom = QHBoxLayout()
+        bottom.setSpacing(8)
+        self.sub = text_label(view["sub"], 12.5, role="muted", parent=self)
+        bottom.addWidget(self.sub, 0, Qt.AlignVCenter)
+        self.key_icon = icon_label("key", 14, "muted", parent=self)
+        bottom.addWidget(self.key_icon, 0, Qt.AlignVCenter)
+        self.masked = text_label(view["masked"], 12.5, role="muted", parent=self)
+        bottom.addWidget(self.masked, 0, Qt.AlignVCenter)
+        self.chip = Chip("Works", "ok", "check", parent=self)
+        self.chip.hide()
+        bottom.addWidget(self.chip, 0, Qt.AlignVCenter)
+        bottom.addStretch(1)
+        lay.addLayout(bottom)
 
     def set_last(self, last):
         theme.set_prop(self, "last", bool(last), children=False)
 
-    def set_field(self, field, name):
-        self.field, self.name = field, name
-        self.name_label.setText(name)
-        self.input.setPlaceholderText("Paste your %s key" % name)
-        self.input.setAccessibleName("%s key" % name)
+    def show_test(self, result):
+        """None: not tested; "checking"; or (ok, message)."""
+        if result == "checking":
+            self.chip.setText("Checking…")
+            theme.set_prop(self.chip, "tone", "neutral")
+            self.chip.setToolTip("")
+            self.chip.show()
+            return
+        if not result:
+            self.chip.hide()
+            return
+        ok, msg = result
+        self.chip.setText("Works" if ok else "Didn't work")
+        theme.set_prop(self.chip, "tone", "ok" if ok else "red")
+        if getattr(self.chip, "_icon", None) is not None:
+            self.chip._icon.setPixmap(icons.pixmap("check" if ok else "alert", 13, "ok-tx" if ok else "red-tx", sw=2))
+        self.chip.setToolTip("" if ok else (msg or ""))
+        self.chip.show()
 
-    def is_editing(self):
-        return self._editing
 
-    def show_view(self, view, tested):
-        """view: api_keys.key_view(...); tested: (ok, msg) of this key's test, or None."""
-        self._editing = False
-        self._has_key = bool(view.get("has_key"))
-        self.edit.hide()
-        self.view.show()
-        self.key_icon.setVisible(self._has_key)
-        self.text.setText(view.get("text") or ("Key saved" if self._has_key else "No key yet"))
-        self.text.setFont(theme.font(13.5))
-        tint(self.text, "text" if self._has_key else "muted")
-        ok = bool(self._has_key and tested and tested[0])
-        bad = bool(self._has_key and tested and not tested[0])
-        self.chip.setVisible(ok or bad)
-        if ok or bad:
-            self.chip.setText("Works" if ok else "Didn't work")
-            theme.set_prop(self.chip, "tone", "ok" if ok else "red")
-            if getattr(self.chip, "_icon", None) is not None:
-                self.chip._icon.setPixmap(icons.pixmap("check" if ok else "alert", 13,
-                                                       "ok-tx" if ok else "red-tx", sw=2))
-            self.chip.setToolTip("" if ok else (tested[1] or ""))
-        self.replace_button.setVisible(self._has_key)
-        self.remove_button.setVisible(self._has_key)
-        self.add_button.setVisible(not self._has_key)
-        self.save_button.hide()
-        self.cancel_button.hide()
+class ApiKeyEditor(Card):
+    """Add or edit one key: a name of your own, the provider, the model, the server address (for an
+    OpenAI-compatible service or Cerebras), the key itself, and Test before Save."""
+    saved = Signal(dict)
+    cancelled = Signal()
+    test = Signal(str, str, str, str)      # provider, key, model, base url
 
-    def open_editor(self):
-        self._editing = True
-        self.view.hide()
-        self.edit.show()
-        self.input.clear()
+    def __init__(self, parent=None):
+        super().__init__(parent, pad=(20, 16), gap=12)
+        self.heading = text_label("Add a key", 14, 700, parent=self)
+        self.add(self.heading)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(10)
+        self.name = self._line("Name", "e.g. My OpenAI key")
+        self.provider = field_font(QComboBox(self))
+        self.provider.setAccessibleName("Provider")
+        for pid in api_keys.ENTRY_PROVIDERS:
+            self.provider.addItem(api_keys.ENTRY_PROVIDER_LABELS[pid], pid)
+        self.provider.currentIndexChanged.connect(self._provider_changed)
+        self.model = field_font(QComboBox(self))
+        self.model.setEditable(True)                       # any model id the service has
+        self.model.setAccessibleName("Model")
+        self.model.setInsertPolicy(QComboBox.NoInsert)
+        self.model.lineEdit().setAccessibleName("Model")
+        self.base = self._line("Server address", "https://api.example.com/v1")
+        self.key = self._line("Key", "Paste the key")
+        self.key.setEchoMode(QLineEdit.Password)
+        self.key.textChanged.connect(self._key_changed)
+        self.base_label = text_label("Server address", 13, 600, parent=self)
+        rows = (("Name", self.name), ("Provider", self.provider), ("Model", self.model),
+                (self.base_label, self.base), ("Key", self.key))
+        for r, (lab, widget) in enumerate(rows):
+            lb = lab if isinstance(lab, QLabel) else text_label(lab, 13, 600, parent=self)
+            lb.setFixedWidth(110)
+            grid.addWidget(lb, r, 0, Qt.AlignVCenter)
+            widget.setFixedHeight(32)
+            grid.addWidget(widget, r, 1)
+        self.add(grid)
+        foot = QHBoxLayout()
+        foot.setSpacing(8)
+        self.test_button = Button("Test key", "secondary", "s", parent=self)
+        self.test_button.setAccessibleName("Test this key")
+        self.test_button.clicked.connect(self._test)
+        foot.addWidget(self.test_button, 0, Qt.AlignVCenter)
+        self.status = text_label("", 12.5, 600, parent=self, wrap=True)
+        self.status.setAccessibleName("Key check")
+        foot.addWidget(self.status, 1, Qt.AlignVCenter)
+        self.cancel_button = Button("Cancel", "ghost", "s", parent=self)
+        self.cancel_button.setAccessibleName("Cancel")
+        self.cancel_button.clicked.connect(self._cancel)
+        foot.addWidget(self.cancel_button, 0, Qt.AlignVCenter)
+        self.save_button = Button("Save", "primary", "s", parent=self)
+        self.save_button.setAccessibleName("Save the key")
+        self.save_button.clicked.connect(self._save)
+        foot.addWidget(self.save_button, 0, Qt.AlignVCenter)
+        self.add(foot)
+        self._editing_id = None
+        self._provider_changed()
+
+    def _line(self, name, placeholder):
+        w = field_font(QLineEdit(self))
+        w.setPlaceholderText(placeholder)
+        w.setAccessibleName(name)
+        return w
+
+    def editing_id(self):
+        return self._editing_id
+
+    def open(self, entry=None, provider=None):
+        """A new key (``provider`` preselected), or ``entry`` to edit (its key stays unless replaced)."""
+        self._editing_id = entry["id"] if entry else None
+        self.heading.setText("Edit key" if entry else "Add a key")
+        pid = (entry or {}).get("provider") or provider or api_keys.ENTRY_PROVIDERS[0]
+        i = self.provider.findData(pid)
+        self.provider.setCurrentIndex(max(0, i))
+        self._provider_changed()
+        self.name.setText((entry or {}).get("name") or "")
+        if entry:
+            self._set_model(entry.get("model") or "")
+            self.base.setText(entry.get("base_url") or "")
+        self.key.clear()
+        self.key.setPlaceholderText("Leave empty to keep the saved key" if entry else "Paste the key")
         self.status.setText("")
-        for b in (self.replace_button, self.remove_button, self.add_button):
-            b.hide()
-        self.save_button.show()
-        self.save_button.setEnabled(False)
-        self.cancel_button.show()
-        self.input.setFocus(Qt.OtherFocusReason)
+        self._key_changed(self.key.text())
+        self.show()
+        (self.key if entry else self.name).setFocus(Qt.OtherFocusReason)
 
-    def close_editor(self):
-        self._editing = False
-        self._timer.stop()
-        self.input.clear()
-        self.edit.hide()
-        self.view.show()
-        self.replace_button.setVisible(self._has_key)
-        self.remove_button.setVisible(self._has_key)
-        self.add_button.setVisible(not self._has_key)
-        self.save_button.hide()
-        self.cancel_button.hide()
-
-    def _changed(self, text):
-        text = text.strip()
-        self.save_button.setEnabled(bool(text))
-        self.status.setText("")
-        if len(text) >= 8:
-            self._timer.start()
+    def _set_model(self, mid):
+        i = self.model.findData(mid)
+        if i >= 0:
+            self.model.setCurrentIndex(i)
         else:
-            self._timer.stop()
+            self.model.setEditText(mid)
 
-    def _fire_test(self):
-        key = self.input.text().strip()
-        if key:
-            self.status.setText("Checking…")
-            tint(self.status, "muted")
-            self.test.emit(self.field, key)
+    def _provider_changed(self, *_):
+        pid = self.provider.currentData()
+        info = engine_choice.WRITER_PROVIDERS.get(pid) or {}
+        self.model.blockSignals(True)
+        self.model.clear()
+        for mid, name, note in engine_choice.writer_models(pid):
+            self.model.addItem("%s · %s" % (name, note) if note else name, mid)
+        self.model.blockSignals(False)
+        self._set_model(info.get("default", ""))
+        editable = api_keys.provider_has_address(pid)
+        self.base_label.setVisible(editable)
+        self.base.setVisible(editable)
+        self.base.setPlaceholderText(info.get("default_url", ""))
+        if not editable:
+            self.base.clear()
+        self.status.setText("")
+
+    def model_id(self):
+        i = self.model.currentIndex()
+        text = self.model.currentText().strip()
+        if i >= 0 and self.model.itemText(i) == text:
+            return str(self.model.itemData(i) or "")
+        return text                                       # typed by hand
+
+    def _key_changed(self, text):
+        self.save_button.setEnabled(bool(text.strip()) or self._editing_id is not None)
+        self.test_button.setEnabled(bool(text.strip()))
+        self.status.setText("")
+
+    def _test(self):
+        key = self.key.text().strip()
+        if not key:
+            return
+        self.status.setText("Checking…")
+        tint(self.status, "muted")
+        self.test.emit(self.provider.currentData(), key, self.model_id(), self.base.text().strip())
 
     def show_test(self, key, ok, message):
-        """A test answer: ignored unless it is for what is in the box now."""
-        if not self._editing or key != self.input.text().strip():
+        """A test answer: shown only while that key is still the one typed."""
+        if self.isHidden() or key != self.key.text().strip():
             return
-        self.last_result = (key, bool(ok), message)
         self.status.setText("✓ Works" if ok else (message or "That key didn't work."))
         tint(self.status, "ok-tx" if ok else "red-tx")
         self.status.setToolTip("" if ok else (message or ""))
 
+    def show_error(self, message):
+        self.status.setText(message)
+        tint(self.status, "red-tx")
+
+    def has_unsaved_key(self):
+        return not self.isHidden() and bool(self.key.text().strip())
+
     def _save(self):
-        key = self.input.text().strip()
-        if key:
-            self.save.emit(self.field, key)
+        key = self.key.text().strip()
+        if not key and self._editing_id is None:
+            return
+        self.saved.emit({"id": self._editing_id, "name": self.name.text().strip(),
+                         "provider": self.provider.currentData(), "model": self.model_id(),
+                         "base_url": self.base.text().strip(), "key": key})
+
+    def _cancel(self):
+        self.hide()
+        self.cancelled.emit()
 
 
-class WriterKeyPanel(Card):
-    """'More options': the AI writer with any provider's key - provider, model,
-    server address (OpenAI-compatible / Cerebras) and that provider's key."""
-    use = Signal(str, str, str)     # provider, model, base url
-
-    PROVIDERS = tuple(engine_choice.WRITER_PROVIDERS)
+class ApiKeysPanel(QWidget):
+    """Settings › My API keys: every saved key in one list, "+ Add key", and the editor."""
+    test = Signal(str, str, str, str, object)    # provider, key, model, base url, token (for the answer)
+    test_saved = Signal(str)                       # a saved key's id
+    saved = Signal(dict)
+    removed = Signal(str)
+    cancelled = Signal()
 
     def __init__(self, parent=None):
-        super().__init__(parent, pad=(20, 4), gap=0)
-        self.provider = field_font(QComboBox(self))
-        self.provider.setAccessibleName("AI writer service")
-        for pid in self.PROVIDERS:
-            self.provider.addItem(engine_choice.WRITER_PROVIDERS[pid]["name"], pid)
-        # Wide enough for "Qwen 3.8 27B · fastest, sees images" without clipping.
-        self.provider.setFixedWidth(300)
-        self.model = field_font(QComboBox(self))
-        self.model.setAccessibleName("Model")
-        self.model.setEditable(True)
-        self.model.setFixedWidth(300)
-        if self.model.lineEdit() is not None:
-            field_font(self.model.lineEdit())
-            self.model.lineEdit().setAccessibleName("Model")
-        self.model.currentIndexChanged.connect(lambda _i: self._show_model_start())
-        self.base = field_font(QLineEdit(self))
-        self.base.setAccessibleName("Server address")
-        self.base.setFixedWidth(300)
-        self.row_provider = SettingRow("AI writer with your own key", self.provider)
-        self.row_model = SettingRow("Model", self.model)
-        self.row_base = SettingRow("Server address", self.base)
-        self.key_row = KeyRow("action_api_key", "Key")
-        foot = QWidget(self)
-        fl = QHBoxLayout(foot)
-        fl.setContentsMargins(0, 12, 0, 12)
-        self.note = text_label("", 12, role="hint", parent=foot, wrap=True)
-        fl.addWidget(self.note, 1)
-        self.use_button = Button("Use for AI writer", "primary", "s", parent=foot)
-        self.use_button.clicked.connect(self._use)
-        fl.addWidget(self.use_button, 0, Qt.AlignVCenter)
-        for w in (self.row_provider, self.row_model, self.row_base, self.key_row, foot):
-            self.add(w)
-        self.provider.currentIndexChanged.connect(lambda _i: self._provider_changed())
+        super().__init__(parent)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(10)
+        self.list_card = Card(self, pad=(20, 4), gap=0)      # shown once there is a key
+        self.list_card.hide()
+        v.addWidget(self.list_card)
+        self.add_button = Button("Add key", "secondary", "s", icon="plus", parent=self)
+        self.add_button.setAccessibleName("Add an API key")
+        self.add_button.clicked.connect(lambda _=False: self.open_new())
+        v.addWidget(self.add_button, 0, Qt.AlignLeft)
+        self.editor = ApiKeyEditor(self)
+        self.editor.saved.connect(self.saved.emit)
+        self.editor.cancelled.connect(self._editor_closed)
+        self.editor.test.connect(lambda p, k, m, b: self.test.emit(p, k, m, b, ("editor", k)))
+        self.editor.hide()
+        v.addWidget(self.editor)
+        self.rows = {}
+        self._entries = {}
+        self._tests = {}                  # key id -> (ok, message) of its last test
 
-    def current(self):
-        return self.provider.currentData()
+    def show_entries(self, items):
+        """items: [(entry, api_keys.entry_view(...))] - the list is drawn again."""
+        for row in self.rows.values():
+            row.hide()
+            row.deleteLater()
+        self.rows, self._entries = {}, {}
+        last = None
+        for entry, view in items:
+            row = ApiKeyRow(entry, view, self.list_card)
+            row.test.connect(self._test_row)
+            row.edit.connect(self._edit_row)
+            row.removed.connect(self.removed.emit)
+            row.show_test(self._tests.get(entry["id"]))
+            self.list_card.add(row)
+            self.rows[entry["id"]] = row
+            self._entries[entry["id"]] = (entry, view)
+            row.set_last(False)
+            last = row
+        if last is not None:
+            last.set_last(True)
+        self.list_card.setVisible(bool(items))
 
-    def load(self, cfg):
-        engine = engine_choice.writer_choice(cfg)
-        pid = cfg.get("action_model") if engine == "own_key" else None
-        pid = engine_choice._norm_provider(pid) or self.PROVIDERS[0]
-        idx = self.provider.findData(pid)
-        self.provider.blockSignals(True)
-        self.provider.setCurrentIndex(max(0, idx))
-        self.provider.blockSignals(False)
-        self._provider_changed(cfg)
+    def _test_row(self, key_id):
+        row = self.rows.get(key_id)
+        if row is not None:
+            row.show_test("checking")
+        self.test_saved.emit(key_id)
 
-    def _provider_changed(self, cfg=None):
-        pid = self.current()
-        info = engine_choice.WRITER_PROVIDERS.get(pid, {})
-        self.model.blockSignals(True)
-        self.model.clear()
-        for mid, name, note in engine_choice.writer_models(pid):
-            self.model.addItem("%s%s" % (name, (" · " + note) if note else ""), mid)
-        if cfg is not None:
-            current = engine_choice.writer_model_for(pid, cfg)
-            i = self.model.findData(current)
-            if i >= 0:
-                self.model.setCurrentIndex(i)
-            elif current:
-                self.model.addItem(current, current)
-                self.model.setCurrentIndex(self.model.count() - 1)
-        self.model.blockSignals(False)
-        self._show_model_start()
-        editable = info.get("base_url") == "editable"
-        self.row_base.setVisible(editable)
-        self.base.setPlaceholderText(info.get("default_url", ""))
-        if editable and cfg is not None:
-            self.base.setText(str(cfg.get("action_api_base_url") or ""))
-        field = info.get("key_field") or "action_api_key"
-        self.key_row.set_field(field, "%s key" % info.get("name", "AI writer"))
-        self.key_row.set_last(False)
-        if field == "google_api_key":
-            self.note.setText("Uses your Google Gemini key.")
-        elif info.get("key_fallback") == "mistral_api_key":
-            self.note.setText("Empty: your Mistral key above is used.")
-        else:
-            self.note.setText("")
+    def _edit_row(self, key_id):
+        if key_id in self._entries:
+            self.open_edit(*self._entries[key_id])
 
-    def _show_model_start(self):
-        """A long model name reads from its start, not its clipped end."""
-        le = self.model.lineEdit()
-        if le is not None:
-            le.setCursorPosition(0)
+    def open_new(self, provider=None):
+        self.editor.open(None, provider)
+        self.add_button.hide()
 
-    def selected_model(self):
-        i = self.model.currentIndex()
-        data = self.model.itemData(i) if i >= 0 else None
-        text = self.model.currentText().strip()
-        if data and self.model.itemText(i) == text:
-            return data
-        return text.split(" · ")[0].strip() if text else ""
+    def open_edit(self, entry, _view=None):
+        self.editor.open(entry)
+        self.add_button.hide()
 
-    def _use(self):
-        self.use.emit(self.current(), self.selected_model(), self.base.text().strip())
+    def close_editor(self):
+        self.editor.hide()
+        self._editor_closed(emit=False)
+
+    def _editor_closed(self, emit=True):
+        self.add_button.show()
+        if emit:
+            self.cancelled.emit()
+
+    def has_unsaved_key(self):
+        return self.editor.has_unsaved_key()
+
+    def show_test(self, token, ok, message):
+        kind, ident = token
+        if kind == "editor":
+            self.editor.show_test(ident, ok, message)
+            return
+        self._tests[ident] = (bool(ok), message)
+        row = self.rows.get(ident)
+        if row is not None and alive(row):
+            row.show_test((bool(ok), message))
 
 
-# ── Updates & about ──────────────────────────────────────────────────────────
+class EngineCard(Card):
+    """One of Speech & AI's two cards (Speech, AI writer), both in one format: the title and what
+    it is for (the hardware on the right); "Runs on" - where the model runs - and "Model" - the
+    model, as the pickers list it (real names, LOCAL / CLOUD / PRO chips, a download icon on one
+    that is not on this computer); one status line with its one action under them. The page
+    fills it (fill / set_source / set_status) and reads runs_on.changed / combo picks."""
+    LABEL_W = 76
+    COMBO_W = 320
+
+    action_clicked = Signal()
+
+    def __init__(self, title, sub, sources, kind="", help_text="", parent=None):
+        super().__init__(parent, pad=(22, 18), gap=12)
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        self.title = text_label(title, 15, 700, parent=self)
+        head.addWidget(self.title, 0, Qt.AlignVCenter)
+        self.kind = text_label(kind, 12.5, 600, role="muted", parent=self)
+        head.addWidget(self.kind, 0, Qt.AlignVCenter)
+        self.help = QLabel(self)
+        self.help.setPixmap(icons.pixmap("help", 15, "muted", sw=1.8))
+        self.help.setFixedSize(16, 16)
+        self.help.setToolTip(help_text)
+        self.help.setAccessibleName("What is the %s model?" % title)
+        self.help.setAccessibleDescription(help_text)
+        self.help.setCursor(Qt.WhatsThisCursor)
+        self.help.setVisible(bool(help_text))
+        head.addWidget(self.help, 0, Qt.AlignVCenter)
+        head.addStretch(1)
+        self.trail = text_label("", 12.5, role="muted", parent=self)
+        head.addWidget(self.trail, 0, Qt.AlignVCenter)
+        self.add(head)
+        self.sub = text_label(sub, 12.5, role="muted", parent=self, wrap=True)
+        self.sub.setVisible(bool(sub))
+        self.add(self.sub)
+        self.sources = tuple(k for k, _n in sources)
+        self.runs_on = Segmented([n for _k, n in sources], 0, "%s runs on" % title, size="s", parent=self)
+        self.add(self._row("Runs on", self.runs_on))
+        self.combo = PlainNameCombo(self)
+        self.combo.setAccessibleName("%s model" % title)
+        self.combo.setFont(theme.font(13.5))
+        self.combo.setCursor(Qt.PointingHandCursor)
+        self.combo.setFixedWidth(self.COMBO_W)
+        self.combo.enable_row_marks()
+        self.combo.setPlaceholderText(PICK_A_MODEL)        # a "Runs on" just picked: nothing chosen yet
+        self.add(self._row("Model", self.combo))
+        status = QHBoxLayout()
+        status.setContentsMargins(self.LABEL_W + 12, 0, 0, 0)
+        status.setSpacing(10)
+        self.status = text_label("", 12.5, role="muted", parent=self, wrap=True)
+        status.addWidget(self.status, 1, Qt.AlignVCenter)
+        self.action = Button("", "link", "s", parent=self)
+        self.action.setAccessibleName("%s model action" % title)
+        self.action.clicked.connect(self.action_clicked.emit)
+        self.action.hide()
+        status.addWidget(self.action, 0, Qt.AlignVCenter)
+        self.add(status)
+        self.extra = QVBoxLayout()           # the NVIDIA card under Speech
+        self.extra.setContentsMargins(0, 0, 0, 0)
+        self.add(self.extra)
+
+    def _row(self, name, widget):
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        lb = text_label(name, 13.5, 600, parent=self)
+        lb.setFixedWidth(self.LABEL_W)
+        row.addWidget(lb, 0, Qt.AlignVCenter)
+        row.addWidget(widget, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        row.addStretch(1)
+        return row
+
+    def source(self):
+        return self.sources[self.runs_on.index()]
+
+    def set_source(self, key):
+        if key in self.sources and self.runs_on.index() != self.sources.index(key):
+            self.runs_on.blockSignals(True)
+            self.runs_on.set_index(self.sources.index(key))
+            self.runs_on.blockSignals(False)
+
+    def fill(self, rows, value):
+        """The rows, with ``value`` selected (what is really set). None, or a value that isn't listed:
+        nothing selected - the box says "Select a model"."""
+        box = self.combo
+        box.blockSignals(True)
+        try:
+            box.fill_rows(rows)
+            idx = box.findData(value) if value else -1      # (a heading's data is None too)
+            box.setCurrentIndex(idx if idx >= 0 and not box.is_heading(idx) else -1)
+        finally:
+            box.blockSignals(False)
+
+    def set_status(self, text, action="", tone="muted"):
+        self.status.setText(text)
+        self.status.setVisible(bool(text))
+        self.status.setProperty("textRole", tone)
+        self.status.style().unpolish(self.status)
+        self.status.style().polish(self.status)
+        self.action.setText(action)
+        self.action.setAccessibleName("%s: %s" % (action, self.title.text()) if action
+                                      else "%s model action" % self.title.text())
+        self.action.setVisible(bool(action))
+
+
 class _Dot(QWidget):
     def __init__(self, color="ok", size=7, parent=None):
         super().__init__(parent)
@@ -2095,7 +1613,6 @@ class SettingsPage(QWidget):
         self._jump = None               # (section, scroll value) we jumped to
         self._refresh_queued = False
         self._pending_use = {}          # model id -> "speech" | "writer" after its download
-        self._key_then_speech = None    # (key field, provider): "Your own key" waiting for its key
         self._hardware = None
         self._hw_asked = False
         self._mic = None
@@ -2372,6 +1889,15 @@ class SettingsPage(QWidget):
         else:
             self.seg_look.hide()             # built (app_theme is kept), never shown
         rows.append(self._row("Notify me when notes or transcripts are ready", self.t_notify))
+        self.row_mac_perms = None
+        if IS_MAC:
+            # The macOS permissions guide (main.py), whenever the shortcut or
+            # pasting stops working - not only on the first launch.
+            b = Button("Check", "secondary", "s", parent=self)
+            b.clicked.connect(lambda: call(self.app, "show_macos_permissions_guide"))
+            self.row_mac_perms = self._row("Mac permissions", b,
+                                           hint="Microphone, Accessibility and Input Monitoring")
+            rows.append(self.row_mac_perms)
         inner.addWidget(self._group(rows))
         blk, bv = self._block("Shortcuts", parent=sec)
         self.shortcut_rows = []
@@ -2556,154 +2082,48 @@ class SettingsPage(QWidget):
         sec, v = self._section("speech", "Speech & AI", gap=14)
         inner = QVBoxLayout()
         inner.setSpacing(30)
-        self.hw_trail = text_label("", 12.5, role="muted", parent=sec)
-        blk, bv = self._block("Speech model", trail=self.hw_trail, parent=sec)
-        self.cards_row = CardsRow(parent=blk)
-        self.model_cards = {}
-        for mid in hardware.MAIN_SPEECH_MODELS:
-            card = ModelCard(mid)
-            card.download.connect(self._model_download)
-            card.use.connect(self._model_use)
-            card.remove.connect(self._model_remove)
-            self.cards_row.add(card)
-            self.model_cards[mid] = card
-        bv.addWidget(self.cards_row)
-        more = QVBoxLayout()
-        more.setContentsMargins(0, 6, 0, 0)
-        more.setSpacing(8)
-        self.more_button = trailing_icon(Button("More sizes", "link", "m", icon="chev_d", parent=blk))
-        self.more_button.setIconSize(QSize(14, 14))
-        self.more_button.setFixedHeight(20)
-        self.more_button.clicked.connect(lambda _=False: self._toggle_more())
-        more.addWidget(self.more_button, 0, Qt.AlignLeft | Qt.AlignAbsolute)
-        self.tiles_row = CardsRow(top=12, parent=blk)
-        self.tiles_row.set_recommended(None, room=False)
-        self.size_tiles = {}
-        for mid in hardware.MORE_SPEECH_MODELS:
-            t = SizeTile(mid)
-            t.activated.connect(self._tile_clicked)
-            t.remove.connect(self._model_remove)
-            self.tiles_row.add(t)
-            self.size_tiles[mid] = t
-        more.addWidget(self.tiles_row)
-        bv.addLayout(more)
-        # The Armenian model: its own wide card under the sizes (hidden until it is available).
-        self.hy_card = ArmenianCard(blk)
-        self.hy_card.download.connect(self._hy_download)
-        self.hy_card.cancel.connect(self._hy_cancel)
-        self.hy_card.use.connect(lambda: self._model_use(hardware.HY_MODEL_ID))
-        self.hy_card.remove.connect(lambda: self._model_remove(hardware.HY_MODEL_ID))
-        self.hy_card.hide()
-        bv.addWidget(self.hy_card)
-        self.gpu_card = GpuCard(blk)
+        # Two cards in one format: Speech (dictation and meetings) and the AI writer.
+        self.speech_card = EngineCard("Speech", "", SPEECH_SOURCES_UI,
+                                      kind=SPEECH_KIND, help_text=SPEECH_HELP, parent=sec)
+        self.hw_trail = self.speech_card.trail
+        self.speech_card.runs_on.changed.connect(self._speech_source_clicked)
+        self.speech_card.combo.currentIndexChanged.connect(self._speech_model_picked)
+        self.speech_card.action_clicked.connect(self._speech_action)
+        self.gpu_card = GpuCard(self.speech_card)
         self.gpu_card.start.connect(self._gpu_start)
         self.gpu_card.cancel.connect(lambda: call(self.app, "cancel_gpu_download"))
         self.gpu_card.retry.connect(self._gpu_retry)
         self.gpu_card.remove.connect(self._gpu_remove)
         self.gpu_card.hide()
-        bv.addWidget(self.gpu_card)
-        self._more_open = True
-        self._sync_more()
-        inner.addWidget(blk)
+        self.speech_card.extra.addWidget(self.gpu_card)
+        inner.addWidget(self.speech_card)
 
-        two = QBoxLayout(QBoxLayout.LeftToRight)       # top to bottom in a narrow window
-        two.setSpacing(20)
-        self.speech_two = two
-        left, lv = self._block("Speech runs on", sub="Dictation and meetings.", parent=sec)
-        tiles = QVBoxLayout()
-        tiles.setSpacing(8)
-        self.speech_tiles = {
-            "local": OptionTile("Speech runs on", engine_choice.THIS_COMPUTER),
-            "cloud": OptionTile("Speech runs on", engine_choice.GUSAN_CLOUD, pro=True),
-            "own_key": OptionTile("Speech runs on", engine_choice.OWN_KEY),
-        }
-        for k, t in self.speech_tiles.items():
-            t.clicked.connect(lambda _=False, s=k: self._speech_pick(s))
-            tiles.addWidget(t)
-        self.speech_provider = Segmented(["Mistral", "Google Gemini"], 0, "Speech key", size="s")
-        self.speech_provider.changed.connect(
-            lambda i: self._speech_pick("own_key", provider=("mistral", "google")[i]))
-        holder = QWidget()
-        hl = QHBoxLayout(holder)
-        hl.setContentsMargins(0, 8, 0, 0)
-        hl.addWidget(self.speech_provider)
-        hl.addStretch(1)
-        self.speech_provider_box = holder
-        self.speech_tiles["own_key"].set_extra(holder)
-        lv.addLayout(tiles)
-        two.addWidget(left, 1, Qt.AlignTop)
-
-        right, rv = self._block("AI writer", sub="Smart Actions, meeting notes and Live Assistant.", parent=sec)
-        wtiles = QVBoxLayout()
-        wtiles.setSpacing(8)
-        self.writer_tiles = {
-            "cloud": OptionTile("AI writer", engine_choice.GUSAN_CLOUD, pro=True),
-            "local": OptionTile("AI writer", engine_choice.THIS_COMPUTER),
-            "own_key": OptionTile("AI writer", engine_choice.OWN_KEY),
-        }
-        self.writer_tiles["cloud"].set_hints(list(CLOUD_WRITER_HINTS))
-        grid_w = QWidget()
-        grid = QGridLayout(grid_w)
-        grid.setContentsMargins(0, 8, 0, 0)
-        grid.setHorizontalSpacing(6)
-        grid.setVerticalSpacing(6)
-        self.writer_sizes = {}
-        for i, mid in enumerate(hardware.LOCAL_AI_MODEL_IDS):
-            ws = WriterSize(mid)
-            ws.activated.connect(self._writer_size_clicked)
-            ws.remove.connect(self._model_remove)
-            grid.addWidget(ws, i // 2, i % 2)
-            self.writer_sizes[mid] = ws
-        self.writer_tiles["local"].set_extra(grid_w)
-        for k, t in self.writer_tiles.items():
-            t.clicked.connect(lambda _=False, c=k: self._writer_pick(c))
-            wtiles.addWidget(t)
-        rv.addLayout(wtiles)
-        two.addWidget(right, 1, Qt.AlignTop)
-        inner.addLayout(two)
+        self.writer_card = EngineCard("AI writer", "", WRITER_SOURCES_UI, kind=WRITER_KIND, help_text=WRITER_HELP, parent=sec)
+        self.writer_card.runs_on.changed.connect(self._writer_source_clicked)
+        self.writer_card.combo.currentIndexChanged.connect(self._writer_model_picked)
+        self.writer_card.action_clicked.connect(self._writer_action)
+        inner.addWidget(self.writer_card)
+        self._speech_action_fn = self._writer_action_fn = None
+        self._model_errors = {}
+        self._progress = {}                   # model id -> the last percent heard (None = size unknown)
+        # A "Runs on" picked but no model yet: the card shows that source's list with nothing
+        # selected ("Select a model"); nothing changes until a model is picked.
+        self._preview = {"speech": None, "writer": None}
+        self._preview_truth = {"speech": None, "writer": None}   # what was set when the preview began
+        self._key_then = None                 # "speech" / "writer": a key being added for that card
 
         kblk, kv = self._block("My API keys", parent=sec)
-        self.key_rows = {}
-        rows = []
-        for field, name in SPEECH_KEYS:
-            r = KeyRow(field, name)
-            self._wire_key_row(r)
-            self.key_rows[field] = r
-            rows.append(r)
-        self.keys_card = self._group(rows)
-        kv.addWidget(self.keys_card)
-        self.more_options = trailing_icon(Button("More options", "link", "m", icon="chev_r", parent=kblk))
-        self.more_options.setIconSize(QSize(14, 14))
-        self.more_options.setFixedHeight(20)
-        self.more_options.clicked.connect(lambda _=False: self._toggle_more_options())
-        kv.addWidget(self.more_options, 0, Qt.AlignLeft | Qt.AlignAbsolute)
-        self.writer_panel = WriterKeyPanel(kblk)
-        self._wire_key_row(self.writer_panel.key_row)
-        self.writer_panel.use.connect(self._writer_own_key)
-        self.writer_panel.hide()
-        kv.addWidget(self.writer_panel)
+        self.keys_panel = ApiKeysPanel(kblk)
+        self.keys_panel.test.connect(self._test_entry)
+        self.keys_panel.test_saved.connect(self._test_saved_entry)
+        self.keys_panel.saved.connect(self._entry_saved)
+        self.keys_panel.removed.connect(self._remove_entry)
+        self.keys_panel.cancelled.connect(lambda: setattr(self, "_key_then", None))
+        kv.addWidget(self.keys_panel)
         self.keys_block = kblk
         inner.addWidget(kblk)
         v.addLayout(inner)
         self._layout_speech_columns()
-
-    def _toggle_more(self):
-        self._more_open = not self._more_open
-        self._sync_more()
-
-    def _sync_more(self):
-        self.tiles_row.setVisible(self._more_open)
-        self.more_button.setIcon(icons.icon("chev_d" if self._more_open else "chev_r", 14, "blue-tx", sw=2))
-        self.more_button.setAccessibleDescription("Expanded" if self._more_open else "Collapsed")
-
-    def _toggle_more_options(self, show=None):
-        show = (not self.writer_panel.isVisible()) if show is None else bool(show)
-        if show:
-            self.writer_panel.load(self.cfg)
-            self._refresh_key_row(self.writer_panel.key_row)
-        self.writer_panel.setVisible(show)
-        self.more_options.setIcon(icons.icon("chev_d" if show else "chev_r", 14, "blue-tx", sw=2))
-        self.more_options.setAccessibleDescription("Expanded" if show else "Collapsed")
 
     # model state helpers
     def _state(self, mid):
@@ -2743,83 +2163,85 @@ class SettingsPage(QWidget):
         return getattr(rec, "model", None)
 
     def _refresh_models(self):
-        cfg = self.cfg
-        dl = self._dl()
-        sel = cfg.get("whisper_model") or hardware.DEFAULT_SPEECH_MODEL
-        speech = self._speech_now()
-        in_use = "In use" if speech.get("kind") == "local" else "Offline backup"
-        on_gpu = bool(self._hardware is not None and getattr(self._hardware, "on_gpu", False))
-        for mid, card in self.model_cards.items():
-            st = self._state(mid)
-            if st == "unknown":
-                st = "ready" if mid == sel else "missing"
-            prog = None
-            err = ""
-            removing = False
-            if dl is not None:
-                try:
-                    p = dl.progress_of(mid)
-                    prog = p[0] if p and (p[2] or p[0]) else None
-                    err = dl.error(mid) or ""
-                    removing = bool(dl.is_removing(mid))
-                except Exception:
-                    pass
-            card.set_state(st, selected=(mid == sel), in_use_text=in_use, pct=prog, error=err,
-                           removing=removing, enabled=dl is not None)
-            card.set_note("A little slower here" if hardware.slower_here(mid, on_gpu) else "")
-        for mid, tile in self.size_tiles.items():
-            st = self._state(mid)
-            if st == "unknown":
-                st = "ready" if mid == sel else "missing"
-            prog = None
-            removing = False
-            if dl is not None:
-                try:
-                    p = dl.progress_of(mid)
-                    prog = p[0] if p and (p[2] or p[0]) else None
-                    removing = bool(dl.is_removing(mid))
-                except Exception:
-                    pass
-            tile.set_state(st, selected=(mid == sel), pct=prog, removing=removing, enabled=dl is not None)
-        self._refresh_hy()
-        rec = self._recommended()
-        if rec in self.model_cards:
-            self.cards_row.set_recommended(self.model_cards[rec])
-            self.tiles_row.set_recommended(None, room=False)
-        elif rec in self.size_tiles and self._more_open:
-            self.cards_row.set_recommended(None)
-            self.tiles_row.set_recommended(self.size_tiles[rec], room=True)
-        else:
-            self.cards_row.set_recommended(None)
-            self.tiles_row.set_recommended(None, room=False)
-        for mid, card in self.model_cards.items():
-            card.setAccessibleDescription("Best for your computer" if mid == rec else "")
+        """The two cards' model lists, download icons and status lines (after a download, a
+        removal, the hardware scan)."""
+        if "speech" not in self._built:
+            return
+        self._refresh_speech_choice()
+        self._refresh_writer()
 
-    def _refresh_hy(self):
-        """The Armenian model's card: hidden while it isn't listed, else its state from the downloads."""
-        card = getattr(self, "hy_card", None)
-        if card is None:
-            return
-        shown = hy_model.state(self.app) != "hidden"
-        card.setVisible(shown)
-        if not shown:
-            return
+    def _model_progress(self, mid):
+        """A running download's percent, or None (not running / size not known yet)."""
+        if mid in self._progress:
+            return self._progress[mid]
         dl = self._dl()
-        st = hy_model.state(self.app)
-        sel = str(self.cfg.get("whisper_model") or "") == hardware.HY_MODEL_ID
-        removing = False
-        if dl is not None:
+        if dl is None:
+            return None
+        if mid == hardware.HY_MODEL_ID:
+            return hy_model.percent(self.app)
+        try:
+            p = dl.progress_of(mid)
+            return int(p[0]) if p and (p[2] or p[0]) else None
+        except Exception:
+            return None
+
+    def _speech_model_state(self, mid):
+        """"ready" | "missing" | "downloading" | "failed" for a speech model (the Armenian one
+        through hy_model). Unknown (no downloads yet): the model in use counts as here."""
+        if mid == hardware.HY_MODEL_ID:
+            st = hy_model.state(self.app)
+            return "missing" if st == "hidden" else st
+        st = self._state(mid)
+        if st == "unknown":
+            st = "ready" if mid == (self.cfg.get("whisper_model") or hardware.DEFAULT_SPEECH_MODEL) else "missing"
+        return st
+
+    def _writer_model_state(self, mid):
+        st = self._state(mid)
+        if st == "unknown":
             try:
-                removing = bool(dl.is_removing(hardware.HY_MODEL_ID))
+                import local_llm
+                st = "ready" if local_llm.model_downloaded(mid) else "missing"
             except Exception:
-                removing = False
-        card.set_state(st, selected=sel, pct=hy_model.percent(self.app), error=hy_model.failure(self.app),
-                       removing=removing, enabled=dl is not None)
+                st = "missing"
+        return st
 
-    def _hy_download(self):
-        """Download the Armenian model and use it when it is on this computer (like a Whisper card).
-        Privacy mode does not stop it: it only fetches the model (speech_hy)."""
-        self._model_download(hardware.HY_MODEL_ID)
+    def _mark_rows(self, card, state_of, info_of):
+        box = card.combo
+        for i in range(box.count()):
+            if box.is_heading(i):
+                continue
+            value = str(box.itemData(i) or "")
+            info = info_of(value)
+            mark, note = "", ""
+            if info is not None and state_of(value) in ("missing", "failed"):
+                mark, note = MARK_DOWNLOAD, info.size
+            box.set_choice_mark(i, mark, note)
+
+    def _download_status(self, mid, info, st, ready_text):
+        """(text, action, tone) for a local model's status line. No downloads service (an early
+        start, a test stub): the line only, no button."""
+        text, action, tone = self._download_line(mid, info, st, ready_text)
+        return (text, action if self._dl() is not None else "", tone)
+
+    def _download_line(self, mid, info, st, ready_text):
+        if st != "downloading":
+            self._progress.pop(mid, None)
+        if st == "downloading":
+            pct = self._model_progress(mid)
+            text = "Downloading %s…%s" % (info.plain, (" %d%%" % pct) if pct is not None else "")
+            return text, ("Cancel" if mid == hardware.HY_MODEL_ID else ""), "muted"
+        if st == "failed":
+            why = self._model_errors.get(mid)
+            if not why and self._dl() is not None:
+                try:
+                    why = self._dl().error(mid)
+                except Exception:
+                    why = ""
+            return why or "The download didn't finish.", "Try again", "muted"
+        if st == "missing":
+            return "Not on this computer yet · %s" % info.size, "Download", "muted"
+        return ready_text, "Remove", "muted"
 
     def _hy_cancel(self):
         hy_model.cancel(self.app)
@@ -2847,32 +2269,14 @@ class SettingsPage(QWidget):
         self._refresh_writer()
 
     def _model_use(self, mid):
-        speech = self._speech_now()
-        if speech.get("kind") == "local":
-            res = engine_choice.set_speech_source(self.app, "local", model=mid, downloaded=self._downloaded_fn())
-            if res["ok"]:
-                apply_settings(self.app, res["changes"])
-            elif res["problem"] == "needs_download":
-                self._model_download(mid)
-                return
-        else:
-            apply_settings(self.app, {"whisper_model": mid})
-        self.refresh()
-
-    def _tile_clicked(self, mid):
-        st = self._state(mid)
-        if st in ("missing", "failed"):
-            self._model_download(mid)
-        elif st == "ready" and mid != self.cfg.get("whisper_model"):
-            self._model_use(mid)
+        """Speech runs on this computer with ``mid`` (picked, or just downloaded for it)."""
+        self._apply_speech(mid)
 
     def _model_remove(self, mid):
         info = hardware.info(mid)
-        plain = info.plain if info else mid
-        if mid in hardware.LOCAL_AI_INFO:
-            plain = info.plain if info.plain != "Alternative" else info.real
-        detail = "%s · %s. You can download it again." % (info.real, info.size) if info else ""
-        if ask(self, "Remove %s?" % plain, detail,
+        real = info.real if info else mid
+        detail = "%s · %s. You can download it again." % (info.plain, info.size) if info else ""
+        if ask(self, "Remove %s?" % real, detail,
                [("cancel", "Cancel", "ghost"), ("remove", "Remove", "danger")]) != "remove":
             return
         dl = self._dl()
@@ -2907,10 +2311,8 @@ class SettingsPage(QWidget):
                 apply_settings(self.app, {engine_choice.LIVE_SPEECH_KEY: engine_choice.LIVE_SPEECH_AUTO})
             if name == str(cfg.get(engine_choice.FILE_KEY) or ""):
                 apply_settings(self.app, {engine_choice.FILE_KEY: engine_choice.FILE_AUTO})
-        if not ok and msg and "speech" in self._built and name in self.model_cards:
-            self.model_cards[name].set_note(msg)
-        if not ok and msg and "speech" in self._built and hardware.HY_MODEL_ID == name:
-            self.hy_card.sub.setText(msg)
+        if not ok and msg and "speech" in self._built:
+            self._model_errors[name] = msg            # the card's status line says it
         self._queue_refresh()
 
     def _on_finished(self, name, state, msg):
@@ -2924,92 +2326,45 @@ class SettingsPage(QWidget):
     def _on_progress(self, name, pct, _done=0, total=0):
         if "speech" not in self._built:
             return
-        # total 0 = the size isn't known yet: draw it indeterminate, not "0%".
-        pct = None if (not total and not pct) else int(pct or 0)
-        text = "…" if pct is None else "%d%%" % pct
-        if name in self.model_cards:
-            self.model_cards[name]._set_progress(pct)
-        elif name == hardware.HY_MODEL_ID:
-            self.hy_card._set_progress(pct)
-        elif name in self.size_tiles:
-            tile = self.size_tiles[name]
-            if tile._state[0] == "downloading":
-                tile.trail.setText(text)
-        elif name in self.writer_sizes:
-            ws = self.writer_sizes[name]
-            if ws._state == "downloading":
-                ws.mark.setText(text)
+        # The status line of the card whose model downloads ("Downloading Balanced… 45%").
+        # total 0 = the size isn't known yet: no percent, not "0%".
+        self._progress[name] = None if (not total and not pct) else int(pct or 0)
+        if name == (self.cfg.get("whisper_model") or "") or name in self._pending_use:
+            self._speech_status()
+        if name == engine_choice.local_writer(self.cfg) or name in self._pending_use:
+            self._writer_status()
 
-    # speech source
-    def _speech_pick(self, source, provider=None, turn_off_privacy=False):
-        cfg = self.cfg
-        if source == "own_key" and provider is None:
-            if cfg.get("backend") in ("mistral", "google") and engine_choice.speech_choice(cfg) == "own_key":
-                provider = cfg.get("backend")
-            elif (cfg.get("mistral_api_key") or "").strip():
-                provider = "mistral"
-            elif (cfg.get("google_api_key") or "").strip():
-                provider = "google"
-            else:
-                provider = "mistral"
-        res = engine_choice.set_speech_source(self.app, source, provider=provider,
-                                              downloaded=self._downloaded_fn(),
-                                              turn_off_privacy=turn_off_privacy)
-        problem = res.get("problem")
-        self._key_then_speech = None
-        if res.get("ok"):
-            apply_settings(self.app, res["changes"])
-        elif problem == "pro":
-            call(self.app, "_pro_upsell", res.get("upsell") or engine_choice.UPSELL_SPEECH)
-        elif problem == "privacy_mode":
-            if self._ask_privacy_off():
-                return self._speech_pick(source, provider, turn_off_privacy=True)
-        elif problem == "needs_key":
-            field = "google_api_key" if provider in ("google", "gemini") else "mistral_api_key"
-            self._key_then_speech = (field, provider)       # saving that key finishes the pick
-            self.open_key_editor(field)
-        elif problem == "needs_download":
-            self._model_download(cfg.get("whisper_model") or hardware.DEFAULT_SPEECH_MODEL)
-        self.refresh()
-        return res
-
+    # ── picking (both cards go through here) ──
     def _ask_privacy_off(self):
         return ask(self, "Turn off Privacy mode?", "Gusan Cloud and your own keys are off while it's on.",
                    [("cancel", "Cancel", "ghost"), ("off", "Turn off", "primary")]) == "off"
 
-    # AI writer
-    def _writer_pick(self, choice, turn_off_privacy=False):
-        cfg = self.cfg
-        if choice == "local":
-            mid = engine_choice.local_writer(cfg)
-            st = self._state(mid)
-            if st in ("missing", "failed"):
-                # Picking the tile itself starts a big download: say how big first.
-                i = hardware.LOCAL_AI_INFO.get(mid)
-                if i is not None and ask(self, "Download %s?" % i.plain, "%s · %s. It works offline." % (i.real, i.size),
-                                         [("cancel", "Cancel", "ghost"), ("go", "Download", "primary")]) != "go":
-                    self.refresh()
-                    return None
-            return self._writer_local(mid, turn_off_privacy)
-        if choice == "own_key":
-            pid = None
-            if engine_choice.writer_choice(cfg) == "own_key":
-                pid = engine_choice._norm_provider(cfg.get("action_model"))
-            if not pid:
-                import actions
-                for cand in (actions.API_MISTRAL_ID, actions.API_GEMINI_ID):
-                    if actions.engine_has_key(cand, cfg):
-                        pid = cand
-                        break
-            if not pid:
-                self._toggle_more_options(True)
-                self.writer_panel.key_row.open_editor()
-                self._scroll_to_widget(self.writer_panel)
-                self.refresh()
-                return None
-            return self._writer_own_key(pid, None, None, turn_off_privacy)
-        res = engine_choice.set_writer(self.app, "cloud", turn_off_privacy=turn_off_privacy)
-        return self._writer_result(res, lambda: self._writer_pick(choice, True))
+    def _apply_result(self, card, res, retry, upsell):
+        """A set_dictation_speech / set_writer_value answer: apply it, or ask what it needs."""
+        problem = res.get("problem")
+        if res.get("ok"):
+            self._preview[card] = None
+            apply_settings(self.app, res["changes"])
+        elif problem == "pro":
+            call(self.app, "_pro_upsell", res.get("upsell") or upsell)
+        elif problem == "privacy_mode":
+            if self._ask_privacy_off():
+                return retry()
+        elif problem == "needs_key":
+            self._key_then = card
+            self.keys_panel.open_new("api_mistral" if card == "speech" else None)
+            self._scroll_to_widget(self.keys_panel)
+        self.refresh()
+        return res
+
+    def _apply_speech(self, value, turn_off_privacy=False):
+        res = engine_choice.set_dictation_speech(self.app, value, downloaded=self._downloaded_fn(),
+                                                 turn_off_privacy=turn_off_privacy)
+        if res.get("problem") == "needs_download":
+            self._model_download(value)
+            return res
+        return self._apply_result("speech", res, lambda: self._apply_speech(value, True),
+                                  engine_choice.UPSELL_SPEECH)
 
     def _writer_local(self, mid, turn_off_privacy=False):
         res = engine_choice.set_writer(self.app, "local", model=mid, downloaded=self._downloaded_fn(),
@@ -3021,230 +2376,322 @@ class SettingsPage(QWidget):
                 self._model_download(mid, use_as="writer")
             self.refresh()
             return res
-        return self._writer_result(res, lambda: self._writer_local(mid, True))
+        return self._apply_result("writer", res, lambda: self._writer_local(mid, True),
+                                  engine_choice.UPSELL_WRITER)
 
-    def _writer_own_key(self, provider, model, base, turn_off_privacy=False):
-        res = engine_choice.set_writer(self.app, "own_key", model=model or None, provider=provider,
-                                       base_url=(base if base else None), turn_off_privacy=turn_off_privacy)
-        if res.get("problem") == "needs_key":
-            self._toggle_more_options(True)
-            idx = self.writer_panel.provider.findData(engine_choice._norm_provider(provider))
-            if idx >= 0:
-                self.writer_panel.provider.setCurrentIndex(idx)
-            self.writer_panel.key_row.open_editor()
-            self._scroll_to_widget(self.writer_panel)
-            self.refresh()
-            return res
-        return self._writer_result(res, lambda: self._writer_own_key(provider, model, base, True))
+    def _apply_writer(self, value, turn_off_privacy=False):
+        choice, _ident, mid = engine_choice.parse_writer_value(value)
+        if choice == "local":
+            return self._writer_local(mid, turn_off_privacy)
+        res = engine_choice.set_writer_value(self.app, value, downloaded=self._downloaded_fn(),
+                                             turn_off_privacy=turn_off_privacy)
+        return self._apply_result("writer", res, lambda: self._apply_writer(value, True),
+                                  engine_choice.UPSELL_WRITER)
 
-    def _writer_result(self, res, retry_without_privacy):
-        problem = res.get("problem")
-        if res.get("ok"):
-            apply_settings(self.app, res["changes"])
-        elif problem == "pro":
-            call(self.app, "_pro_upsell", res.get("upsell") or engine_choice.UPSELL_WRITER)
-        elif problem == "privacy_mode":
-            if self._ask_privacy_off():
-                return retry_without_privacy()
-        self.refresh()
-        return res
+    # ── the two cards ──
+    def _speech_source_clicked(self, i):
+        """A "Runs on" segment: show that source's models, nothing chosen yet. Nothing changes until a
+        model is picked (the segment of what is set just shows it again)."""
+        src = self.speech_card.sources[i]
+        truth = engine_choice.speech_choice(self.cfg)
+        self._preview["speech"] = None if src == truth else src
+        self._preview_truth["speech"] = truth
+        self._refresh_speech_choice()
 
-    def _writer_size_clicked(self, mid):
-        self._writer_local(mid)
+    def _speech_model_picked(self, _i):
+        value = str(self.speech_card.combo.currentData() or "")
+        self._refresh_speech_choice()           # what is really set, until the pick applies
+        if not value:
+            return
+        if engine_choice.dictation_speech_source(value) == "local":
+            st = self._speech_model_state(value)
+            if st in ("missing", "failed"):
+                if self._confirm_download(value):
+                    self._model_download(value)
+                return
+            if st == "downloading":
+                self._pending_use[value] = "speech"
+                return
+        self._apply_speech(value)
+
+    def _confirm_download(self, mid):
+        i = hardware.info(mid)
+        if i is None:
+            return False
+        return ask(self, "Download %s?" % i.real, "%s · %s. It works offline." % (i.plain, i.size),
+                   [("cancel", "Not now", "ghost"), ("go", "Download", "primary")]) == "go"
+
+    def _speech_action(self):
+        fn = self._speech_action_fn
+        if fn is not None:
+            fn()
+
+    def _shown_source(self, card, truth):
+        """The source the card shows: the one just clicked (nothing picked yet), unless it is what
+        is set now, or the setting changed somewhere else since (then what is really set)."""
+        shown = self._preview.get(card)
+        if shown == truth or (shown and self._preview_truth.get(card) != truth):
+            shown = self._preview[card] = None
+        return shown or truth
 
     def _refresh_speech_choice(self):
         cfg = self.cfg
-        speech = self._speech_now()
-        kind = speech.get("kind")
-        privacy = bool(cfg.get("privacy_mode"))
-        sel = cfg.get("whisper_model") or hardware.DEFAULT_SPEECH_MODEL
-        local = engine_choice._local_speech("dictation", sel)
-        for k, t in self.speech_tiles.items():
-            t.setChecked(k == kind)
-            t.set_paused(privacy and k != "local")
-        # The real model name and where it runs, as the pickers say it ("Whisper Small · Local").
-        self.speech_tiles["local"].set_hints(["%s · %s" % (local["tagged"], local["plain"])])
-        cloud = engine_choice.CLOUD_SPEECH_MODELS.get(str(cfg.get("managed_provider") or "gemini").lower(),
-                                                      hardware.CLOUD_SPEECH_MODEL)
-        self.speech_tiles["cloud"].set_hints(["Off while Privacy mode is on" if privacy else
-                                              "%s · nothing to download"
-                                              % engine_choice.tagged_name(cloud, "cloud")])
-        if privacy:
-            own = "Off while Privacy mode is on"
-        elif kind == "own_key":
-            own = speech.get("tagged") or "%s · %s" % (speech.get("plain"), speech.get("model_name"))
+        card = self.speech_card
+        truth = engine_choice.speech_choice(cfg)
+        src = self._shown_source("speech", truth)
+        card.set_source(src)
+        rows = engine_choice.dictation_speech_rows(cfg, is_pro(self.app), source=src)
+        value = engine_choice.dictation_speech_value(cfg) if src == truth else None
+        if src == "local" and value and self._speech_model_state(value) in ("missing", "failed"):
+            value = None          # not on this computer: "Select a model" - a pick asks to download it
+        card.fill(rows, value)
+        if src == "local":
+            self._mark_rows(card, self._speech_model_state, hardware.info)
+            rec = self._recommended()
+            i = card.combo.findData(rec) if rec else -1
+            if i >= 0 and hardware.info(rec) is not None:
+                card.combo.setItemData(i, "%s · Best for this computer" % hardware.info(rec).plain, NOTE_ROLE)
+        self._speech_status()
+
+    def _preview_status(self, card, src, has_rows):
+        """The line under a "Runs on" just picked (no model chosen yet)."""
+        if src == "own_key" and not has_rows:
+            return "", "Add key"
+        return "", ""
+
+    def _open_key_for(self, card):
+        self._key_then = card
+        self.keys_panel.open_new("api_mistral" if card == "speech" else None)
+        self._scroll_to_widget(self.keys_panel)
+
+    def _speech_status(self):
+        cfg = self.cfg
+        truth = engine_choice.speech_choice(cfg)
+        src = self._preview.get("speech") or truth
+        fn, action = None, ""
+        if src != truth:
+            text, action = self._preview_status("speech", src, self.speech_card.combo.count() > 0)
+            if action:
+                def fn():
+                    self._open_key_for("speech")
+        elif src == "cloud":
+            text = ""
+        elif src == "own_key":
+            e = api_keys.entry(cfg, cfg.get("speech_key_id"))
+            text = ""
+            if e is not None:
+                action = "Edit key"
+
+                def fn():
+                    self.keys_panel.open_edit(e, api_keys.entry_view(cfg, e))
+                    self._scroll_to_widget(self.keys_panel)
         else:
-            own = "Mistral or Google Gemini"
-        self.speech_tiles["own_key"].set_hints([own])
-        both = bool((cfg.get("mistral_api_key") or "").strip() and (cfg.get("google_api_key") or "").strip())
-        self.speech_provider_box.setVisible(kind == "own_key" and both)
-        self.speech_provider.set_index(1 if cfg.get("backend") == "google" else 0)
+            sel = cfg.get("whisper_model") or hardware.DEFAULT_SPEECH_MODEL
+            info = hardware.info(sel)
+            text = ""
+            if info is not None:
+                st = self._speech_model_state(sel)
+                on_gpu = bool(self._hardware is not None and getattr(self._hardware, "on_gpu", False))
+                ready = "On this computer · %s" % info.size
+                if hardware.slower_here(sel, on_gpu):
+                    ready += " · a little slower here"
+                text, action, _tone = self._download_status(sel, info, st, ready)
+                if st == "missing":
+                    text, action = "", ""          # the box says "Select a model"
+                if action == "Remove":
+                    def fn():
+                        self._model_remove(sel)
+                elif action == "Cancel":
+                    fn = self._hy_cancel
+                elif action:
+                    def fn():
+                        self._model_download(sel)
+            if cfg.get("privacy_mode"):
+                text = (text + "\n" if text else "") + "Privacy mode is on."
+        self._speech_action_fn = fn
+        self.speech_card.set_status(text, action)
+
+    def _writer_kind(self):
+        kind = (self._writer_now() or {}).get("kind")
+        return kind if kind in ("cloud", "own_key") else "local"
+
+    def _writer_source_clicked(self, i):
+        src = self.writer_card.sources[i]
+        truth = self._writer_kind()
+        self._preview["writer"] = None if src == truth else src
+        self._preview_truth["writer"] = truth
+        self._refresh_writer()
+
+    def _writer_model_picked(self, _i):
+        value = str(self.writer_card.combo.currentData() or "")
+        self._refresh_writer()
+        if not value:
+            return
+        choice, _ident, mid = engine_choice.parse_writer_value(value)
+        if choice == "local":
+            st = self._writer_model_state(mid)
+            if st in ("missing", "failed"):
+                i = hardware.LOCAL_AI_INFO.get(mid)
+                if i is not None and ask(self, "Download %s?" % i.real, "%s · %s. It works offline." % (i.plain, i.size),
+                                         [("cancel", "Not now", "ghost"), ("go", "Download", "primary")]) == "go":
+                    self._model_download(mid, use_as="writer")
+                return
+            if st == "downloading":
+                self._pending_use[mid] = "writer"
+                return
+        self._apply_writer(value)
+
+    def _writer_action(self):
+        fn = self._writer_action_fn
+        if fn is not None:
+            fn()
 
     def _refresh_writer(self):
         cfg = self.cfg
+        card = self.writer_card
+        kind = self._writer_kind()
+        src = self._shown_source("writer", kind)
+        card.set_source(src)
+        # The row of what really writes (runs_on: a Pro default writes on Gusan Cloud too).
+        value = None
+        if src == kind == "cloud":
+            fam = engine_choice.cloud_writer_family(cfg)
+            value = "cloud" if fam == "deepseek" else "cloud:" + fam
+        elif src == kind:
+            value = engine_choice.local_writer(cfg) if kind == "local" else engine_choice.writer_value(cfg)
+        if src == "local" and value and self._writer_model_state(value) in ("missing", "failed"):
+            value = None          # not on this computer: "Select a model" - a pick asks to download it
+        if src == kind == "local" and (self._writer_now() or {}).get("kind") != "local":
+            value = None          # the built-in rules write: no model is in use, so none is shown chosen
+        card.fill(engine_choice.writer_rows(cfg, is_pro(self.app), choice=src), value)
+        if src == "local":
+            self._mark_rows(card, self._writer_model_state, hardware.LOCAL_AI_INFO.get)
+        self._writer_status()
+
+    def _writer_status(self):
+        cfg = self.cfg
         now = self._writer_now() or {}
         kind = now.get("kind")
-        tile = {"cloud": "cloud", "own_key": "own_key"}.get(kind, "local")
-        privacy = bool(cfg.get("privacy_mode"))
-        for k, t in self.writer_tiles.items():
-            t.setChecked(k == tile)
-            t.set_paused(privacy and k != "local")
-        if privacy:
-            self.writer_tiles["cloud"].set_hints(["Off while Privacy mode is on"])
+        src = self._preview.get("writer")
+        fn, action = None, ""
+        if src:
+            text, action = self._preview_status("writer", src, self.writer_card.combo.count() > 0)
+            if action:
+                def fn():
+                    self._open_key_for("writer")
+        elif cfg.get("privacy_mode") and engine_choice.writer_choice(cfg) != "local":
+            text = PAUSED_TEXT + "."
+        elif kind == "cloud":
+            text = ""
+        elif kind == "own_key":
+            e = api_keys.entry(cfg, cfg.get("writer_key_id"))
+            text = ""
+            if e is not None:
+                action = "Edit key"
+
+                def fn():
+                    self.keys_panel.open_edit(e, api_keys.entry_view(cfg, e))
+                    self._scroll_to_widget(self.keys_panel)
+        elif kind == "local":
+            mid = engine_choice.local_writer(cfg)
+            info = hardware.LOCAL_AI_INFO.get(mid)
+            st = self._writer_model_state(mid)
+            text, action, _tone = self._download_status(mid, info, st,
+                                                        "On this computer · %s · works offline" % info.size)
+            if st == "missing":
+                text, action = "", ""              # the box says "Select a model"
+            if action == "Remove":
+                def fn():
+                    self._model_remove(mid)
+            elif action:
+                def fn():
+                    self._model_download(mid, use_as="writer")
         else:
-            self.writer_tiles["cloud"].set_hints(list(CLOUD_WRITER_HINTS))
-        self.writer_tiles["local"].set_hints(["Works offline"])
-        self.writer_tiles["own_key"].set_hints(["Off while Privacy mode is on" if privacy else self._own_key_hint(cfg)])
-        # The local writer stays marked while the cloud writes: it is the offline backup.
-        local_sel = engine_choice.local_writer(cfg)
-        dl = self._dl()
-        for mid, ws in self.writer_sizes.items():
-            st = self._state(mid)
-            if st == "unknown":
-                try:
-                    import local_llm
-                    st = "ready" if local_llm.model_downloaded(mid) else "missing"
-                except Exception:
-                    st = "missing"
-            pct = None
-            if dl is not None and st == "downloading":
-                try:
-                    p = dl.progress_of(mid)
-                    pct = p[0] if p and (p[2] or p[0]) else None
-                except Exception:
-                    pct = None
-            ws.set_state(st, selected=(mid == local_sel), pct=pct)
+            text = ""                              # no AI model yet: the box says "Select a model"
+        self._writer_action_fn = fn
+        self.writer_card.set_status(text, action)
 
-    def _own_key_hint(self, cfg):
-        import actions
-        engine = actions.normalize_action_model(cfg.get("action_model"))
-        pids = []
-        if engine_choice.writer_choice(cfg) == "own_key":
-            pids.append(engine)
-        pids += [actions.API_MISTRAL_ID, actions.API_GEMINI_ID]
-        for pid in pids:
-            info = engine_choice.WRITER_PROVIDERS.get(pid)
-            if not info:
-                continue
-            for field in (info.get("key_field"), info.get("key_fallback")):
-                if not field:
-                    continue
-                try:
-                    kv = api_keys.key_view(cfg, field)
-                except ValueError:
-                    continue
-                if kv["has_key"]:
-                    text = kv["text"]
-                    return "%s · %s" % (info["name"], text[:1].lower() + text[1:])
-        return "Mistral, Google Gemini and more"
-
-    # keys
-    def _wire_key_row(self, row):
-        row.save.connect(self._save_key)
-        row.removed.connect(self._remove_key)
-        row.test.connect(self._test_key)
-        row.cancel_button.clicked.connect(self._forget_key_then)
-
-    def _refresh_key_row(self, row):
-        if row.is_editing():
-            return
-        try:
-            kv = api_keys.key_view(self.cfg, row.field)
-        except ValueError:
-            return
-        key = str(self.cfg.get(row.field) or "").strip()
-        row.show_view(kv, key_test_result(key))
-
+    # ── My API keys ──
     def _refresh_keys(self):
-        for row in self.key_rows.values():
-            self._refresh_key_row(row)
-        if self.writer_panel.isVisible():
-            self._refresh_key_row(self.writer_panel.key_row)
+        moved = api_keys.slot_migration(self.cfg)
+        if moved:
+            apply_settings(self.app, moved)
+        cfg = self.cfg
+        self.keys_panel.show_entries([(e, api_keys.entry_view(cfg, e)) for e in api_keys.entries(cfg)])
 
-    def open_key_editor(self, field):
+    def open_key_editor(self, field=None):
+        """Open "Add key" (for a Mistral / Google key when ``field`` says so)."""
         self.ensure_built("speech")
-        row = self.key_rows.get(field)
-        if row is None:
-            return
-        row.open_editor()
-        self._scroll_to_widget(self.keys_card)
+        provider = {"mistral_api_key": "api_mistral", "google_api_key": "api_gemini"}.get(field)
+        self.keys_panel.open_new(provider)
+        self._scroll_to_widget(self.keys_panel)
 
-    def _test_key(self, field, key):
-        cfg = dict(self.cfg)
-        row = self.sender() if isinstance(self.sender(), KeyRow) else self._row_for(field)
-        if row is self.writer_panel.key_row and field == "action_api_key":
-            pid = self.writer_panel.current()
-            cfg.update(action_model=pid, action_api_provider=pid,
-                       action_api_model=self.writer_panel.selected_model(),
-                       action_api_base_url=self.writer_panel.base.text().strip())
-
+    def _test_entry(self, provider, key, model, base, token):
         def done(res):
             ok, msg = res if isinstance(res, tuple) else (False, "")
-            remember_key_test(key, ok, msg)
-            if row is not None and alive(row):
-                row.show_test(key, ok, msg)
+            if alive(self.keys_panel):
+                self.keys_panel.show_test(token, ok, msg)
 
         def failed(_e):
             done((False, "Couldn't check it right now."))
-        run_bg(api_keys.test_key, field, key, cfg, then=done, error=failed, owner=self)
+        run_bg(api_keys.test_entry, provider, key, model, base, then=done, error=failed, owner=self)
 
-    def unsaved_edits(self):
-        """True while a key is typed into an open "My API keys" editor and not saved yet. Installing an
-        update closes Gusan: the controller (AppController._update_unsaved_edits) asks first."""
-        rows = list(getattr(self, "key_rows", {}).values())
-        panel = getattr(self, "writer_panel", None)           # (the Speech section may not be built yet)
-        if panel is not None:
-            rows.append(panel.key_row)
-        for row in rows:
-            try:
-                if row.is_editing() and row.input.text().strip():
-                    return True
-            except RuntimeError:                  # a row already torn down
-                continue
-        return False
+    def _test_saved_entry(self, key_id):
+        e = api_keys.entry(self.cfg, key_id)
+        if e is None:
+            return
+        self._test_entry(e["provider"], api_keys.secret_of(self.cfg, key_id), e.get("model") or "",
+                         e.get("base_url") or "", ("row", key_id))
 
-    def _row_for(self, field):
-        if self.writer_panel.isVisible() and self.writer_panel.key_row.field == field and \
-                self.writer_panel.key_row.is_editing():
-            return self.writer_panel.key_row
-        return self.key_rows.get(field) or (self.writer_panel.key_row
-                                            if self.writer_panel.key_row.field == field else None)
-
-    def _save_key(self, field, key):
-        row = self.sender() if isinstance(self.sender(), KeyRow) else self._row_for(field)
-        ok = False
+    def _entry_saved(self, data):
+        key_id = data.get("id")
         try:
-            ok = bool(api_keys.save_key(self.app, field, key))
-        except Exception:
-            logger.warning("Saving the %s key failed", field, exc_info=True)
-        if row is not None:
-            if ok:
-                if row.last_result and row.last_result[0] == key:
-                    remember_key_test(key, row.last_result[1], row.last_result[2])
-                row.close_editor()
+            if key_id:
+                ok = api_keys.update_entry(self.app, key_id, data["name"], data["provider"], data["model"],
+                                           key=data.get("key"), base_url=data.get("base_url", ""))
             else:
-                row.status.setText("Couldn't save it.")
-                tint(row.status, "red-tx")
-        then = getattr(self, "_key_then_speech", None)
-        if ok and then and then[0] == field and row is self.key_rows.get(field):
-            # "Your own key" was picked before there was a key: use it now.
-            self._speech_pick("own_key", provider=then[1])
+                key_id = api_keys.add_entry(self.app, data["name"], data["provider"], data["model"],
+                                            data["key"], base_url=data.get("base_url", ""))
+                ok = bool(key_id)
+        except Exception:
+            logger.warning("Saving an API key failed", exc_info=True)
+            ok = False
+        if not ok:
+            self.keys_panel.editor.show_error("Couldn't save it.")
+            return
+        self.keys_panel.close_editor()
+        then, self._key_then = self._key_then, None
+        value = engine_choice.KEY_VALUE_PREFIX + key_id
+        if then == "speech" and data["provider"] in engine_choice.SPEECH_KEY_PROVIDERS:
+            self._apply_speech(value)               # the card asked for a key: use it now
+            return
+        if then == "writer":
+            self._apply_writer(value)
             return
         self.refresh()
 
-    def _forget_key_then(self, *_args):
-        self._key_then_speech = None
-
-    def _remove_key(self, field):
-        name = api_keys.KEY_NAMES.get(field, "this")
-        if ask(self, "Remove the %s key?" % name, "You can paste it again later.",
+    def _remove_entry(self, key_id):
+        e = api_keys.entry(self.cfg, key_id)
+        if e is None:
+            return
+        name = api_keys.entry_view(self.cfg, e)["title"]
+        if ask(self, "Remove “%s”?" % name, "A card that uses it stops using it. You can add it again later.",
                [("cancel", "Cancel", "ghost"), ("remove", "Remove", "danger")]) != "remove":
             return
         try:
-            api_keys.clear_key(self.app, field)
+            api_keys.remove_entry(self.app, key_id)
         except Exception:
-            logger.warning("Removing the %s key failed", field, exc_info=True)
+            logger.warning("Removing an API key failed", exc_info=True)
         self.refresh()
+
+    def unsaved_edits(self):
+        """True while a key is typed into the open key editor and not saved yet. Installing an
+        update closes Gusan: the controller (AppController._update_unsaved_edits) asks first."""
+        panel = getattr(self, "keys_panel", None)           # (the Speech section may not be built yet)
+        try:
+            return bool(panel is not None and panel.has_unsaved_key())
+        except RuntimeError:
+            return False
 
     # GPU
     def _gpu_state(self):
@@ -3876,7 +3323,7 @@ class SettingsPage(QWidget):
         target = None
         if "speech" in self._built:
             target = {"gpu": self.gpu_card, "keys": self.keys_block, "api_keys": self.keys_block,
-                      "models": self.cards_row, "writer": self.writer_tiles["local"]}.get(focus)
+                      "models": self.speech_card, "writer": self.writer_card}.get(focus)
         self._jump_target = (sid, target)
         self._jump_to()
         # Freshly built sections can still grow while they are polished and

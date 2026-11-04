@@ -19,6 +19,13 @@ logger = logging.getLogger("transcribe")
 
 IS_MAC = sys.platform == "darwin"
 
+# The shortcuts a new install gets (main.DEFAULT and every page's fallback).
+# On a Mac, Control (⌃): Option (⌥) + a letter types a character there
+# (⌥R ®, ⌥S ß), and the listener doesn't swallow it, so an Option shortcut
+# also typed into the user's text.
+DICTATION_DEFAULT = "ctrl+r" if IS_MAC else "alt+r"
+SMART_ACTIONS_DEFAULT = "ctrl+s" if IS_MAC else "alt+s"
+
 MODIFIERS = ("ctrl", "alt", "shift", "cmd", "win", "super")
 _MAC_ORDER = ("ctrl", "alt", "shift", "cmd")            # ⌃⌥⇧⌘, Apple's order
 _MAC_SYMBOL = {"ctrl": "⌃", "alt": "⌥", "shift": "⇧", "cmd": "⌘", "win": "⌘", "super": "⌘"}

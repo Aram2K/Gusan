@@ -60,6 +60,7 @@ TAGS_ROLE = Qt.UserRole + 5          # a rich row's chips: ("local",) / ("cloud"
 HEADING_ROLE = Qt.UserRole + 6       # True on a group heading (it is not a row)
 TIP_ROLE = Qt.UserRole + 7           # a rich row's tooltip (the tags in words)
 CLOSED_ROLE = Qt.UserRole + 8        # a rich row's short name: what the closed box says when the title does not fit
+DOTS_ROLE = Qt.UserRole + 9          # a rich row's (speed, accuracy), 1-5 each: dots after its second line
 MARK_PRO = "pro"
 MARK_DOWNLOAD = "download"
 # Where QStandardItem keeps an item's flags. Rows are greyed out through the
@@ -82,6 +83,14 @@ _CHIP_GAP = 4         # between two chips
 _HEADING_H = 26       # a group heading's height
 _ROW_H = 34           # a one-line row (the stylesheet's own item height)
 _ROW_H_NOTE = 46      # a row with its muted second line
+# Speed / accuracy: "Speed ●●●●○  Accuracy ●●●○○" after the second line (models on this computer).
+DOTS_MAX = 5
+_DOT = 6              # a dot's diameter
+_DOT_GAP = 3          # between two dots
+_DOTS_LABEL_GAP = 5   # between "Speed" and its dots
+_DOTS_GROUP_GAP = 12  # between the speed dots and "Accuracy"
+_DOTS_LEAD = 14       # between the second line's text and "Speed"
+DOT_WORDS = ("Speed", "Accuracy")
 _NOTE_SCALE = 0.86    # the second line's size next to the name
 _ARROW_ROOM = 34      # the closed box's drop-down arrow and its air, from the right edge
 _MIN_NAME = 90        # a closed box keeps at least this much of the name (or all of it, if shorter)
@@ -242,7 +251,65 @@ class _RowDelegate(QStyledItemDelegate):
         mw = self.mark_width(index.data(MARK_ROLE) or "")
         top_w += (_MARK_GAP + chips_w if chips_w else 0) + (_CHIP_GAP + mw if mw else 0)
         note_w = QFontMetrics(self.note_font(font)).horizontalAdvance(str(index.data(NOTE_ROLE) or ""))
+        if index.data(DOTS_ROLE):
+            note_w = self.dots_column(font) + self.dots_width(index.data(DOTS_ROLE), font)
         return max(top_w, note_w) + _TEXT_PAD
+
+    def dots_column(self, font):
+        """Where the dots start: after the widest second line of the rows that have dots, so every
+        row's dots line up in one column."""
+        fm = QFontMetrics(self.note_font(font))
+        widest = 0
+        for i in range(self._box.count()):
+            if self._box.itemData(i, DOTS_ROLE):
+                widest = max(widest, fm.horizontalAdvance(str(self._box.itemData(i, NOTE_ROLE) or "")))
+        return widest
+
+    @staticmethod
+    def _dots(value):
+        try:
+            speed, accuracy = value
+            return int(speed or 0), int(accuracy or 0)
+        except (TypeError, ValueError):
+            return 0, 0
+
+    def dots_width(self, value, font=None):
+        """The room "Speed ●●●●○  Accuracy ●●●○○" takes after the second line (0 without dots)."""
+        speed, accuracy = self._dots(value)
+        if not (speed or accuracy):
+            return 0
+        fm = QFontMetrics(self.note_font(font or self._box.font()))
+        one = DOTS_MAX * _DOT + (DOTS_MAX - 1) * _DOT_GAP
+        return (_DOTS_LEAD + sum(fm.horizontalAdvance(w) for w in DOT_WORDS)
+                + 2 * (_DOTS_LABEL_GAP + one) + _DOTS_GROUP_GAP)
+
+    def paint_dots(self, painter, value, x, mid_y, font, word_c, on_c):
+        """Draw the two dot rows starting at ``x`` (vertically centred on ``mid_y``)."""
+        speed, accuracy = self._dots(value)
+        if not (speed or accuracy):
+            return
+        nf = self.note_font(font)
+        fm = QFontMetrics(nf)
+        off_c = theme.qcolor("line")
+        x += _DOTS_LEAD
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setFont(nf)
+        for i, (word, n) in enumerate(zip(DOT_WORDS, (speed, accuracy))):
+            if i:
+                x += _DOTS_GROUP_GAP
+            painter.setPen(word_c)
+            w = fm.horizontalAdvance(word)
+            painter.drawText(QRect(x, mid_y - fm.height() // 2, w + 2, fm.height()),
+                             Qt.AlignLeft | Qt.AlignVCenter, word)
+            x += w + _DOTS_LABEL_GAP
+            painter.setPen(Qt.NoPen)
+            for d in range(DOTS_MAX):
+                painter.setBrush(on_c if d < n else off_c)
+                painter.drawEllipse(QRectF(x, mid_y - _DOT / 2, _DOT, _DOT))
+                x += _DOT + _DOT_GAP
+            x -= _DOT_GAP
+        painter.restore()
 
     # ── Qt ──
     def initStyleOption(self, option, index):
@@ -339,10 +406,17 @@ class _RowDelegate(QStyledItemDelegate):
         text_r = QRect(left, top_y, max(10, chips_left - _MARK_GAP - left), top_h)
         painter.drawText(text_r, Qt.AlignLeft | Qt.AlignVCenter, str(index.data(TITLE_ROLE) or ""))
         if note:
-            painter.setFont(self.note_font(option.font))
+            nf = self.note_font(option.font)
+            painter.setFont(nf)
             painter.setPen(note_c)
-            painter.drawText(QRect(left, r.top() + top_h - 2, r.right() - left - 4, r.height() - top_h),
-                             Qt.AlignLeft | Qt.AlignTop, note)
+            note_r = QRect(left, r.top() + top_h - 2, r.right() - left - 4, r.height() - top_h)
+            painter.drawText(note_r, Qt.AlignLeft | Qt.AlignTop, note)
+            dots = index.data(DOTS_ROLE)
+            if dots:
+                nfm = QFontMetrics(nf)
+                on_c = theme.qcolor("blue-tx" if selected else "blue")
+                self.paint_dots(painter, dots, left + self.dots_column(option.font),
+                                note_r.top() + nfm.height() // 2 + 1, option.font, note_c, on_c)
         painter.restore()
 
 
@@ -367,6 +441,15 @@ class PlainNameCombo(QComboBox):
         title = self.currentData(TITLE_ROLE)
         if title and self._delegate is not None:
             self._paint_closed_rich(p, opt, str(title), str(self.currentData(CLOSED_ROLE) or title))
+            return
+        if self.currentIndex() < 0 and self.placeholderText():
+            # Nothing chosen yet: the placeholder ("Select a model"), muted like an empty field's.
+            opt.currentText = ""
+            p.drawComplexControl(QStyle.CC_ComboBox, opt)
+            edit = self.style().subControlRect(QStyle.CC_ComboBox, opt, QStyle.SC_ComboBoxEditField, self)
+            p.setFont(self.font())
+            p.setPen(theme.qcolor("faint" if not self.isEnabled() else "muted"))
+            p.drawText(edit, Qt.AlignLeft | Qt.AlignVCenter, self.placeholderText())
             return
         plain = self.currentData(PLAIN_ROLE)
         if plain:
@@ -449,12 +532,17 @@ class PlainNameCombo(QComboBox):
         self.setItemData(i, str(row.get("closed") or row.get("title") or ""), CLOSED_ROLE)
         self.setItemData(i, str(row.get("note") or ""), NOTE_ROLE)
         self.setItemData(i, tuple(row.get("tags") or ()), TAGS_ROLE)
+        if row.get("speed") or row.get("accuracy"):
+            self.setItemData(i, (int(row.get("speed") or 0), int(row.get("accuracy") or 0)), DOTS_ROLE)
         tip = str(row.get("tip") or "")
         self.setItemData(i, tip, TIP_ROLE)
         self.setItemData(i, tip, Qt.ToolTipRole)
         spoken = str(row.get("line") or row.get("title") or "")
         if row.get("note"):
             spoken += ". " + str(row["note"])
+        if row.get("speed") or row.get("accuracy"):
+            spoken += ". Speed %d of %d, accuracy %d of %d" % (int(row.get("speed") or 0), DOTS_MAX,
+                                                               int(row.get("accuracy") or 0), DOTS_MAX)
         self.setItemData(i, spoken, Qt.AccessibleTextRole)
         return i
 

@@ -80,8 +80,10 @@ def ctl(qapp):
     import main
     import updater
     main.cfg.update(analytics_enabled=False, onboarding_done=True, account_gate_seen=True,
-                    install_updates_on_quit=False)
+                    install_updates_on_quit=False, macos_perms_guide_shown=True)
     patches = [
+        # A test process has no Mac permissions: no "Let Gusan work on your Mac" guide at startup.
+        mock.patch.object(main.AppController, "_mac_permissions_need_attention", lambda self: False),
         mock.patch.object(main.AppController, "_setup_hotkey", lambda self, hk, remove_old=None: True),
         mock.patch.object(main.AppController, "_setup_assist_hotkey", lambda self, hk: False),
         mock.patch.object(main.AppController, "_setup_smart_hotkey", lambda self, hk: False),
@@ -472,7 +474,7 @@ def test_the_pro_window_opens_over_the_gusan_window(ctl, monkeypatch):
     seen = []
 
     def fake_exec(dlg):
-        lines = [lb.text() for lb in dlg.findChildren(QLabel) if lb.text().endswith("is a Pro feature.")]
+        lines = [lb.text() for lb in dlg.findChildren(QLabel) if lb.text().endswith("comes with Gusan Pro.")]
         seen.append((dlg.parentWidget(), lines))
         dlg.deleteLater()
         return 0
@@ -481,7 +483,7 @@ def test_the_pro_window_opens_over_the_gusan_window(ctl, monkeypatch):
     _spin(30)
     try:
         ctl._pro_upsell("Live Assistance")                       # the tray / pages' feature name
-        assert seen[0] == (ctl.main_win, ["Live Assistant is a Pro feature."])
+        assert seen[0] == (ctl.main_win, ["Live Assistant comes with Gusan Pro."])
     finally:
         ctl.main_win.hide()
     ctl._pro_upsell()
@@ -507,16 +509,20 @@ def test_a_calendar_reminder_is_the_toast(ctl, monkeypatch):
         assert ctl._calendar_busy() is True                      # one toast at a time
         ctl._on_calendar_remind(dict(m, id="ev2"))
         assert ctl._reminder is toast                            # reused
-        # Recording is free, so this reaches the consent notice. Refuse it:
-        # the real notice is modal and would sit forever offscreen. A plain
-        # Record is not a Pro upsell.
+        # Recording is Pro: a guest's Record closes the toast and gets the Pro window.
         import ui.recording_prompts as rp
         monkeypatch.setattr(rp, "ensure_recording_consent", lambda parent, app: False)
         assert ctl.record_from_calendar(m) is False
-        assert upsells == []
+        assert upsells == ["Meeting recording"]
         assert not toast.isVisible()
         assert ctl.meeting_session.is_busy is False
         assert ctl._calendar_busy() is False
+        # Pro reaches the consent notice instead. Refuse it: the real notice is
+        # modal and would sit forever offscreen.
+        monkeypatch.setattr(ctl, "is_pro", lambda: True)
+        assert ctl.record_from_calendar(m) is False
+        assert upsells == ["Meeting recording"]
+        assert ctl.meeting_session.is_busy is False
     finally:
         toast.hide_reminder()
 

@@ -243,7 +243,7 @@ def model_tagged(model_id):
 
 
 def speech_row(value, name, kind, group="", *, detail="", note="", pro=False, model="",
-               plain="", show_pro=True):
+               plain="", show_pro=True, speed=0, accuracy=0):
     """One row of a speech picker (a dict): ``value`` (the config value, unchanged), ``name`` (the
     real model name, or "Automatic" / "Same as Dictation"), ``detail`` (more after the name: the
     model Automatic picks, "your Google key"), ``title`` (name + detail: the first line),
@@ -258,7 +258,7 @@ def speech_row(value, name, kind, group="", *, detail="", note="", pro=False, mo
     words = tag_words(tags)
     return {"value": value, "name": name, "detail": detail, "title": title, "closed": name,
             "note": note, "kind": kind, "tags": tuple(tags), "pro": bool(pro), "group": group,
-            "model": model or name, "plain": plain,
+            "model": model or name, "plain": plain, "speed": int(speed or 0), "accuracy": int(accuracy or 0),
             "line": f"{title} · {words}" if words else title, "tip": tag_tip(tags)}
 
 
@@ -280,7 +280,8 @@ def _row_for_engine(value, name, engine, *, group="", note="", detail="", show_p
 def _whisper_rows(group=GROUP_THIS_COMPUTER):
     """The Whisper models, as rows: the real name (Whisper Small), LOCAL, and the plain word
     (Balanced) under it."""
-    return [speech_row(mid, info.real, "local", group, note=info.plain, model=info.real, plain=info.plain)
+    return [speech_row(mid, info.real, "local", group, note=info.plain, model=info.real, plain=info.plain,
+                       speed=info.speed, accuracy=info.accuracy)
             for mid, info in hardware.MODEL_INFO.items()]
 
 
@@ -425,6 +426,30 @@ CLOUD_SPEECH_MODELS = {"gemini": CLOUD_PROFILE_NAMES[CLOUD_FAST], "mistral": CLO
 CLOUD_WRITER_MODEL = hardware.CLOUD_WRITER_MODEL      # meeting notes on Gusan Cloud
 CLOUD_LIVE_MODEL = hardware.CLOUD_LIVE_MODEL          # Live Assistant answers on Gusan Cloud
 CLOUD_SMART_MODEL = hardware.CLOUD_SMART_MODEL        # Smart Actions on Gusan Cloud
+# The AI writers Gusan Cloud can be asked for (cfg "cloud_writer_model", sent as the request's
+# "model": action_api.CLOUD_WRITER_FAMILIES). "" = the server's own order, DeepSeek first. The
+# picked one answers Smart Actions and the Live Assistant first; the others stay behind it as the
+# fallback (smart-action preferRoutes). Meeting notes keep the server's order. OpenAI and Claude
+# are named by family: the server runs a different model of each for answers and for notes.
+CLOUD_WRITER_KEY = "cloud_writer_model"
+CLOUD_WRITERS = (
+    ("deepseek", hardware.CLOUD_LIVE_MODEL, "Gusan's default · fastest"),
+    ("openai", "OpenAI GPT", "By OpenAI"),
+    ("claude", "Anthropic Claude", "By Anthropic"),
+    ("mistral", "Mistral Small", "By Mistral AI"),
+    ("gemini", "Gemini 2.5 Flash", "By Google"),
+)
+CLOUD_WRITER_NAMES = {fam: name for fam, name, _note in CLOUD_WRITERS}
+
+
+def cloud_writer_family(cfg):
+    """The Gusan Cloud writer picked ("deepseek" when none is, the server's first)."""
+    fam = str((cfg or {}).get(CLOUD_WRITER_KEY) or "").strip().lower()
+    return fam if fam in CLOUD_WRITER_NAMES else "deepseek"
+
+
+def cloud_writer_name(cfg):
+    return CLOUD_WRITER_NAMES[cloud_writer_family(cfg)]
 
 # Mistral's /audio/transcriptions only takes Voxtral Mini (same as main.py).
 MISTRAL_STT_DEFAULT = "voxtral-mini-latest"
@@ -634,11 +659,10 @@ def speech_engine(cfg, pro, feature="dictation"):
     backend = cfg.get("backend") or "local"
     if not cfg.get("privacy_mode"):
         if backend == "managed" and pro:
-            provider = str(cfg.get("managed_provider") or "gemini").lower()
-            provider = provider if provider in CLOUD_SPEECH_MODELS else "gemini"
-            name = CLOUD_SPEECH_MODELS[provider]
+            profile = cloud_profile(cfg.get(SPEECH_PROFILE_KEY))
+            name = CLOUD_PROFILE_NAMES[profile]
             return _result(feature, "cloud", GUSAN_CLOUD, GUSAN_CLOUD, name, WHERE_CLOUD,
-                           f"{GUSAN_CLOUD} · {name}", CLOUD_SPEECH_IDS[provider], pro=True)
+                           f"{GUSAN_CLOUD} · {name}", profile, pro=True)
         if backend == "google" and cfg.get("google_api_key"):
             mid = str(cfg.get("google_stt_model") or GOOGLE_STT_DEFAULT)
             name = model_display_name(mid)
@@ -732,6 +756,250 @@ def set_smart_speech(app_or_cfg, value, *, pro=None, downloaded=None, turn_off_p
     elif value and downloaded is not None and not downloaded(value):
         return _outcome(problem="needs_download")
     return _outcome({SMART_SPEECH_KEY: value})
+
+
+# ── Dictation's speech model (one list for the Dictation page and Settings) ──
+# The Dictation page's "Model" picker and Settings › Speech & AI's Speech card write the SAME
+# settings (backend, whisper_model, managed_provider): one choice for dictation and meetings.
+# A picker value is a Whisper id (or the Armenian model's), "cloud" (Gusan Cloud) or
+# "own:mistral" / "own:google" (your own key). Qt-free.
+DICTATION_CLOUD = "cloud"
+DICTATION_CLOUD_BEST = "cloud:best"
+DICTATION_OWN_MISTRAL, DICTATION_OWN_GOOGLE = "own:mistral", "own:google"
+DICTATION_OWN = {DICTATION_OWN_MISTRAL: "mistral", DICTATION_OWN_GOOGLE: "google"}
+# Gusan Cloud speech for dictation and meetings: its "fast" or "best" profile (main.AudioRecorder
+# sends it as the request's "model"; the server picks the engine).
+SPEECH_PROFILE_KEY = "managed_speech_profile"
+# A key from Settings › My API keys: "key:<id>" (api_keys.entries).
+KEY_VALUE_PREFIX = "key:"
+# The source each picker value belongs to (Settings' "Runs on").
+SPEECH_SOURCES = ("local", "cloud", "own_key")
+
+
+def dictation_speech_value(cfg):
+    """The picker value of what dictation uses now (speech_choice + the model)."""
+    cfg = cfg or {}
+    choice = speech_choice(cfg)
+    if choice == "cloud":
+        return DICTATION_CLOUD_BEST if cloud_profile(cfg.get(SPEECH_PROFILE_KEY)) == CLOUD_BEST else DICTATION_CLOUD
+    if choice == "own_key":
+        entry = _entry(cfg, cfg.get("speech_key_id"))
+        if entry is not None and SPEECH_KEY_PROVIDERS.get(entry.get("provider")) == cfg.get("backend"):
+            return KEY_VALUE_PREFIX + entry["id"]
+        return DICTATION_OWN_GOOGLE if cfg.get("backend") == "google" else DICTATION_OWN_MISTRAL
+    return str(cfg.get("whisper_model") or "base")
+
+
+def dictation_speech_source(value):
+    """"local" | "cloud" | "own_key" for a picker value."""
+    value = str(value or "")
+    if value in (DICTATION_CLOUD, DICTATION_CLOUD_BEST):
+        return "cloud"
+    if value in DICTATION_OWN or value.startswith(KEY_VALUE_PREFIX):
+        return "own_key"
+    return "local"
+
+
+def dictation_speech_rows(cfg=None, pro=None, source=None):
+    """The rows of the dictation speech pickers (speech_row dicts): under "On this computer"
+    every Whisper model and, while listed, the Armenian model; under "Gusan Cloud" its Fast
+    profile (CLOUD, PRO); under "Your own key" Mistral and Google Gemini (CLOUD), each with a
+    muted "Add your key first" while that key isn't saved. ``source`` keeps one group only
+    (Settings' card shows the group "Runs on" picked)."""
+    cfg = cfg or {}
+    _c, pro, _signed = _context(cfg, pro)
+    show_pro = pro_chip(pro)
+    rows = []
+    if source in (None, "local"):
+        rows += _local_rows()
+    if source in (None, "cloud"):
+        for value, profile in ((DICTATION_CLOUD, CLOUD_FAST), (DICTATION_CLOUD_BEST, CLOUD_BEST)):
+            name = CLOUD_PROFILE_NAMES[profile]
+            rows.append(speech_row(value, name, "cloud", GROUP_GUSAN_CLOUD,
+                                   note=CLOUD_PROFILE_NOTES[profile], pro=True, model=name,
+                                   show_pro=show_pro))
+    if source in (None, "own_key"):
+        # One row per saved key that can transcribe (Mistral, Google Gemini): its speech model,
+        # and the name the person gave the key.
+        for entry in key_entries(cfg):
+            backend = SPEECH_KEY_PROVIDERS.get(entry.get("provider"))
+            if not backend:
+                continue
+            mid = (normalize_mistral_model(cfg.get("mistral_stt_model", MISTRAL_STT_DEFAULT))
+                   if backend == "mistral" else str(cfg.get("google_stt_model") or GOOGLE_STT_DEFAULT))
+            name = model_display_name(mid)
+            rows.append(speech_row(KEY_VALUE_PREFIX + entry["id"], name, "own_key", GROUP_OWN_KEY,
+                                   detail=entry.get("name") or "", note=MODEL_NOTES.get(mid, ""),
+                                   model=name, plain=WRITER_PROVIDERS[entry["provider"]]["name"]))
+    return rows
+
+
+def set_dictation_speech(app_or_cfg, value, *, pro=None, downloaded=None, turn_off_privacy=False):
+    """The config changes for a dictation speech pick: set_speech_source for the value's source
+    (same return shape: problems "pro", "privacy_mode", "needs_key", "needs_download",
+    "unknown")."""
+    value = str(value or "").strip()
+    source = dictation_speech_source(value)
+    if source == "local":
+        return set_speech_source(app_or_cfg, "local", model=value or None, pro=pro,
+                                 downloaded=downloaded, turn_off_privacy=turn_off_privacy)
+    if source == "cloud":
+        res = set_speech_source(app_or_cfg, "cloud", pro=pro, turn_off_privacy=turn_off_privacy)
+        if res.get("ok"):
+            res["changes"][SPEECH_PROFILE_KEY] = CLOUD_BEST if value == DICTATION_CLOUD_BEST else CLOUD_FAST
+        return res
+    if value.startswith(KEY_VALUE_PREFIX):
+        # A saved key: it goes into the slot speech reads (mistral_api_key / google_api_key).
+        cfg, _pro, _signed = _context(app_or_cfg, pro)
+        entry = _entry(cfg, value[len(KEY_VALUE_PREFIX):])
+        backend = SPEECH_KEY_PROVIDERS.get((entry or {}).get("provider"))
+        secret = key_secret(cfg, (entry or {}).get("id"))
+        if not backend or not secret:
+            return _outcome(problem="needs_key" if entry is not None else "unknown")
+        field = "google_api_key" if backend == "google" else "mistral_api_key"
+        res = set_speech_source(dict(cfg, **{field: secret}), "own_key", provider=backend, pro=pro,
+                                turn_off_privacy=turn_off_privacy)
+        if res.get("ok"):
+            res["changes"].update({field: secret, "speech_key_id": entry["id"]})
+            writer = _entry(cfg, cfg.get("writer_key_id"))
+            if (field == "google_api_key" and writer is not None and writer["id"] != entry["id"]
+                    and WRITER_PROVIDERS[writer["provider"]]["key_field"] == "google_api_key"
+                    and writer_choice(cfg) == "own_key"):
+                # A Gemini AI writer reads the same slot: it now runs on this key too - say so.
+                res["changes"]["writer_key_id"] = entry["id"]
+        return res
+    return set_speech_source(app_or_cfg, "own_key", provider=DICTATION_OWN[value], pro=pro,
+                             turn_off_privacy=turn_off_privacy)
+
+
+# ── the AI writer's model list (Settings › Speech & AI › AI writer) ──────────
+# Values: "cloud" (Gusan Cloud), a local_llm id, or "own:<provider id>:<model id>".
+WRITER_OWN_PREFIX = "own:"
+
+
+def writer_value(cfg):
+    """The picker value of the AI writer set now."""
+    cfg = cfg or {}
+    choice = writer_choice(cfg)
+    if choice == "cloud":
+        fam = cloud_writer_family(cfg)
+        return "cloud" if fam == "deepseek" else f"cloud:{fam}"
+    if choice == "own_key":
+        entry = _entry(cfg, cfg.get("writer_key_id"))
+        if entry is not None and entry.get("provider") == _norm_provider(cfg.get("action_model")):
+            return KEY_VALUE_PREFIX + entry["id"]
+        pid = _norm_provider(cfg.get("action_model"))
+        return f"{WRITER_OWN_PREFIX}{pid}:{writer_model_for(pid, cfg)}"
+    return local_writer(cfg)
+
+
+def parse_writer_value(value):
+    """(choice, provider id, model id) of a picker value."""
+    value = str(value or "")
+    if value == "cloud":
+        return "cloud", None, None
+    if value.startswith("cloud:"):
+        return "cloud", None, value[len("cloud:"):] or None
+    if value.startswith(KEY_VALUE_PREFIX):
+        return "key", value[len(KEY_VALUE_PREFIX):], None
+    if value.startswith(WRITER_OWN_PREFIX):
+        pid, _, mid = value[len(WRITER_OWN_PREFIX):].partition(":")
+        return "own_key", pid, mid or None
+    return "local", None, value or None
+
+
+def writer_rows(cfg=None, pro=None, choice=None):
+    """The AI writer picker's rows (speech_row dicts) for ``choice`` ("cloud" | "local" |
+    "own_key"; None = all): Gusan Cloud's model (CLOUD, PRO); every local model (LOCAL, its plain
+    size word under it); and, per provider whose key is saved, its models (CLOUD)."""
+    cfg = cfg or {}
+    _c, pro, _signed = _context(cfg, pro)
+    rows = []
+    if choice in (None, "cloud"):
+        for fam, name, note in CLOUD_WRITERS:
+            rows.append(speech_row("cloud" if fam == "deepseek" else f"cloud:{fam}", name, "cloud",
+                                   GROUP_GUSAN_CLOUD, note=note, pro=True, show_pro=pro_chip(pro)))
+    if choice in (None, "local"):
+        for mid, info in hardware.LOCAL_AI_INFO.items():
+            rows.append(speech_row(mid, info.real, "local", GROUP_THIS_COMPUTER, note=info.plain,
+                                   model=info.real, plain=info.plain, speed=info.speed,
+                                   accuracy=info.accuracy))
+    if choice in (None, "own_key"):
+        # One row per saved key: the model chosen for it, and the name the person gave it.
+        for entry in key_entries(cfg):
+            info = WRITER_PROVIDERS[entry["provider"]]
+            mid = entry.get("model") or writer_model_for(entry["provider"], {})
+            name = model_display_name(mid)
+            rows.append(speech_row(KEY_VALUE_PREFIX + entry["id"], name, "own_key", GROUP_OWN_KEY,
+                                   detail=entry.get("name") or info["name"], note=info["name"],
+                                   model=name, plain=info["name"]))
+    return rows
+
+
+def set_writer_value(app_or_cfg, value, *, pro=None, downloaded=None, turn_off_privacy=False):
+    """The config changes for an AI writer pick (writer_rows' values): set_writer for Gusan Cloud
+    (and which of its models), a local model or a saved key (copied into the AI writer's key
+    slot, action_api_key). Same return shape as set_writer."""
+    choice, ident, model = parse_writer_value(value)
+    if choice == "cloud":
+        res = set_writer(app_or_cfg, "cloud", pro=pro, turn_off_privacy=turn_off_privacy)
+        if res.get("ok"):
+            res["changes"][CLOUD_WRITER_KEY] = "" if model in (None, "deepseek") else model
+        return res
+    if choice == "local":
+        return set_writer(app_or_cfg, "local", model=model, pro=pro, downloaded=downloaded,
+                          turn_off_privacy=turn_off_privacy)
+    if choice == "key":
+        cfg, _pro, _signed = _context(app_or_cfg, pro)
+        entry = _entry(cfg, ident)
+        secret = key_secret(cfg, ident)
+        if entry is None:
+            return _outcome(problem="unknown")
+        if not secret:
+            return _outcome(problem="needs_key")
+        info = WRITER_PROVIDERS[entry["provider"]]
+        field = info["key_field"]                     # the slot that provider's writer reads
+        # Always this key's own address (never one a previous key left behind).
+        base = (entry.get("base_url") or info["default_url"]) if info["base_url"] == "editable" else None
+        res = set_writer(dict(cfg, **{field: secret}), "own_key", model=entry.get("model") or None,
+                         provider=entry["provider"], base_url=base, pro=pro,
+                         turn_off_privacy=turn_off_privacy)
+        if res.get("ok"):
+            res["changes"].update({field: secret, "writer_key_id": entry["id"]})
+            if field == "google_api_key" and cfg.get("backend") == "google" and cfg.get("speech_key_id") != entry["id"]:
+                # Speech on Google reads the same slot: it now runs on this key too - say so.
+                res["changes"]["speech_key_id"] = entry["id"]
+        return res
+    return set_writer(app_or_cfg, "own_key", model=model, provider=ident, pro=pro,
+                      turn_off_privacy=turn_off_privacy)
+
+
+# ── Settings › My API keys: the saved keys (cfg "api_keys", secrets in "api_key_secrets") ──
+# An entry: {"id", "name", "provider" (a WRITER_PROVIDERS id), "model", "base_url"}; its secret
+# sits in cfg["api_key_secrets"][id] (main.save_config keeps it in the OS keyring). Every entry can
+# write (AI writer); a Mistral or Google Gemini one can also transcribe (SPEECH_KEY_PROVIDERS).
+SPEECH_KEY_PROVIDERS = {actions.API_MISTRAL_ID: "mistral", actions.API_GEMINI_ID: "google"}
+
+
+def key_entries(cfg):
+    """The saved keys, in the order they were added (entries with an unknown provider left out)."""
+    out = []
+    for e in (cfg or {}).get("api_keys") or ():
+        if isinstance(e, dict) and e.get("id") and e.get("provider") in WRITER_PROVIDERS:
+            out.append(e)
+    return out
+
+
+def _entry(cfg, key_id):
+    for e in key_entries(cfg):
+        if e["id"] == key_id:
+            return e
+    return None
+
+
+def key_secret(cfg, key_id):
+    secrets = (cfg or {}).get("api_key_secrets") or {}
+    return str(secrets.get(key_id) or "").strip() if isinstance(secrets, dict) and key_id else ""
 
 
 # ── Live Assistant's speech model ────────────────────────────────────────────
@@ -1498,7 +1766,7 @@ def writer_engine(cfg, pro, signed_in, feature="smart_actions", action_model=Non
         return _basic(feature)
     if kind == "managed":
         if token:
-            model = CLOUD_SMART_MODEL if feature == "smart_actions" else CLOUD_WRITER_MODEL
+            model = cloud_writer_name(cfg) if feature == "smart_actions" else CLOUD_WRITER_MODEL
             return _result(feature, "cloud", GUSAN_CLOUD, GUSAN_CLOUD, model, WHERE_CLOUD,
                            f"{GUSAN_CLOUD} · {model}", actions.API_MANAGED_ID, pro=True)
         return _basic(feature)
@@ -1530,8 +1798,9 @@ def live_engine(cfg, pro, signed_in, downloaded=None):
     if cfg.get("privacy_mode") or cfg.get("live_assist_writer") == "local":
         chosen = engine if kind == "local_llm" else _first_on_disk(on_disk)
     elif token:
-        return _result(feature, "cloud", GUSAN_CLOUD, GUSAN_CLOUD, CLOUD_LIVE_MODEL, WHERE_CLOUD,
-                       f"{GUSAN_CLOUD} · {CLOUD_LIVE_MODEL}", actions.API_MANAGED_ID, pro=True)
+        name = cloud_writer_name(cfg)
+        return _result(feature, "cloud", GUSAN_CLOUD, GUSAN_CLOUD, name, WHERE_CLOUD,
+                       f"{GUSAN_CLOUD} · {name}", actions.API_MANAGED_ID, pro=True)
     elif (engine == actions.RULE_BASED_ID or kind is None
           or (kind == "cloud" and not actions.engine_has_key(engine, cfg))
           or kind == "managed"):

@@ -213,14 +213,15 @@ def test_every_view_builds_without_an_error_card(env, tier):
 
 def test_plain_stub_app_without_services_degrades(env):
     """The Wave 1 stub (no set_settings, no downloads, no recorder): no error card,
-    the current model shows In use, Download is disabled, toggles still apply."""
+    the current model is selected, no download / remove button, toggles still apply."""
     from ui.shell import ErrorPage
     win, app = env.build("free", rich=False)
     page = _settings(win, section="speech")
     assert not isinstance(page, ErrorPage)
-    card = page.model_cards["base"]                    # the stub's whisper_model
-    assert card.is_selected() and "remove" in card.buttons
-    assert not page.model_cards["small"].buttons["download"].isEnabled()
+    card = page.speech_card
+    assert card.combo.currentData() == "base"          # the stub's whisper_model
+    assert card.status.text().startswith("On this computer")
+    assert not card.action.isVisibleTo(card)           # nothing to download or remove with
     page.t_notify.click()
     assert ("set_setting", "notify_when_ready", False) in app.calls
     acct = win.open("account")
@@ -240,8 +241,7 @@ def test_lazy_sections_build_after_the_first_paint(env):
 def test_every_control_has_a_name(env, tier):
     win, app = env.build(tier, nvidia=True)
     page = _settings(win)
-    page._toggle_more_options(True)
-    page.key_rows["google_api_key"].open_editor()
+    page.keys_panel.open_new("api_openai_compatible")            # the key editor, its address field too
     assert not _unnamed(page), _unnamed(page)
     acct = win.open("account")
     assert not _unnamed(acct), _unnamed(acct)
@@ -300,11 +300,9 @@ def test_the_smallest_window_clips_nothing(env):
     win.resize(960, 700)
     win.show()
     page = _settings(win)
-    page._toggle_more_options(True)
-    page.key_rows["mistral_api_key"].open_editor()
+    page.keys_panel.open_new("api_openai_compatible")
     _spin(10)
     assert page.nav.isHidden() and page.is_narrow()
-    assert page.speech_two.direction() == QBoxLayout.TopToBottom
     assert page.content.minimumSizeHint().width() <= page.scroll.viewport().width(), \
         (page.content.minimumSizeHint().width(), page.scroll.viewport().width())
     win.resize(1280, 820)
@@ -406,24 +404,48 @@ def test_microphone_picker_and_level(env):
 
 
 # ── Speech & AI ──
-def test_model_cards_reflect_the_shared_downloads(env):
+def _rows(box):
+    return [box.itemData(i) for i in range(box.count()) if not box.is_heading(i)]
+
+
+def _pick(card, value):
+    """Pick a row of a card's Model list the way the open list does."""
+    i = card.combo.findData(value)
+    assert i >= 0, value
+    card.combo.setCurrentIndex(i)
+    _spin()
+
+
+def _runs_on(card, source):
+    """Click one of a card's "Runs on" segments."""
+    card.runs_on._on_clicked(card.sources.index(source))
+    _spin()
+
+
+def test_speech_card_reflects_the_shared_downloads(env):
+    from ui.components.model_combo import MARK_DOWNLOAD, MARK_ROLE
     win, app = env.build("free")
     page = _settings(win)
-    small, base, turbo = page.model_cards["small"], page.model_cards["base"], page.model_cards["large-v3-turbo"]
-    assert small.is_selected() and "remove" in small.buttons
-    assert page.cards_row.recommended() is small                   # Best for your computer
-    assert page.cards_row.ribbon.isVisibleTo(page.cards_row)
-    assert turbo.note.text() == "A little slower here"
-    assert small.model_label.text().replace(" ", " ") == "Whisper Small · 460 MB"
+    card = page.speech_card
+    assert card.source() == "local" and card.combo.currentData() == "small"
+    assert card.status.text() == "On this computer · 460 MB"        # small is Best for this computer
+    assert card.action.text() == "Remove"
     assert page.hw_trail.text() == "This computer: i7-1260P · 16 GB"
-    base.buttons["download"].click()
+    base = card.combo.findData("base")
+    assert card.combo.itemData(base, MARK_ROLE) == MARK_DOWNLOAD       # not on this computer
+    assert not card.combo.itemData(card.combo.findData("small"), MARK_ROLE)
+    env.answers.append("go")
+    _pick(card, "base")
+    assert env.asked[-1]["title"] == "Download Whisper Base?"
     assert ("start", "base") in app.downloads.calls
-    _spin()
-    assert base.progress is not None                                 # downloading state
+    assert card.combo.currentData() == "small"                          # used once it's here
     app.downloads.finish("base")
     _spin()
-    assert app.cfg["whisper_model"] == "base" and app.cfg["backend"] == "local"   # used once it's here
-    assert page.model_cards["base"].is_selected()
+    assert app.cfg["whisper_model"] == "base" and app.cfg["backend"] == "local"
+    assert card.combo.currentData() == "base"
+    from ui.components.model_combo import NOTE_ROLE
+    assert card.status.text() == "On this computer · 140 MB"
+    assert card.combo.itemData(card.combo.findData("small"), NOTE_ROLE) == "Balanced · Best for this computer"
 
 
 def test_downloads_that_appear_later_are_heard_once(env):
@@ -433,40 +455,46 @@ def test_downloads_that_appear_later_are_heard_once(env):
     dl = app.downloads
     del app.downloads
     page = _settings(win, section="speech")
-    assert not page.model_cards["base"].buttons["download"].isEnabled()
+    card = page.speech_card
+    assert not card.action.isVisibleTo(card)
     app.downloads = dl
     win.open("settings")
     win.open("settings")
     _spin()
-    base = page.model_cards["base"]
-    assert base.buttons["download"].isEnabled()
-    base.buttons["download"].click()
-    _spin()
-    assert base.progress is not None
+    page._refresh_models()
+    assert card.action.text() == "Remove"
+    env.answers.append("go")
+    _pick(card, "base")
+    assert ("start", "base") in dl.calls
     hits = []
-    base._set_progress = hits.append
+    real = page._speech_status
+    page._speech_status = lambda: (hits.append(1), real())[1]
     dl.progress.emit("base", 40, 40, 100)
-    assert hits == [40]
+    assert hits == [1]                                              # heard once
+    app.cfg["whisper_model"] = "base"                               # its line is the one shown
+    dl.progress.emit("base", 40, 40, 100)
+    assert card.status.text() == "Downloading Fast… 40%"
     dl.progress.emit("base", 0, 0, 0)                               # size not known yet
-    assert hits == [40, None]                                       # indeterminate, not "0%"
+    assert card.status.text() == "Downloading Fast…"                # no "0%"
 
 
 def test_use_and_remove_a_model(env):
     win, app = env.build("free")
     app.downloads.states["base"] = "ready"
     page = _settings(win)
-    page.model_cards["base"].buttons["use"].click()
+    card = page.speech_card
+    _pick(card, "base")                                              # on disk: no question
     assert app.cfg["whisper_model"] == "base"
     env.answers.append("remove")
-    page.model_cards["base"].buttons["remove"].click()
-    assert env.asked[-1]["title"] == "Remove Fast?"
+    card.action.click()
+    assert env.asked[-1]["title"] == "Remove Whisper Base?"
     assert ("remove", "base") in app.downloads.calls
     app.downloads.states["base"] = "missing"
     app.downloads.removed.emit("base", True, "")
     _spin()
     assert app.cfg["whisper_model"] == "small"                       # moved to a model on disk
     env.answers.append(None)                                         # Cancel
-    page.model_cards["small"].buttons["remove"].click()
+    card.action.click()
     assert ("remove", "small") not in app.downloads.calls
 
 
@@ -489,144 +517,197 @@ def test_removing_the_smart_actions_speech_model_resets_it(env):
     assert app.cfg["smart_actions_speech_model"] == "medium"
 
 
-def test_more_sizes_tiles(env):
+def test_every_speech_model_is_one_list(env):
     win, app = env.build("free")
     page = _settings(win)
-    tiny = page.size_tiles["tiny"]
-    assert tiny.accessibleName() == "Download Lightest (Whisper Tiny, 75 MB)"
-    tiny.click()
+    card = page.speech_card
+    assert _rows(card.combo)[:len(hardware.SPEECH_MODEL_IDS)] == list(hardware.SPEECH_MODEL_IDS)
+    env.answers.append(None)                                         # Not now
+    _pick(card, "tiny")
+    assert ("start", "tiny") not in app.downloads.calls
+    env.answers.append("go")
+    _pick(card, "tiny")
     assert ("start", "tiny") in app.downloads.calls
-    page.more_button.click()
-    assert not page.tiles_row.isVisibleTo(page)
 
 
-def test_pro_sees_offline_backup_and_cloud_selected(env):
+def test_pro_sees_cloud_selected(env):
     win, app = env.build("pro")
     page = _settings(win)
-    assert page.speech_tiles["cloud"].isChecked()
-    assert page.writer_tiles["cloud"].isChecked()
-    assert page.writer_tiles["cloud"].hints() == ["DeepSeek V4.1 Flash", "Mistral Small for meeting notes"]
-    from PySide6.QtWidgets import QLabel
-    texts = [lb.text() for lb in page.model_cards["small"].action.findChildren(QLabel)]
-    assert "Offline backup" in texts
-    assert page.writer_sizes["qwen_tiny"].is_selected()
+    assert page.speech_card.source() == "cloud"
+    assert page.speech_card.combo.currentData() == "cloud"
+    assert page.speech_card.status.isHidden()                        # nothing to say: no line
+    assert page.writer_card.source() == "cloud"
+    assert page.writer_card.combo.currentText().startswith("DeepSeek V4.1 Flash")
+    assert page.writer_card.status.isHidden()
+    # Gusan Cloud's writers: the picked one answers first.
+    assert _rows(page.writer_card.combo) == ["cloud", "cloud:openai", "cloud:claude", "cloud:mistral",
+                                             "cloud:gemini"]
+    _pick(page.writer_card, "cloud:claude")
+    assert app.cfg["cloud_writer_model"] == "claude"
+    assert page.writer_card.combo.currentData() == "cloud:claude"
 
 
-def test_speech_runs_on_free_user_gets_the_pro_window(env):
+def test_runs_on_shows_the_list_and_nothing_changes_until_a_pick(env):
     win, app = env.build("free")
     page = _settings(win)
-    assert page.speech_tiles["local"].isChecked()
-    assert page.speech_tiles["local"].hints() == ["Whisper Small · Local · Balanced"]
-    assert page.speech_tiles["cloud"].pro_tag is not None
-    page.speech_tiles["cloud"].click()
+    card = page.speech_card
+    assert card.source() == "local" and card.combo.currentData() == "small"
+    assert card.sources == page.writer_card.sources == ("local", "cloud", "own_key")      # one order
+    _runs_on(card, "cloud")
+    assert card.source() == "cloud" and card.combo.currentIndex() == -1                 # "Select a model"
+    assert _rows(card.combo) == ["cloud", "cloud:best"]
+    assert app.cfg["backend"] == "local"                                                # nothing changed
+    _pick(card, "cloud")
     assert ("_pro_upsell", "Fast cloud transcription") in app.calls
     assert app.cfg["backend"] == "local"
-    assert page.speech_tiles["local"].isChecked() and not page.speech_tiles["cloud"].isChecked()
-    page.writer_tiles["cloud"].click()
+    _runs_on(card, "local")                                                             # back to what is set
+    assert card.combo.currentData() == "small"
+    _runs_on(page.writer_card, "cloud")
+    _pick(page.writer_card, "cloud")
     assert ("_pro_upsell", "Smart Actions") in app.calls
 
 
 def test_pro_switches_speech_and_writer(env):
     win, app = env.build("pro", backend="local")
     page = _settings(win)
-    page.speech_tiles["cloud"].click()
-    assert app.cfg["backend"] == "managed"
-    page.writer_tiles["local"].click()                               # Small is on disk
+    _runs_on(page.speech_card, "cloud")
+    _pick(page.speech_card, "cloud:best")
+    assert (app.cfg["backend"], app.cfg["managed_speech_profile"]) == ("managed", "best")
+    _runs_on(page.writer_card, "local")
+    assert page.writer_card.combo.currentIndex() == -1                                  # nothing picked yet
+    _pick(page.writer_card, "qwen_tiny")                                                # on disk: no question
     assert app.cfg["action_model"] == "qwen_tiny"
-    assert page.writer_tiles["local"].isChecked()
+    assert page.writer_card.source() == "local"
+    assert page.writer_card.combo.currentData() == "qwen_tiny"
 
 
 def test_writer_sizes_download_then_use(env):
     win, app = env.build("free")
     page = _settings(win)
-    page.writer_sizes["qwen_3b"].click()
+    card = page.writer_card
+    assert _rows(card.combo) == list(hardware.LOCAL_AI_MODEL_IDS)
+    env.answers.append("go")
+    _pick(card, "qwen_3b")
     assert ("start", "qwen_3b") in app.downloads.calls
     app.downloads.finish("qwen_3b")
     _spin()
     assert app.cfg["action_model"] == "qwen_3b"
-    assert page.writer_sizes["qwen_3b"].is_selected()
+    assert card.combo.currentData() == "qwen_3b"
 
 
 def test_privacy_mode_asks_before_cloud(env):
     win, app = env.build("pro", backend="local", privacy_mode=True)
     page = _settings(win)
-    assert page.speech_tiles["cloud"].hints() == ["Off while Privacy mode is on"]
+    assert "Privacy mode is on" in page.speech_card.status.text()
     env.answers.append("off")
-    page.speech_tiles["cloud"].click()
+    _runs_on(page.speech_card, "cloud")
+    _pick(page.speech_card, "cloud")
     assert env.asked[-1]["title"] == "Turn off Privacy mode?"
     assert app.cfg["privacy_mode"] is False and app.cfg["backend"] == "managed"
 
 
-def test_own_key_without_a_key_opens_the_key_row(env):
+def _add_key(page, name, provider, key, model=None):
+    ed = page.keys_panel.editor
+    assert ed.isVisibleTo(page)
+    ed.name.setText(name)
+    ed.provider.setCurrentIndex(ed.provider.findData(provider))
+    if model:
+        ed._set_model(model)
+    ed.key.setText(key)
+    ed.save_button.click()
+    _spin()
+
+
+def test_own_key_without_a_key_opens_the_key_list(env):
     win, app = env.build("free")
     page = _settings(win)
-    page.speech_tiles["own_key"].click()
-    row = page.key_rows["mistral_api_key"]
-    assert row.is_editing()
+    card = page.speech_card
+    _runs_on(card, "own_key")
+    assert card.combo.count() == 0 and card.action.text() == "Add key"
+    card.action.click()                                              # "Add a Mistral or Google Gemini key"
+    assert page.keys_panel.editor.provider.currentData() == "api_mistral"
     assert app.cfg["backend"] == "local"
-    row.input.setText("mk-test-key-0000-abc")
-    row.save_button.click()                                          # saving the key finishes the pick
-    _spin()
+    _add_key(page, "Work Mistral", "api_mistral", "mk-test-key-0000-abc")
+    assert app.cfg["backend"] == "mistral"                           # the card asked for it: used now
     assert app.cfg["mistral_api_key"] == "mk-test-key-0000-abc"
-    assert app.cfg["backend"] == "mistral"
-    assert page.speech_tiles["own_key"].isChecked()
+    assert card.source() == "own_key"
+    assert card.combo.currentData() == "key:" + app.cfg["speech_key_id"]
+    assert card.action.text() == "Edit key" and card.status.isHidden()
 
 
-def test_own_key_cancelled_then_saved_later_keeps_speech(env):
+def test_a_key_added_on_its_own_is_only_saved(env):
     win, app = env.build("free")
     page = _settings(win)
-    page.speech_tiles["own_key"].click()
-    row = page.key_rows["mistral_api_key"]
-    row.cancel_button.click()
-    row.add_button.click()
-    row.input.setText("mk-test-key-0000-abc")
-    row.save_button.click()
-    _spin()
-    assert app.cfg["mistral_api_key"] == "mk-test-key-0000-abc"
+    _runs_on(page.speech_card, "own_key")
+    page.speech_card.action.click()
+    page.keys_panel.editor.cancel_button.click()                    # changed their mind
+    page.keys_panel.add_button.click()
+    _add_key(page, "Mine", "api_mistral", "mk-test-key-0000-abc")
     assert app.cfg["backend"] == "local"                             # only saved, not switched
+    assert [r for r in page.keys_panel.rows] == [e["id"] for e in app.cfg["api_keys"]]
+    _runs_on(page.speech_card, "own_key")
+    assert _rows(page.speech_card.combo) == ["key:" + app.cfg["api_keys"][0]["id"]]
 
 
-def test_api_key_tested_on_paste_masked_and_saved(env, monkeypatch):
+def test_any_key_can_be_added_tested_edited_and_removed(env, monkeypatch):
     import api_keys
     seen = []
 
-    def fake_test(field, key, cfg=None):
-        seen.append((field, key))
+    def fake_test(provider, key, model="", base_url=""):
+        seen.append((provider, key, model, base_url))
         return (True, "Works")
-    monkeypatch.setattr(api_keys, "test_key", fake_test)
+    monkeypatch.setattr(api_keys, "test_entry", fake_test)
     win, app = env.build("free")
     page = _settings(win)
-    row = page.key_rows["google_api_key"]
-    assert row.text.text() == "No key yet" and row.add_button.isVisibleTo(row)
-    row.add_button.click()
-    assert row.is_editing() and row.input.echoMode() == QLineEdit.Password
-    row.input.setText("AIza-test-key-0xyz")
-    assert _wait(lambda: row.status.text() == "✓ Works", 4)
-    assert seen == [("google_api_key", "AIza-test-key-0xyz")]
-    row.save_button.click()
-    assert app.cfg["google_api_key"] == "AIza-test-key-0xyz"
+    panel = page.keys_panel
+    assert not panel.list_card.isVisibleTo(page) and not panel.rows        # no keys: just "+ Add key"
+    panel.add_button.click()
+    ed = panel.editor
+    ed.name.setText("My OpenAI")
+    ed.provider.setCurrentIndex(ed.provider.findData("api_openai_compatible"))
+    assert ed.base.isVisibleTo(ed)                                   # an OpenAI-compatible service has an address
+    ed.base.setText("https://llm.example.com/v1")
+    ed._set_model("my-own-model")                                    # any model id
+    ed.key.setText("sk-test-key-0xyz")
+    assert ed.key.echoMode() == QLineEdit.Password
+    ed.test_button.click()
+    assert _wait(lambda: ed.status.text() == "✓ Works", 4)
+    assert seen[-1] == ("api_openai_compatible", "sk-test-key-0xyz", "my-own-model", "https://llm.example.com/v1")
+    ed.save_button.click()
     _spin()
-    assert not row.is_editing()
-    assert row.text.text() == "Key ending xyz"
-    assert row.chip.isVisibleTo(row) and row.chip.text() == "Works"
+    (entry,) = app.cfg["api_keys"]
+    assert (entry["name"], entry["model"], entry["base_url"]) == ("My OpenAI", "my-own-model",
+                                                                  "https://llm.example.com/v1")
+    assert app.cfg["api_key_secrets"][entry["id"]] == "sk-test-key-0xyz"
+    row = panel.rows[entry["id"]]
+    assert row.masked.text() == "Key ending xyz" and row.title.text() == "My OpenAI"
+    row.test_button.click()
+    assert _wait(lambda: row.chip.text() == "Works", 4)
+    # every key can write: the AI writer lists it under "Your own key"
+    _runs_on(page.writer_card, "own_key")
+    _pick(page.writer_card, "key:" + entry["id"])
+    assert (app.cfg["action_model"], app.cfg["action_api_key"]) == ("api_openai_compatible", "sk-test-key-0xyz")
+    row = panel.rows[entry["id"]]
+    assert row.use_chip.text() == "AI writer"
+    row.edit_button.click()
+    assert ed.isVisibleTo(page) and ed.name.text() == "My OpenAI" and ed.key.text() == ""
+    ed.name.setText("Work")
+    ed.save_button.click()                                           # the key stays when left empty
+    _spin()
+    assert app.cfg["api_keys"][0]["name"] == "Work" and app.cfg["api_key_secrets"][entry["id"]] == "sk-test-key-0xyz"
     env.answers.append("remove")
-    row.remove_button.click()
-    assert app.cfg["google_api_key"] == ""
+    panel.rows[entry["id"]].remove_button.click()
+    assert env.asked[-1]["title"] == "Remove \u201cWork\u201d?"
+    assert app.cfg["api_keys"] == [] and app.cfg["action_api_key"] == ""
 
 
-def test_more_options_writer_with_own_key(env):
-    win, app = env.build("free", action_api_key="sk-openai-test-123")
+def test_old_keys_join_the_list(env):
+    win, app = env.build("free", mistral_api_key="mk-old-key-0000", action_api_key="sk-openai-test-123",
+                         action_api_provider="api_openai_compatible")
     page = _settings(win)
-    page.more_options.click()
-    panel = page.writer_panel
-    assert panel.isVisibleTo(page)
-    i = panel.provider.findData("api_openai_compatible")
-    assert i >= 0
-    panel.provider.setCurrentIndex(i)
-    assert panel.row_base.isVisibleTo(panel)
-    panel.use_button.click()
-    assert app.cfg["action_model"] == "api_openai_compatible"
-    assert page.writer_tiles["own_key"].isChecked()
+    providers = sorted(e["provider"] for e in app.cfg["api_keys"])
+    assert providers == ["api_mistral", "api_openai_compatible"]
+    assert len(page.keys_panel.rows) == 2
 
 
 def test_gpu_card_only_for_nvidia(env):
@@ -772,21 +853,14 @@ def test_the_page_says_when_a_typed_key_is_not_saved(env):
     win, _app = env.build("free")
     page = _settings(win, section="speech")
     assert page.unsaved_edits() is False
-    row = page.key_rows["google_api_key"]
-    row.open_editor()
+    page.keys_panel.open_new()
+    ed = page.keys_panel.editor
     assert page.unsaved_edits() is False                          # open, nothing typed
-    row.input.setText("   ")
+    ed.key.setText("   ")
     assert page.unsaved_edits() is False
-    row.input.setText("AIzaSyExampleKey")
+    ed.key.setText("AIzaSyExampleKey")
     assert page.unsaved_edits() is True
-    row.close_editor()                                            # Cancel: nothing to lose
-    assert page.unsaved_edits() is False
-    page._toggle_more_options(True)
-    writer = page.writer_panel.key_row
-    writer.open_editor()
-    writer.input.setText("sk-example")
-    assert page.unsaved_edits() is True                           # the AI writer's key too
-    writer.close_editor()
+    ed.cancel_button.click()                                      # Cancel: nothing to lose
     assert page.unsaved_edits() is False
     assert win.pages()["settings"] is page                        # where the controller finds it
 
@@ -847,7 +921,7 @@ def test_on_setting_changed_redraws(env):
     page.on_setting_changed("save_history")
     _spin()
     assert not page.t_history.isChecked()
-    assert page.model_cards["large-v3-turbo"].is_selected()
+    assert page.speech_card.combo.currentData() == "large-v3-turbo"
     page.on_setting_changed("not_a_setting_we_show")             # ignored, no error
 
 

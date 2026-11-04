@@ -24,6 +24,13 @@ NOTION_MCP_SECRET = "notion_mcp_client_secret"
 # JSON blob holding the per-user stashed API keys (the user_secrets store), so
 # keys swapped out on account switch never sit in plaintext config.json either.
 USER_SECRETS_SECRET = "user_secrets_keys"
+# Settings › My API keys: each saved key's secret is its own keyring item, "api_key.<id>" - one
+# object for all of them could outgrow Windows Credential Manager's 2560-byte limit.
+API_KEY_SECRET_PREFIX = "api_key."
+
+
+def api_key_secret_name(key_id):
+    return API_KEY_SECRET_PREFIX + str(key_id)
 MEETINGS_DIR_NAME = "meetings"
 
 

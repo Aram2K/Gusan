@@ -34,6 +34,9 @@
 //   app sends no "stream" and keeps the budgets above.
 // * Everything else (the live recap, apps before 2.0 that send no mode):
 //   Mistral Small -> OpenAI (OPENAI_FAST_MODEL) -> Gemini Flash.
+// * body.model (optional, the AI writer the person picked in the app): for Smart Actions and Live
+//   Assistant answers that engine goes first, the rest of the chain follows as the fallback
+//   (preferRoutes). Meeting notes keep their own order.
 // Not streamed, EVERY engine has a whole-answer time limit (its own, else
 // WHOLE_CAP_MS), and the chain as a whole stays inside NON_STREAM_DEADLINE_MS,
 // so the app's 45 s wait always ends with an answer or a clean error.
@@ -574,6 +577,26 @@ async function routesFor(live: boolean, smart: boolean, notes: boolean, messages
   return [...first, ...gpt, ...backup, ...mistral, ...gemini];
 }
 
+// The app may name the AI writer the person picked (Settings › Speech & AI › AI writer):
+// body.model = "deepseek" | "openai" | "claude" | "mistral" | "gemini". Its engines move to the
+// front of this mode's chain; the others stay behind it, in their order, as the fallback - so a
+// pick never makes an answer fail. Unknown or missing: the chain as it is (older apps send none).
+const PREFERRED_FAMILIES = ["deepseek", "openai", "claude", "mistral", "gemini"] as const;
+
+function routeFamily(route: Route): string {
+  if (route.name === "live") return "deepseek";
+  if (route.name.startsWith("claude")) return "claude";
+  if (route.name.startsWith("gemini")) return "gemini";
+  return route.name;                                   // "openai", "mistral"
+}
+
+function preferRoutes(routes: Route[], prefer: unknown): Route[] {
+  const want = typeof prefer === "string" ? prefer.trim().toLowerCase() : "";
+  if (!(PREFERRED_FAMILIES as readonly string[]).includes(want)) return routes;
+  const first = routes.filter((r) => routeFamily(r) === want);
+  return first.length ? [...first, ...routes.filter((r) => routeFamily(r) !== want)] : routes;
+}
+
 function call(route: Route, body: Record<string, unknown>, signal?: AbortSignal) {
   return fetch(route.url, {
     method: "POST",
@@ -860,7 +883,10 @@ Deno.serve(async (req) => {
   if (messages.length === 0) return json({ error: "no_messages" }, 400);
 
   const startedAt = Date.now();
-  const routes = await routesFor(live, smart, notes, messages, maxTokens, stream);
+  // The person's pick leads Smart Actions and Live Assistant answers; meeting notes keep their own
+  // order (their tail engines have a short whole-answer cap and would only time out first).
+  const chain = await routesFor(live, smart, notes, messages, maxTokens, stream);
+  const routes = notes ? chain : preferRoutes(chain, body?.model);
   if (!routes.length) {
     console.error("no chat engine configured: set MISTRAL_STT_KEY, GOOGLE_STT_KEY, OPENAI_TOKEN or CLAUDE_LLM_KEY");
     return json({ error: "actions_not_configured" }, 503);

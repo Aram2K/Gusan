@@ -18,8 +18,9 @@ dist/
 build/
 *.spec
 
-# CI-generated icon
+# CI-generated icons
 assets/icon.ico
+assets/icon.icns
 
 # Built from installer/player by installer/player/build.ps1 (CI does it before Inno Setup)
 installer/wizard/GusanSlides.exe

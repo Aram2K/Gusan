@@ -176,7 +176,7 @@ def test_same_page_for_free_and_pro_with_no_limit_wording(build, store):
         assert not any(b in low for b in ("limit", "hour", "upgrade", "minutes left", "unlock")), t
         assert t != "PRO", "calm Pro: no Pro tag or banner, only the chip on the one row in the Accuracy list"
     assert "MP3, WAV, M4A, FLAC or video · any length" in texts
-    assert "On this computer. Nothing is uploaded." in _texts(free)
+    assert "Private: stays on this computer." in _texts(free)
     # The one Pro row is Gusan Cloud's best profile (its server chooses the model), wearing its CLOUD
     # and PRO chips (it says what a row IS, so it reads the same for Free and for Pro).
     for page in (free, pro):
@@ -421,7 +421,7 @@ def test_free_pick_of_gusan_cloud_opens_the_pro_window_and_saves_nothing(build, 
     assert _sets(app) == [], "nothing saved"
     assert page.model_combo.currentData() == "small", "the combo snapped back"
     assert page.model_line.text() == "Whisper Small · Local"
-    assert _foot(page) == ("On this computer. Nothing is uploaded.", "shield")
+    assert _foot(page) == ("Private: stays on this computer.", "shield")
 
 
 def test_pro_pick_of_gusan_cloud_is_saved_once_and_named(build, store):
@@ -433,10 +433,10 @@ def test_pro_pick_of_gusan_cloud_is_saved_once_and_named(build, store):
     assert page.model_combo.plain_text() == "Best accuracy", "the profile's name, never the service's"
     assert page.model_combo.closed_text() == "Best accuracy · Cloud · Pro"
     assert page.model_line.text() == "Best accuracy · Cloud", "what Gusan Cloud is asked for, never a Whisper name"
-    assert _foot(page) == ("Sent to Gusan Cloud to transcribe.", "cloud")
+    assert _foot(page) == ("Sent securely to Gusan Cloud.", "cloud")
     page.model_combo.setCurrentIndex(page.model_combo.findData("auto"))
     assert _sets(app)[-1] == ("file_model", "auto")
-    assert _foot(page) == ("On this computer. Nothing is uploaded.", "shield")
+    assert _foot(page) == ("Private: stays on this computer.", "shield")
 
     # Saved: a file asks for the best profile whatever the old provider setting says (the server chooses)
     page, app = build("pro", file_model="cloud", managed_provider="mistral")
@@ -480,7 +480,7 @@ def test_own_key_items_appear_once_the_key_is_saved(build, store):
     page.on_setting_changed("mistral_api_key")
     assert "own:mistral" not in _item_texts(page)
     assert page.model_combo.currentData() == "auto"
-    assert _foot(page) == ("On this computer. Nothing is uploaded.", "shield")
+    assert _foot(page) == ("Private: stays on this computer.", "shield")
 
 
 def test_privacy_mode_greys_out_the_cloud_items_and_says_why(build, store):
@@ -492,7 +492,7 @@ def test_privacy_mode_greys_out_the_cloud_items_and_says_why(build, store):
         assert not box.choice_enabled(box.findData(value)), value
     assert box.choice_enabled(box.findData("small")) and box.choice_enabled(box.findData("auto"))
     assert hint.isVisibleTo(page) and hint.text() == "Privacy mode keeps it on this computer."
-    assert _foot(page) == ("On this computer. Nothing is uploaded.", "shield")
+    assert _foot(page) == ("Private: stays on this computer.", "shield")
     box.setCurrentIndex(box.findData("cloud"))                 # can't be clicked; even so
     assert box.currentData() == "auto" and _sets(app) == []
     assert not [c for c in app.calls if c[0] == "_pro_upsell"]
@@ -502,14 +502,14 @@ def test_privacy_mode_greys_out_the_cloud_items_and_says_why(build, store):
     assert box.choice_enabled(box.findData("cloud")) and box.choice_enabled(box.findData("own:google"))
     assert not hint.isVisibleTo(page)
     assert box.currentData() == "cloud", "the saved pick runs again"
-    assert _foot(page) == ("Sent to Gusan Cloud to transcribe.", "cloud")
+    assert _foot(page) == ("Sent securely to Gusan Cloud.", "cloud")
 
 
 def test_a_saved_cloud_pick_that_cannot_run_shows_automatic(build, store):
     page, app = build("free", file_model="cloud", downloads=FakeDownloads(ready=["base", "small"]))
     assert page.model_combo.currentData() == "auto"
     assert page.model_line.text() == "Whisper Small · Local"
-    assert _foot(page) == ("On this computer. Nothing is uploaded.", "shield")
+    assert _foot(page) == ("Private: stays on this computer.", "shield")
     page, app = build("pro", file_model="own:google")              # no key saved
     assert page.model_combo.currentData() == "auto"
     assert _sets(app) == [], "showing Automatic never writes"
@@ -522,12 +522,12 @@ def test_refresh_account_follows_the_plan(build, store):
     page.refresh_account()
     assert _item_texts(page)["cloud"] == "Best accuracy · Cloud · Pro"      # the row is what it is, whoever looks
     assert page.model_combo.currentData() == "cloud"
-    assert _foot(page) == ("Sent to Gusan Cloud to transcribe.", "cloud")
+    assert _foot(page) == ("Sent securely to Gusan Cloud.", "cloud")
     app.set_tier("free")                                         # Pro ended
     page.refresh_account()
     assert _item_texts(page)["cloud"] == "Best accuracy · Cloud · Pro"
     assert page.model_combo.currentData() == "auto"
-    assert _foot(page) == ("On this computer. Nothing is uploaded.", "shield")
+    assert _foot(page) == ("Private: stays on this computer.", "shield")
     assert _sets(app) == [] and not [c for c in app.calls if c[0] == "_pro_upsell"]
 
 
