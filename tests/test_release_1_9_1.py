@@ -86,7 +86,7 @@ class TestAutoAnswerNeverPreemptsTheUser(unittest.TestCase):
     def _overlay(self, **state):
         base = dict(app=SimpleNamespace(cfg={}), _suggesting=False, _suggest_auto=False,
                     _hold_until=0.0, _pending_auto=False,
-                    _free_cannot_ask=lambda auto=False: False,   # Pro: no early stop
+                    _no_answer_engine_for_free=lambda: False,     # Pro / has an engine: no early stop
                     rules_active=lambda: False)                   # no standing rule for everything heard
         base.update(state)
         return SimpleNamespace(**base)

@@ -41,6 +41,7 @@ import numpy as np
 import pytest
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt, QTimer
 from PySide6.QtGui import QColor, QContextMenuEvent, QImage, QPalette
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QCheckBox, QComboBox, QDialog, QLabel, QLineEdit,
                                QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton,
                                QStyle, QStyleOptionButton, QTextEdit, QToolTip, QVBoxLayout, QWidget)
@@ -864,7 +865,19 @@ def test_the_pro_window(qapp, scheme, made, feature):
     app.style_content = STYLESHEET            # main.py gives the Pro window the 1.x sheet; without it nothing is styled
     dlg = ProDialog(main_app=app, feature=feature)
     made.append(dlg)
-    readable(dlg, "the Pro window", minimum=4)
+    dlg.show()
+    QTest.qWait(100)
+    # The plan cards dim their neighbours with an opacity effect. Qt places a widget with an effect
+    # wrongly when it is painted onto a scaled image (what this audit does), so the cards would be
+    # measured away from their text. The effects only dim the cards beside the one in view.
+    for effect in dlg.dims.values():
+        effect.setEnabled(False)
+    # Only the card in view is measured: the cards beside it show a sliver at the window's edge,
+    # dimmed on purpose, with none of their text in it.
+    beside = [QRect(c.mapTo(dlg, QPoint(0, 0)), c.size()) for c in dlg.cards.values()
+              if c is not dlg.cards[dlg._plan]]
+    pieces = [p for p in widget_pieces(dlg) if not any(r.contains(p[1].center()) for r in beside)]
+    readable(dlg, "the Pro window", pieces=pieces, minimum=4)
 
 
 def test_the_feedback_window(qapp, scheme, window, made):

@@ -292,10 +292,10 @@ def test_jump_near_the_end_lands_once_the_rest_is_built(env):
 
 
 def test_the_smallest_window_clips_nothing(env):
-    """The shell's 960 px minimum: the section list makes room, Speech runs on /
-    AI writer stack, Account stacks its side cards - no content is wider than
-    what the page can show (the scroll areas never scroll sideways)."""
-    from PySide6.QtWidgets import QBoxLayout
+    """The shell's 960 px minimum: the section list makes room, the Speech and
+    AI writer cards sit one above the other, Account stacks its side cards - no
+    content is wider than what the page can show (the scroll areas never scroll
+    sideways)."""
     win, _app = env.build("pro", nvidia=True, google_api_key="AIza-test-key-0xyz")
     win.resize(960, 700)
     win.show()
@@ -308,7 +308,7 @@ def test_the_smallest_window_clips_nothing(env):
     win.resize(1280, 820)
     _spin(10)
     assert not page.nav.isHidden() and not page.is_narrow()
-    assert page.speech_two.direction() == QBoxLayout.LeftToRight
+    assert page.speech_card.y() < page.writer_card.y()           # one above the other, at every width
     assert page.content.minimumSizeHint().width() <= page.scroll.viewport().width()
     acct = win.open("account")
     _spin(5)
