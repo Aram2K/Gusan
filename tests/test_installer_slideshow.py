@@ -35,6 +35,12 @@ WIZARD = INSTALLER / "wizard"
 PLAYER = INSTALLER / "player"
 VIDEO = WIZARD / "gusan_intro.mp4"
 
+
+def _in_installer(name):
+    """installer.iss names its files with Windows backslashes: a path that also resolves on Linux."""
+    return INSTALLER / name.replace("\\", "/")
+
+
 MAX_WIZARD_BYTES = 4_000_000          # all pictures together, as stored in [Files]
 MAX_VIDEO_BYTES = 8_000_000           # the intro video (installer/make_wizard_video.py)
 
@@ -151,7 +157,7 @@ class TestPictures(unittest.TestCase):
                   if not src.startswith("..") and src != "wizard\\GusanSlides.exe"]
         self.assertGreater(len(names), 40)
         for name in names:
-            self.assertTrue((INSTALLER / name).is_file(), name)
+            self.assertTrue(_in_installer(name).is_file(), name)
 
     def test_the_script_needs_inno_setup_6_5_2_for_png(self):
         self.assertRegex(self.text, r"(?m)^#if VER < EncodeVer\(6,5,2\)\s*\n\s*#error [^\n]+\n#endif")
@@ -165,7 +171,7 @@ class TestPictures(unittest.TestCase):
             m = re.fullmatch(r"wizard\\finish_(\d+)x(\d+)\.png", name)
             self.assertTrue(m, name)
             w, h = int(m.group(1)), int(m.group(2))
-            self.assertEqual(_png_size(INSTALLER / name), (w, h), name)
+            self.assertEqual(_png_size(_in_installer(name)), (w, h), name)
             self.assertAlmostEqual(w / h, 164 / 314, delta=0.005, msg=name)    # Inno's ratio
             sizes.append((w, h))
         for area in LARGE_AREAS:
@@ -177,7 +183,7 @@ class TestPictures(unittest.TestCase):
             m = re.fullmatch(r"wizard\\small_(\d+)\.png", name)
             self.assertTrue(m, name)
             side = int(m.group(1))
-            self.assertEqual(_png_size(INSTALLER / name), (side, side), name)
+            self.assertEqual(_png_size(_in_installer(name)), (side, side), name)
             sizes.append(side)
         for side in SMALL_AREAS:
             self.assertIn(side, sizes)
