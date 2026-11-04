@@ -145,7 +145,10 @@ class TestPictures(unittest.TestCase):
 
     def test_every_picture_the_script_names_exists(self):
         names = self._listed("WizardImageFile") + self._listed("WizardSmallImageFile")
-        names += [src for src, _flags in _file_sources(self.text) if not src.startswith("..")]
+        # GusanSlides.exe is a build product (installer/player/build.ps1, git-ignored): CI builds it
+        # after the tests, and the script includes it only when it exists (#if HaveVideo).
+        names += [src for src, _flags in _file_sources(self.text)
+                  if not src.startswith("..") and src != "wizard\\GusanSlides.exe"]
         self.assertGreater(len(names), 40)
         for name in names:
             self.assertTrue((INSTALLER / name).is_file(), name)
