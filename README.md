@@ -13,17 +13,17 @@
 Dictation, Smart Actions, meeting notes and a Live Assistant that stays out of your screen share on Windows.<br/>
 Speech is turned into text on your computer by default.
 
-**[⬇ Download for Windows](https://github.com/Aram2K/Gusan/releases/latest/download/TranscribeApp-Windows-Setup.exe)** &nbsp;·&nbsp;
-**[⬇ Download for macOS](https://github.com/Aram2K/Gusan/releases/latest/download/TranscribeApp-Mac.dmg)** &nbsp;·&nbsp;
+**[⬇ Download for Windows](https://github.com/Aram2K/Gusan/releases/latest/download/Gusan-Windows-Setup.exe)** &nbsp;·&nbsp;
+**[⬇ Download for macOS](https://github.com/Aram2K/Gusan/releases/latest/download/Gusan-Mac.dmg)** &nbsp;·&nbsp;
 [Website](https://gusan.aibuben.xyz) &nbsp;·&nbsp; [All releases](https://github.com/Aram2K/Gusan/releases)
 
-<sub>Prefer a portable build? Get the [Windows .zip](https://github.com/Aram2K/Gusan/releases/latest/download/TranscribeApp-Windows.zip).</sub>
+<sub>Prefer a portable build? Get the [Windows .zip](https://github.com/Aram2K/Gusan/releases/latest/download/Gusan-Windows.zip).</sub>
 
 </div>
 
 ---
 
-> **Gusan was called Transcribe until version 2.0.0.** Same app, new name: your settings, history and sign-in carry over. The download files (`TranscribeApp-…`) and the data folder (`%APPDATA%\Transcribe`) keep the old name on purpose, so installed copies keep updating.
+> **Gusan was called Transcribe until version 2.0.0.** Same app, new name: your settings, history and sign-in carry over. The program file (`TranscribeApp.exe`) and the data folder (`%APPDATA%\Transcribe`) keep the old name on purpose, so installed copies keep updating. The older download names (`TranscribeApp-…`) still work too.
 
 ## What it does
 
@@ -55,12 +55,12 @@ Also: mixed languages in one sentence · a dictionary for names and terms · you
 
 ### Windows 10 / 11 (64-bit)
 
-1. Download and run **[TranscribeApp-Windows-Setup.exe](https://github.com/Aram2K/Gusan/releases/latest/download/TranscribeApp-Windows-Setup.exe)**. If Windows says "Windows protected your PC" (the app isn't code-signed), click **More info → Run anyway**.
+1. Download and run **[Gusan-Windows-Setup.exe](https://github.com/Aram2K/Gusan/releases/latest/download/Gusan-Windows-Setup.exe)**. If Windows says "Windows protected your PC" (the app isn't code-signed), click **More info → Run anyway**.
 2. The first time Gusan opens, the welcome window checks your computer, recommends a speech model and sets up your microphone and shortcut.
 
 ### macOS (Apple Silicon)
 
-1. Download **[TranscribeApp-Mac.dmg](https://github.com/Aram2K/Gusan/releases/latest/download/TranscribeApp-Mac.dmg)**, open it and drag the app (it's still named TranscribeApp) to Applications.
+1. Download **[Gusan-Mac.dmg](https://github.com/Aram2K/Gusan/releases/latest/download/Gusan-Mac.dmg)**, open it and drag the app (it's still named TranscribeApp) to Applications.
 2. macOS blocks the first launch because the app isn't notarized. Open **System Settings → Privacy & Security → Open Anyway**, or run `xattr -dr com.apple.quarantine /Applications/TranscribeApp.app`.
 3. Gusan lives in the **menu bar**. It needs three permissions under **Privacy & Security**: **Microphone**, **Accessibility** (to paste) and **Input Monitoring** (for the shortcut). A short guide opens on first launch.
 
