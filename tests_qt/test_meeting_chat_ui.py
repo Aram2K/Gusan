@@ -26,8 +26,9 @@ from ui.components import clipboard as rich_clipboard
 from ui.components import mini_prompt
 
 
-def _pump(cond=None, timeout=5.0):
-    """Run the event loop: ten turns, or until ``cond`` holds (at most ``timeout`` seconds)."""
+def _pump(cond=None, timeout=20.0):
+    """Run the event loop: ten turns, or until ``cond`` holds (at most ``timeout`` seconds: a shared build
+    machine can stall for a few seconds, and a test that passes returns as soon as ``cond`` holds)."""
     end = time.monotonic() + timeout
     turns = 0
     while time.monotonic() < end:
