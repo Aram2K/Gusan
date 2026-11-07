@@ -11,6 +11,18 @@ final class VoiceTests: XCTestCase {
         func write(_ data: Data, key: String) -> Bool { guard writable else { return false }; values[key] = data; return true }
         func clear(_ key: String) { values.removeValue(forKey: key) }
     }
+    func testVoiceChannelDiagnosticReasons() {
+        let board = Board(); var route = VoiceChannel.Route.pasteboard
+        let channel = VoiceChannel(container: nil, group: "voice", pasteboard: board, route: { route })
+        XCTAssertEqual(channel.diagnosticsDescription, "Pasteboard fallback")
+        board.writable = false
+        XCTAssertEqual(channel.diagnosticsDescription, "Unavailable (pasteboard read/write denied)")
+        route = .fullAccessRequired
+        XCTAssertEqual(channel.diagnosticsDescription, "Unavailable (Full Access is off)")
+        XCTAssertEqual(channel.unavailableError, .fullAccessRequired)
+        route = .unavailable
+        XCTAssertEqual(channel.diagnosticsDescription, "Unavailable (no shared voice storage)")
+    }
     func testPasteboardVoiceStartTranscriptResultAndCleanupWithoutAppGroup() throws {
         let board = Board()
         let keyboard = VoiceChannel(container: nil, group: "voice", pasteboard: board, route: { .pasteboard })
@@ -144,6 +156,9 @@ final class VoiceTests: XCTestCase {
             let store = SessionStore(resolution: resolution, backends: [file, reports], privateBackend: Board("private"), pasteboardFallbackAllowed: { enabled }, voicePasteboard: voice)
             let channel = store.makeVoiceChannel()
             XCTAssertEqual(channel.available, writable || enabled)
+            let expected = writable ? "App Group" : (enabled ? "Pasteboard fallback" : "Unavailable (pasteboard fallback is off)")
+            XCTAssertEqual(store.diagnostics().voiceChannel, expected)
+            XCTAssertTrue(store.diagnostics().summary.contains("Voice: " + expected))
             if writable || !enabled { XCTAssertTrue(voice.values.isEmpty) }
             if !writable && !enabled { XCTAssertEqual(channel.unavailableError, .fallbackOff) }
             channel.clear()

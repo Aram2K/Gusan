@@ -96,13 +96,14 @@ public struct SessionDiagnostics {
     public let local: SessionReport
     public let peer: SessionReport?
     public let pasteboardFallback: String
+    public let voiceChannel: String
     public var groupID: String? { local.groupID }
     public var keychainOK: Bool { local.stores.contains { $0.name == "Keychain" && $0.readable && $0.writable } }
     public var fileOK: Bool { local.stores.contains { $0.name == "App-group file" && $0.readable && $0.writable } }
     public var pasteboardOK: Bool { local.stores.contains { $0.name == "Team pasteboard" && $0.readable && $0.writable } }
     public var isShared: Bool { local.stores.contains { $0.readable && $0.writable } }
     public var sharingStatus: String { isShared ? "shared" : "not shared" }
-    public var summary: String { local.stores.map(\.summary).joined(separator: "\n") }
+    public var summary: String { (local.stores.map(\.summary) + ["Voice: " + voiceChannel]).joined(separator: "\n") }
 }
 
 public final class SessionStore: SessionStorage {
@@ -164,7 +165,7 @@ public final class SessionStore: SessionStorage {
     }
     private func voiceRoute() -> VoiceChannel.Route {
         synchronized {
-            guard role != .keyboard || fullAccess() != false else { return .unavailable }
+            guard role != .keyboard || fullAccess() != false else { return .fullAccessRequired }
             let allowed = fallbackAllowed()
             if Date().timeIntervalSince(voiceCheckedAt) < 1 {
                 if cachedVoiceRoute == .pasteboard && !allowed { return .disabled }
@@ -303,7 +304,8 @@ public final class SessionStore: SessionStorage {
         }
     }
     public func diagnostics() -> SessionDiagnostics {
-        synchronized {
+        let voice = makeVoiceChannel().diagnosticsDescription
+        return synchronized {
             _ = reconcile()
             let reportKey = "report." + role.rawValue
             let stores = backends.map(health)
@@ -311,7 +313,7 @@ public final class SessionStore: SessionStorage {
             if let data = try? JSONEncoder().encode(report) { for backend in backends { _ = backend.write(data, key: reportKey) } }
             let peer = peerReport()
             let fallback = !fallbackAllowed() ? "off" : (usePasteboard() && stores.contains { $0.name == "Team pasteboard" && $0.hasSession } ? "in use" : "not needed")
-            return SessionDiagnostics(local: report, peer: peer, pasteboardFallback: fallback)
+            return SessionDiagnostics(local: report, peer: peer, pasteboardFallback: fallback, voiceChannel: voice)
         }
     }
 }

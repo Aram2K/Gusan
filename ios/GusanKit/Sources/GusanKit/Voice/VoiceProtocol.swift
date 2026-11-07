@@ -83,7 +83,7 @@ public struct VoiceTranscript: Codable, Equatable {
 }
 
 public struct VoiceChannel {
-    enum Route { case file, pasteboard, unavailable, disabled }
+    enum Route { case file, pasteboard, unavailable, disabled, fullAccessRequired }
     private struct Packet<Value: Codable>: Codable { let issuedAt: Date; let value: Value }
     public enum Notification: String { case command, status }
     public let container: URL?
@@ -97,7 +97,22 @@ public struct VoiceChannel {
     init(container: URL?, group: String, pasteboard: SessionBackend, route: @escaping () -> Route) {
         self.container = container; self.group = group; self.pasteboard = pasteboard; self.route = route
     }
-    public var unavailableError: VoiceError { route() == .disabled ? .fallbackOff : .notShared }
+    public var unavailableError: VoiceError {
+        switch route() {
+        case .disabled: return .fallbackOff
+        case .fullAccessRequired: return .fullAccessRequired
+        default: return .notShared
+        }
+    }
+    public var diagnosticsDescription: String {
+        switch route() {
+        case .file: return "App Group"
+        case .pasteboard: return available ? "Pasteboard fallback" : "Unavailable (pasteboard read/write denied)"
+        case .disabled: return "Unavailable (pasteboard fallback is off)"
+        case .fullAccessRequired: return "Unavailable (Full Access is off)"
+        case .unavailable: return "Unavailable (no shared voice storage)"
+        }
+    }
     public var available: Bool {
         switch storage() {
         case .file: return container != nil

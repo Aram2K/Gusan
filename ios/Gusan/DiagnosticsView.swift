@@ -20,6 +20,7 @@ struct DiagnosticsView: View {
             if let diagnostics = model.diagnostics {
                 AppCard {
                     Text("Pasteboard fallback: " + diagnostics.pasteboardFallback).font(.headline)
+                    Text("Voice: " + diagnostics.voiceChannel).font(.headline)
                     if diagnostics.peer == nil { Text("Waiting for a keyboard report before enabling fallback.").font(.body).foregroundStyle(.secondary) }
                 }
                 groupCard("App", report: diagnostics.local)
