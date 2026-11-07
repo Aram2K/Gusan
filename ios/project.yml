@@ -1,0 +1,76 @@
+name: Gusan
+options:
+  deploymentTarget:
+    iOS: "16.0"
+packages:
+  GusanKit:
+    path: GusanKit
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: 0.1.0
+    CURRENT_PROJECT_VERSION: 1
+    CODE_SIGN_IDENTITY[sdk=iphonesimulator*]: "-"
+    CODE_SIGN_STYLE: Automatic
+targets:
+  Gusan:
+    type: application
+    platform: iOS
+    sources: [Gusan]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aram2k.gusan
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1,2"
+    info:
+      path: Gusan/Info.plist
+      properties:
+        CFBundleDisplayName: Gusan
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        GusanAppGroup: group.com.aram2k.gusan
+        UILaunchScreen: {}
+        CFBundleURLTypes:
+          - CFBundleURLSchemes: [gusan]
+    entitlements:
+      path: Gusan/Gusan.entitlements
+      properties:
+        com.apple.security.application-groups: [group.com.aram2k.gusan]
+    dependencies:
+      - package: GusanKit
+      - target: GusanKeyboard
+        embed: true
+  GusanKeyboard:
+    type: app-extension
+    platform: iOS
+    sources: [GusanKeyboard]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aram2k.gusan.keyboard
+        TARGETED_DEVICE_FAMILY: "1,2"
+        APPLICATION_EXTENSION_API_ONLY: YES
+    info:
+      path: GusanKeyboard/Info.plist
+      properties:
+        CFBundleDisplayName: Gusan
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        GusanAppGroup: group.com.aram2k.gusan
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.keyboard-service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).KeyboardViewController
+          NSExtensionAttributes:
+            RequestsOpenAccess: true
+            PrimaryLanguage: en-US
+            IsASCIICapable: false
+    entitlements:
+      path: GusanKeyboard/GusanKeyboard.entitlements
+      properties:
+        com.apple.security.application-groups: [group.com.aram2k.gusan]
+    dependencies:
+      - package: GusanKit
+schemes:
+  Gusan:
+    build:
+      targets:
+        Gusan: all
