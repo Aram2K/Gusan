@@ -158,19 +158,21 @@ MODEL_NOTES = {
 # (MODEL_NAMES below). The old Gemini ids are not sent to Gusan Cloud any more; a saved "cloud:best" /
 # "gemini-2.5-pro" is the best profile, "cloud" / "gemini-2.5-flash" / a provider the fast one.
 CLOUD_FAST, CLOUD_BEST = "fast", "best"
-CLOUD_GLADIA, CLOUD_GLADIA_FUSION = "gladia", "gladia-fusion"
-CLOUD_PROFILES = (CLOUD_FAST, CLOUD_BEST, CLOUD_GLADIA, CLOUD_GLADIA_FUSION)
+# Gladia: Solaria-3 (English, French, German, Spanish, Italian), then Solaria-1 (100+ languages). (2.1.2 test builds
+# also offered a "Gladia Fusion": Gladia's solaria-fusion is undocumented and refused to our account (403) - a saved
+# pick of it is this profile, _PROFILE_ALIASES.)
+CLOUD_GLADIA = "gladia"
+CLOUD_PROFILES = (CLOUD_FAST, CLOUD_BEST, CLOUD_GLADIA)
 CLOUD_PROFILE_NAMES = {CLOUD_FAST: "Fast", CLOUD_BEST: "Best accuracy",
-                       CLOUD_GLADIA: "Gladia Solaria", CLOUD_GLADIA_FUSION: "Gladia Fusion"}
+                       CLOUD_GLADIA: "Gladia Solaria"}
 # What each profile tries, first to last (transcribe-proxy FAST_ORDER / BEST_ORDER, the first three; the Gladia
 # profiles try their two Gladia models, then the BEST order; the server may change an order without an app update,
 # so the line says what it tries, not what it will use).
 CLOUD_PROFILE_NOTES = {CLOUD_FAST: "ElevenLabs Scribe v2 · Mistral Voxtral · OpenAI GPT Transcribe",
                        CLOUD_BEST: "ElevenLabs Scribe v2 · OpenAI GPT Transcribe · GPT-4o Transcribe",
-                       CLOUD_GLADIA: "Gladia Solaria 3 · Gladia Solaria 1 · ElevenLabs Scribe v2",
-                       CLOUD_GLADIA_FUSION: "Gladia Solaria Fusion · Gladia Solaria 1 · ElevenLabs Scribe v2"}
+                       CLOUD_GLADIA: "Gladia Solaria 3 · Gladia Solaria 1 · ElevenLabs Scribe v2"}
 _PROFILE_ALIASES = {"best": CLOUD_BEST, "gemini-2.5-pro": CLOUD_BEST, "fast": CLOUD_FAST,
-                    "gladia": CLOUD_GLADIA, "gladia-fusion": CLOUD_GLADIA_FUSION}
+                    "gladia": CLOUD_GLADIA, "gladia-fusion": CLOUD_GLADIA}
 
 
 def cloud_profile(value, default=CLOUD_FAST):
@@ -403,8 +405,7 @@ FILE_KEY = "file_model"
 FILE_AUTO = "auto"
 FILE_AUTO_LABEL = "Automatic"
 FILE_CLOUD = "cloud"
-FILE_MANAGED_PROFILES = {FILE_CLOUD: CLOUD_BEST, "cloud:gladia": CLOUD_GLADIA,
-                         "cloud:gladia-fusion": CLOUD_GLADIA_FUSION}
+FILE_MANAGED_PROFILES = {FILE_CLOUD: CLOUD_BEST, "cloud:gladia": CLOUD_GLADIA}
 FILE_OWN_GOOGLE = "own:google"
 FILE_OWN_MISTRAL = "own:mistral"
 FILE_CLOUD_VALUES = (*FILE_MANAGED_PROFILES, FILE_OWN_GOOGLE, FILE_OWN_MISTRAL)
@@ -555,11 +556,9 @@ MODEL_NAMES = {
     "gpt-4o-transcribe": "GPT-4o Transcribe", "gpt-4o-mini-transcribe": "GPT-4o mini Transcribe",
     "whisper-1": "Whisper (OpenAI)",
     "solaria-1": "Gladia Solaria-1", "solaria-3": "Gladia Solaria-3",
-    "solaria-fusion": "Gladia Solaria Fusion",
     # Gusan Cloud's two profiles (a job that asked for one and has no answer yet).
     CLOUD_FAST: CLOUD_PROFILE_NAMES[CLOUD_FAST], CLOUD_BEST: CLOUD_PROFILE_NAMES[CLOUD_BEST],
     CLOUD_GLADIA: CLOUD_PROFILE_NAMES[CLOUD_GLADIA],
-    CLOUD_GLADIA_FUSION: CLOUD_PROFILE_NAMES[CLOUD_GLADIA_FUSION],
 }
 
 
@@ -781,7 +780,7 @@ def set_smart_speech(app_or_cfg, value, *, pro=None, downloaded=None, turn_off_p
 DICTATION_CLOUD = "cloud"
 DICTATION_CLOUD_BEST = "cloud:best"
 DICTATION_CLOUD_PROFILES = {DICTATION_CLOUD: CLOUD_FAST, DICTATION_CLOUD_BEST: CLOUD_BEST,
-                            "cloud:gladia": CLOUD_GLADIA, "cloud:gladia-fusion": CLOUD_GLADIA_FUSION}
+                            "cloud:gladia": CLOUD_GLADIA}
 DICTATION_OWN_MISTRAL, DICTATION_OWN_GOOGLE = "own:mistral", "own:google"
 DICTATION_OWN = {DICTATION_OWN_MISTRAL: "mistral", DICTATION_OWN_GOOGLE: "google"}
 # Gusan Cloud speech for dictation and meetings: its "fast" or "best" profile (main.AudioRecorder

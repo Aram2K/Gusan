@@ -9,7 +9,7 @@ import speech_langs
 from tests.test_cloud_speech import FakePost, Resp, WAV
 
 
-@pytest.mark.parametrize("profile", [ec.CLOUD_GLADIA, ec.CLOUD_GLADIA_FUSION])
+@pytest.mark.parametrize("profile", [ec.CLOUD_GLADIA])
 def test_gladia_round_trip(profile):
     value = "cloud:" + profile
     assert ec.cloud_profile(profile) == profile
@@ -44,7 +44,7 @@ def test_gladia_round_trip(profile):
 def test_gladia_empty_and_language_answers():
     assert ec.cloud_profile("") == ec.CLOUD_FAST
     assert ec.file_session({}, False) == ("local", None)
-    for model in ("solaria-1", "solaria-3", "solaria-fusion"):
+    for model in ("solaria-1", "solaria-3"):
         assert ec.model_display_name(model).startswith("Gladia Solaria")
         assert speech_langs.answer_problem("Hello there", "en", model) == ""
     assert speech_langs.answer_problem("Բարեւ աշխարհ", "hy", "solaria-1") == ""
@@ -63,11 +63,11 @@ def test_gladia_capable_family(model):
 def test_gladia_proxy_source():
     source = (Path(__file__).resolve().parents[1] / "supabase/functions/transcribe-proxy/index.ts").read_text()
     assert 'return env("Gladia_STT") || env("GLADIA_API_KEY") || env("GLADIA_KEY") || env("GLADIA_TOKEN") || env("GLADIA_API_TOKEN");' in source
-    for text in ('"solaria-1": "gladia"', '"solaria-3": "gladia"', '"solaria-fusion": "gladia"',
+    assert '"solaria-fusion": "gladia"' not in source   # never tried: our Gladia account is refused it (403)
+    for text in ('"solaria-1": "gladia"', '"solaria-3": "gladia"',
                  'orderFor("STT_GLADIA_ORDER", ["solaria-3", "solaria-1"])',
-                 'orderFor("STT_GLADIA_FUSION_ORDER", ["solaria-fusion", "solaria-1"])',
                  '["en", "fr", "de", "es", "it"].includes(language)',
-                 'await transcribeGladia(bytes, language, languages, id, t)'):
+                 'await transcribeGladia(bytes, language, languages, id, t, vocabulary)'):
         assert text in source
     body = source.split("async function transcribeGladia", 1)[1].split("async function transcribeElevenLabs", 1)[0]
     for text in ('form.append("audio"', '"x-gladia-key": engineKey("gladia")',
@@ -87,3 +87,35 @@ def test_gladia_proxy_source():
     assert '.catch(() => { console.error(JSON.stringify({ stt_cleanup_failed: "gladia", status: 0 })); });' in cleanup
     assert 'job.id' not in cleanup
     assert 'engineKey' not in cleanup
+
+
+def test_there_is_no_gladia_fusion_and_a_saved_pick_of_it_is_gladia_solaria():
+    """Gladia documents Solaria-1 and Solaria-3; its solaria-fusion is refused to our account (403), so "Gladia Fusion"
+    (2.1.2 test builds) is gone."""
+    assert ec.CLOUD_PROFILES == (ec.CLOUD_FAST, ec.CLOUD_BEST, ec.CLOUD_GLADIA)
+    assert "Gladia Fusion" not in ec.CLOUD_PROFILE_NAMES.values()
+    assert ec.cloud_profile("gladia-fusion") == ec.CLOUD_GLADIA
+    assert ec.dictation_speech_value({"backend": "managed", ec.SPEECH_PROFILE_KEY: "gladia-fusion"}) in (
+        "cloud:gladia", ec.dictation_speech_value({"backend": "managed", ec.SPEECH_PROFILE_KEY: "gladia"}))
+    assert "cloud:gladia-fusion" not in ec.FILE_CLOUD_VALUES
+    assert "cloud:gladia-fusion" not in settings_apply.FILE_CLOUD_VALUES
+    for rows in (ec.dictation_speech_rows({}, pro=True), ec.file_rows({}, pro=True)):
+        assert not [r for r in rows if "fusion" in r["value"]]
+
+
+def test_gladia_is_told_the_language_and_gets_the_vocabulary():
+    """A named language is THE language; "multi" sends its list with switching; the person's vocabulary is Gladia's
+    custom_vocabulary, and a model that refuses it gets the job once more without it."""
+    source = (Path(__file__).resolve().parents[1] / "supabase/functions/transcribe-proxy/index.ts").read_text()
+    body = source.split("async function transcribeGladia", 1)[1].split("async function transcribeElevenLabs", 1)[0]
+    assert "explicit ? { languages: [language], code_switching: false }" in body
+    assert 'language === "multi" && languages?.length ? { languages, code_switching: true }' in body
+    assert "custom_vocabulary: true, custom_vocabulary_config: { vocabulary, default_intensity: 0.5 }" in body
+    assert "let init = await start(vocabulary.length > 0);" in body
+    assert "(init.status === 400 || init.status === 422)" in body and "init = await start(false);" in body
+    helper = source.split("function vocabularyOf", 1)[1].split("async function transcribeGladia", 1)[0]
+    for text in ("Array.isArray(body?.vocabulary)", 'typeof v !== "string"', "VOCAB_TERM_MAX", "out.length >= VOCAB_MAX"):
+        assert text in helper
+    assert "const vocabulary = vocabularyOf(body);" in source
+    # ... and the app sends it (cloud_speech: the request body's "vocabulary")
+    assert 'body["vocabulary"] = list(spec.terms)' in (Path(__file__).resolve().parents[1] / "cloud_speech.py").read_text()

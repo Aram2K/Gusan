@@ -117,7 +117,7 @@ class TestValues(unittest.TestCase):
                          ("gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash-preview"))
         for mid in ec.GEMINI_SPEECH_MODELS:                       # the Gemini ids are for YOUR OWN key only
             self.assertIn(mid, ec.MODEL_NAMES)
-        self.assertEqual(ec.CLOUD_PROFILES, ("fast", "best", "gladia", "gladia-fusion"))
+        self.assertEqual(ec.CLOUD_PROFILES, ("fast", "best", "gladia"))
         for word in ec.CLOUD_PROFILES:
             self.assertIn(word, ec.MODEL_NAMES)
         self.assertEqual(ec.CLOUD_SPEECH_IDS, {"gemini": "fast", "mistral": "fast"})
@@ -949,7 +949,7 @@ class TestProxySource(unittest.TestCase):
         src = _source()
         cat = self._catalog(src)
         self.assertEqual(cat, {
-            "solaria-1": "gladia", "solaria-3": "gladia", "solaria-fusion": "gladia",
+            "solaria-1": "gladia", "solaria-3": "gladia",
             "scribe_v2": "elevenlabs",
             "voxtral-mini-latest": "mistral", "gpt-transcribe": "openai", "gpt-4o-transcribe": "openai",
             "gpt-4o-mini-transcribe": "openai", "whisper-1": "openai", "gemini-3.8-flash": "gemini",
