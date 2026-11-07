@@ -84,6 +84,13 @@ final class KeyboardViewController: UIInputViewController {
         toolbar.addSubview(screen.chip)
         screen.onChange = { [weak self] in self?.screenChanged() }
         screen.onLost = { [weak self] in self?.screenLost() }
+        screen.onStopped = { [weak self] in
+            self?.showMessage("Gusan Screen stopped")
+            UIAccessibility.post(notification: .announcement, argument: "Gusan Screen stopped.")
+        }
+        screen.onOffer = { [weak self] in
+            self?.showMessage("Start Gusan Screen in the Gusan app to ask about your screen", detail: "Gusan Screen shares a picture of your screen only when you ask with the Screen chip. Start it from Home › Gusan Screen in the Gusan app, or from Control Center's screen recording control.", accessory: "Open")
+        }
         toolbar.message.addTarget(self, action: #selector(expandMessage), for: .touchUpInside)
         toolbar.context.addTarget(self, action: #selector(expandContext), for: .touchUpInside)
         panel.onClose = { [weak self] in self?.showTyping() }
@@ -108,6 +115,7 @@ final class KeyboardViewController: UIInputViewController {
         super.viewDidAppear(animated); connected = true
         accessState = store.sessionState(fullAccess: hasFullAccess)
         settings.refresh(); updateContext()
+        screen.publishKeyboard(height: Double(keyboardHeight), screenHeight: Double(view.window?.windowScene?.screen.bounds.height ?? UIScreen.main.bounds.height))
     }
     override func viewWillLayoutSubviews() {
         super.viewWillLayoutSubviews()
@@ -157,8 +165,8 @@ final class KeyboardViewController: UIInputViewController {
         let screenInstruction = editing && screen.armed
         instructionHeader.update(text: instruction, theme: theme, busy: busy, placeholder: screenInstruction ? "Ask about your screen…" : "Tell Gusan what to do…", suggestions: screenInstruction ? ScreenPrompts.suggestions : InstructionHeader.defaultSuggestions)
         explanation.textColor = theme.foreground
-        toolbar.context.setTitle(screen.summary(context.summary), for: .normal)
-        toolbar.context.accessibilityValue = context.summary
+        updateContextTitle(screen.summary(context.summary), theme: theme)
+        toolbar.context.accessibilityValue = (screen.live ? "Gusan Screen is live. " : "") + context.summary
         toolbar.message.setTitle(snapshotReturnSurface != nil ? "Text snapshot" : message ?? "", for: .normal)
         let statusAction = snapshotReturnSurface != nil ? "Back" : accessory ?? (undoRecord == nil ? nil : undoIsRedo ? "Redo" : "Undo")
         toolbar.accessory.setTitle(statusAction, for: .normal); toolbar.accessory.isHidden = statusAction == nil
@@ -166,30 +174,46 @@ final class KeyboardViewController: UIInputViewController {
         toolbar.accessory.isEnabled = (statusAction != "Undo" && statusAction != "Redo") || undoRecord?.step(context: currentContext.voiceContext) != nil
         toolbar.accessory.accessibilityHint = accessory == "Sign in" ? "Opens the Gusan app" : "Activates the status action"
         toolbar.mic.isEnabled = !busy; toolbar.logo.isEnabled = !busy
-        screen.update(theme: theme, busy: busy)
+        screen.update(theme: theme, busy: busy, traits: traitCollection)
         toolbar.logo.accessibilityValue = accessState.actionError?.localizedDescription
         toolbar.setNeedsLayout(); layoutScreenChip()
     }
-    /// The Screen chip sits left of the mic and takes its width from the message area.
+    /// While Gusan Screen is live the context line starts with a red dot, like the system indicator.
+    private func updateContextTitle(_ title: String, theme: KeyboardTheme) {
+        let font = toolbar.context.titleLabel?.font ?? .systemFont(ofSize: 12, weight: .medium)
+        guard screen.live else { toolbar.context.setAttributedTitle(nil, for: .normal); toolbar.context.setTitle(title, for: .normal); return }
+        let text = NSMutableAttributedString(string: "● ", attributes: [.foregroundColor: UIColor.systemRed, .font: font])
+        text.append(NSAttributedString(string: title, attributes: [.foregroundColor: theme.foreground, .font: font]))
+        toolbar.context.setAttributedTitle(text, for: .normal)
+    }
+    /// The Screen chip sits left of the mic, as tall as the mic, and takes its width from the message area.
     private func layoutScreenChip() {
         let chip = screen.chip
         guard !chip.isHidden else { return }
         let size = chip.intrinsicContentSize
+        let height = max(size.height, toolbar.mic.frame.height)
         let right = toolbar.accessory.isHidden ? toolbar.mic.frame.minX : toolbar.accessory.frame.minX
-        chip.frame = CGRect(x: right - size.width - 6, y: toolbar.contextHeight + (toolbar.controlsHeight - size.height) / 2, width: size.width, height: size.height)
+        chip.frame = CGRect(x: right - size.width - 6, y: toolbar.contextHeight + (toolbar.controlsHeight - height) / 2, width: size.width, height: height)
         toolbar.message.frame.size.width = max(0, chip.frame.minX - toolbar.message.frame.minX - 6)
     }
     private func screenChanged() {
         if screen.armed {
             if surface != .instruction { beginInstruction() }
-        } else if surface == .instruction, instruction.isEmpty, instructionContext != nil, !busy { cancelInstruction() }
+            if screen.needsArmReminder { screen.markArmReminderShown(); showMessage("Your next Run sends a picture of this screen") }
+            UIAccessibility.post(notification: .layoutChanged, argument: instructionHeader)
+            UIAccessibility.post(notification: .announcement, argument: "Screen on. Ask about your screen; Run sends a picture of it.")
+        } else {
+            if surface == .instruction, instruction.isEmpty, instructionContext != nil, !busy { cancelInstruction() }
+            if screen.available { UIAccessibility.post(notification: .announcement, argument: "Screen off.") }
+        }
         updateContext()
     }
     /// The broadcast ended mid-instruction: never let the question fall through to a plain text action.
     private func screenLost() {
         guard surface == .instruction, !busy else { return }
         cancelInstruction()
-        showMessage("Gusan Screen ended. Start it again to ask about your screen.")
+        showMessage("Gusan Screen stopped. Start it again to ask about your screen.")
+        UIAccessibility.post(notification: .announcement, argument: "Gusan Screen stopped. Your question was cancelled.")
     }
     private func applyTheme(_ theme: KeyboardTheme) {
         view.backgroundColor = theme.background
@@ -281,6 +305,7 @@ final class KeyboardViewController: UIInputViewController {
         case "How to enable", "Details": expandMessage()
         case "See plans": openContainingApp(URL(string: "https://gusan.aibuben.xyz")!)
         case "Retry": if let retryAction, let retryContext { run(retryAction, context: retryContext, useScreen: retryScreen) }
+        case "Open": openContainingApp(URL(string: "gusan://screen")!)
         default: break
         }
     }
@@ -375,7 +400,7 @@ final class KeyboardViewController: UIInputViewController {
         let kind: JobResult.Kind = context.selected.isEmpty ? (context.text.isEmpty ? .insert : .replaceContext) : .replaceSelection
         func job(_ token: String) throws -> GusanJob {
             guard useScreen, case .custom(let instruction) = action else { return SmartActionJob(text: context.text, action: action, accessToken: token, target: settings.translateTarget, kind: kind) }
-            return try screen.job(instruction: instruction, text: context.text, accessToken: token, kind: kind)
+            return try screen.job(instruction: instruction, text: context.text, selected: context.selected, accessToken: token, kind: kind)
         }
         let progress: @Sendable (String) async -> Void = { [weak self] message in await MainActor.run { self?.showMessage(message, accessory: "Cancel") } }
         do { return try await JobRunner().result(of: try job(session.accessToken), progress: progress) }

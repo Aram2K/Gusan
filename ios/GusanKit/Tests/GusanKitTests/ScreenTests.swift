@@ -201,7 +201,7 @@ final class ScreenActionTests: XCTestCase {
         let parts = try XCTUnwrap(messages[1]["content"] as? [[String: Any]])
         XCTAssertEqual(parts.count, 2)
         XCTAssertEqual(parts[0]["type"] as? String, "text")
-        XCTAssertEqual(parts[0]["text"] as? String, "Instruction: Reply to this\n\nText in the field:\nThanks,")
+        XCTAssertEqual(parts[0]["text"] as? String, "Instruction: Reply to this\n\nText near the cursor in the field, for context only (nothing is selected; \"this\" in the instruction means the screen):\nThanks,")
         XCTAssertEqual(parts[1]["type"] as? String, "image_url")
         let image = try XCTUnwrap(parts[1]["image_url"] as? [String: String])
         XCTAssertEqual(image["url"], "data:image/jpeg;base64," + frame.jpeg.base64EncodedString())
@@ -275,5 +275,169 @@ final class ScreenSettingsTests: XCTestCase {
         XCTAssertTrue(peer.explained); XCTAssertEqual(peer.idleMinutes, 10)
         peer.idleMinutes = 5
         XCTAssertEqual(settings.idleMinutes, 5)
+    }
+}
+
+final class ScreenFrameTimingTests: XCTestCase {
+    private func image(_ width: Int, _ height: Int) -> CGImage {
+        let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.setFillColor(CGColor(red: 0.2, green: 0.4, blue: 0.8, alpha: 1)); context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage()!
+    }
+
+    func testFastThenIdleRate() {
+        let store = ScreenFrameStore(fastInterval: 0.4, idleInterval: 1.0, capacity: 2)
+        let start = Date()
+        XCTAssertEqual(store.minimumInterval(at: start), 1.0, "idle until something asks for frames")
+        store.boost(until: start.addingTimeInterval(10))
+        XCTAssertEqual(store.minimumInterval(at: start), 0.4)
+        store.store(image(2, 2), at: start)
+        XCTAssertTrue(store.shouldAccept(at: start.addingTimeInterval(0.5)))
+        store.store(image(2, 2), at: start.addingTimeInterval(0.5))
+        XCTAssertEqual(store.minimumInterval(at: start.addingTimeInterval(11)), 1.0)
+        store.store(image(2, 2), at: start.addingTimeInterval(11))
+        XCTAssertFalse(store.shouldAccept(at: start.addingTimeInterval(11.5)), "only 0.5 s after the last frame once idle")
+        XCTAssertTrue(store.shouldAccept(at: start.addingTimeInterval(12)))
+        XCTAssertEqual(store.accepted, 3)
+        XCTAssertNil(store.snapshot(before: start.addingTimeInterval(-1)), "capacity 2: the first frame is gone")
+        XCTAssertEqual(store.snapshot(before: start.addingTimeInterval(1))?.capturedAt, start.addingTimeInterval(0.5))
+    }
+
+    func testFreezesThePictureFromBeforeTheKeyboard() throws {
+        let store = ScreenFrameStore(fastInterval: 0.4, idleInterval: 1.0, capacity: 4)
+        let start = Date()
+        store.store(image(10, 20), at: start)
+        store.store(image(12, 24), at: start.addingTimeInterval(1))
+        let shownAt = start.addingTimeInterval(1.3)
+        store.store(image(14, 28), at: start.addingTimeInterval(2), "this one shows the keyboard")
+        let keyboard = ScreenKeyboardState(shownAt: shownAt, keyboardHeight: 300, screenHeight: 800)
+        let frame = try XCTUnwrap(store.frame(for: UUID(), keyboard: keyboard))
+        XCTAssertTrue(frame.frozen); XCTAssertFalse(frame.cropped)
+        XCTAssertEqual(frame.width, 12); XCTAssertEqual(frame.capturedAt, start.addingTimeInterval(1))
+        XCTAssertEqual(store.frozen?.capturedAt, start.addingTimeInterval(1))
+        // Later frames (with the keyboard on them) never replace the frozen one while the keyboard is up.
+        store.store(image(16, 32), at: start.addingTimeInterval(3))
+        store.store(image(16, 32), at: start.addingTimeInterval(4))
+        store.store(image(16, 32), at: start.addingTimeInterval(5))
+        store.store(image(16, 32), at: start.addingTimeInterval(6))
+        XCTAssertEqual(store.frame(for: UUID(), keyboard: keyboard)?.capturedAt, start.addingTimeInterval(1))
+        XCTAssertEqual(store.frame(for: UUID())?.width, 16, "without a keyboard the latest picture is used")
+        store.unfreeze()
+        XCTAssertNil(store.frozen)
+        // Nothing from before the keyboard is left: the latest picture is used with the keyboard's band cropped off.
+        let cropped = try XCTUnwrap(store.frame(for: UUID(), keyboard: keyboard))
+        XCTAssertFalse(cropped.frozen); XCTAssertTrue(cropped.cropped)
+        XCTAssertEqual(cropped.width, 16); XCTAssertEqual(cropped.height, 20, "32 px minus the keyboard's 300/800")
+        XCTAssertEqual(ScreenKeyboardState(shownAt: shownAt, keyboardHeight: 790, screenHeight: 800).bottomFraction, ScreenFrameGeometry.maxBottomCrop, "never crops more than 70 %")
+        XCTAssertEqual(ScreenFrameGeometry.cropRect(width: 10, height: 100, bottomFraction: 0.25), CGRect(x: 0, y: 0, width: 10, height: 75))
+        store.clear()
+        XCTAssertNil(store.frame(for: UUID(), keyboard: keyboard), "right after a pause there is nothing to answer with; the extension waits for the next frame")
+    }
+
+    func testFreshness() {
+        let now = Date()
+        let shownAt = now.addingTimeInterval(-120)
+        let frozen = ScreenFrame(requestID: UUID(), capturedAt: shownAt.addingTimeInterval(-1), width: 1, height: 1, jpeg: Data([1]), frozen: true)
+        XCTAssertTrue(frozen.isFresh(now: now, keyboardShownAt: shownAt), "a frozen picture is judged against the keyboard's appearance, not now")
+        XCTAssertFalse(frozen.isFresh(now: now, keyboardShownAt: nil), "without a known keyboard time it is just two minutes old")
+        XCTAssertFalse(ScreenFrame(requestID: UUID(), capturedAt: shownAt.addingTimeInterval(-6), width: 1, height: 1, jpeg: Data([1]), frozen: true).isFresh(now: now, keyboardShownAt: shownAt))
+        let live = ScreenFrame(requestID: UUID(), capturedAt: now.addingTimeInterval(-2), width: 1, height: 1, jpeg: Data([1]))
+        XCTAssertTrue(live.isFresh(now: now, keyboardShownAt: shownAt))
+        XCTAssertFalse(ScreenFrame(requestID: UUID(), capturedAt: now.addingTimeInterval(-6), width: 1, height: 1, jpeg: Data([1])).isFresh(now: now))
+        XCTAssertFalse(ScreenFrame(requestID: UUID(), capturedAt: now.addingTimeInterval(120), width: 1, height: 1, jpeg: Data([1])).isFresh(now: now), "a picture from the future is distrusted")
+    }
+
+    func testProviderRejectsStalePicture() async {
+        let store = MemoryBackend()
+        let channel = ScreenChannel(stores: [store])
+        channel.write(status: ScreenStatus(startedAt: Date(), idleDeadline: Date().addingTimeInterval(60), width: 1, height: 1))
+        let provider = ScreenChannelFrameProvider(channel: channel, pollInterval: 0.02, keyboardShownAt: Date())
+        let extensionSide = Task.detached {
+            while channel.readRequest() == nil { try await Task.sleep(nanoseconds: 5_000_000) }
+            let request = try XCTUnwrap(channel.consumeRequest())
+            channel.write(frame: ScreenFrame(requestID: request.id, capturedAt: Date().addingTimeInterval(-30), width: 4, height: 8, jpeg: Data([7])))
+        }
+        do { _ = try await provider.frame(timeout: 2); XCTFail("a 30 s old picture is not what the user is looking at") }
+        catch { XCTAssertEqual(error as? ScreenError, .noFrame) }
+        try? await extensionSide.value
+        XCTAssertNil(store.values["frame"], "the stale picture is removed")
+        XCTAssertEqual(ScreenChannel.lifetimes["frame"], 10)
+    }
+
+    func testKeyboardPacket() {
+        let store = MemoryBackend()
+        var clock = Date()
+        let channel = ScreenChannel(stores: [store], now: { clock })
+        XCTAssertTrue(channel.keyboardNeedsRefresh())
+        XCTAssertNil(channel.readKeyboard())
+        let state = ScreenKeyboardState(shownAt: clock, keyboardHeight: 336, screenHeight: 852)
+        XCTAssertTrue(channel.write(keyboard: state))
+        XCTAssertEqual(channel.readKeyboard(), state)
+        XCTAssertFalse(channel.keyboardNeedsRefresh())
+        clock = clock.addingTimeInterval(ScreenChannel.keyboardRefresh)
+        XCTAssertTrue(channel.keyboardNeedsRefresh(), "the keyboard rewrites it long before it expires")
+        XCTAssertEqual(channel.readKeyboard(), state)
+        clock = clock.addingTimeInterval(100)
+        XCTAssertNil(channel.readKeyboard(), "a keyboard that died without saying goodbye stops freezing the picture")
+        channel.write(keyboard: state); channel.clearKeyboard()
+        XCTAssertNil(store.values["keyboard"])
+        XCTAssertEqual(channel.name(.keyboard), "gusan.screen.keyboard.com.aram2k.gusan")
+        XCTAssertEqual(ScreenStatus.heartbeatInterval * 3, ScreenStatus.liveWindow - 1)
+    }
+}
+
+private extension ScreenFrameStore {
+    func store(_ image: CGImage, at now: Date, _ note: String) { store(image, at: now) }
+}
+
+final class ScreenPromptSelectionTests: XCTestCase {
+    private let frame = ScreenFrame(requestID: UUID(), capturedAt: Date(), width: 1, height: 1, jpeg: Data([1]))
+    private func userText(selected: String, text: String) throws -> String {
+        let messages = try ScreenPrompts.messages(instruction: "Translate this", text: text, selected: selected, frame: frame)
+        guard case .parts(let parts) = messages[1].content, case .text(let body) = parts[0] else { XCTFail(); return "" }
+        return body
+    }
+    func testTellsTheModelWhatThisMeans() throws {
+        XCTAssertTrue(try userText(selected: "Bonjour", text: "Hi. Bonjour. Bye").contains("Selected text in the field"))
+        XCTAssertTrue(try userText(selected: "Bonjour", text: "Hi. Bonjour. Bye").contains("\nBonjour"))
+        XCTAssertFalse(try userText(selected: "Bonjour", text: "Hi. Bonjour. Bye").contains("Bye"), "only the selection is sent when there is one")
+        XCTAssertTrue(try userText(selected: "", text: "Hi there").contains("nothing is selected; \"this\" in the instruction means the screen"))
+        XCTAssertTrue(try userText(selected: "", text: "").contains("The field is empty"))
+    }
+}
+
+final class ScreenConsentTests: XCTestCase {
+    func testConsentExpiresAndFollowsTheVersion() {
+        let suite = "ScreenConsentTests." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var clock = Date()
+        let board = MemoryBackend()
+        let settings = ScreenSettings(defaults: defaults, shared: board, version: "1.2", now: { clock })
+        XCTAssertFalse(settings.explained); XCTAssertNil(settings.explainedAt)
+        settings.explained = true
+        XCTAssertTrue(settings.explained); XCTAssertEqual(settings.explainedAt!.timeIntervalSince(clock), 0, accuracy: 0.001)
+        clock = clock.addingTimeInterval(ScreenSettings.consentValidity - 1)
+        XCTAssertTrue(settings.explained)
+        clock = clock.addingTimeInterval(2)
+        XCTAssertFalse(settings.explained, "re-shown after 30 days")
+        XCTAssertNotNil(settings.explainedAt, "the page can say it is a repeat")
+        settings.explained = true
+        XCTAssertTrue(settings.explained)
+        let updated = ScreenSettings(defaults: defaults, shared: board, version: "1.3", now: { clock })
+        XCTAssertFalse(updated.explained, "re-shown after an app update")
+        XCTAssertFalse(settings.armReminderShown)
+        settings.armReminderShown = true
+        XCTAssertTrue(ScreenSettings(defaults: defaults, shared: board, version: "1.2", now: { clock }).armReminderShown)
+        XCTAssertNil(settings.lastIdleStop)
+        settings.recordIdleStop(minutes: 10)
+        XCTAssertEqual(settings.lastIdleStop?.minutes, 10); XCTAssertEqual(settings.lastIdleStop!.at.timeIntervalSince(clock), 0, accuracy: 0.001)
+        // The extension's record is visible to the app through the shared copy.
+        let other = UserDefaults(suiteName: suite + ".other")!
+        defer { other.removePersistentDomain(forName: suite + ".other") }
+        XCTAssertEqual(ScreenSettings(defaults: other, shared: board, version: "1.2", now: { clock }).lastIdleStop?.minutes, 10)
+        settings.clearIdleStop()
+        XCTAssertNil(settings.lastIdleStop)
+        XCTAssertNil(ScreenSettings(defaults: other, shared: board, version: "1.2", now: { clock }).lastIdleStop)
     }
 }

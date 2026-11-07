@@ -23,6 +23,7 @@ struct PlaygroundCard: View {
 
 struct HomeView: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var screen: ScreenMonitor
     private let examples: [(String, String, String, String)] = [
         ("Ask Gusan", "sparkles", "Make this warmer: Thanks for the update.", "Thanks so much for keeping me in the loop!"),
         ("Rephrase", "arrow.triangle.2.circlepath", "We need to do a check of the plan.", "Let's review the plan."),
@@ -34,6 +35,7 @@ struct HomeView: View {
     ]
     var body: some View {
         ScreenContent {
+            if screen.isLive { ScreenCard() }
             AppCard {
                 HStack(alignment: .top, spacing: 12) { BrandMark(); Text("Welcome to Gusan").font(.title2).bold() }
                 Text(model.session?.email ?? "Sign in to use Gusan Cloud.").font(.subheadline).foregroundStyle(.secondary)
@@ -54,7 +56,7 @@ struct HomeView: View {
                 if !model.setupFinished { PrimaryButton(title: "Finish setup", icon: "arrow.right") { model.impact(); model.resumeSetup() } }
             }
             PlaygroundCard()
-            ScreenCard()
+            if !screen.isLive { ScreenCard() }
             AppCard {
                 NavigationLink { HowToUseView() } label: { Label("How to use Gusan", systemImage: "questionmark.circle").frame(minHeight: 44) }
                 Button("Review keyboard setup") { model.resumeSetup() }.frame(minHeight: 44)

@@ -79,16 +79,23 @@ and **10 App IDs per 7 days**; Gusan's app, keyboard and Gusan Screen extension 
 **Simulator preview of the keyboard.** Third-party keyboards cannot be enabled in the
 Simulator, so the `GusanKeyboardPreview` scheme (Simulator-only, never embedded in the
 .ipa) hosts `KeyboardViewController` inside a plain app. Launch it with `--screen` to
-show the Screen chip armed. Debug launch arguments for the app:
-`--gusan-debug-screen-page` opens Home › Gusan Screen; `--gusan-debug-screen-live`
-fakes a live broadcast on that page.
+show the Screen chip armed, or `--screen-offer` for the ghosted chip shown when no
+broadcast is live. The same can be done with the real keyboard extension in a debug
+build by setting the `debugScreenPreview` / `debugScreenOffer` boolean in the keyboard's
+defaults (`xcrun simctl spawn booted defaults write group.com.aram2k.gusan debugScreenPreview -bool YES`).
+Debug launch arguments for the app: `--gusan-debug-screen-page` opens Home › Gusan Screen;
+`--gusan-debug-screen-live` fakes a live broadcast on that page.
 
 6. **Gusan Screen:** open Home › Gusan Screen, read what is shared, then Start.
    While the red indicator shows, the keyboard gets a **Screen** chip; tap it,
    type "reply to this" (or pick a suggestion) and Run. One picture of the
-   current screen goes to Gusan Cloud with your instruction; the answer is
-   inserted with Undo. It stops by itself after 10 minutes without a question
-   (Keyboard › Screen). The Simulator cannot run broadcasts; test on a device.
+   screen from just before the keyboard came up goes to Gusan Cloud with your
+   instruction; the answer is inserted with Undo. The picture contains everything
+   visible on the screen at that moment; the chip is never offered in password
+   fields. It stops by itself after 10 minutes without a question (Keyboard ›
+   Screen). The Simulator cannot run broadcasts; test on a device. If Sideloadly
+   renames the extension so it no longer ends in `.screen`, the broadcast sheet
+   lists every broadcast extension instead of preselecting Gusan Screen.
 
 **Privacy:** Full Access enables networking and shared storage. Text is sent to
 Gusan Cloud only when you tap an action. Authentication and entitlement checks

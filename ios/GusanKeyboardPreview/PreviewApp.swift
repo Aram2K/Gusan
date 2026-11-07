@@ -9,6 +9,8 @@ final class PreviewAppDelegate: UIResponder, UIApplicationDelegate {
         let args = ProcessInfo.processInfo.arguments
         UserDefaults.standard.set(args.contains("--screen"), forKey: "debugScreenPreview")
         UserDefaults(suiteName: "group.com.aram2k.gusan")?.set(args.contains("--screen"), forKey: "debugScreenPreview")
+        UserDefaults.standard.set(args.contains("--screen-offer"), forKey: "debugScreenOffer")
+        UserDefaults(suiteName: "group.com.aram2k.gusan")?.set(args.contains("--screen-offer"), forKey: "debugScreenOffer")
         window = UIWindow(frame: UIScreen.main.bounds)
         window?.rootViewController = PreviewHostController()
         window?.makeKeyAndVisible()

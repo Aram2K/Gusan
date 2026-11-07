@@ -8,6 +8,9 @@ final class ScreenMonitor: ObservableObject {
     @Published private(set) var status: ScreenStatus?
     @Published var idleMinutes = ScreenIdleTimer.defaultMinutes
     @Published var explained = false
+    /// The user acknowledged once, but it has expired (30 days) or the app was updated.
+    @Published var explainedBefore = false
+    @Published var lastIdleStop: (at: Date, minutes: Int)?
     let settings: ScreenSettings
     let channel: ScreenChannel
     private var observer: DarwinObserver?
@@ -15,7 +18,7 @@ final class ScreenMonitor: ObservableObject {
     init(store: SessionStore = SessionStore()) {
         settings = ScreenSettings(group: store.resolution.chosen)
         channel = ScreenChannel(container: store.resolution.container, pasteboardAllowed: { [settings = SettingsStore(group: store.resolution.chosen)] in settings.pasteboardFallback })
-        idleMinutes = settings.idleMinutes; explained = settings.explained
+        idleMinutes = settings.idleMinutes; explained = settings.explained; explainedBefore = !explained && settings.explainedAt != nil; lastIdleStop = settings.lastIdleStop
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--gusan-debug-screen-live") {
             status = ScreenStatus(startedAt: Date().addingTimeInterval(-90), idleDeadline: Date().addingTimeInterval(510), width: 590, height: 1280, requests: 2)
@@ -37,8 +40,10 @@ final class ScreenMonitor: ObservableObject {
         if ProcessInfo.processInfo.arguments.contains("--gusan-debug-screen-live") { return }
         #endif
         status = channel.readStatus()
+        explained = settings.explained; explainedBefore = !explained && settings.explainedAt != nil
+        lastIdleStop = settings.lastIdleStop
     }
-    func acknowledge() { settings.explained = true; explained = true }
+    func acknowledge() { settings.explained = true; explained = true; explainedBefore = false }
     func setIdle(_ minutes: Int) { settings.idleMinutes = minutes; idleMinutes = settings.idleMinutes }
 }
 
@@ -63,14 +68,22 @@ final class BroadcastPickerHost: UIView {
         accessibilityTraits = .button
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    /// True when the system picker exposed its button and it was stretched under the label.
+    private(set) var stretched = false
     override func layoutSubviews() {
         super.layoutSubviews()
         picker.frame = bounds
+        var found = false
         for case let button as UIButton in picker.subviews {
+            found = true
             button.frame = bounds
             button.setImage(nil, for: .normal); button.setImage(nil, for: .highlighted)
             button.imageView?.isHidden = true
         }
+        stretched = found
+        #if DEBUG
+        assert(found || bounds.isEmpty, "RPSystemBroadcastPickerView has no UIButton subview on this iOS; the stretched target is gone")
+        #endif
     }
 }
 
@@ -92,12 +105,13 @@ struct ScreenView: View {
                 Text("What is shared").font(.headline)
                 bullet("eye.trianglebadge.exclamationmark", "iOS shows the red recording indicator the whole time Gusan Screen runs. Tap it, or use Control Center, to stop.")
                 bullet("lock.shield", "Nothing leaves your iPhone on its own. Gusan Screen keeps only the latest picture in memory, downscaled, and never saves or logs it.")
-                bullet("paperplane", "Only when you ask something with the keyboard's Screen chip, that one picture is sent to Gusan Cloud together with your instruction and the text in the field. The answer comes back into your text, with Undo.")
-                bullet("eye.slash", "Passwords and other secure fields are blanked by iOS and never used.")
+                bullet("paperplane", "Only when you ask something with the keyboard's Screen chip, one picture is sent to Gusan Cloud together with your instruction and the text in the field. The picture is from just before the keyboard came up, so the keyboard itself isn't in it. The answer comes back into your text, with Undo.")
+                bullet("exclamationmark.triangle", "The picture shows everything on your screen at that moment — messages, names, codes, balances. Gusan never offers it while you type in a password field.")
                 bullet("timer", "It stops by itself after \(screen.idleMinutes) minutes without a question.")
             }
             if !screen.explained {
-                PrimaryButton(title: "I understand, continue", icon: "checkmark") { model.impact(); screen.acknowledge() }
+                if screen.explainedBefore { Text("Please read this again: it has been a while, or Gusan was updated.").font(.footnote).foregroundStyle(.secondary) }
+                PrimaryButton(title: "Got it, continue", icon: "checkmark") { model.impact(); screen.acknowledge() }
             } else {
                 AppCard {
                     HStack(spacing: 12) {
@@ -119,9 +133,9 @@ struct ScreenView: View {
                 }
                 AppCard {
                     Picker("Stop after", selection: Binding(get: { screen.idleMinutes }, set: { screen.setIdle($0) })) {
-                        ForEach(ScreenIdleTimer.minuteOptions, id: \.self) { Text("\($0) min without a question").tag($0) }
+                        ForEach(ScreenIdleTimer.minuteOptions, id: \.self) { Text("\($0) minutes").tag($0) }
                     }.frame(minHeight: 44)
-                    Text("Applies to the next start. The broadcast always ends when you stop it yourself.").font(.footnote).foregroundStyle(.secondary)
+                    Text("Without a question for that long, Gusan Screen stops itself. Applies to the next start; it always ends when you stop it yourself.").font(.footnote).foregroundStyle(.secondary)
                 }
             }
         }
@@ -130,10 +144,13 @@ struct ScreenView: View {
         .onDisappear { screen.stop() }
     }
     private var statusDetail: String {
-        guard let status = screen.status, screen.isLive else { return "Start it here, or from Control Center." }
+        guard let status = screen.status, screen.isLive else {
+            if let stop = screen.lastIdleStop { return "Stopped after \(stop.minutes) min idle at " + stop.at.formatted(date: .omitted, time: .shortened) + ". Start it here, or from Control Center." }
+            return "Start it here, or from Control Center."
+        }
         var parts = ["Since " + status.startedAt.formatted(date: .omitted, time: .shortened)]
         parts.append(status.hasFrame ? "picture \(status.width)×\(status.height)" : "waiting for the first picture")
-        parts.append("stops at " + status.idleDeadline.formatted(date: .omitted, time: .shortened) + " if unused")
+        parts.append("stops at " + status.idleDeadline.formatted(date: .omitted, time: .shortened) + " if you don't ask anything")
         return parts.joined(separator: " · ")
     }
     private func bullet(_ icon: String, _ text: String) -> some View {
@@ -146,6 +163,7 @@ struct ScreenView: View {
 
 /// Home card: one line of status and a link to the full screen.
 struct ScreenCard: View {
+    @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var screen: ScreenMonitor
     @State private var opened = false
     var body: some View {
@@ -155,7 +173,7 @@ struct ScreenCard: View {
                     Image(systemName: "eye").foregroundStyle(Theme.brandBlue).accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Gusan Screen").font(.headline)
-                        Text(screen.isLive ? "Live. Use the Screen chip in the keyboard." : "Let Gusan see your screen to reply or explain.").font(.footnote).foregroundStyle(.secondary)
+                        Text(screen.isLive ? "Live. Use the Screen chip in the keyboard." : "Let Gusan see your screen to reply, explain or translate what's on it.").font(.footnote).foregroundStyle(.secondary)
                     }
                     Spacer()
                     Image(systemName: "chevron.right").foregroundStyle(.secondary).accessibilityHidden(true)
@@ -165,10 +183,12 @@ struct ScreenCard: View {
         .navigationDestination(isPresented: $opened) { ScreenView() }
         .onAppear {
             screen.refresh()
+            if model.openScreenPage { model.openScreenPage = false; opened = true }
             #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("--gusan-debug-screen-page") { opened = true }
             #endif
         }
+        .onChange(of: model.openScreenPage) { open in if open { model.openScreenPage = false; opened = true } }
     }
 }
 
