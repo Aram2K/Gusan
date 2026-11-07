@@ -44,8 +44,17 @@ public struct AgentJob: GusanJob {
                             askedFor = confirmation.summary
                             let request = JobConfirmation(prompt: confirmation.summary)
                             continuation.yield(.needsConfirmation(request))
-                            let accepted = try await request.response()
-                            current = accepted ? try await service.confirm(current.id) : try await service.cancel(current.id)
+                            // Wait for the user, but keep watching the server: the confirmation can expire
+                            // or be decided from another device, and then the local prompt is moot.
+                            let decision = await Self.awaitDecision(request, taskID: current.id, service: service, interval: max(interval, 5_000_000_000))
+                            try Task.checkCancellation()
+                            if let accepted = decision {
+                                do { current = accepted ? try await service.confirm(current.id) : try await service.cancel(current.id) }
+                                catch AgentError.notAwaitingConfirmation { current = try await service.status(current.id, waitSeconds: 0) }
+                            } else {
+                                await request.resolve(false)
+                                current = try await service.status(current.id, waitSeconds: 0)
+                            }
                             onTask?(current)
                             continue
                         }
@@ -68,6 +77,24 @@ public struct AgentJob: GusanJob {
                 } catch { continuation.finish(throwing: error) }
             }
             continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    /// The user's answer, or nil when the server moved on first (expired, or decided elsewhere).
+    static func awaitDecision(_ request: JobConfirmation, taskID: UUID, service: AgentService, interval: UInt64) async -> Bool? {
+        await withTaskGroup(of: Bool?.self) { group in
+            group.addTask { try? await request.response() }
+            group.addTask {
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: interval)
+                    if Task.isCancelled { return nil }
+                    if let fresh = try? await service.status(taskID, waitSeconds: 0), fresh.status != .awaitingConfirmation { return nil }
+                }
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
         }
     }
 }

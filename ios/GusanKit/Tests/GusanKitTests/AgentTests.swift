@@ -220,6 +220,22 @@ final class AgentJobTests: XCTestCase {
         XCTAssertEqual(task.status, .cancelled)
     }
 
+    func testServerSideCancelUnblocksPendingConfirmation() async throws {
+        let stub = StubAgentService()
+        var id: UUID?
+        let job = AgentJob(service: stub, start: .new(AgentIntent(mode: .do, instruction: "Book a table"), context: nil), interval: 1_000) { id = $0.id }
+        do {
+            _ = try await JobRunner().result(of: job, confirmation: { _ in
+                _ = try await stub.cancel(try XCTUnwrap(id))   // another device cancels while the card is open
+                try await Task.sleep(nanoseconds: 50_000_000)
+                return true
+            })
+            XCTFail("the job must end as cancelled")
+        } catch is CancellationError {}
+        let task = try await stub.status(try XCTUnwrap(id), waitSeconds: 0)
+        XCTAssertEqual(task.status, .cancelled)
+    }
+
     func testResumeFinishedTaskYieldsCardImmediately() async throws {
         let done = StubAgentService.demoTasks().first { $0.status == .completed }!
         let stub = StubAgentService(seeded: [done])
