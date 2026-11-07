@@ -20,6 +20,7 @@ final class AgentTests: XCTestCase {
             XCTAssertNil(AgentIntent.detect(text), text)
         }
         XCTAssertEqual(AgentIntent.detect("order the groceries from Rewe")?.mode, .do)
+        XCTAssertEqual(AgentIntent.detect("Order a longer charging cable")?.mode, .do)
         XCTAssertEqual(AgentIntent.detect("check my flight status for LH123")?.mode, .research)
         XCTAssertEqual(AgentIntent.detect("Send Mary the notes from today")?.mode, .do, "sending to a person is a do-it task; the card asks before anything is sent")
         XCTAssertTrue(AgentIntent.referencesDraft("Find flights matching the dates in this text"))
