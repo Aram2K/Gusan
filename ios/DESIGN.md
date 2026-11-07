@@ -194,5 +194,28 @@ Height: system keyboard height plus a 44pt Gusan toolbar. The height doesn't cha
 - **Reduce Motion and Reduce Transparency** are respected.
 - No information is conveyed by color alone.
 
-## 7. Voice hook (Milestone 2)
-`KeyboardViewController.startVoice()` is the only mic entry point. It may open the containing app via `openContainingApp(_:)`, and it can feed a transcript into instruction mode or insert it directly.
+## 7. Smart voice
+`KeyboardViewController.startVoice()` remains the mic entry point. The keyboard snapshots the document identifier, selection, and before/after context at the mic tap. Recording is hosted in the containing app; the existing one-time launch authorization and App Group / temporary pasteboard channel rules still apply.
+
+### 7.1 Voice surface
+- Listening, transcribing and thinking replace the entire keyboard surface without changing its height. Crossfade in 0.2 seconds; switch instantly with Reduce Motion.
+- Show a large live blue waveform, or an animated idle waveform when no levels are available. Reduce Motion makes the idle waveform static.
+- Show a status line, a Stop button at least 64 points high, and a smaller Cancel control with a 44-point touch target. Stop finishes capture while listening; during processing it cancels the job.
+- Use Gusan blue `#0033A0` and accent `#2563EB`, never red. Use `UIGlassEffect` on iOS 26+, otherwise ultra-thin material blur. Respect Reduce Transparency, light and dark. The containing-app voice sheet uses the same blue-only palette and mark.
+- Done exposes an Undo chip and a Keyboard control. A changed document opens the result card with explicit Copy; never copy automatically.
+
+### 7.2 Smart by default
+Smart voice is the default for users without an explicitly saved voice preset. Existing explicit presets remain available in Keyboard settings; Ask Gusan remains a separate secondary flow.
+- Selection: speech is the instruction about that selection. Replace only the unchanged selection.
+- Empty field: polish the dictation and insert it at the cursor.
+- Around-cursor text: send one `smart_auto` request using `.voiceSmart(transcript:)`. The system asks only for JSON `{"kind":"edit"|"insert","text":"..."}`. Edit returns the complete context replacement; insert returns polished dictation. Existing text is data, never instructions; preserve its language unless asked.
+- Parse the first complete JSON object, including fenced answers and escaped braces in strings. An invalid schema or malformed answer falls back to insertion of the cleaned transcript, without deleting text.
+- Apply only when document ID, selection and both context sides still match the snapshot. Otherwise present the result card. Undo restores the original text for both insert and edit; around-cursor Undo also restores the cursor offset.
+
+### 7.3 Jobs and development previews
+`GusanJob.run()` produces an `AsyncThrowingStream<JobEvent, Error>` with progress and one typed `JobResult`. Results distinguish replace-selection, replace-context, insert and card-only. Smart actions, presets, Ask Gusan and voice use jobs. Network requests, request encoding and classifier parsing execute off the main thread; UIKit presentation stays on it. Cancelling a stream cancels its worker.
+
+DEBUG builds support `--gusan-debug-voice` on the containing app. This explicitly enables a local keyboard preview: mic starts a fake level feed, Stop advances to thinking, and Stop again delivers a fixed fake transcript/result through the normal snapshot/range/Undo guards. No microphone, credential or network access is involved and no fake IPC packets are persisted. Launch the app without the argument to disable it. Release builds omit the preview code.
+
+## 8. Agent actions (future)
+A future long-running job may call a server-side computer-use agent from H Company. Keep its credential only in Supabase as `H_company_computer_agents`, never on the phone or in a client request. The server owns agent execution and authorization. Stream progress events through the same job interface and return a card-only result that the user reviews and explicitly inserts. Do not add an on-device agent or automatic agent-result insertion.
