@@ -216,6 +216,7 @@ final class VoiceKeyController: NSObject {
         let failed = status?.phase == .failed && status?.requestID == requestID && localMessage != nil
         let showPanel = !panelDismissed && (active || inserted != nil || failed)
         panel.update(phase: active ? phase : inserted != nil ? .done : .failed, message: localMessage ?? (inserted != nil ? "Done" : message ?? "Voice"), level: status?.level ?? 0, hasUndo: inserted != nil)
+        panel.undo.isEnabled = !awaitingUndoContext; undoButton.isEnabled = !awaitingUndoContext
         if showPanel != panelVisible { panelVisible = showPanel; onPanelVisibility?(showPanel) }
     }
     @objc private func stopVoice() {
@@ -315,6 +316,7 @@ final class VoiceKeyController: NSObject {
         clearReview(); undoButton.isHidden = false; show("Done")
     }
     @objc private func undo() {
+        if awaitingUndoContext { documentDidChange(); if awaitingUndoContext { return } }
         guard let inserted, let expected = undoContext, currentContext() == expected, expected.selected.isEmpty, let proxy = host?.textDocumentProxy else {
             self.inserted = nil; undoButton.isHidden = true; show("Text changed. Undo is no longer available."); return
         }
