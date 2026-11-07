@@ -1,8 +1,9 @@
-# Gusan for iPhone — Milestone 1
+# Gusan for iPhone
 
 A native companion app and a custom keyboard Smart Actions bar: Smart, Email,
 To-do, Translate and Summarize, plus Undo. Actions use **Gusan Pro / Gusan Cloud
-only**; no provider API keys live on the phone. Voice input is not included yet.
+only**; no provider API keys live on the phone. Voice input uses the containing
+app for microphone access and returns results to the keyboard.
 
 ## Project and Mac builds
 
@@ -70,6 +71,9 @@ and **10 App IDs per 7 days**; Gusan's app and keyboard consume **2 App IDs**.
 4. In a text field, switch using the globe key. Select text, or leave the cursor
    in the field, then tap an action. The logo runs your default action. **Undo**
    restores the original while the replacement context remains unchanged.
+5. Tap the Gusan mic to open the app and start a voice session the first time,
+   then return to the keyboard. Tap stop to process your recording, or cancel
+   while transcribing/thinking. Results return to the keyboard for insertion.
 
 **Privacy:** Full Access enables networking and shared storage. Text is sent to
 Gusan Cloud only when you tap an action. Authentication and entitlement checks
@@ -79,7 +83,7 @@ text iOS exposes is submitted, not necessarily the entire document.
 Google sign-in requires `gusan://auth-callback` in the Supabase Auth redirect
 allow-list. Email/password sign-in works without this redirect configuration.
 
-## Known limits and next milestone
+## Known limits
 
 iOS only gives keyboards text near the cursor: in very long documents, select
 the text first. Secure fields and phone pads do not allow custom keyboards;
@@ -87,8 +91,6 @@ some apps disable them entirely. Undo is disabled if the document/context change
 Actual Sideloadly installation, shared login and live cloud actions still need
 physical-device verification.
 
-Milestone 2 plans voice dictation using the containing app for microphone access,
-with a URL-routed bounce (for example `gusan://dictate`) and a shared result for
-the keyboard to insert. The keyboard has no microphone button or recording
-implementation in M1; background behavior and the return-to-keyboard experience
-will need device validation.
+Voice dictation opens the containing app via `gusan://voice` for microphone
+access and shares results with the keyboard. Background behavior and the
+return-to-keyboard experience still need physical-device validation.

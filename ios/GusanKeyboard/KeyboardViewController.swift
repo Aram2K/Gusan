@@ -154,7 +154,7 @@ final class KeyboardViewController: UIInputViewController {
     @objc func startVoice() {
         guard !busy else { return }
         impact()
-        if let onVoice { onVoice() } else { showMessage("Voice is coming soon") }
+        if let onVoice { onVoice() } else { showMessage("Tap the mic to open the Gusan app and start a voice session the first time") }
     }
     private func showMessage(_ text: String, detail: String? = nil, accessory: String? = nil) {
         voice.dismiss()

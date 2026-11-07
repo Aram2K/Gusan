@@ -102,7 +102,7 @@ Short illustrated sections:
 2. Tap the Gusan button.
 3. Pick an action, or tap **Ask Gusan…** and type what you want ("make it more formal", "translate to Armenian").
 4. The result replaces your text; tap **Undo** to restore it.
-5. The mic key (voice) is coming soon.
+5. Tap the mic to open Gusan and start a voice session the first time, then return to the keyboard. Tap stop to process the recording; tap cancel while transcribing/thinking.
 6. Troubleshooting: "Sign in to use Gusan" in the keyboard, Full Access, switching keyboards.
 
 ### 4.6 Diagnostics (hidden behind the row)
@@ -141,7 +141,7 @@ Height: system keyboard height plus a 44pt Gusan toolbar. The height doesn't cha
   - Spinner + "Rephrasing…" + ✕ cancel.
   - "Replaced · Undo" for 8s.
   - An error (2 lines max, tap to expand) with an action button when one applies (Sign in / How to enable).
-- **Mic key:** calls `startVoice()`, the single voice entry point. Milestone 1 shows "Voice is coming soon".
+- **Mic key:** calls `startVoice()`, the single voice entry point. Opens Gusan for microphone access the first time; shared results return to the keyboard. Shows stop while recording and cancel while transcribing/thinking.
 
 ### 5.2 Typing (default)
 - QWERTY with shift, caps lock, 123 and #+= layers.
