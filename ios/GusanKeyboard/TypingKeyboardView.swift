@@ -24,7 +24,9 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
     var inputEnabled = true {
         didSet { if !inputEnabled { cancelTouches() } }
     }
-    var enableInputClicksWhenVisible: Bool { true }
+    var keyClicks = true
+    var doubleSpacePeriod = true
+    var enableInputClicksWhenVisible: Bool { keyClicks }
     let globeButton = UIButton(type: .system)
     private(set) var layerMode: Layer = .letters
     private var shift: Shift = .off
@@ -133,7 +135,7 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
                 }
                 cap.onActivate = { [weak self] in
                     guard let self, self.inputEnabled else { return }
-                    UIDevice.current.playInputClick()
+                    if self.keyClicks { UIDevice.current.playInputClick() }
                     if key == .delete { self.onDelete?() } else { self.press(key) }
                 }
                 if key == .shift && shift != .off { cap.layer.backgroundColor = UIColor.white.cgColor; cap.textColor = .black }
@@ -207,7 +209,7 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
         for touch in touches {
             guard let index = nearest(touch.location(in: self)) else { continue }
             active[touch] = index
-            UIDevice.current.playInputClick()
+            if keyClicks { UIDevice.current.playInputClick() }
             if slots[index].key == .delete { onDelete?(); startDeleteRepeat() }
             showPreview(touch, index: index)
         }
@@ -282,7 +284,7 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
         case .letters: layerMode = .letters; updateAutomaticShift()
         case .space:
             let now = Date.timeIntervalSinceReferenceDate
-            if now - lastSpaceTap < 0.35 && before.last == " " && before.dropLast().last.map({ $0.isLetter || $0.isNumber }) == true {
+            if doubleSpacePeriod && now - lastSpaceTap < 0.35 && before.last == " " && before.dropLast().last.map({ $0.isLetter || $0.isNumber }) == true {
                 onDoubleSpace?(); lastSpaceTap = 0
             } else { onInsert?(" "); lastSpaceTap = now }
             if layerMode != .letters { layerMode = .letters; updateAutomaticShift() }
@@ -299,7 +301,7 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
             let elapsed = Date.timeIntervalSinceReferenceDate - self.deleteStarted
             guard elapsed > 0.4 else { return }
             ticks += 1
-            if elapsed > 1 || ticks % 2 == 0 { self.onDelete?(); UIDevice.current.playInputClick() }
+            if elapsed > 1 || ticks % 2 == 0 { self.onDelete?(); if self.keyClicks { UIDevice.current.playInputClick() } }
         }
     }
 }
