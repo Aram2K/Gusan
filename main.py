@@ -72,6 +72,7 @@ import actions
 import action_api
 import local_llm
 import smart_prompt
+import web_sources
 import telemetry
 import auth
 import entitlements
@@ -317,6 +318,7 @@ DEFAULT = {
     # What transcribes a Smart Action: "" = same as Dictation | "cloud" =
     # Gusan Cloud (Pro, never in Privacy mode) | a Whisper id (hardware.MODEL_INFO).
     "smart_actions_speech_model": "",
+    "smart_actions_web_search": False,      # Smart Actions may look current facts up (Gusan Cloud, Linkup) - off until turned on
     "app_theme": "system",               # Settings > General > App look (row hidden in 2.0: light only)
     "install_updates_on_quit": True,      # download a found update, run it at Quit
     # One quiet line on Home for 1.x upgraders ("Transcribe is now Gusan…"):
@@ -7224,6 +7226,7 @@ class AppController(QObject):
         # ...and the selection it read when the shortcut was pressed (None: not a Smart Action, or none started).
         sel_job = getattr(self, "_take_selection", None) if oneshot else None
         sel_kind = None
+        sources = []                     # the web pages a Smart Action used (title + address), when it searched
         # What THIS take transcribes with (a Smart Action may use its own;
         # a cloud pick stays on this computer once Privacy mode is on, as
         # AudioRecorder._backend decides).
@@ -7379,6 +7382,7 @@ class AppController(QObject):
             action_model, action_config = self._resolve_action_engine()
             # Text selected on screen: the spoken words are the instruction, the selection what they are about.
             action_input = text
+            sel = None
             if sel_job is not None and action_mode == actions.ACTION_SMART_AUTO:
                 sel = AppController._selection_for_take(self, sel_job, action_model, action_config)
                 if sel:
@@ -7387,6 +7391,12 @@ class AppController(QObject):
                     # the pill says the take works on the selection ("On your selection · Gusan Cloud")
                     self.overlay.call_soon(self.overlay.set_task, pill_kind, pill_detail,
                                            dict(pill_info or {}, on_selection=True))
+            # The web (Linkup, through Gusan Cloud), when the person turned it on: the server searches only when the
+            # request asks for it or needs live figures (web_sources.smart_search_wanted - the pill says so ahead).
+            action_config, web_info = AppController._smart_web(self, text, action_mode, action_model, action_config)
+            if web_info is not None and web_sources.smart_search_wanted(text):
+                self.overlay.call_soon(self.overlay.set_task, pill_kind, pill_detail,
+                                       dict(pill_info or {}, on_selection=bool(sel), web=True))
             try:
                 output_text = actions.process(
                     action_input,
@@ -7399,6 +7409,7 @@ class AppController(QObject):
                 if action_mode == actions.ACTION_SMART_SELECTION:
                     # "<answer>" first: something to read (a card, never pasted); else the changed text.
                     sel_kind, output_text = smart_prompt.split_selection_result(output_text)
+                sources = list((web_info or {}).get("sources") or [])
                 telemetry.track(
                     "action_completed",
                     {
@@ -7434,6 +7445,8 @@ class AppController(QObject):
             if action_mode == actions.ACTION_SMART_SELECTION:
                 # The pages know Smart Actions by their mode; the selected text itself is never kept.
                 extra = {"action": actions.ACTION_SMART_AUTO, "said": text, "on_selection": True}
+            if sources and extra:
+                extra["sources"] = sources              # the web pages it used (title + address)
             hist.save_entry(output_text, lang, used_backend, **extra)
             self.notify_history_changed()
 
@@ -7452,7 +7465,10 @@ class AppController(QObject):
 
         self._wait_keys_released(0.35)
         if action_mode == actions.ACTION_SMART_SELECTION:
-            AppController._deliver_selection_result(self, sel_kind, output_text, pill_kind)
+            AppController._deliver_selection_result(self, sel_kind, output_text, pill_kind, sources)
+        elif action_mode != actions.ACTION_TRANSCRIBE_ONLY and sources:
+            pasted = self._paste_via_clipboard(output_text, rich=True)
+            self.overlay.call_soon(self.overlay.show_done, pasted, kind=pill_kind, web_sources=len(sources))
         elif action_mode != actions.ACTION_TRANSCRIBE_ONLY:
             # A Smart Action's Markdown: real lists / bold / headings where
             # the app takes HTML, nice plain text everywhere else.
@@ -7499,32 +7515,47 @@ class AppController(QObject):
         if put is None:
             pyperclip.copy(text)
 
-    def _deliver_selection_result(self, kind, text, pill_kind=None):
+    def _smart_web(self, text, action_mode, engine, config):
+        """(config, info): a Smart Action's config with the web search asked for, and the dict the answer's sources
+        land in - or (config, None) when it can't search: the setting is off, Privacy mode, not Gusan Cloud with a
+        Pro token. Worker thread."""
+        cfg = getattr(self, "cfg", None) or {}
+        if (not cfg.get("smart_actions_web_search") or cfg.get("privacy_mode")
+                or action_mode not in (actions.ACTION_SMART_AUTO, actions.ACTION_SMART_SELECTION)
+                or actions.ACTION_MODELS.get(engine, {}).get("kind") != "managed"
+                or not (config or {}).get("_managed_token")):
+            return config, None
+        info = {}
+        return dict(config or {}, _web_search=True, _web_query=str(text or ""), _answer_info=info), info
+
+    def _deliver_selection_result(self, kind, text, pill_kind=None, sources=()):
         """Worker thread. An answer about the selection: a card, and copied - never pasted. A changed text: pasted
         where the cursor is (over the selection when it is still selected in a box you can type in) and left on the
         clipboard; when the cursor is somewhere nothing can be typed (a web page), copied and shown instead."""
         import selection_reader
+        n = len(sources or ())
         if kind == smart_prompt.KIND_ANSWER:
             AppController._copy_result(self, text)
-            self.overlay.call_soon(self.overlay.show_done, False)
-            self._run_on_gui(AppController._show_answer_card, self, text, "answer")
+            self.overlay.call_soon(self.overlay.show_done, False, web_sources=n)
+            self._run_on_gui(AppController._show_answer_card, self, text, "answer", sources)
             return
         if selection_reader.focus_editable() is False:
             AppController._copy_result(self, text)
-            self.overlay.call_soon(self.overlay.show_done, False, kind=pill_kind)
-            self._run_on_gui(AppController._show_answer_card, self, text, "copied")
+            self.overlay.call_soon(self.overlay.show_done, False, kind=pill_kind, web_sources=n)
+            self._run_on_gui(AppController._show_answer_card, self, text, "copied", sources)
             return
         pasted = self._paste_via_clipboard(text, restore=False, rich=True)
-        self.overlay.call_soon(self.overlay.show_done, pasted, kind=pill_kind)
+        self.overlay.call_soon(self.overlay.show_done, pasted, kind=pill_kind, web_sources=n)
 
-    def _show_answer_card(self, text, kind="answer"):
-        """GUI thread: the small card above the pill (ui/answer_card.py); ``kind``: "answer" or "copied"."""
+    def _show_answer_card(self, text, kind="answer", sources=()):
+        """GUI thread: the small card above the pill (ui/answer_card.py); ``kind``: "answer" or "copied"; ``sources``:
+        the web pages the answer used."""
         try:
             card = getattr(self, "_answer_card", None)
             if card is None:
                 from ui.answer_card import AnswerCard
                 card = self._answer_card = AnswerCard()
-            card.show_text(text, kind, near=getattr(self, "overlay", None))
+            card.show_text(text, kind, near=getattr(self, "overlay", None), sources=sources)
         except Exception:
             logger.warning("Could not show the answer card", exc_info=True)
 

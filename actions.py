@@ -256,6 +256,8 @@ def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_I
                     session_id=(config or {}).get("_live_session_id") or "",
                     note_ref=(config or {}).get("_note_ref") or "",
                     prefer=(config or {}).get("cloud_writer_model") or "",
+                    web_search=bool((config or {}).get("_web_search")), config=config,
+                    info=(config or {}).get("_answer_info"), web_query=(config or {}).get("_web_query", ""),
                 )
             except action_api.ActionAPIError as e:
                 err = ActionError(str(e))
@@ -322,6 +324,9 @@ def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_I
                     session_id=(config or {}).get("_live_session_id") or "",
                     note_ref=(config or {}).get("_note_ref") or "",
                     prefer=(config or {}).get("cloud_writer_model") or "",
+                    web_search=bool((config or {}).get("_web_search")) and mode == ACTION_SMART_SELECTION,
+                    config=config, info=(config or {}).get("_answer_info"),
+                    web_query=(config or {}).get("_web_query", ""),
                 )
             except action_api.ActionAPIError as e:
                 err = ActionError(str(e))
