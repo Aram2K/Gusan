@@ -60,6 +60,7 @@ final class VoiceKeyController: NSObject {
         refresh()
     }
     func toggle() { tap() }
+    func dismiss() { inserted = nil; localMessage = nil; undoButton.isHidden = true; refresh() }
     func disappear() { visible = false; observer = nil; timer?.invalidate(); timer = nil }
     private func currentContext() -> VoiceContext? {
         guard let proxy = host?.textDocumentProxy else { return nil }

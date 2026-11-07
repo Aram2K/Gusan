@@ -148,6 +148,7 @@ final class KeyboardViewController: UIInputViewController {
         if let onVoice { onVoice() } else { showMessage("Voice is coming soon") }
     }
     private func showMessage(_ text: String, detail: String? = nil, accessory: String? = nil) {
+        voice.dismiss()
         message = text; self.detail = detail; self.accessory = accessory; updateContext()
     }
     @objc private func expandMessage() {
@@ -181,6 +182,7 @@ final class KeyboardViewController: UIInputViewController {
         run(.custom(instruction: instruction), context: context)
     }
     private func run(_ action: SmartAction, context: Context) {
+        voice.dismiss()
         guard !busy else { return }
         guard hasFullAccess else {
             showTyping()
