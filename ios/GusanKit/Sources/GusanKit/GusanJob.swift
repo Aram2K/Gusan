@@ -1,13 +1,28 @@
 import Foundation
 
-public struct JobResult: Codable, Equatable {
-    public enum Kind: String, Codable { case replaceSelection, replaceContext, insert, cardOnly }
-    public let text: String
-    public let kind: Kind
-    public init(text: String, kind: Kind) { self.text = text; self.kind = kind }
+public struct JobCard: Codable, Equatable, Sendable {
+    public let title: String
+    public let body: String
+    public let insertableText: String?
+    public init(title: String, body: String, insertableText: String? = nil) {
+        self.title = title; self.body = body; self.insertableText = insertableText
+    }
 }
 
-public enum JobEvent: Equatable { case progress(String), result(JobResult) }
+public struct JobResult: Codable, Equatable, Sendable {
+    public enum Kind: String, Codable, Sendable { case replaceSelection, replaceContext, insert, cardOnly }
+    public let text: String
+    public let kind: Kind
+    public let card: JobCard?
+    public init(text: String, kind: Kind) { self.text = text; self.kind = kind; card = nil }
+    public init(card: JobCard) { self.card = card; text = card.insertableText ?? ""; kind = .cardOnly }
+}
+
+public enum JobEvent: Equatable, Sendable {
+    case progress(String)
+    case needsConfirmation(JobConfirmation)
+    case result(JobResult)
+}
 
 public protocol GusanJob {
     func run() -> AsyncThrowingStream<JobEvent, Error>
@@ -15,12 +30,7 @@ public protocol GusanJob {
 
 public extension GusanJob {
     func result() async throws -> JobResult {
-        for try await event in run() {
-            try Task.checkCancellation()
-            if case .result(let result) = event { return result }
-        }
-        try Task.checkCancellation()
-        throw GusanError.invalidResponse
+        try await JobRunner().result(of: self)
     }
 }
 
