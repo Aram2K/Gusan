@@ -67,7 +67,7 @@ public final class AuthClient {
     }
     private func signIn(grant: String, body: [String: String]) async throws -> Session {
         let (data, response) = try await send(request(path: "/auth/v1/token?grant_type=" + grant, body: body))
-        guard response.statusCode == 200 else { throw GusanError.signInFailed(Self.signInMessage(data)) }
+        guard response.statusCode == 200 else { throw GusanError.signInFailed(grant == "password" ? Self.signInMessage(data) : "Google sign-in failed. Try again.") }
         let session = try Self.decodeSession(data)
         store.write(session)
         return session
