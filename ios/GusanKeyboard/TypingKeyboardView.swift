@@ -20,6 +20,7 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
     var onDelete: (() -> Void)?
     var onReturn: (() -> Void)?
     var onDoubleSpace: (() -> Void)?
+    var returnTitle: String?
     var inputEnabled = true {
         didSet { if !inputEnabled { cancelTouches() } }
     }
@@ -121,11 +122,15 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
                 cap.layer.shadowOpacity = 1; cap.layer.shadowRadius = 0
                 cap.layer.backgroundColor = (isSpecial(key) ? theme.special : theme.letter).cgColor
                 cap.textColor = theme.foreground
-                cap.font = .systemFont(ofSize: isSpecial(key) ? 16 : 24)
+                cap.font = .systemFont(ofSize: isSpecial(key) ? 16 : 22)
                 cap.text = title(key)
                 cap.isAccessibilityElement = key != .globe
                 cap.accessibilityLabel = accessibilityTitle(key)
                 cap.accessibilityTraits = .keyboardKey
+                if key == .shift {
+                    cap.accessibilityHint = "Double tap quickly to lock capitals"
+                    if shift != .off { cap.accessibilityTraits.insert(.selected) }
+                }
                 cap.onActivate = { [weak self] in
                     guard let self, self.inputEnabled else { return }
                     UIDevice.current.playInputClick()
@@ -165,6 +170,7 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
         case .globe: return ""
         case .space: return "space"
         case .enter:
+            if let returnTitle { return returnTitle }
             switch returnType {
             case .go: return "go"
             case .google, .search, .yahoo: return "search"

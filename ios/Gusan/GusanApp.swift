@@ -22,6 +22,7 @@ final class AccountModel: NSObject, ObservableObject, ASWebAuthenticationPresent
     @Published var error = ""
     @Published var busy = false
     @Published var diagnostics: SessionDiagnostics?
+    @Published var signInRequest = UUID()
     private var webSession: ASWebAuthenticationSession?
     private var pkce: PKCE?
     override init() {
@@ -76,6 +77,8 @@ final class AccountModel: NSObject, ObservableObject, ASWebAuthenticationPresent
     func handleURL(_ url: URL) {
         guard url.scheme == "gusan" else { return }
         switch url.host {
+        case "signin":
+            signInRequest = UUID()
         case "auth-callback":
             guard let proof = pkce else { return }
             pkce = nil
@@ -109,6 +112,7 @@ struct ContentView: View {
     private var settings: SettingsStore { SettingsStore(group: account.store.resolution.chosen) }
     var body: some View {
         NavigationStack {
+            ScrollViewReader { reader in
             Form {
                 Section("Account") {
                     if let session = account.session {
@@ -126,7 +130,7 @@ struct ContentView: View {
                     }
                     if account.busy { ProgressView() }
                     if !account.error.isEmpty { Text(account.error).font(.footnote).foregroundStyle(.red) }
-                }.disabled(account.busy)
+                }.disabled(account.busy).id("account")
                 Section("Keyboard setup") {
                     Text("1. Open Settings › General › Keyboard › Keyboards.\n2. Tap Add New Keyboard… and choose Gusan.\n3. Tap Gusan and turn on Allow Full Access.")
                     Text("Full Access lets Gusan send your selected or surrounding text to Gusan Cloud only when you run an action.").font(.footnote).foregroundStyle(.secondary)
@@ -153,6 +157,11 @@ struct ContentView: View {
             .navigationTitle("Gusan")
             .task { action = settings.defaultAction; target = settings.translateTarget; await account.update() }
             .onChange(of: scenePhase) { if $0 == .active { Task { await account.update() } } }
+            .onChange(of: account.signInRequest) { _ in
+                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                reader.scrollTo("account", anchor: .top)
+            }
+            }
         }
     }
 }

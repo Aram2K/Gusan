@@ -2,187 +2,285 @@ import UIKit
 import GusanKit
 
 final class KeyboardViewController: UIInputViewController {
+    var onVoice: (() -> Void)?
+    private struct Context: Equatable {
+        let document: UUID
+        let selected: String
+        let before: String
+        let after: String
+        var text: String { selected.isEmpty ? before + after : selected }
+        var summary: String {
+            if text.isEmpty { return "No text: Ask Gusan writes it" }
+            let count = text.split(whereSeparator: { $0.isWhitespace }).count
+            return "\(selected.isEmpty ? "Around cursor" : "Selected") · \(count) \(count == 1 ? "word" : "words")"
+        }
+    }
+    private enum Surface { case typing, panel, instruction, explanation }
     private let store = SessionStore()
     private lazy var auth = AuthClient(store: store)
     private lazy var settings = SettingsStore(group: store.resolution.chosen)
-    private let status = UILabel()
-    private let spinner = UIActivityIndicatorView(style: .medium)
-    private let undoButton = UIButton(type: .system)
+    private let toolbar = GusanToolbar()
+    private let panel = GusanPanel()
+    private let instructionHeader = InstructionHeader()
     private let keyArea = TypingKeyboardView()
-    private var actionButtons: [UIButton] = []
-    private var translateButton: UIButton?
+    private let explanation = UILabel()
+    private var surface: Surface = .typing
+    private var instruction = ""
+    private var instructionContext: Context?
+    private var message: String?
+    private var detail: String?
+    private var accessory: String?
     private var busy = false
     private var original: String?
     private var replacement: String?
-    private var undoDocument: UUID?
-    private var undoBefore: String?
-    private var undoAfter: String?
+    private var undoContext: Context?
     private var task: Task<Void, Never>?
+    private var height: NSLayoutConstraint!
+    private var resultTimer: Timer?
+    private var retryAction: SmartAction?
+    private var retryContext: Context?
+    private var connected = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        let height = view.heightAnchor.constraint(equalToConstant: 260)
+        height = view.heightAnchor.constraint(equalToConstant: 260)
         height.priority = .defaultHigh; height.isActive = true
-        let stack = UIStackView()
-        stack.axis = .vertical; stack.spacing = 0; stack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(stack)
-        NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: view.leadingAnchor), stack.trailingAnchor.constraint(equalTo: view.trailingAnchor), stack.topAnchor.constraint(equalTo: view.topAnchor), stack.bottomAnchor.constraint(equalTo: view.bottomAnchor)])
-        let bar = UIStackView()
-        bar.axis = .vertical; bar.spacing = 0
-        bar.heightAnchor.constraint(equalToConstant: 44).isActive = true
-        let scroll = UIScrollView()
-        scroll.showsHorizontalScrollIndicator = false
-        let top = UIStackView()
-        top.spacing = 6; top.translatesAutoresizingMaskIntoConstraints = false
-        scroll.addSubview(top)
-        NSLayoutConstraint.activate([
-            top.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor, constant: 6),
-            top.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor, constant: -6),
-            top.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor),
-            top.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor),
-            top.heightAnchor.constraint(equalTo: scroll.frameLayoutGuide.heightAnchor)
-        ])
-        let logo = button("", action: #selector(defaultAction))
-        logo.setImage(UIImage(named: "GusanLogo")?.withRenderingMode(.alwaysOriginal), for: .normal)
-        logo.imageView?.contentMode = .scaleAspectFit
-        logo.widthAnchor.constraint(equalToConstant: 30).isActive = true
-        logo.accessibilityLabel = "Run default Gusan action"
-        top.addArrangedSubview(logo); actionButtons.append(logo)
-        for (title, mode) in [("Smart", SmartActionMode.smartAuto), ("Email", .writeEmail), ("To-do", .makeTodoList)] {
-            top.addArrangedSubview(actionButton(title, mode: mode))
-        }
-        let translate = actionButton("Translate", mode: .translate)
-        translateButton = translate
-        top.addArrangedSubview(translate)
-        top.addArrangedSubview(actionButton("Summarize", mode: .summarize))
-        bar.addArrangedSubview(scroll)
-        let stateRow = UIStackView(arrangedSubviews: [spinner, status, undoButton])
-        stateRow.spacing = 8
-        status.numberOfLines = 1; status.font = .systemFont(ofSize: 10); status.textColor = .secondaryLabel
-        status.adjustsFontSizeToFitWidth = true; status.minimumScaleFactor = 0.6
-        status.text = "Select text or type, then choose an action."
-        undoButton.setTitle("Undo", for: .normal); undoButton.addTarget(self, action: #selector(undo), for: .touchUpInside)
-        undoButton.isHidden = true
-        undoButton.titleLabel?.font = .systemFont(ofSize: 11, weight: .semibold)
-        undoButton.setContentHuggingPriority(.required, for: .horizontal)
-        stateRow.heightAnchor.constraint(equalToConstant: 16).isActive = true
-        stateRow.isLayoutMarginsRelativeArrangement = true
-        stateRow.layoutMargins = UIEdgeInsets(top: 0, left: 8, bottom: 0, right: 8)
-        bar.addArrangedSubview(stateRow)
-        stack.addArrangedSubview(bar)
-        stack.addArrangedSubview(keyArea)
+        [toolbar, panel, instructionHeader, keyArea, explanation].forEach { view.addSubview($0) }
+        explanation.numberOfLines = 0; explanation.font = .systemFont(ofSize: 15)
+        toolbar.logo.addTarget(self, action: #selector(togglePanel), for: .touchUpInside)
+        toolbar.logo.addGestureRecognizer(UILongPressGestureRecognizer(target: self, action: #selector(defaultAction(_:))))
+        toolbar.mic.addTarget(self, action: #selector(startVoice), for: .touchUpInside)
+        toolbar.accessory.addTarget(self, action: #selector(accessoryPressed), for: .touchUpInside)
+        toolbar.message.addTarget(self, action: #selector(expandMessage), for: .touchUpInside)
+        panel.onClose = { [weak self] in self?.showTyping() }
+        panel.onAsk = { [weak self] in self?.beginInstruction() }
+        panel.onAction = { [weak self] in guard let self else { return }; UIImpactFeedbackGenerator(style: .light).impactOccurred(); self.run($0, context: self.currentContext) }
+        instructionHeader.onSuggestion = { [weak self] in self?.setInstruction($0) }
+        instructionHeader.onRun = { [weak self] in self?.runInstruction() }
+        instructionHeader.onCancel = { [weak self] in self?.cancelInstruction() }
         keyArea.globeButton.addTarget(self, action: #selector(handleInputModeList(from:with:)), for: .allTouchEvents)
         keyArea.onInsert = { [weak self] in self?.insert($0) }
         keyArea.onDelete = { [weak self] in self?.deleteOnce() }
-        keyArea.onReturn = { [weak self] in self?.newline() }
+        keyArea.onReturn = { [weak self] in self?.returnPressed() }
         keyArea.onDoubleSpace = { [weak self] in self?.doubleSpace() }
-        refreshLabels()
+        updateSurface()
     }
-    override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); refreshLabels() }
-    override func viewWillLayoutSubviews() { super.viewWillLayoutSubviews(); updateTypingContext() }
+    private var currentContext: Context {
+        Context(document: textDocumentProxy.documentIdentifier, selected: textDocumentProxy.selectedText ?? "", before: textDocumentProxy.documentContextBeforeInput ?? "", after: textDocumentProxy.documentContextAfterInput ?? "")
+    }
+    override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); updateSurface() }
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated); connected = true; updateContext()
+    }
+    override func viewWillLayoutSubviews() {
+        super.viewWillLayoutSubviews()
+        let width = view.bounds.width
+        toolbar.frame = CGRect(x: 0, y: 0, width: width, height: 44)
+        let extra: CGFloat = surface == .instruction ? 74 : 0
+        instructionHeader.frame = CGRect(x: 0, y: 44, width: width, height: extra)
+        keyArea.frame = CGRect(x: 0, y: 44 + extra, width: width, height: max(0, view.bounds.height - 44 - extra))
+        panel.frame = CGRect(x: 0, y: 44, width: width, height: max(0, view.bounds.height - 44))
+        explanation.frame = panel.frame.insetBy(dx: 18, dy: 12)
+        updateContext()
+    }
     override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
-        super.traitCollectionDidChange(previousTraitCollection)
-        updateTypingContext()
+        super.traitCollectionDidChange(previousTraitCollection); updateContext()
     }
-    override func textDidChange(_ textInput: UITextInput?) { super.textDidChange(textInput); updateTypingContext() }
-    override func selectionDidChange(_ textInput: UITextInput?) { super.selectionDidChange(textInput); updateTypingContext() }
+    override func textDidChange(_ textInput: UITextInput?) { super.textDidChange(textInput); updateContext() }
+    override func selectionDidChange(_ textInput: UITextInput?) { super.selectionDidChange(textInput); updateContext() }
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated); task?.cancel(); keyArea.cancelTouches()
     }
-    private func updateTypingContext() {
-        keyArea.updateContext(before: textDocumentProxy.documentContextBeforeInput, capitalization: textDocumentProxy.autocapitalizationType, returnType: textDocumentProxy.returnKeyType, appearance: textDocumentProxy.keyboardAppearance, needsGlobe: needsInputModeSwitchKey)
+    private func updateContext() {
+        guard connected else { return }
+        let editing = surface == .instruction
+        keyArea.returnTitle = editing ? "Run" : nil
+        keyArea.updateContext(before: editing ? instruction : textDocumentProxy.documentContextBeforeInput, capitalization: editing ? .sentences : textDocumentProxy.autocapitalizationType, returnType: editing ? .go : textDocumentProxy.returnKeyType, appearance: textDocumentProxy.keyboardAppearance, needsGlobe: needsInputModeSwitchKey)
         let theme = KeyboardTheme(appearance: textDocumentProxy.keyboardAppearance, traits: traitCollection)
-        view.backgroundColor = theme.background
-        actionButtons.forEach { $0.backgroundColor = theme.letter; $0.tintColor = KeyboardTheme.blue }
+        view.backgroundColor = theme.background; toolbar.apply(theme)
+        let context = instructionContext ?? currentContext
+        panel.update(theme: theme, target: settings.translateTarget, defaultMode: settings.defaultAction, context: context.text)
+        instructionHeader.update(text: instruction, theme: theme)
+        explanation.textColor = theme.foreground
+        toolbar.message.setTitle(message ?? context.summary, for: .normal)
+        toolbar.accessory.setTitle(accessory, for: .normal); toolbar.accessory.isHidden = accessory == nil
+        toolbar.accessory.accessibilityHint = accessory == "Sign in" ? "Opens the Gusan app" : "Activates the status action"
+        toolbar.mic.isEnabled = !busy; toolbar.logo.isEnabled = !busy
+        toolbar.setNeedsLayout()
     }
-    private func button(_ title: String, action: Selector) -> UIButton {
-        let b = UIButton(type: .system)
-        b.setTitle(title, for: .normal); b.titleLabel?.font = .systemFont(ofSize: 12, weight: .medium)
-        b.contentEdgeInsets = UIEdgeInsets(top: 0, left: 10, bottom: 0, right: 10)
-        b.layer.cornerRadius = 6
-        b.addTarget(self, action: action, for: .touchUpInside)
-        return b
+    private func updateSurface() {
+        keyArea.cancelTouches()
+        panel.isHidden = surface != .panel; explanation.isHidden = surface != .explanation
+        instructionHeader.isHidden = surface != .instruction
+        keyArea.isHidden = surface == .panel || surface == .explanation
+        keyArea.inputEnabled = !busy
+        height.constant = 260
+        updateContext(); view.setNeedsLayout()
     }
-    private func actionButton(_ title: String, mode: SmartActionMode) -> UIButton {
-        let b = button(title, action: #selector(actionPressed(_:)))
-        b.accessibilityIdentifier = mode.rawValue; actionButtons.append(b); return b
+    private func showTyping() { instructionContext = nil; surface = .typing; updateSurface() }
+    @objc private func defaultAction(_ gesture: UILongPressGestureRecognizer) {
+        guard gesture.state == .began, !busy else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        run(.mode(settings.defaultAction), context: currentContext)
     }
-    private func refreshLabels() { translateButton?.setTitle("Translate → " + settings.translateTarget.uppercased(), for: .normal) }
-    @objc private func defaultAction() { run(settings.defaultAction) }
-    @objc private func actionPressed(_ sender: UIButton) {
-        if let mode = sender.accessibilityIdentifier.flatMap(SmartActionMode.init(rawValue:)) { run(mode) }
-    }
-    private func run(_ mode: SmartActionMode) {
+    @objc private func togglePanel() {
         guard !busy else { return }
-        guard hasFullAccess else { status.text = "Allow Full Access for Gusan in Settings › General › Keyboard › Keyboards › Gusan"; return }
-        guard store.read() != nil, store.diagnostics().isShared else { status.text = "Open the Gusan app and sign in"; return }
-        let selected = textDocumentProxy.selectedText ?? ""
-        let before = textDocumentProxy.documentContextBeforeInput ?? ""
-        let after = textDocumentProxy.documentContextAfterInput ?? ""
-        let text = selected.isEmpty ? before + after : selected
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { status.text = "Type or select some text first"; return }
-        let document = textDocumentProxy.documentIdentifier
-        busy = true; spinner.startAnimating(); status.text = "Working…"; undoButton.isHidden = true
-        keyArea.inputEnabled = false
-        actionButtons.forEach { $0.isEnabled = false }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        if surface == .instruction { cancelInstruction(); return }
+        surface = surface == .panel ? .typing : .panel
+        message = nil; detail = nil; accessory = nil; updateSurface()
+        let destination: UIView = surface == .panel ? panel : keyArea
+        destination.alpha = 0
+        destination.transform = UIAccessibility.isReduceMotionEnabled ? .identity : CGAffineTransform(translationX: 0, y: 8)
+        UIView.animate(withDuration: UIAccessibility.isReduceMotionEnabled ? 0.15 : 0.35, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: 0, options: [.beginFromCurrentState]) {
+            destination.alpha = 1; destination.transform = .identity
+        }
+    }
+    @objc func startVoice() {
+        guard !busy else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        if let onVoice { onVoice() } else { showMessage("Voice is coming soon") }
+    }
+    private func showMessage(_ text: String, detail: String? = nil, accessory: String? = nil) {
+        message = text; self.detail = detail; self.accessory = accessory; updateContext()
+    }
+    @objc private func expandMessage() {
+        guard !busy, let detail else { return }
+        explanation.text = detail + "\n\nTap the Gusan logo to return to actions."
+        surface = .explanation; updateSurface()
+    }
+    @objc private func accessoryPressed() {
+        switch accessory {
+        case "Sign in": openContainingApp(URL(string: "gusan://signin?from=keyboard")!)
+        case "Undo": undo()
+        case "Cancel": task?.cancel()
+        case "How to enable": expandMessage()
+        case "See plans": openContainingApp(URL(string: "https://gusan.aibuben.xyz")!)
+        case "Retry": if let retryAction, let retryContext { run(retryAction, context: retryContext) }
+        default: break
+        }
+    }
+    private func beginInstruction() {
+        guard !busy else { return }
+        instructionContext = currentContext; instruction = ""
+        message = nil; accessory = nil; detail = nil
+        surface = .instruction; updateSurface()
+    }
+    func setInstruction(_ text: String) { instruction = text; updateContext() }
+    private func cancelInstruction() {
+        instruction = ""; instructionContext = nil; message = nil; accessory = nil; detail = nil; showTyping()
+    }
+    private func runInstruction() {
+        guard let context = instructionContext else { return }
+        run(.custom(instruction: instruction), context: context)
+    }
+    private func run(_ action: SmartAction, context: Context) {
+        guard !busy else { return }
+        guard hasFullAccess else {
+            showTyping()
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+            showMessage("Gusan needs Full Access to reach Gusan Cloud", detail: "Allow Full Access for Gusan in Settings › General › Keyboard › Keyboards › Gusan › Allow Full Access. Text is sent to Gusan Cloud only when you run an action.", accessory: "How to enable")
+            return
+        }
+        guard store.read() != nil, store.diagnostics().isShared else {
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+            showTyping(); showMessage("Sign in to use Gusan", accessory: "Sign in"); return
+        }
+        do { _ = try Prompts.messages(text: context.text, action: action, target: settings.translateTarget) }
+        catch { showMessage(error.localizedDescription, detail: error.localizedDescription); return }
+        guard currentContext == context else { showMessage("Text changed. Select it and try again."); return }
+        busy = true; resultTimer?.invalidate(); invalidateUndo(); toolbar.spinner.startAnimating()
+        retryAction = action; retryContext = context
+        let progress: String
+        switch action { case .rephrase: progress = "Rephrasing…"; case .fixGrammar: progress = "Fixing grammar…"; default: progress = "Working…" }
+        showMessage(progress, accessory: "Cancel"); updateSurface()
         task = Task { @MainActor in
-            defer { busy = false; keyArea.inputEnabled = true; spinner.stopAnimating(); actionButtons.forEach { $0.isEnabled = true }; updateTypingContext() }
+            defer { busy = false; toolbar.spinner.stopAnimating(); keyArea.inputEnabled = true; updateContext() }
             do {
                 guard let session = try await auth.refresh() else { throw GusanError.unauthorized }
                 let client = SmartActionClient()
                 let result: String
-                do { result = try await client.run(text: text, mode: mode, accessToken: session.accessToken, target: settings.translateTarget) }
+                do { result = try await client.run(text: context.text, action: action, accessToken: session.accessToken, target: settings.translateTarget) }
                 catch GusanError.unauthorized {
                     guard let refreshed = try await auth.refresh(force: true) else { throw GusanError.unauthorized }
-                    result = try await client.run(text: text, mode: mode, accessToken: refreshed.accessToken, target: settings.translateTarget)
+                    result = try await client.run(text: context.text, action: action, accessToken: refreshed.accessToken, target: settings.translateTarget)
                 }
                 try Task.checkCancellation()
-                guard textDocumentProxy.documentIdentifier == document,
-                      (textDocumentProxy.selectedText ?? "") == selected,
-                      (textDocumentProxy.documentContextBeforeInput ?? "") == before,
-                      (textDocumentProxy.documentContextAfterInput ?? "") == after else {
-                    status.text = "Text changed. Select your text and try again."; return
-                }
+                guard currentContext == context else { showMessage("Text changed. Select it and try again."); return }
                 guard !result.isEmpty else { throw GusanError.invalidResponse }
-                if selected.isEmpty {
-                    textDocumentProxy.adjustTextPosition(byCharacterOffset: after.utf16.count)
-                    for _ in text { textDocumentProxy.deleteBackward() }
+                if context.selected.isEmpty {
+                    textDocumentProxy.adjustTextPosition(byCharacterOffset: context.after.utf16.count)
+                    for _ in context.text { textDocumentProxy.deleteBackward() }
                 }
                 textDocumentProxy.insertText(result)
-                original = text; replacement = result
-                undoDocument = textDocumentProxy.documentIdentifier
-                undoBefore = textDocumentProxy.documentContextBeforeInput
-                undoAfter = textDocumentProxy.documentContextAfterInput
-                status.text = "Done"; undoButton.isHidden = false
-            } catch is CancellationError { status.text = "Cancelled" }
-            catch { status.text = error.localizedDescription }
+                original = context.text; replacement = result; undoContext = currentContext
+                instructionContext = nil; instruction = ""; showTyping()
+                showMessage("Replaced", accessory: "Undo")
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                UIAccessibility.post(notification: .announcement, argument: "Replaced. Undo available.")
+                resultTimer = Timer.scheduledTimer(withTimeInterval: 8, repeats: false) { [weak self] _ in
+                    guard let self, self.message == "Replaced" else { return }
+                    self.message = nil; self.accessory = nil; self.updateContext()
+                }
+            } catch is CancellationError { showMessage("Cancelled") }
+            catch GusanError.unauthorized { showMessage("Sign in to use Gusan", accessory: "Sign in") }
+            catch GusanError.proRequired {
+                UINotificationFeedbackGenerator().notificationOccurred(.error)
+                showMessage("Gusan Pro is needed for AI actions", accessory: "See plans")
+            }
+            catch {
+                UINotificationFeedbackGenerator().notificationOccurred(.error)
+                let retry = [GusanError.network, .timeout, .failed, .serverNotConfigured, .invalidResponse].contains(error as? GusanError ?? .emptyInput)
+                let title = error as? GusanError == .network ? "You're offline. Tap for details." : "Action failed. Tap for details."
+                showMessage(title, detail: error.localizedDescription, accessory: retry ? "Retry" : nil)
+            }
         }
     }
-    @objc private func undo() {
+    private func undo() {
         guard !busy, let original, let replacement else { return }
-        guard textDocumentProxy.documentIdentifier == undoDocument,
-              textDocumentProxy.documentContextBeforeInput == undoBefore,
-              textDocumentProxy.documentContextAfterInput == undoAfter,
-              (textDocumentProxy.selectedText ?? "").isEmpty else {
-            status.text = "Text changed. Undo is no longer available."; undoButton.isHidden = true; return
+        guard currentContext == undoContext, currentContext.selected.isEmpty else {
+            invalidateUndo(); showMessage("Text changed. Undo is no longer available."); return
         }
         for _ in replacement { textDocumentProxy.deleteBackward() }
         textDocumentProxy.insertText(original)
-        self.original = nil; self.replacement = nil; undoButton.isHidden = true; status.text = "Undone"
-        updateTypingContext()
+        invalidateUndo(); showMessage("Undone")
     }
-    private func invalidateUndo() { original = nil; replacement = nil; undoButton.isHidden = true }
+    private func invalidateUndo() { original = nil; replacement = nil; undoContext = nil; if accessory == "Undo" { accessory = nil } }
     private func insert(_ text: String) {
         guard !busy else { return }
-        invalidateUndo(); textDocumentProxy.insertText(text); updateTypingContext()
+        if surface == .instruction { instruction += text }
+        else { invalidateUndo(); message = nil; detail = nil; accessory = nil; textDocumentProxy.insertText(text) }
+        updateContext()
     }
-    private func newline() { insert("\n") }
+    private func returnPressed() { if surface == .instruction { runInstruction() } else { insert("\n") } }
     private func deleteOnce() {
         guard !busy else { return }
-        invalidateUndo(); textDocumentProxy.deleteBackward(); updateTypingContext()
+        if surface == .instruction { if !instruction.isEmpty { instruction.removeLast() } }
+        else { invalidateUndo(); message = nil; detail = nil; accessory = nil; textDocumentProxy.deleteBackward() }
+        updateContext()
     }
     private func doubleSpace() {
         guard !busy else { return }
-        invalidateUndo(); textDocumentProxy.deleteBackward(); textDocumentProxy.insertText(". "); updateTypingContext()
+        if surface == .instruction { if instruction.last == " " { instruction.removeLast() }; instruction += ". " }
+        else { invalidateUndo(); textDocumentProxy.deleteBackward(); textDocumentProxy.insertText(". ") }
+        updateContext()
+    }
+    func openContainingApp(_ url: URL) {
+        let selector = NSSelectorFromString("openURL:options:completionHandler:")
+        var responder: UIResponder? = self
+        while let current = responder {
+            if current is UIApplication, current.responds(to: selector) {
+                typealias Completion = @convention(block) (Bool) -> Void
+                typealias Open = @convention(c) (AnyObject, Selector, NSURL, NSDictionary, Completion) -> Void
+                let open = unsafeBitCast(current.method(for: selector), to: Open.self)
+                let completion: Completion = { [weak self] opened in
+                    if !opened { self?.showMessage("Open the Gusan app to sign in.") }
+                }
+                open(current, selector, url as NSURL, [:] as NSDictionary, completion)
+                return
+            }
+            responder = current.next
+        }
+        showMessage("Open the Gusan app to sign in.")
     }
 }
