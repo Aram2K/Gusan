@@ -53,6 +53,12 @@ final class AgentKeyboardController {
 
     func appear() {
         visible = true
+        #if DEBUG
+        if task == nil, let demo = (UserDefaults(suiteName: store.resolution.chosen) ?? .standard).string(forKey: "gusan.debug.agentDemo"), let intent = AgentIntent.detect(demo) {
+            (UserDefaults(suiteName: store.resolution.chosen) ?? .standard).removeObject(forKey: "gusan.debug.agentDemo")
+            start(intent, context: ""); return
+        }
+        #endif
         if let task, !task.status.isTerminal { if job == nil { run(.resume(task.id), announce: false) } }
         else if task == nil, error == nil, let id = tracker.activeTaskID { run(.resume(id), announce: false) }
     }

@@ -34,7 +34,7 @@ final class AgentCenter: NSObject, ObservableObject {
         UNUserNotificationCenter.current().setNotificationCategories([
             UNNotificationCategory(identifier: Self.confirmCategory, actions: [
                 UNNotificationAction(identifier: "confirm", title: "Confirm", options: [.authenticationRequired]),
-                UNNotificationAction(identifier: "cancel", title: "Cancel task", options: [.destructive]),
+                UNNotificationAction(identifier: "cancel", title: "Cancel task", options: [.destructive, .authenticationRequired]),
             ], intentIdentifiers: []),
             UNNotificationCategory(identifier: Self.resultCategory, actions: [], intentIdentifiers: []),
         ])

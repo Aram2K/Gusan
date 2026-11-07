@@ -41,7 +41,9 @@ struct ActivityView: View {
         }
         .task { await agent.refresh() }
         .onChange(of: agent.openTaskID) { if let id = $0 { selection = id; agent.openTaskID = nil } }
-        .onAppear { if let id = agent.openTaskID { selection = id; agent.openTaskID = nil } }
+        .onAppear {
+            if let id = agent.openTaskID ?? model.pendingTaskID { selection = id; agent.openTaskID = nil; model.pendingTaskID = nil }
+        }
     }
 
     private var list: some View {
