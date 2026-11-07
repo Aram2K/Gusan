@@ -22,7 +22,7 @@ open Gusan.xcodeproj
 # No development team is needed for Simulator builds.
 xcodebuild -project Gusan.xcodeproj -scheme Gusan -destination 'generic/platform=iOS Simulator' build
 (cd GusanKit && swift test)
-python3 scripts/check_prompt_parity.py
+python3 scripts/tests/check_prompt_parity.py
 bash scripts/build_unsigned_ipa.sh
 ```
 

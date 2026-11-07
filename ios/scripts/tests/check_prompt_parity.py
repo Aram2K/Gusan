@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 import types
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 sys.modules["storage"] = types.ModuleType("storage")
 sys.modules.setdefault("requests", types.ModuleType("requests"))

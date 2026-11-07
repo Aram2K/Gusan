@@ -40,7 +40,7 @@ jobs:
         working-directory: ios/GusanKit
         run: swift test
       - name: Check desktop prompt parity
-        run: python3 ios/scripts/check_prompt_parity.py
+        run: python3 ios/scripts/tests/check_prompt_parity.py
       - name: Build for Simulator
         working-directory: ios
         run: |
