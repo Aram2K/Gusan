@@ -11,7 +11,7 @@ public struct AgentIntent: Equatable {
 
     static let doVerbs = ["book", "order", "buy", "purchase", "reserve", "schedule", "sign up", "sign me up", "register", "subscribe", "unsubscribe", "cancel my", "send", "submit", "post", "apply for", "apply to", "pay", "renew", "return", "rsvp", "add to cart", "checkout", "check out", "fill in", "fill out", "file", "transfer", "donate", "enroll", "enrol"]
     static let researchVerbs = ["find", "research", "look up", "lookup", "search", "search for", "compare", "check", "investigate", "list", "get me", "tell me", "what is", "what's", "what are", "who is", "who's", "when is", "when does", "where is", "where can", "how much", "how many", "how do", "how does", "which", "is there", "are there", "show me", "give me", "recommend", "suggest", "summarize the latest", "news about", "price of", "best", "cheapest", "nearest", "reviews of", "reviews for"]
-    static let editVerbs = ["rewrite", "rephrase", "reword", "fix", "correct", "translate", "shorten", "expand", "proofread", "make it", "make this", "summarize this", "summarise this", "summarize the text", "formal", "casual", "polite", "friendlier", "bullet", "reply to this", "answer this", "respond to this", "write an email", "write a message", "write a reply", "draft", "continue", "edit", "tone", "emoji", "grammar", "spelling", "capitalize", "punctuation"]
+    static let editVerbs = ["check grammar", "check spelling", "check the grammar", "check the spelling", "check my", "check this", "check it", "list the pros", "list pros", "order the", "order these", "sort", "which is better", "which one", "which sounds", "find a nicer", "find a better", "find another way", "find a way to say", "find a word", "find a synonym", "rewrite", "rephrase", "reword", "fix", "correct", "translate", "shorten", "expand", "proofread", "make it", "make this", "summarize this", "summarise this", "summarize the text", "formal", "casual", "polite", "friendlier", "bullet", "reply to this", "answer this", "respond to this", "write an email", "write a message", "write a reply", "draft", "continue", "edit", "tone", "emoji", "grammar", "spelling", "capitalize", "punctuation"]
     static let researchPrefixes = ["please ", "can you ", "could you ", "hey gusan, ", "hey gusan ", "gusan, ", "gusan ", "agent, ", "agent "]
 
     /// Returns nil when the request reads like a text edit (the Smart Actions pipeline handles it).
@@ -41,6 +41,11 @@ public struct AgentIntent: Equatable {
         guard lowered.hasPrefix(verb) else { return false }
         let next = lowered.dropFirst(verb.count).first
         return next == nil || next == " " || next == "," || next == "?" || next == ":"
+    }
+
+    /// Whether the instruction talks about the draft ("using this", "from this text"), so the text should be sent as context.
+    public static func referencesDraft(_ instruction: String) -> Bool {
+        instruction.lowercased().range(of: #"\b(this|these|the text|my text|the draft|my draft|the selection|the selected text|above|below|here)\b"#, options: .regularExpression) != nil
     }
 
     /// Short card title, e.g. "Research: cheapest flights to Rome".

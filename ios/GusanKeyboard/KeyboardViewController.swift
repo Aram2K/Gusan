@@ -235,7 +235,7 @@ final class KeyboardViewController: UIInputViewController {
         }
         if !settings.privacyMode, let request = action.agentRequest(contextText: context.text), let intent = AgentIntent.detect(request) {
             instructionContext = nil; instruction = ""; showTyping()
-            agent.start(intent, context: action.isCustomInstruction ? context.text : ""); return
+            agent.start(intent, context: AgentIntent.referencesDraft(intent.instruction) ? context.text : ""); return
         }
         #if DEBUG
         if store.read()?.accessToken == "gusan-debug-no-network" {

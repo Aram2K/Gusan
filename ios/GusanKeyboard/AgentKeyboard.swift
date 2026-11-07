@@ -3,12 +3,10 @@ import GusanKit
 
 extension SmartAction {
     /// The user's own words when an action might be an agent task ("find…", "book…") instead of a text edit.
+    /// Only typed instructions qualify: document text is never treated as a command.
     func agentRequest(contextText: String) -> String? {
-        switch self {
-        case .custom(let instruction): return instruction
-        case .mode(.smartAuto): return contextText
-        default: return nil
-        }
+        if case .custom(let instruction) = self { return instruction }
+        return nil
     }
     var isCustomInstruction: Bool { if case .custom = self { return true } else { return false } }
 }

@@ -15,9 +15,13 @@ final class AgentTests: XCTestCase {
     }
 
     func testIgnoresTextEdits() {
-        for text in ["Make it more formal", "Translate to French", "fix the grammar", "Rewrite this as a haiku", "Summarize this", "Reply to this politely", "Send it", "ok", "Find it in the text and shorten"] {
+        for text in ["Make it more formal", "Translate to French", "fix the grammar", "Rewrite this as a haiku", "Summarize this", "Reply to this politely", "Send it", "ok", "Find it in the text and shorten",
+                     "check grammar and spelling", "Find a nicer way to say no", "list the pros and cons", "which is better here, A or B?", "order the paragraphs by date", "Sort these alphabetically"] {
             XCTAssertNil(AgentIntent.detect(text), text)
         }
+        XCTAssertEqual(AgentIntent.detect("Send Mary the notes from today")?.mode, .do, "sending to a person is a do-it task; the card asks before anything is sent")
+        XCTAssertTrue(AgentIntent.referencesDraft("Find flights matching the dates in this text"))
+        XCTAssertFalse(AgentIntent.referencesDraft("Find the cheapest flights to Rome"))
     }
 
     // MARK: Decoding
