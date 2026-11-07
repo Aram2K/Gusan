@@ -355,7 +355,8 @@ def test_the_cloud_item_is_the_fast_profile_whatever_the_old_provider_says(page_
     page = page_for(app)
     combo = page.speech_combo
     assert combo.itemText(combo.findData("cloud")) == "Fast · Cloud · Pro"
-    assert combo.row_note(combo.findData("cloud")) == "ElevenLabs Scribe v2 · Mistral Voxtral · OpenAI GPT Transcribe"
+    # real-time first (live_stt.py), then the Fast profile's backup engines
+    assert combo.row_note(combo.findData("cloud")) == "Gladia Solaria 1 live · ElevenLabs Scribe v2 · Mistral Voxtral"
     app.cfg["managed_provider"] = "mistral"
     page.on_setting_changed("managed_provider")
     assert combo.itemText(combo.findData("cloud")) == "Fast · Cloud · Pro"   # the server chooses the model

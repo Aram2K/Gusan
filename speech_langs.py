@@ -8,7 +8,9 @@ sentence. Every word should come out in the language it was spoken in, in that
 language's own script: never translated, never transliterated. With fewer than
 two ticked, any language may be detected (how "multi" always worked).
 """
+import functools
 import re
+import sys
 
 # The languages the app offers, in picker order.
 NAMES = {"en": "English", "ar": "Arabic", "hy": "Armenian", "fr": "French",
@@ -65,6 +67,63 @@ def saved_mix(cfg):
     if not isinstance(raw, (list, tuple)):
         return []
     return [code for code in NAMES if code in raw]
+
+
+# Real-time Gladia (live_stt.py) on Auto-detect: at most this many candidate languages (Gladia: "a small set").
+LIVE_MAX_LANGUAGES = 5
+
+
+@functools.lru_cache(maxsize=1)
+def computer_languages():
+    """The languages this computer is set up for, ISO codes in order: Windows' keyboard languages, macOS'
+    preferred languages. () when unknown. Asked once per run."""
+    codes = []
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            import locale
+            user32 = ctypes.windll.user32
+            n = user32.GetKeyboardLayoutList(0, None)
+            if n > 0:
+                buf = (ctypes.c_void_p * n)()
+                n = user32.GetKeyboardLayoutList(n, buf)
+                for hkl in list(buf)[:max(0, n)]:
+                    name = locale.windows_locale.get((hkl or 0) & 0xFFFF, "")
+                    codes.append(name.split("_")[0].lower())
+        elif sys.platform == "darwin":
+            import subprocess
+            out = subprocess.run(["defaults", "read", "-g", "AppleLanguages"], capture_output=True, text=True,
+                                 timeout=2).stdout
+            codes += [c.lower() for c in re.findall(r'^\s*"?([A-Za-z]{2,3})\b', out or "", re.M)]
+    except Exception:
+        return ()
+    seen = []
+    for code in codes:
+        if code and code not in seen:
+            seen.append(code)
+    return tuple(seen)
+
+
+def live_languages(lang_setting, cfg=None):
+    """(language, languages) for a real-time Gladia session (live_stt.open_session).
+
+    A set language is THE language (Gladia writes every sentence in it). Auto-detect: Gladia detects each sentence
+    among the person's languages - the Mixed-languages list, then the computer's languages - so a take that goes
+    from English to French to Armenian keeps each in its own language (Gladia: switching needs a short list,
+    never all 100+). Fewer than two: Gladia detects freely (the take's first language). "Mixed languages": its
+    ticked list."""
+    setting = normalize(lang_setting, default="auto")
+    if setting not in ("auto", "multi"):
+        return setting, ()
+    picked = saved_mix(cfg)
+    if setting == "multi" and len(picked) >= 2:
+        return "multi", tuple(picked[:LIVE_MAX_LANGUAGES])
+    found = []
+    for code in list(picked) + list(computer_languages()):
+        if code in WHISPER_NAMES and code not in found:
+            found.append(code)
+    found = found[:LIVE_MAX_LANGUAGES]
+    return ("multi", tuple(found)) if len(found) >= 2 else ("auto", ())
 
 
 def mix_languages(cfg):

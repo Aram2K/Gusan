@@ -2701,8 +2701,9 @@ class AudioRecorder:
                 cb = self.on_live_text
                 if cb is not None:
                     cb(" ".join(committed + [text]))
-            session = live_stt.LiveSession(self.get_auth_token, AudioRecorder._lang_setting(self),
-                                           speech_langs.mix_languages(cfg), terms, purpose="dictation",
+            # Auto-detect: each sentence in its own language, among the person's languages (speech_langs).
+            language, languages = speech_langs.live_languages(AudioRecorder._lang_setting(self), cfg)
+            session = live_stt.LiveSession(self.get_auth_token, language, languages, terms, purpose="dictation",
                                            on_partial=on_partial, on_final=on_final)
             self._live_session = session
 

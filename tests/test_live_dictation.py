@@ -56,6 +56,44 @@ class TestWhenItRuns(unittest.TestCase):
         self.assertFalse(self._wanted(live_stt=False))
 
 
+class TestLanguages(unittest.TestCase):
+    """Real-time on Auto-detect: Gladia detects each sentence among the person's languages (never forced into one,
+    which made Gladia write French and Armenian speech in English)."""
+
+    def _live(self, setting, cfg=None, computer=("en", "fr", "hy")):
+        import speech_langs
+        with mock.patch.object(speech_langs, "computer_languages", lambda: computer):
+            return speech_langs.live_languages(setting, cfg or {})
+
+    def test_auto_detect_switches_among_the_mixed_list_and_the_computers_languages(self):
+        self.assertEqual(self._live("auto", {"mix_languages": ["hy", "en"]}), ("multi", ("en", "hy", "fr")))
+        self.assertEqual(self._live("auto"), ("multi", ("en", "fr", "hy")))
+        self.assertEqual(self._live("Auto-detect", computer=("en", "xx", "en", "de")), ("multi", ("en", "de")))
+
+    def test_one_or_no_known_language_lets_gladia_detect_freely(self):
+        self.assertEqual(self._live("auto", computer=("en",)), ("auto", ()))
+        self.assertEqual(self._live("auto", computer=()), ("auto", ()))
+
+    def test_a_set_language_is_the_language(self):
+        self.assertEqual(self._live("fr"), ("fr", ()))
+        self.assertEqual(self._live("en", {"mix_languages": ["hy", "en"]}), ("en", ()))
+
+    def test_mixed_languages_is_its_ticked_list(self):
+        self.assertEqual(self._live("multi", {"mix_languages": ["hy", "fr", "en"]}), ("multi", ("en", "hy", "fr")))
+        self.assertEqual(self._live("multi", {"mix_languages": ["hy"]}), ("multi", ("hy", "en", "fr")))
+
+    def test_at_most_a_few_languages(self):
+        many = ("en", "fr", "de", "es", "it", "nl", "pt", "hy")
+        self.assertEqual(len(self._live("auto", computer=many)[1]), 5)
+
+    def test_this_computers_languages_never_raise(self):
+        import speech_langs
+        speech_langs.computer_languages.cache_clear()
+        got = speech_langs.computer_languages()
+        self.assertIsInstance(got, tuple)
+        self.assertTrue(all(isinstance(c, str) for c in got))
+
+
 class TestAtStop(unittest.TestCase):
     def test_a_clean_session_gives_the_text_at_once(self):
         s = FakeSession("Hello everyone.")

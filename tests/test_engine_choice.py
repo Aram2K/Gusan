@@ -944,5 +944,28 @@ class TestCloudRowsMatchTheServer(unittest.TestCase):
         self.assertEqual(by_value["cloud"]["note"], "Gusan's default \u00b7 fastest")
 
 
+class TestRealtimeInTheRows(unittest.TestCase):
+    """A dictation / Smart Action on Gusan Cloud streams to Gladia live first (live_stt.py): its rows name Gladia
+    first, then the profile's backup engines. Live Assistant and files don't stream: their lines stay."""
+
+    def test_dictation_rows_name_gladia_live_first(self):
+        rows = {r["value"]: r["note"] for r in ec.dictation_speech_rows({}, source="cloud")}
+        for value, profile in ec.DICTATION_CLOUD_PROFILES.items():
+            first, *backup = ec.CLOUD_PROFILE_NOTES[profile].split(" \u00b7 ")
+            self.assertEqual(rows[value], " \u00b7 ".join(["Gladia Solaria 1 live", first, backup[0]]))
+        smart = [r for r in ec.smart_speech_rows({}) if r["value"] == ec.SMART_SPEECH_CLOUD][0]
+        self.assertTrue(smart["note"].startswith("Gladia Solaria 1 live \u00b7 "))
+
+    def test_without_real_time_the_profile_line_stays(self):
+        for cfg in ({"live_stt": False}, {"privacy_mode": True}):
+            rows = {r["value"]: r["note"] for r in ec.dictation_speech_rows(cfg, source="cloud")}
+            for value, profile in ec.DICTATION_CLOUD_PROFILES.items():
+                self.assertEqual(rows[value], ec.CLOUD_PROFILE_NOTES[profile])
+
+    def test_files_and_live_assistant_do_not_claim_it(self):
+        for row in ec.file_rows({}, pro=True, signed_in=True) + ec.live_speech_rows({}, pro=True, signed_in=True):
+            self.assertNotIn("live", (row.get("note") or "").split(" \u00b7 ")[0].lower().replace("live assist", ""))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -173,6 +173,19 @@ CLOUD_PROFILE_NOTES = {CLOUD_FAST: "ElevenLabs Scribe v2 · Mistral Voxtral · O
                        CLOUD_GLADIA: "Gladia Solaria 3 · Gladia Solaria 1 · ElevenLabs Scribe v2"}
 _PROFILE_ALIASES = {"best": CLOUD_BEST, "gemini-2.5-pro": CLOUD_BEST, "fast": CLOUD_FAST,
                     "gladia": CLOUD_GLADIA, "gladia-fusion": CLOUD_GLADIA}
+# Real-time (live_stt.py): a dictation or Smart Action on Gusan Cloud streams to Gladia Solaria 1 live first; the
+# profile's own engines are its backup. So their rows name it first (Live Assistant and files don't stream).
+REALTIME_ENGINE = "Gladia Solaria 1 live"
+
+
+def realtime_note(profile, cfg=None):
+    """The second line of a dictation / Smart Actions Gusan Cloud row: Gladia live, then the profile's first two
+    engines (its backup). Without real-time (cfg live_stt off, Privacy mode) the profile's own line."""
+    cfg = cfg or {}
+    note = CLOUD_PROFILE_NOTES[profile]
+    if cfg.get("privacy_mode") or not cfg.get("live_stt", True):
+        return note
+    return " · ".join([REALTIME_ENGINE] + note.split(" · ")[:2])
 
 
 def heal_speech_settings(cfg):
@@ -750,7 +763,7 @@ def smart_speech_rows(cfg=None, pro=None):
     rows += _local_rows()
     name = CLOUD_PROFILE_NAMES[CLOUD_FAST]
     rows.append(speech_row(SMART_SPEECH_CLOUD, name, "cloud", GROUP_GUSAN_CLOUD,
-                           note=CLOUD_PROFILE_NOTES[CLOUD_FAST], pro=True, model=name,
+                           note=realtime_note(CLOUD_FAST, cfg), pro=True, model=name,
                            show_pro=pro_chip(pro)))
     return rows
 
@@ -848,7 +861,7 @@ def dictation_speech_rows(cfg=None, pro=None, source=None):
         for value, profile in DICTATION_CLOUD_PROFILES.items():
             name = CLOUD_PROFILE_NAMES[profile]
             rows.append(speech_row(value, name, "cloud", GROUP_GUSAN_CLOUD,
-                                   note=CLOUD_PROFILE_NOTES[profile], pro=True, model=name,
+                                   note=realtime_note(profile, cfg), pro=True, model=name,
                                    show_pro=show_pro))
     if source in (None, "own_key"):
         # One row per saved key that can transcribe (Mistral, Google Gemini): its speech model,
