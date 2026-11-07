@@ -33,6 +33,7 @@ final class KeyboardViewController: UIInputViewController {
     private var message: String?
     private var detail: String?
     private var accessory: String?
+    private var snapshotReturnSurface: Surface?
     private var busy = false
     private var original: String?
     private var replacement: String?
@@ -140,8 +141,8 @@ final class KeyboardViewController: UIInputViewController {
         explanation.textColor = theme.foreground
         toolbar.context.setTitle(context.summary, for: .normal)
         toolbar.context.accessibilityValue = context.summary
-        toolbar.message.setTitle(message ?? "", for: .normal)
-        let statusAction = accessory ?? (undoRecord == nil ? nil : undoIsRedo ? "Redo" : "Undo")
+        toolbar.message.setTitle(snapshotReturnSurface != nil ? "Text snapshot" : message ?? "", for: .normal)
+        let statusAction = snapshotReturnSurface != nil ? "Back" : accessory ?? (undoRecord == nil ? nil : undoIsRedo ? "Redo" : "Undo")
         toolbar.accessory.setTitle(statusAction, for: .normal); toolbar.accessory.isHidden = statusAction == nil
         toolbar.accessory.isEnabled = (statusAction != "Undo" && statusAction != "Redo") || undoRecord?.step(context: currentContext.voiceContext) != nil
         toolbar.accessory.accessibilityHint = accessory == "Sign in" ? "Opens the Gusan app" : "Activates the status action"
@@ -164,7 +165,7 @@ final class KeyboardViewController: UIInputViewController {
         height.constant = 280
         updateContext(); view.setNeedsLayout()
     }
-    private func showTyping() { instructionContext = nil; surface = .typing; updateSurface() }
+    private func showTyping() { snapshotReturnSurface = nil; instructionContext = nil; surface = .typing; updateSurface() }
     private func impact() { if settings.haptics { UIImpactFeedbackGenerator(style: .light).impactOccurred() } }
     private func notify(_ type: UINotificationFeedbackGenerator.FeedbackType) { if settings.haptics { UINotificationFeedbackGenerator().notificationOccurred(type) } }
     @objc private func defaultAction(_ gesture: UILongPressGestureRecognizer) {
@@ -178,6 +179,7 @@ final class KeyboardViewController: UIInputViewController {
         impact()
         if surface == .instruction { cancelInstruction(); return }
         surface = surface == .panel ? .typing : .panel
+        snapshotReturnSurface = nil
         message = nil; detail = nil; accessory = nil; updateSurface()
         let destination: UIView = surface == .panel ? panel : keyArea
         destination.alpha = 0
@@ -204,12 +206,16 @@ final class KeyboardViewController: UIInputViewController {
     }
     @objc private func expandContext() {
         let context = instructionContext ?? currentContext
-        explanation.text = context.summary + "\n\n" + (context.text.isEmpty ? "No existing text will be replaced." : context.text) + "\n\nTap the Gusan logo to return to actions."
+        if surface != .explanation { snapshotReturnSurface = surface }
+        explanation.text = context.summary + "\n\n" + (context.text.isEmpty ? "No existing text will be replaced." : context.text)
         explanationScroll.setContentOffset(.zero, animated: false)
         surface = .explanation
         updateSurface()
     }
     @objc private func accessoryPressed() {
+        if let previous = snapshotReturnSurface {
+            snapshotReturnSurface = nil; surface = previous; updateSurface(); return
+        }
         switch accessory ?? (undoRecord == nil ? nil : undoIsRedo ? "Redo" : "Undo") {
         case "Sign in": openContainingApp(URL(string: "gusan://signin?from=keyboard")!)
         case "Undo", "Redo": undo()
