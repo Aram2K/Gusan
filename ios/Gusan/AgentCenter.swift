@@ -155,6 +155,7 @@ final class AgentCenter: NSObject, ObservableObject {
     }
 
     private func mutate(_ id: UUID, _ operation: (AgentService) async throws -> AgentTask) async {
+        guard !privacyMode else { error = AgentError.privacyMode.errorDescription; return }
         guard let service = currentService() else { return }
         do {
             let updated = try await operation(service)
@@ -239,8 +240,8 @@ extension AgentCenter: UNUserNotificationCenterDelegate {
         let action = response.actionIdentifier
         await MainActor.run {
             switch action {
-            case "confirm": Task { await self.confirm(id) }
-            case "cancel": Task { await self.cancel(id) }
+            case "confirm" where !self.privacyMode: Task { await self.confirm(id) }
+            case "cancel" where !self.privacyMode: Task { await self.cancel(id) }
             default: self.openTaskID = id; self.model.selectedTab = .activity
             }
         }
