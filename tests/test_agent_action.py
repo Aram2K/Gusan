@@ -258,3 +258,17 @@ def test_webhook_uses_private_run_lookup(run):
     lookup = next(c for c in out["dbCalls"] if c.get("table"))
     assert lookup["table"] == "agent_task_runs"
     assert lookup["filters"] == [["h_session_id", "session1"]]
+
+
+def test_deleting_tasks_cannot_reset_limits():
+    sql = (ROOT / "supabase/migrations/202611070001_agent_tasks.sql").read_text().lower()
+    policy = re.search(r"create policy agent_tasks_owner_delete[^;]+", sql).group()
+    assert "(select auth.uid()) = user_id" in policy
+    assert "status in ('completed', 'failed', 'cancelled', 'timed_out')" in policy
+    ledger = sql.split("create table public.agent_task_starts (")[1].split("\n);")[0]
+    assert "references public.agent_tasks" not in ledger
+    assert "alter table public.agent_task_starts enable row level security" in sql
+    assert "revoke all on public.agent_task_starts from public, anon, authenticated, service_role" in sql
+    assert "grant select, insert on public.agent_task_starts to service_role" in sql
+    assert "from public.agent_task_starts where user_id = p_user_id and started_at >= now() - interval '24 hours'" in sql
+    assert "insert into public.agent_task_starts (user_id) values (p_user_id)" in sql

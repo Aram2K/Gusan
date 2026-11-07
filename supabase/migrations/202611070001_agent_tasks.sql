@@ -29,9 +29,18 @@ create table public.agent_task_runs (
 alter table public.agent_task_runs enable row level security;
 revoke all on public.agent_task_runs from public, anon, authenticated;
 grant all on public.agent_task_runs to service_role;
+-- Append-only start accounting survives deletion of the visible task.
+create table public.agent_task_starts (
+  user_id uuid not null references auth.users on delete cascade,
+  started_at timestamptz not null default now()
+);
+create index agent_task_starts_user_started on public.agent_task_starts (user_id, started_at desc);
+alter table public.agent_task_starts enable row level security;
+revoke all on public.agent_task_starts from public, anon, authenticated, service_role;
+grant select, insert on public.agent_task_starts to service_role;
 alter table public.agent_tasks enable row level security;
 create policy agent_tasks_owner_select on public.agent_tasks for select to authenticated using ((select auth.uid()) = user_id);
-create policy agent_tasks_owner_delete on public.agent_tasks for delete to authenticated using ((select auth.uid()) = user_id);
+create policy agent_tasks_owner_delete on public.agent_tasks for delete to authenticated using ((select auth.uid()) = user_id and status in ('completed', 'failed', 'cancelled', 'timed_out'));
 revoke all on public.agent_tasks from anon, authenticated;
 grant select, delete on public.agent_tasks to authenticated;
 grant all on public.agent_tasks to service_role;
@@ -46,12 +55,13 @@ begin
   if (select count(*) from public.agent_tasks where user_id = p_user_id and status in ('queued', 'running', 'awaiting_confirmation')) >= p_max_active then
     raise exception using errcode = 'P0001', message = 'too_many_active';
   end if;
-  if (select count(*) from public.agent_tasks where user_id = p_user_id and created_at >= now() - interval '24 hours') >= p_max_per_day then
+  if (select count(*) from public.agent_task_starts where user_id = p_user_id and started_at >= now() - interval '24 hours') >= p_max_per_day then
     raise exception using errcode = 'P0002', message = 'quota_exceeded';
   end if;
   insert into public.agent_tasks (user_id, mode, title, deadline_at)
     values (p_user_id, p_mode, left(p_title, 120), now() + make_interval(secs => p_deadline_s)) returning * into task;
   insert into public.agent_task_runs (task_id) values (task.id);
+  insert into public.agent_task_starts (user_id) values (p_user_id);
   return task;
 end;
 $$;
