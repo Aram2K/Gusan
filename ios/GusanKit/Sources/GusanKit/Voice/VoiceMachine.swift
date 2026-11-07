@@ -2,8 +2,16 @@ import Foundation
 
 public enum VoicePlan: Equatable {
     case insert(String), smart(SmartActionMode, String), instruction(instruction: String, text: String)
+    case automatic(SmartAction, String, JobResult.Kind)
     public static func plan(transcript: String, context: VoiceContext?, action: VoiceAction) -> VoicePlan {
         if let selected = context?.selected, !selected.isEmpty { return .instruction(instruction: transcript, text: selected) }
+        if action == .automatic {
+            let text = (context?.before ?? "") + (context?.after ?? "")
+            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return .automatic(.custom(instruction: "Polish this dictation: fix punctuation, spelling and grammar without adding facts or changing its language."), transcript, .insert)
+            }
+            return .automatic(.voiceSmart(transcript: transcript), text, .replaceContext)
+        }
         if case .smart(let mode) = action { return .smart(mode, transcript) }
         return .insert(transcript)
     }
@@ -11,7 +19,7 @@ public enum VoicePlan: Equatable {
 
 public struct VoiceMachine {
     public enum Event {
-        case sessionStarted(Date), command(VoiceCommand, Date), transcribed(UUID, String), finished(UUID, String, Bool), failed(UUID, String), acknowledged(UUID), tick(Date), sessionStopped
+        case sessionStarted(Date), command(VoiceCommand, Date), transcribed(UUID, String), finished(UUID, String, Bool), completed(UUID, JobResult), failed(UUID, String), acknowledged(UUID), tick(Date), sessionStopped
     }
     public enum Effect: Equatable {
         case beginCapture, finishCapture(UUID), discardCapture, cancelWork, runAction(UUID, String, VoiceContext?), deliver(String), stopSession, publish
@@ -24,6 +32,7 @@ public struct VoiceMachine {
     public private(set) var result: String?
     public private(set) var message: String?
     public private(set) var replacesSelection = false
+    public private(set) var resultKind: JobResult.Kind?
     public var idleTimeout: TimeInterval
     public var maxRecording: TimeInterval = 300
     public var action: VoiceAction
@@ -60,6 +69,10 @@ public struct VoiceMachine {
         case .finished(let id, let result, let replaces):
             guard requestID == id, phase == .thinking else { return [] }
             phase = .done; self.result = result; replacesSelection = replaces; effects = [.deliver(result)]
+        case .completed(let id, let result):
+            guard requestID == id, phase == .thinking else { return [] }
+            phase = .done; self.result = result.text; resultKind = result.kind
+            replacesSelection = result.kind == .replaceSelection; effects = [.deliver(result.text)]
         case .failed(let id, let message):
             guard requestID == id, [.recording, .transcribing, .thinking].contains(phase) else { return [] }
             phase = .failed; self.message = message; effects = [.discardCapture, .cancelWork]
@@ -75,6 +88,7 @@ public struct VoiceMachine {
         case .sessionStopped:
             phase = .off; requestID = nil; recordingStarted = nil; context = nil; result = nil; message = nil; effects = [.discardCapture, .cancelWork]
         }
+        if phase != .done { resultKind = nil }
         return effects + [.publish]
     }
 }

@@ -2,13 +2,14 @@ import Foundation
 import CoreFoundation
 
 public enum VoiceAction: Hashable, Codable {
-    case transcribeOnly, smart(SmartActionMode)
-    public static var all: [VoiceAction] { [.transcribeOnly] + SmartActionMode.allCases.map { .smart($0) } }
-    public var label: String { if case .smart(let mode) = self { return mode.label }; return "Transcribe only" }
-    public var rawValue: String { if case .smart(let mode) = self { return mode.rawValue }; return "transcribe" }
+    case automatic, transcribeOnly, smart(SmartActionMode)
+    public static var all: [VoiceAction] { [.automatic, .transcribeOnly] + SmartActionMode.allCases.map { .smart($0) } }
+    public var label: String { if case .smart(let mode) = self { return mode.label }; return self == .automatic ? "Smart voice" : "Transcribe only" }
+    public var rawValue: String { if case .smart(let mode) = self { return mode.rawValue }; return self == .automatic ? "voice_smart" : "transcribe" }
     public init(from decoder: Decoder) throws {
         let value = try decoder.singleValueContainer().decode(String.self)
-        if value == "transcribe" { self = .transcribeOnly }
+        if value == "voice_smart" { self = .automatic }
+        else if value == "transcribe" { self = .transcribeOnly }
         else if let mode = SmartActionMode(rawValue: value) { self = .smart(mode) }
         else { throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Unknown voice action")) }
     }
@@ -25,7 +26,7 @@ public final class VoiceSettings {
         set { defaults.set(newValue, forKey: "voiceLanguage") }
     }
     public var defaultAction: VoiceAction {
-        get { defaults.data(forKey: "voiceDefaultAction").flatMap { try? JSONDecoder().decode(VoiceAction.self, from: $0) } ?? .transcribeOnly }
+        get { defaults.data(forKey: "voiceDefaultAction").flatMap { try? JSONDecoder().decode(VoiceAction.self, from: $0) } ?? .automatic }
         set { defaults.set(try? JSONEncoder().encode(newValue), forKey: "voiceDefaultAction") }
     }
     public var idleMinutes: Int {
@@ -61,8 +62,10 @@ public struct VoiceStatus: Codable, Equatable {
     public var level: Float
     public var message, result: String?
     public var replacesSelection: Bool
-    public init(phase: VoicePhase = .off, requestID: UUID? = nil, heartbeat: Date = Date(), sessionEndsAt: Date? = nil, level: Float = 0, message: String? = nil, result: String? = nil, replacesSelection: Bool = false) {
+    public var resultKind: JobResult.Kind?
+    public init(phase: VoicePhase = .off, requestID: UUID? = nil, heartbeat: Date = Date(), sessionEndsAt: Date? = nil, level: Float = 0, message: String? = nil, result: String? = nil, replacesSelection: Bool = false, resultKind: JobResult.Kind? = nil) {
         self.phase = phase; self.requestID = requestID; self.heartbeat = heartbeat; self.sessionEndsAt = sessionEndsAt; self.level = level; self.message = message; self.result = result; self.replacesSelection = replacesSelection
+        self.resultKind = resultKind
     }
     public func isAlive(now: Date = Date()) -> Bool { phase != .off && now.timeIntervalSince(heartbeat) < 3 }
 }

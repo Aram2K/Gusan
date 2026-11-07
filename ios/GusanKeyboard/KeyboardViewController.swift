@@ -222,12 +222,12 @@ final class KeyboardViewController: UIInputViewController {
             defer { busy = false; toolbar.spinner.stopAnimating(); keyArea.inputEnabled = true; updateContext() }
             do {
                 guard let session = try await auth.refresh() else { throw GusanError.unauthorized }
-                let client = SmartActionClient()
                 let result: String
-                do { result = try await client.run(text: context.text, action: action, accessToken: session.accessToken, target: settings.translateTarget) }
+                let kind: JobResult.Kind = context.selected.isEmpty ? (context.text.isEmpty ? .insert : .replaceContext) : .replaceSelection
+                do { result = try await SmartActionJob(text: context.text, action: action, accessToken: session.accessToken, target: settings.translateTarget, kind: kind).result().text }
                 catch GusanError.unauthorized {
                     guard let refreshed = try await auth.refresh(force: true) else { throw GusanError.unauthorized }
-                    result = try await client.run(text: context.text, action: action, accessToken: refreshed.accessToken, target: settings.translateTarget)
+                    result = try await SmartActionJob(text: context.text, action: action, accessToken: refreshed.accessToken, target: settings.translateTarget, kind: kind).result().text
                 }
                 try Task.checkCancellation()
                 guard currentContext == context else { showMessage("Text changed. Select it and try again."); return }

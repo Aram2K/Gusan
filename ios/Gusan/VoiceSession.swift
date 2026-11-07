@@ -169,19 +169,14 @@ final class VoiceSession: ObservableObject {
                     } catch is CancellationError {} catch { execute(machine.handle(.failed(id, error.localizedDescription))) }
                 }
             case .runAction(let id, let transcript, let context):
-                let plan = VoicePlan.plan(transcript: transcript, context: context, action: machine.action)
                 work = Task {
                     do {
                         let result = try await authorized { token in
-                            switch plan {
-                            case .insert(let text): return text
-                            case .smart(let mode, let text): return try await SmartActionClient().run(text: text, mode: mode, accessToken: token, target: SettingsStore(group: self.store.resolution.chosen).translateTarget)
-                            case .instruction(let instruction, let text): return try await SmartActionClient().run(instruction: instruction, text: text, accessToken: token)
-                            }
+                            try await VoiceJob(transcript: transcript, context: context, action: self.machine.action, accessToken: token, target: SettingsStore(group: self.store.resolution.chosen).translateTarget).result()
                         }
                         try Task.checkCancellation()
-                        guard !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw VoiceError.invalidResponse }
-                        execute(machine.handle(.finished(id, result, !(context?.selected.isEmpty ?? true))))
+                        guard !result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw VoiceError.invalidResponse }
+                        execute(machine.handle(.completed(id, result)))
                     } catch is CancellationError {} catch { execute(machine.handle(.failed(id, error.localizedDescription))) }
                 }
             case .deliver: break
@@ -190,7 +185,7 @@ final class VoiceSession: ObservableObject {
             }
         }
     }
-    private func authorized(_ operation: (String) async throws -> String) async throws -> String {
+    private func authorized<T>(_ operation: (String) async throws -> T) async throws -> T {
         guard let session = try await auth.refresh() else { throw VoiceError.notSignedIn }
         do { return try await operation(session.accessToken) }
         catch where (error as? VoiceError) == .unauthorized || (error as? GusanError) == .unauthorized {
@@ -200,7 +195,7 @@ final class VoiceSession: ObservableObject {
     }
     private func publish() {
         if machine.phase != .off && !channel.available { error = channel.unavailableError.localizedDescription; stop(); return }
-        status = VoiceStatus(phase: machine.phase, requestID: machine.requestID, sessionEndsAt: machine.phase == .recording ? machine.recordingStarted?.addingTimeInterval(machine.maxRecording) : machine.lastActivity.addingTimeInterval(machine.idleTimeout), level: status.level, message: machine.message, result: machine.result, replacesSelection: machine.replacesSelection)
+        status = VoiceStatus(phase: machine.phase, requestID: machine.requestID, sessionEndsAt: machine.phase == .recording ? machine.recordingStarted?.addingTimeInterval(machine.maxRecording) : machine.lastActivity.addingTimeInterval(machine.idleTimeout), level: status.level, message: machine.message, result: machine.result, replacesSelection: machine.replacesSelection, resultKind: machine.resultKind)
         try? channel.write(status: status); channel.post(.status)
     }
     func stop() {
