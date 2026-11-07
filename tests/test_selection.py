@@ -126,11 +126,17 @@ class TestWindowsChoice(unittest.TestCase):
                 mock.patch.object(sr, "_copy_selection", return_value=copied) as copy:
             return sr.read_selection(platform="win32"), copy.called
 
-    def test_an_app_that_answers_is_trusted_and_no_keys_are_sent(self):
+    def test_an_app_that_answers_with_text_is_trusted_and_no_keys_are_sent(self):
         sel, copied = self.read(("from uia", True, False, False))
         self.assertEqual((sel.text, sel.source, sel.editable, copied), ("from uia", "uia", True, False))
-        sel, copied = self.read(("", True, None, False))
-        self.assertEqual((bool(sel), copied), (False, False))            # nothing selected: no copy keys either
+
+    def test_an_empty_answer_still_gets_the_copy_keys(self):
+        """Google Docs draws its own text: Chrome's UI Automation says nothing is selected while the person has a whole
+        letter selected (seen 2026-11-07: the AI got only "make it shorter" and made a text up)."""
+        sel, copied = self.read(("", True, False, False), copied="Objet : Remerciements")
+        self.assertEqual((sel.text, sel.source, copied), ("Objet : Remerciements", "copy", True))
+        sel, copied = self.read(("", True, None, False), copied="")
+        self.assertEqual((bool(sel), copied), (False, True))             # truly nothing selected: nothing copied
 
     def test_an_app_that_does_not_answer_gets_the_copy_keys(self):
         sel, copied = self.read(("", False, None, False))
