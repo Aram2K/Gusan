@@ -511,7 +511,11 @@ async function sync(db: any, row: Obj, wait = 0) {
           patch.error_code = "plan_missing";
         } else {
           await saveRun(db, row, {
-            plan: { ...plan, instruction: run.plan.instruction },
+            plan: {
+              ...plan,
+              instruction: run.plan.instruction,
+              ...(run.plan.timezone ? { timezone: run.plan.timezone } : {}),
+            },
           });
           patch.status = "awaiting_confirmation";
           patch.confirmation = plan;
@@ -687,7 +691,13 @@ Deno.serve(async (req: Request) => {
         throw new Failure("storage_error", 500);
       }
       let row = Array.isArray(data) ? data[0] : data;
-      await saveRun(db, row, { phase: "prepare", plan: { instruction } });
+      await saveRun(db, row, {
+        phase: "prepare",
+        plan: {
+          instruction,
+          ...(body.timezone ? { timezone: body.timezone } : {}),
+        },
+      });
       let session;
       try {
         session = await h(
@@ -747,7 +757,10 @@ Deno.serve(async (req: Request) => {
         "/sessions",
         "POST",
         sessionRequest(
-          { plan: { ...plan, instruction: run.plan.instruction } },
+          {
+            plan: { ...plan, instruction: run.plan.instruction },
+            ...(run.plan.timezone ? { timezone: run.plan.timezone } : {}),
+          },
           "do",
           run.plan.instruction,
           "execute",

@@ -457,3 +457,24 @@ def test_step_length_boundary_never_truncates(run, length, expected):
     else:
         assert out["row"]["confirmation"]["steps"] == [step]
         assert out["run"]["plan"]["steps"] == [step]
+
+
+@pytest.mark.parametrize("timezone", ["Europe/Paris", None])
+def test_timezone_survives_start_prepare_and_execute(run, timezone):
+    fields = {"timezone": timezone} if timezone else {}
+    out, = run({"row": {"mode": "do"}, "requests": [
+        {"body": {"action": "start", "mode": "do", "instruction": "Send it", **fields}},
+        {"body": {"action": "status", "task_id": ID}, "change": {
+            "status": "completed", "answer": {"markdown": "Plan", "needs_action": True, "plan": PLAN}}},
+        {"body": {"action": "confirm", "task_id": ID}}]})
+    assert out["replies"][-1]["body"]["status"] == "running"
+    sessions = [c["body"] for c in out["calls"] if c["url"].endswith("/sessions")]
+    assert len(sessions) == 2
+    for session in sessions:
+        assert session.get("timezone") == timezone
+        if timezone is None:
+            assert "timezone" not in session
+    assert out["run"]["plan"].get("timezone") == timezone
+    assert "timezone" not in out["snapshots"][1]["row"]["confirmation"]
+    message = sessions[-1]["messages"][0]["message"]
+    assert "timezone" not in message
