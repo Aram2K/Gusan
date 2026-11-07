@@ -2,6 +2,18 @@ import XCTest
 @testable import GusanKit
 
 final class VoiceTests: XCTestCase {
+    func testLiveVoiceInstruction() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let token = environment["GUSAN_LIVE_ACCESS_TOKEN"], !token.isEmpty else { throw XCTSkip("Set GUSAN_LIVE_ACCESS_TOKEN to run live voice integration.") }
+        let path = try XCTUnwrap(environment["GUSAN_LIVE_WAV"], "Set GUSAN_LIVE_WAV to a WAV containing 'quarterly report'.")
+        let wav = try Data(contentsOf: URL(fileURLWithPath: path))
+        let transcript = try await TranscribeClient().run(wav: wav, language: "en", accessToken: token)
+        print("Live transcript: \(transcript)")
+        XCTAssertTrue(transcript.localizedCaseInsensitiveContains("quarterly report"))
+        let result = try await SmartActionClient().run(instruction: "Make this more formal", text: transcript, accessToken: token)
+        print("Live instruction result: \(result)")
+        XCTAssertFalse(result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
     let now = Date(timeIntervalSince1970: 1000)
     func response(_ code: Int) -> HTTPURLResponse { HTTPURLResponse(url: TranscribeClient.url, statusCode: code, httpVersion: nil, headerFields: nil)! }
     func json(_ body: Any) throws -> Data { try JSONSerialization.data(withJSONObject: body) }
