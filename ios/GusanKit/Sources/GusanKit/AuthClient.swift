@@ -108,6 +108,6 @@ public final class AuthClient {
     public func signOut() async {
         let session = store.read()
         if let token = session?.accessToken { _ = try? await send(request(path: "/auth/v1/logout", token: token)) }
-        if store.read()?.refreshToken == session?.refreshToken { store.clear() }
+        store.clear()
     }
 }
