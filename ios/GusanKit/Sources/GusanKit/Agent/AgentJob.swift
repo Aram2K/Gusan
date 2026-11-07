@@ -47,14 +47,18 @@ public struct AgentJob: GusanJob {
                             // Wait for the user, but keep watching the server: the confirmation can expire
                             // or be decided from another device, and then the local prompt is moot.
                             let decision = await Self.awaitDecision(request, taskID: current.id, service: service, interval: max(interval, 5_000_000_000))
-                            try Task.checkCancellation()
+                            let id = current.id
                             if let accepted = decision {
-                                do { current = accepted ? try await service.confirm(current.id) : try await service.cancel(current.id) }
-                                catch AgentError.notAwaitingConfirmation { current = try await service.status(current.id, waitSeconds: 0) }
+                                // Detached: the user's decision must reach the server even if the stream is torn
+                                // down right after (JobRunner throws on decline; the keyboard may be dismissed).
+                                let decide = Task.detached { accepted ? try await service.confirm(id) : try await service.cancel(id) }
+                                do { current = try await decide.value }
+                                catch AgentError.notAwaitingConfirmation { current = try await service.status(id, waitSeconds: 0) }
                             } else {
                                 await request.resolve(false)
-                                current = try await service.status(current.id, waitSeconds: 0)
+                                current = try await service.status(id, waitSeconds: 0)
                             }
+                            try Task.checkCancellation()
                             onTask?(current)
                             continue
                         }

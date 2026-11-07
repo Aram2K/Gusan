@@ -216,7 +216,9 @@ final class AgentJobTests: XCTestCase {
             _ = try await JobRunner().result(of: job, confirmation: { _ in false })
             XCTFail("declined jobs end as cancelled")
         } catch is CancellationError {}
-        let task = try await stub.status(try XCTUnwrap(id), waitSeconds: 0)
+        // The cancel is sent from a detached task; give it a moment.
+        var task = try await stub.status(try XCTUnwrap(id), waitSeconds: 0)
+        for _ in 0..<50 where task.status != .cancelled { try await Task.sleep(nanoseconds: 20_000_000); task = try await stub.status(try XCTUnwrap(id), waitSeconds: 0) }
         XCTAssertEqual(task.status, .cancelled)
     }
 
