@@ -18,6 +18,14 @@ struct ActivityView: View {
                         PrimaryButton(title: "Sign in") { model.handleURL(URL(string: "gusan://signin")!) }
                     }
                 }
+            } else if agent.tasks.isEmpty, let error = agent.error, !agent.loading {
+                ScreenContent {
+                    AppCard {
+                        Label("Couldn't load your tasks", systemImage: "exclamationmark.triangle").font(.headline).foregroundStyle(Theme.danger)
+                        Text(error).foregroundStyle(.secondary)
+                        PrimaryButton(title: "Try again") { Task { await agent.refresh() } }
+                    }
+                }
             } else if agent.tasks.isEmpty && !agent.loading {
                 ScreenContent {
                     emptyState
