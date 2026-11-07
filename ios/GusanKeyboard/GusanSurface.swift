@@ -5,7 +5,13 @@ private final class ContextLabel: UILabel {
     override func drawText(in rect: CGRect) { super.drawText(in: rect.insetBy(dx: 8, dy: 0)) }
 }
 
-final class VoiceKey: UIButton {
+class ToolbarButton: UIButton {
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        bounds.insetBy(dx: -max(0, (44 - bounds.width) / 2), dy: -max(0, (44 - bounds.height) / 2)).contains(point)
+    }
+}
+
+final class VoiceKey: ToolbarButton {
     private let gradient = CAGradientLayer()
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -31,7 +37,7 @@ final class VoiceKey: UIButton {
 }
 
 final class GusanToolbar: UIView {
-    let logo = UIButton(type: .system)
+    let logo = ToolbarButton(type: .system)
     let mic = VoiceKey(frame: .zero)
     let message = UIButton(type: .system)
     let accessory = UIButton(type: .system)
