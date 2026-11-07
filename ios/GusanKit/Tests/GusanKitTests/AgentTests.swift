@@ -16,7 +16,7 @@ final class AgentTests: XCTestCase {
 
     func testIgnoresTextEdits() {
         for text in ["Make it more formal", "Translate to French", "fix the grammar", "Rewrite this as a haiku", "Summarize this", "Reply to this politely", "Send it", "ok", "Find it in the text and shorten",
-                     "check grammar and spelling", "Find a nicer way to say no", "list the pros and cons", "which is better here, A or B?", "order the paragraphs by date", "Sort these alphabetically"] {
+                     "check grammar and spelling", "order these words alphabetically", "check my punctuation", "Find a shorter way to say this sentence", "Find a nicer way to say no", "list the pros and cons", "which is better here, A or B?", "order the paragraphs by date", "Sort these alphabetically"] {
             XCTAssertNil(AgentIntent.detect(text), text)
         }
         XCTAssertEqual(AgentIntent.detect("order the groceries from Rewe")?.mode, .do)
