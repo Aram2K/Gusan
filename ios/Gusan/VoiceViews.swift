@@ -73,7 +73,13 @@ struct VoiceReadyView: View {
                     }
                 }
             }.navigationTitle("Voice").navigationBarTitleDisplayMode(.inline)
-                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() }.frame(minWidth: 44, minHeight: 44) } }
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button { dismiss() } label: {
+                            Image(systemName: "xmark").font(.system(size: 17, weight: .semibold)).frame(width: 44, height: 44)
+                        }.accessibilityLabel("Close voice")
+                    }
+                }
                 .onAppear { voice.refreshPermission() }
         }
     }
