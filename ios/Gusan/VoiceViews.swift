@@ -4,7 +4,19 @@ import GusanKit
 
 struct VoiceReadyView: View {
     @ObservedObject var voice: VoiceSession
+    let onSignIn: () -> Void
     @Environment(\.dismiss) private var dismiss
+    private var statusText: String? {
+        switch voice.status.phase {
+        case .off: return nil
+        case .ready: return "Ready"
+        case .recording: return "Listening…"
+        case .transcribing: return "Transcribing…"
+        case .thinking: return "Thinking…"
+        case .done: return "Done"
+        case .failed: return "Couldn't finish"
+        }
+    }
     var body: some View {
         NavigationStack {
             VStack(spacing: 24) {
@@ -16,9 +28,12 @@ struct VoiceReadyView: View {
                     Text("Tap Record to prepare a voice session.").multilineTextAlignment(.center)
                     Button("Record") { voice.start() }.frame(minHeight: 44)
                 }
-                Text(voice.status.phase.rawValue.capitalized).foregroundStyle(.secondary)
+                if let statusText { Text(statusText).foregroundStyle(.secondary) }
                 if let end = voice.status.sessionEndsAt, voice.alive { Text("Session until \(end.formatted(date: .omitted, time: .shortened))") }
                 if !voice.error.isEmpty { Text(voice.error).foregroundStyle(.red) }
+                if voice.error == VoiceError.notSignedIn.localizedDescription {
+                    Button("Sign in") { onSignIn(); dismiss() }.frame(minHeight: 44)
+                }
                 if voice.error == VoiceError.fallbackOff.localizedDescription {
                     Button("Keyboard settings") { dismiss(); UIApplication.shared.open(URL(string: "gusan://keyboard-settings")!) }.frame(minHeight: 44)
                 }
