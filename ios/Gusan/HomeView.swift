@@ -37,6 +37,9 @@ struct HomeView: View {
             AppCard {
                 HStack(alignment: .top, spacing: 12) { BrandMark(); Text("Welcome to Gusan").font(.title2).bold() }
                 Text(model.session?.email ?? "Sign in to use Gusan Cloud.").font(.subheadline).foregroundStyle(.secondary)
+                if model.session == nil {
+                    Button("Sign in") { model.impact(); model.handleURL(URL(string: "gusan://signin")!) }.frame(minHeight: 44)
+                }
                 if model.loadingPlan { ProgressView("Checking your plan…") }
                 else if model.session != nil, model.planError == nil { PlanBadge(pro: model.isPro) }
                 if let error = model.planError {

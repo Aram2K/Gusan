@@ -29,7 +29,7 @@ struct OnboardingView: View {
                 .animation(reduceMotion ? .easeInOut(duration: 0.15) : .spring(response: 0.35, dampingFraction: 0.85), value: step)
                 .toolbar {
                     ToolbarItem(placement: .navigationBarLeading) { if step != .welcome { Button("Back") { model.onboardingStep = OnboardingStep(rawValue: step.rawValue - 1) ?? .welcome }.frame(minWidth: 44, minHeight: 44) } }
-                    ToolbarItem(placement: .navigationBarTrailing) { if step.rawValue >= 2 { Button("Skip for now") { model.finishOnboarding() }.frame(minHeight: 44) } }
+                    ToolbarItem(placement: .navigationBarTrailing) { Button("Skip for now") { model.cancelGoogle(); model.finishOnboarding() }.frame(minHeight: 44).accessibilityHint("Finish setup later from Home") }
                 }
                 .onChange(of: model.session) { session in if session != nil, step == .signIn { advance() } }
         }.interactiveDismissDisabled()
