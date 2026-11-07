@@ -17,7 +17,7 @@ private final class VoiceWaveform: UIView {
 }
 
 final class VoiceKeyController: NSObject {
-    let micButton = UIButton(type: .system)
+    private weak var micKey: VoiceKey?
     let bar = UIStackView()
     private weak var host: UIInputViewController?
     private let store: SessionStore
@@ -44,15 +44,11 @@ final class VoiceKeyController: NSObject {
     private var resultPanel: UIView?
     private var reviewContext: VoiceContext?
     private var reviewHeading: UILabel?
-    init(host: UIInputViewController, store: SessionStore) {
-        self.host = host; self.store = store
+    init(host: UIInputViewController, store: SessionStore, micKey: VoiceKey) {
+        self.host = host; self.store = store; self.micKey = micKey
         channel = store.makeVoiceChannel()
         super.init()
         restorePending()
-        micButton.setImage(UIImage(systemName: "mic.fill"), for: .normal)
-        micButton.accessibilityLabel = "Start dictation"
-        micButton.backgroundColor = .tertiarySystemBackground; micButton.layer.cornerRadius = 8
-        micButton.addTarget(self, action: #selector(tap), for: .touchUpInside)
         label.font = .systemFont(ofSize: 12); label.numberOfLines = 2
         undoButton.setTitle("Undo", for: .normal); undoButton.addTarget(self, action: #selector(undo), for: .touchUpInside); undoButton.isHidden = true
         copyButton.setTitle("Copy", for: .normal); copyButton.accessibilityLabel = "Copy voice result"
@@ -135,10 +131,7 @@ final class VoiceKeyController: NSObject {
         if alive && timer == nil { timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.refresh() } }
         if !alive { timer?.invalidate(); timer = nil }
         let phase = alive ? status?.phase ?? .off : .off
-        let busy = phase == .transcribing || phase == .thinking
-        micButton.setImage(UIImage(systemName: phase == .recording ? "stop.circle.fill" : busy ? "xmark.circle" : "mic.fill"), for: .normal)
-        micButton.tintColor = phase == .recording ? .systemRed : .systemBlue
-        micButton.accessibilityLabel = phase == .recording ? "Stop dictation" : busy ? "Cancel dictation" : "Start dictation"
+        micKey?.update(phase: phase)
         if phase == .recording { waveform.levels = Array((waveform.levels + [status?.level ?? 0]).suffix(30)) }
         waveform.isHidden = phase != .recording
         if let status, status.phase == .done, status.requestID == requestID, insertedID != requestID { deliver(status) }

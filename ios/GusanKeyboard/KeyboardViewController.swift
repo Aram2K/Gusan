@@ -17,7 +17,7 @@ final class KeyboardViewController: UIInputViewController {
     }
     private enum Surface { case typing, panel, instruction, explanation }
     private lazy var store = SessionStore(role: .keyboard, pasteboardAccessAllowed: { [weak self] in self?.hasFullAccess == true })
-    private lazy var voice = VoiceKeyController(host: self, store: store)
+    private lazy var voice = VoiceKeyController(host: self, store: store, micKey: toolbar.mic)
     private lazy var auth = AuthClient(store: store)
     private lazy var settings = SettingsStore(group: store.resolution.chosen, pasteboardAccessAllowed: { [weak self] in self?.hasFullAccess == true })
     private let toolbar = GusanToolbar()

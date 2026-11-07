@@ -12,11 +12,18 @@ final class VoiceKey: UIButton {
         apply(KeyboardTheme(appearance: nil, traits: traitCollection))
         gradient.startPoint = CGPoint(x: 0, y: 0); gradient.endPoint = CGPoint(x: 1, y: 1)
         layer.insertSublayer(gradient, at: 0)
-        setImage(UIImage(systemName: "mic.fill"), for: .normal); tintColor = .white
-        accessibilityLabel = "Gusan voice"
+        tintColor = .white
+        update(phase: .off)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func apply(_ theme: KeyboardTheme) { gradient.colors = [theme.brandRed.cgColor, theme.brandBlue.cgColor] }
+    func update(phase: VoicePhase) {
+        let recording = phase == .recording
+        let busy = phase == .transcribing || phase == .thinking
+        setImage(UIImage(systemName: recording ? "stop.circle.fill" : busy ? "xmark.circle" : "mic.fill"), for: .normal)
+        accessibilityLabel = recording ? "Stop dictation" : busy ? "Cancel dictation" : "Start dictation"
+        accessibilityHint = recording ? "Stops recording and processes your voice" : busy ? "Cancels the voice request" : "Opens the Gusan app to start a voice session the first time"
+    }
     override func layoutSubviews() {
         super.layoutSubviews(); gradient.frame = bounds; gradient.cornerRadius = bounds.height / 2
         if let imageView { bringSubviewToFront(imageView) }
@@ -34,7 +41,6 @@ final class GusanToolbar: UIView {
         logo.setImage(UIImage(named: "GusanLogo")?.withRenderingMode(.alwaysOriginal), for: .normal)
         logo.imageView?.contentMode = .scaleAspectFit; logo.accessibilityLabel = "Gusan actions"
         logo.accessibilityHint = "Tap for actions. Hold to run your default action."
-        mic.accessibilityHint = "Voice is coming soon"
         message.accessibilityHint = "Tap a status message for details"
         message.titleLabel?.font = .systemFont(ofSize: 12, weight: .medium)
         message.titleLabel?.numberOfLines = 2; message.titleLabel?.lineBreakMode = .byWordWrapping
