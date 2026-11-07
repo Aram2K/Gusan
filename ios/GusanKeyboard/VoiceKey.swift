@@ -39,6 +39,9 @@ final class VoiceKeyController: NSObject {
     private var undoContext: VoiceContext?
     private var localMessage: String?
     private var reviewResult: String?
+    private var resultPanel: UIView?
+    private var reviewContext: VoiceContext?
+    private var reviewHeading: UILabel?
     init(host: UIInputViewController, store: SessionStore) {
         self.host = host; self.store = store
         channel = VoiceChannel(container: store.resolution.container, group: store.resolution.chosen ?? "group.com.aram2k.gusan")
@@ -73,7 +76,7 @@ final class VoiceKeyController: NSObject {
     }
     func toggle() { tap() }
     func dismiss() { inserted = nil; localMessage = nil; clearReview(); undoButton.isHidden = true; refresh() }
-    func disappear() { visible = false; observer = nil; timer?.invalidate(); timer = nil }
+    func disappear() { visible = false; observer = nil; timer?.invalidate(); timer = nil; closeResult() }
     private func currentContext() -> VoiceContext? {
         guard let proxy = host?.textDocumentProxy else { return nil }
         return VoiceContext(selected: proxy.selectedText ?? "", before: proxy.documentContextBeforeInput ?? "", after: proxy.documentContextAfterInput ?? "", documentID: proxy.documentIdentifier.uuidString)
@@ -156,7 +159,7 @@ final class VoiceKeyController: NSObject {
         proxy.insertText(result)
         inserted = result; original = context.selected; undoContext = currentContext(); undoButton.isHidden = false
     }
-    private func clearReview() { reviewResult = nil; copyButton.isHidden = true; reviewButton.isHidden = true }
+    private func clearReview() { closeResult(); reviewResult = nil; copyButton.isHidden = true; reviewButton.isHidden = true }
     private func offerResult(_ result: String) {
         guard !result.isEmpty else { return }
         reviewResult = result; copyButton.isHidden = false; reviewButton.isHidden = false
@@ -169,20 +172,39 @@ final class VoiceKeyController: NSObject {
     }
     @objc private func viewResult() {
         guard let result = reviewResult, let host else { return }
-        let alert = UIAlertController(title: "Voice result", message: result, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "Copy", style: .default) { [weak self] _ in self?.copyResult() })
-        if let expected = currentContext(), let documentID = context?.documentID, !documentID.isEmpty, expected.documentID == documentID, expected.selected.isEmpty {
-            alert.addAction(UIAlertAction(title: "Insert at cursor", style: .default) { [weak self] _ in
-                guard let self, self.currentContext() == expected, let proxy = self.host?.textDocumentProxy else {
-                    self?.show("Text changed. Review result."); return
-                }
-                proxy.insertText(result)
-                self.inserted = result; self.original = ""; self.undoContext = self.currentContext()
-                self.clearReview(); self.undoButton.isHidden = false; self.show("Done")
-            })
+        closeResult()
+        let panel = UIView(frame: host.view.bounds)
+        panel.autoresizingMask = [.flexibleWidth, .flexibleHeight]; panel.backgroundColor = .systemGroupedBackground
+        let heading = UILabel(); heading.text = "Voice result"; heading.font = .preferredFont(forTextStyle: .headline)
+        heading.adjustsFontForContentSizeCategory = true; heading.numberOfLines = 0
+        let text = UITextView(); text.text = result; text.isEditable = false; text.isSelectable = false
+        text.font = .preferredFont(forTextStyle: .body); text.adjustsFontForContentSizeCategory = true
+        text.backgroundColor = .secondarySystemGroupedBackground; text.layer.cornerRadius = 8
+        let actions = UIStackView(); actions.spacing = 8; actions.distribution = .fillEqually
+        func button(_ title: String, _ action: Selector) {
+            let button = UIButton(type: .system); button.setTitle(title, for: .normal)
+            button.addTarget(self, action: action, for: .touchUpInside)
+            button.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+            actions.addArrangedSubview(button)
         }
-        alert.addAction(UIAlertAction(title: "Close", style: .cancel))
-        host.present(alert, animated: true)
+        button("Copy", #selector(copyResult))
+        if let expected = currentContext(), let documentID = context?.documentID, !documentID.isEmpty, expected.documentID == documentID, expected.selected.isEmpty {
+            reviewContext = expected; button("Insert at cursor", #selector(insertReviewedResult))
+        }
+        button("Close", #selector(closeResult))
+        let stack = UIStackView(arrangedSubviews: [heading, text, actions]); stack.axis = .vertical; stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false; panel.addSubview(stack)
+        NSLayoutConstraint.activate([stack.topAnchor.constraint(equalTo: panel.topAnchor, constant: 12), stack.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -12), stack.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 12), stack.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -12)])
+        resultPanel = panel; reviewHeading = heading; host.view.addSubview(panel)
+    }
+    @objc private func closeResult() { resultPanel?.removeFromSuperview(); resultPanel = nil; reviewContext = nil; reviewHeading = nil }
+    @objc private func insertReviewedResult() {
+        guard let result = reviewResult, let expected = reviewContext, currentContext() == expected, let proxy = host?.textDocumentProxy else {
+            reviewHeading?.text = "Text changed. Use Copy."; return
+        }
+        proxy.insertText(result)
+        inserted = result; original = ""; undoContext = currentContext()
+        clearReview(); undoButton.isHidden = false; show("Done")
     }
     @objc private func undo() {
         guard let inserted, let expected = undoContext, currentContext() == expected, expected.selected.isEmpty, let proxy = host?.textDocumentProxy else {
