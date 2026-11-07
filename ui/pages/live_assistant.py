@@ -92,7 +92,6 @@ import json
 import logging
 import math
 import os
-import re
 
 from PySide6.QtCore import (QEasingCurve, QEvent, QPointF, QRectF, QSize, Qt, QTimer, QVariantAnimation,
                             Signal)
@@ -104,6 +103,7 @@ from PySide6.QtWidgets import (QBoxLayout, QButtonGroup, QComboBox, QFrame, QGra
 
 import hotkeys
 import live_context
+import meeting_titles
 from ui import live_docs_ui, theme
 from ui.components import (Button, Card, Chip, IconButton, PageHeader, ProTag, Segmented,
                            SettingRow, SettingsRail, Toggle, icons, label, row_actions)
@@ -145,7 +145,6 @@ CONTEXT_SAVE_MS = 700
 CONTEXT_MIN_H = 66                          # Context: two lines tall...
 CONTEXT_MAX_LINES = 5                       # ...growing to five as the text needs
 
-_GENERIC_TITLE = re.compile(r"^Live session \d{1,2}:\d{2}$")
 _DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
@@ -276,18 +275,17 @@ def load_sessions():
     for m in meeting_store.list_live_sessions():
         folder = str(m.get("dir") or "")
         question, answers = _answers_log(folder)
-        if question:
+        title = str(m.get("title") or "").strip()
+        if title and not meeting_titles.is_placeholder(title):
+            text = title                                  # named by the person, or by the AI from the notes
+        elif question:
             text = "“%s”" % question
         else:
-            title = str(m.get("title") or "").strip()
-            if title and not _GENERIC_TITLE.match(title) and title != "Untitled Meeting":
-                text = title
-            else:
-                try:
-                    text = meeting_store.summary_preview(meeting_store.load_notes(folder))
-                except Exception:
-                    text = ""
-                text = text or "Live session"
+            try:
+                text = meeting_store.summary_preview(meeting_store.load_notes(folder))
+            except Exception:
+                text = ""
+            text = text or "Live session"
         out.append({"dir": folder, "id": m.get("id", ""),
                     "started": str(m.get("started") or m.get("timestamp") or ""),
                     "duration_sec": m.get("duration_sec") or 0,

@@ -346,6 +346,7 @@ class ActionAPIError(RuntimeError):
         self.code = code or ""
 
 
+import meeting_titles
 import notes_prompt
 import smart_prompt
 
@@ -375,6 +376,8 @@ def _max_tokens_for(mode, text=None):
         return 220
     if mode == "meeting_chat":
         return 1400      # a short answer, or a drafted email; the server caps a request at 2000
+    if mode == "meeting_title":
+        return 160       # 3-7 words (room for a model that thinks a little first)
     return 1000
 
 
@@ -632,6 +635,8 @@ def build_messages(text, mode, source_lang="auto", target_lang="en", vocab_block
         # paper (arxiv 2307.15793): two-stage thinking, third-person rephrasing so the notes are shareable, explicit
         # owner attribution, careful name preservation - now with a length that scales with the meeting.
         instruction = None
+    elif mode == "meeting_title":
+        instruction = meeting_titles.TITLE_INSTRUCTION
     elif mode == "live_recap":
         # Rolling "so far" panel during a call: regenerated every ~20 s, read
         # at a glance. Bullets only.
@@ -665,8 +670,12 @@ def server_mode(mode):
     every piece of the talk) and "live_people" (the names of the people on the call, read off
     the Live Assistant's own screenshot: people_from_screen.py) are client-side briefs: the
     server routes them exactly like a live answer - the same fast live model, and inside the
-    Live Assistant session that is already open - so they are sent as "live_assist"."""
-    return "live_assist" if mode in ("live_rule", "live_people") else mode
+    Live Assistant session that is already open - so they are sent as "live_assist".
+    "meeting_title" (the name of a meeting, read off its finished notes) goes as "meeting_notes": the server
+    already lets that through for Free (the same meeting's note_ref is not counted twice) and for Pro."""
+    if mode in ("live_rule", "live_people"):
+        return "live_assist"
+    return "meeting_notes" if mode == "meeting_title" else mode
 
 
 def run_managed_action(text, mode, token, source_lang="auto", target_lang="en",

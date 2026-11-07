@@ -242,6 +242,7 @@ import diarization
 import invite_context
 import meeting_speakers
 import meeting_store
+import meeting_titles
 import people_from_screen
 import rich_text
 import speaker_followup
@@ -304,6 +305,9 @@ QUIT_CHUNK_WAIT = 3.0      # s: pieces being transcribed at Quit may still land
 RECOVERED_NOTICE = ("Gusan was closed before this meeting was finished, so the transcript was "
                     "rebuilt from the saved recording.")
 # The AI stopped writing at its limit: the notes are kept up to their last whole line (actions.CutShort).
+# How long the notes wait for the meeting's new name (one short call); a slower engine still saves it, a moment later.
+TITLE_WAIT_S = 8.0
+
 NOTES_CUT_NOTICE = ("The notes stopped early, so the last topic may be missing. "
                     "Write them again from \u22ef \u203a Rewrite notes.")
 # ...and when it stopped before the Discussion, so that the rest of the notes (not one topic) is what is missing.
@@ -1746,7 +1750,15 @@ class MeetingCore:
                 fields["duration_sec"] = (self._duration_sec()
                                           + int(self._resume_prior_duration or 0))
             fields.update(extra)
-            if meeting_store.update_meta(self._meeting_dir, **fields) is None:
+
+            def change(meta):
+                # A name the notes page saved meanwhile (a rename, or the AI's title from these notes) is not undone
+                # by the session's older copy of it.
+                if (meta.get("title_source") in (meeting_titles.SOURCE_USER, meeting_titles.SOURCE_AUTO)
+                        and not meeting_titles.is_placeholder(meta.get("title"))):
+                    return {k: v for k, v in fields.items() if k != "title"}
+                return fields
+            if meeting_store.edit_meta(self._meeting_dir, change) is None:
                 logger.warning("Could not save meeting details")
         except Exception:
             logger.warning("Could not save meeting details", exc_info=True)
@@ -2381,11 +2393,44 @@ class MeetingCore:
             self._write_meta(**self._result_meta(
                 notes_engine=used, notes_engine_label=engine_label(used), notes_error=None))
             self._notes_saved.set()
+            self._name_meeting(notes, engine, engine_config, used)
             self._save_history_entry(notes)
 
             self.proc_signals.finished.emit(notes, "")
         except Exception as e:
             self.proc_signals.finished.emit("", str(e))
+
+    def _name_meeting(self, notes, engine, engine_config, used):
+        """Worker thread: a meeting that still has the app's placeholder name ("Meeting · Tue 14:30") gets one from the
+        notes just written - one short call to the engine that wrote them (a Free person's cloud note covers it: same
+        note_ref). Waits up to TITLE_WAIT_S so the name is in the History entry and the notes page; a slower engine
+        still saves it, a moment later. A title the person typed or the calendar gave is never touched. Never raises."""
+        try:
+            folder = self._meeting_dir
+            if not folder or used == actions.RULE_BASED_ID or not (notes or "").strip():
+                return                                       # no AI wrote these notes: no AI names them
+            if not meeting_titles.wants_title(meeting_store.load_meta(folder)):
+                return
+            lang, found, done = self._final_lang or "auto", [], threading.Event()
+
+            def work():
+                try:
+                    raw = actions.process(meeting_titles.title_input(notes), actions.ACTION_MEETING_TITLE,
+                                          source_lang=lang, target_lang="en", model=engine, config=engine_config)
+                    title = meeting_titles.clean_title(raw)
+                    if not title:
+                        meeting_store.mark_title_tried(folder)          # it answered, and not with a title: not again
+                    elif meeting_store.set_auto_title(folder, title):
+                        found.append(title)
+                except Exception:
+                    logger.info("Could not name the meeting from its notes", exc_info=True)   # tried again later
+                finally:
+                    done.set()
+            threading.Thread(target=work, daemon=True).start()
+            if done.wait(TITLE_WAIT_S) and found and self._meeting_dir == folder:
+                self._meeting_title = found[0]
+        except Exception:
+            logger.warning("Could not name the meeting", exc_info=True)
 
     def _save_plain_transcript_early(self, prior=""):
         """Worker thread: this run's transcript as it is now (a resumed meeting's

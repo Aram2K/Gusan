@@ -3858,6 +3858,11 @@ PENDING_NOTES_RETRY_MS = 60_000
 # A meeting started right after launch may run for hours: keep waiting for it
 # (one check a minute) rather than leave the notes for the launch after.
 PENDING_NOTES_MAX_TRIES = 240
+# Meetings saved before meetings were named ("Meeting · Tue 14:30") get a name from their notes, once a launch,
+# a minute after startup and only while nothing records or answers (meeting_title_pass.py).
+TITLE_PASS_DELAY_MS = 60_000
+TITLE_PASS_RETRY_MS = 120_000
+TITLE_PASS_MAX_TRIES = 30
 
 
 # ── Main PySide6 Application Controller ───────────────────────────────────────
@@ -4133,6 +4138,7 @@ class AppController(QObject):
         # Meeting notes a Quit left for later: written once startup work is done.
         self._pending_notes_queue = []
         QTimer.singleShot(PENDING_NOTES_DELAY_MS, self._write_pending_notes)
+        QTimer.singleShot(TITLE_PASS_DELAY_MS, self._name_old_meetings)
 
         # Setup System Tray
         self._setup_tray()
@@ -7779,6 +7785,59 @@ class AppController(QObject):
             if folders:
                 self._run_on_gui(self._start_pending_notes, folders)
         threading.Thread(target=_scan, daemon=True, name="gusan-pending-notes").start()
+
+    def _title_pass_busy(self):
+        """Something the person is doing (or the app is ending) that the quiet naming of old meetings gives way to."""
+        s = getattr(self, "meeting_session", None)
+        return bool(getattr(self, "_quitting", False) or self.is_rec or getattr(self, "_busy", False) is True
+                    or getattr(self, "_file_job_running", False) is True or getattr(self, "_live_session_id", None)
+                    or (s is not None and s.is_busy))
+
+    def _name_old_meetings(self, tries=0):
+        """Startup (+60 s): meetings saved before meetings were named get a name from their notes - one short call
+        each, newest first, up to 25 a launch, one pass at a time (meeting_title_pass.py says when it never runs: Privacy
+        mode, a Free person, a model on this computer). Waits while something records or converts, as the pending notes
+        do."""
+        if getattr(self, "_quitting", False) or getattr(self, "_title_pass_running", False):
+            return
+        s = getattr(self, "meeting_session", None)
+        if s is None:
+            return
+        if self._title_pass_busy():
+            if tries < TITLE_PASS_MAX_TRIES:
+                QTimer.singleShot(TITLE_PASS_RETRY_MS, lambda t=tries + 1: self._name_old_meetings(t))
+            return
+        try:
+            import meeting_session
+            import meeting_title_pass
+            engine, config = self._resolve_action_engine(action_model=meeting_session.effective_notes_engine(self))
+            if not meeting_title_pass.allowed_engine(engine, config):
+                return
+        except Exception:
+            logger.debug("Naming old meetings: could not pick an engine", exc_info=True)
+            return
+        self._title_pass_running = True
+
+        def work():
+            try:
+                named = meeting_title_pass.run(engine, config, should_stop=self._title_pass_busy)
+            finally:
+                self._title_pass_running = False
+            if named:
+                self._run_on_gui(self._old_meetings_named)
+        threading.Thread(target=work, daemon=True, name="gusan-title-pass").start()
+
+    def _old_meetings_named(self):
+        """GUI thread: some old meetings have names now - the Meetings list and Past sessions read the library again."""
+        mw = getattr(self, "main_win", None)
+        try:
+            for route, hook in (("meetings", "list_changed"), ("live_assistant", "reload_sessions")):
+                page = mw.page(route) if mw is not None else None
+                fn = getattr(page, hook, None)
+                if callable(fn):
+                    fn()
+        except Exception:
+            logger.debug("Refreshing the lists after naming old meetings failed", exc_info=True)
 
     def _start_pending_notes(self, folders):
         self._pending_notes_queue = list(folders)

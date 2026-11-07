@@ -73,6 +73,7 @@ from PySide6.QtWidgets import (QAbstractButton, QGraphicsDropShadowEffect, QGrid
                                QLayout, QLineEdit, QSizePolicy, QVBoxLayout, QWidget)
 
 import hotkeys
+import meeting_titles
 import rich_text
 from ui import theme
 from ui.components import Button, Card, Chip, IconButton, Keycaps, PageHeader, ProTag, clipboard, icons, label
@@ -414,7 +415,7 @@ def recent_items(entries, meetings, transcripts, active_dir=None, active_state=N
             status = "notes_ready" if m.get("has_notes") else "audio_only"
         dur = short_duration(m.get("duration_sec"))
         lab = "Meeting · " + dur if dur else "Meeting"
-        title = str(m.get("title") or "Meeting")
+        title = meeting_titles.display_title(m)          # "Meeting · Tue 14:30" -> a name from its notes
         # The Meetings page's on_open: folder=<dir> opens its notes; the one
         # being recorded opens the live view instead.
         busy = status in ("recording", "processing")
@@ -454,7 +455,7 @@ def load_sources():
         out.append([])
     try:
         import meeting_store
-        out.append(meeting_store.list_meetings())
+        out.append(meeting_store.list_meetings(preview=True))
     except Exception:
         logger.warning("list_meetings failed", exc_info=True)
         out.append([])

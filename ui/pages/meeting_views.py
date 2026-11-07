@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (QBoxLayout, QCheckBox, QFileDialog, QFrame, QGrap
                                QLabel, QMenu, QPlainTextEdit, QProgressBar, QScrollArea,
                                QSizePolicy, QStackedWidget, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
+import meeting_titles
 import rich_text
 from app_info import APP_NAME
 from ui import privacy_prompt, theme
@@ -2455,7 +2456,9 @@ def read_meeting(folder):
     # segments and the call's sound)? Two small files read here, off the window's thread: the page
     # offers "Identify speakers" for a meeting that still says "Them" only when it can.
     can_name_call = bool(meeting_speakers.refinable(folder)) if "Them:" in transcript else False
-    return {"folder": str(folder), "meta": meta, "title": str(meta.get("title") or "Untitled Meeting"),
+    # (a meeting still called "Meeting · Tue 14:30" is shown by a short name from its notes, as the list does)
+    title = meeting_titles.display_title({"title": meta.get("title"), "preview": meeting_store.summary_preview(notes)})
+    return {"folder": str(folder), "meta": meta, "title": title,
             "notes": notes, "transcript": transcript, "my_notes": my_notes, "parts": parts,
             "people": list(people), "screen_people": meeting_store.screen_people(meta),
             "started": started, "duration_sec": duration,
