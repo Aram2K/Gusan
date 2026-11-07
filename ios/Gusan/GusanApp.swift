@@ -16,7 +16,7 @@ struct GusanApp: App {
     var body: some Scene {
         WindowGroup {
             AppRootView().environmentObject(model).environmentObject(voice).environmentObject(agent).tint(Theme.accent)
-                .onAppear { voice.agentHandoff = { intent, context in Task { try? await agent.start(intent, context: context) } } }
+                .onAppear { voice.agentHandoff = { intent, context in try await agent.start(intent, context: context) } }
                 .onChange(of: scenePhase) { agent.setActive($0 == .active) }
                 .onChange(of: model.pendingTaskID) { if let id = $0 { agent.openTaskID = id; model.pendingTaskID = nil } }
                 .onOpenURL { if $0.host == "voice" { voice.handleURL($0) } else { model.handleURL($0) } }
