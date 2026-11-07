@@ -58,6 +58,8 @@ final class VoiceKeyController: NSObject {
     private var original = ""
     private var restoreUTF16 = 0
     private var undoContext: VoiceContext?
+    private var undoRecord: ReplacementUndo?
+    private var undoIsRedo = false
     private var undoSnapshot: VoiceContext?
     private var undoCaptureDeadline: TimeInterval = 0
     private var awaitingUndoContext = false
@@ -108,8 +110,17 @@ final class VoiceKeyController: NSObject {
         guard ProcessInfo.processInfo.systemUptime < undoCaptureDeadline else { awaitingUndoContext = false; undoSnapshot = nil; return }
         guard let inserted, let snapshot = undoSnapshot, let current = currentContext(), VoiceEdit.containsInsertedResult(inserted, context: current, snapshot: snapshot) else { return }
         undoContext = current; awaitingUndoContext = false
+        undoRecord = ReplacementUndo(original: original, replacement: inserted, snapshot: snapshot, restoreUTF16: restoreUTF16)
     }
-    func dismiss() { inserted = nil; localMessage = nil; clearReview(); undoButton.isHidden = true; panelDismissed = true; refresh() }
+    func insertedText(_ text: String, hasSelection: Bool) {
+        if awaitingUndoContext { documentDidChange(); awaitingUndoContext = false }
+        if hasSelection || undoRecord?.append(text) == false { undoRecord = nil; undoContext = nil }
+    }
+    func deletedText(hasSelection: Bool) {
+        if awaitingUndoContext { documentDidChange(); awaitingUndoContext = false }
+        if hasSelection || undoRecord?.deleteBackward() == false { undoRecord = nil; undoContext = nil }
+    }
+    func dismiss() { inserted = nil; undoRecord = nil; undoContext = nil; awaitingUndoContext = false; localMessage = nil; clearReview(); undoButton.isHidden = true; panelDismissed = true; refresh() }
     func disappear() { visible = false; observer = nil; timer?.invalidate(); timer = nil; closeResult() }
     private func currentContext() -> VoiceContext? {
         guard let proxy = host?.textDocumentProxy else { return nil }
@@ -219,7 +230,9 @@ final class VoiceKeyController: NSObject {
         let failed = status?.phase == .failed && status?.requestID == requestID && localMessage != nil
         let showPanel = !panelDismissed && (active || inserted != nil || failed)
         panel.update(phase: active ? phase : inserted != nil ? .done : .failed, message: localMessage ?? (inserted != nil ? "Done" : message ?? "Voice"), level: status?.level ?? 0, hasUndo: inserted != nil)
-        panel.undo.isEnabled = undoContext != nil && !awaitingUndoContext; undoButton.isEnabled = undoContext != nil && !awaitingUndoContext
+        let canUndo = currentContext().flatMap { undoRecord?.step(context: $0) } != nil && !awaitingUndoContext
+        panel.undo.isEnabled = canUndo; undoButton.isEnabled = canUndo
+        panel.undo.setTitle(undoIsRedo ? "Redo" : "↶ Undo", for: .normal); undoButton.setTitle(undoIsRedo ? "Redo" : "Undo", for: .normal)
         if showPanel != panelVisible { panelVisible = showPanel; onPanelVisibility?(showPanel) }
     }
     @objc private func stopVoice() {
@@ -265,7 +278,7 @@ final class VoiceKeyController: NSObject {
         undoSnapshot = currentContext()
         proxy.insertText(result)
         inserted = result; original = edit.original; restoreUTF16 = edit.restoreUTF16
-        undoContext = nil; undoCaptureDeadline = ProcessInfo.processInfo.systemUptime + 0.5; awaitingUndoContext = true
+        undoRecord = nil; undoIsRedo = false; undoContext = nil; undoCaptureDeadline = ProcessInfo.processInfo.systemUptime + 0.5; awaitingUndoContext = true
         documentDidChange(); undoButton.isHidden = false
         UIAccessibility.post(notification: .announcement, argument: "Done. Undo available.")
     }
@@ -317,18 +330,20 @@ final class VoiceKeyController: NSObject {
         undoSnapshot = expected
         proxy.insertText(result)
         inserted = result; original = ""; restoreUTF16 = 0
-        undoContext = nil; undoCaptureDeadline = ProcessInfo.processInfo.systemUptime + 0.5; awaitingUndoContext = true; documentDidChange()
+        undoRecord = nil; undoIsRedo = false; undoContext = nil; undoCaptureDeadline = ProcessInfo.processInfo.systemUptime + 0.5; awaitingUndoContext = true; documentDidChange()
         clearReview(); undoButton.isHidden = false; show("Done")
     }
     @objc private func undo() {
         if awaitingUndoContext { documentDidChange(); if awaitingUndoContext { return } }
-        guard let inserted, let expected = undoContext, currentContext() == expected, expected.selected.isEmpty, let proxy = host?.textDocumentProxy else {
+        guard let record = undoRecord, let current = currentContext(), let step = record.step(context: current), let proxy = host?.textDocumentProxy else {
             self.inserted = nil; undoButton.isHidden = true; show("Text changed. Undo is no longer available."); return
         }
-        for _ in inserted { proxy.deleteBackward() }
-        if !original.isEmpty { proxy.insertText(original) }
-        if restoreUTF16 != 0 { proxy.adjustTextPosition(byCharacterOffset: -restoreUTF16) }
-        self.inserted = nil; undoButton.isHidden = true; show("Undone")
+        if step.advanceUTF16 != 0 { proxy.adjustTextPosition(byCharacterOffset: step.advanceUTF16) }
+        for _ in 0..<step.deleteCount { proxy.deleteBackward() }
+        if !step.text.isEmpty { proxy.insertText(step.text) }
+        if step.restoreUTF16 != 0 { proxy.adjustTextPosition(byCharacterOffset: step.restoreUTF16) }
+        undoRecord = record.inverted(); undoIsRedo.toggle(); inserted = record.original
+        undoButton.isHidden = false; show(undoIsRedo ? "Undone" : "Redone")
         panelDismissed = true; refresh()
     }
     private func hostBundleID() -> String? {
