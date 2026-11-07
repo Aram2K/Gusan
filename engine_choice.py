@@ -158,13 +158,19 @@ MODEL_NOTES = {
 # (MODEL_NAMES below). The old Gemini ids are not sent to Gusan Cloud any more; a saved "cloud:best" /
 # "gemini-2.5-pro" is the best profile, "cloud" / "gemini-2.5-flash" / a provider the fast one.
 CLOUD_FAST, CLOUD_BEST = "fast", "best"
-CLOUD_PROFILES = (CLOUD_FAST, CLOUD_BEST)
-CLOUD_PROFILE_NAMES = {CLOUD_FAST: "Fast", CLOUD_BEST: "Best accuracy"}
-# What each profile tries, first to last (transcribe-proxy FAST_ORDER / BEST_ORDER, the first three; the server
-# may change the order without an app update, so the line says what it tries, not what it will use).
+CLOUD_GLADIA, CLOUD_GLADIA_FUSION = "gladia", "gladia-fusion"
+CLOUD_PROFILES = (CLOUD_FAST, CLOUD_BEST, CLOUD_GLADIA, CLOUD_GLADIA_FUSION)
+CLOUD_PROFILE_NAMES = {CLOUD_FAST: "Fast", CLOUD_BEST: "Best accuracy",
+                       CLOUD_GLADIA: "Gladia Solaria", CLOUD_GLADIA_FUSION: "Gladia Fusion"}
+# What each profile tries, first to last (transcribe-proxy FAST_ORDER / BEST_ORDER, the first three; the Gladia
+# profiles try their two Gladia models, then the BEST order; the server may change an order without an app update,
+# so the line says what it tries, not what it will use).
 CLOUD_PROFILE_NOTES = {CLOUD_FAST: "ElevenLabs Scribe v2 · Mistral Voxtral · OpenAI GPT Transcribe",
-                       CLOUD_BEST: "ElevenLabs Scribe v2 · OpenAI GPT Transcribe · GPT-4o Transcribe"}
-_PROFILE_ALIASES = {"best": CLOUD_BEST, "gemini-2.5-pro": CLOUD_BEST, "fast": CLOUD_FAST}
+                       CLOUD_BEST: "ElevenLabs Scribe v2 · OpenAI GPT Transcribe · GPT-4o Transcribe",
+                       CLOUD_GLADIA: "Gladia Solaria 3 · Gladia Solaria 1 · ElevenLabs Scribe v2",
+                       CLOUD_GLADIA_FUSION: "Gladia Solaria Fusion · Gladia Solaria 1 · ElevenLabs Scribe v2"}
+_PROFILE_ALIASES = {"best": CLOUD_BEST, "gemini-2.5-pro": CLOUD_BEST, "fast": CLOUD_FAST,
+                    "gladia": CLOUD_GLADIA, "gladia-fusion": CLOUD_GLADIA_FUSION}
 
 
 def cloud_profile(value, default=CLOUD_FAST):
@@ -397,9 +403,11 @@ FILE_KEY = "file_model"
 FILE_AUTO = "auto"
 FILE_AUTO_LABEL = "Automatic"
 FILE_CLOUD = "cloud"
+FILE_MANAGED_PROFILES = {FILE_CLOUD: CLOUD_BEST, "cloud:gladia": CLOUD_GLADIA,
+                         "cloud:gladia-fusion": CLOUD_GLADIA_FUSION}
 FILE_OWN_GOOGLE = "own:google"
 FILE_OWN_MISTRAL = "own:mistral"
-FILE_CLOUD_VALUES = (FILE_CLOUD, FILE_OWN_GOOGLE, FILE_OWN_MISTRAL)
+FILE_CLOUD_VALUES = (*FILE_MANAGED_PROFILES, FILE_OWN_GOOGLE, FILE_OWN_MISTRAL)
 # own-key value -> (backend, the cfg key it needs)
 _FILE_OWN = {FILE_OWN_GOOGLE: ("google", "google_api_key"),
              FILE_OWN_MISTRAL: ("mistral", "mistral_api_key")}
@@ -546,8 +554,12 @@ MODEL_NAMES = {
     "scribe_v2": "ElevenLabs Scribe v2", "gpt-transcribe": "GPT Transcribe",
     "gpt-4o-transcribe": "GPT-4o Transcribe", "gpt-4o-mini-transcribe": "GPT-4o mini Transcribe",
     "whisper-1": "Whisper (OpenAI)",
+    "solaria-1": "Gladia Solaria-1", "solaria-3": "Gladia Solaria-3",
+    "solaria-fusion": "Gladia Solaria Fusion",
     # Gusan Cloud's two profiles (a job that asked for one and has no answer yet).
     CLOUD_FAST: CLOUD_PROFILE_NAMES[CLOUD_FAST], CLOUD_BEST: CLOUD_PROFILE_NAMES[CLOUD_BEST],
+    CLOUD_GLADIA: CLOUD_PROFILE_NAMES[CLOUD_GLADIA],
+    CLOUD_GLADIA_FUSION: CLOUD_PROFILE_NAMES[CLOUD_GLADIA_FUSION],
 }
 
 
@@ -768,6 +780,8 @@ def set_smart_speech(app_or_cfg, value, *, pro=None, downloaded=None, turn_off_p
 # "own:mistral" / "own:google" (your own key). Qt-free.
 DICTATION_CLOUD = "cloud"
 DICTATION_CLOUD_BEST = "cloud:best"
+DICTATION_CLOUD_PROFILES = {DICTATION_CLOUD: CLOUD_FAST, DICTATION_CLOUD_BEST: CLOUD_BEST,
+                            "cloud:gladia": CLOUD_GLADIA, "cloud:gladia-fusion": CLOUD_GLADIA_FUSION}
 DICTATION_OWN_MISTRAL, DICTATION_OWN_GOOGLE = "own:mistral", "own:google"
 DICTATION_OWN = {DICTATION_OWN_MISTRAL: "mistral", DICTATION_OWN_GOOGLE: "google"}
 # Gusan Cloud speech for dictation and meetings: its "fast" or "best" profile (main.AudioRecorder
@@ -784,7 +798,8 @@ def dictation_speech_value(cfg):
     cfg = cfg or {}
     choice = speech_choice(cfg)
     if choice == "cloud":
-        return DICTATION_CLOUD_BEST if cloud_profile(cfg.get(SPEECH_PROFILE_KEY)) == CLOUD_BEST else DICTATION_CLOUD
+        profile = cloud_profile(cfg.get(SPEECH_PROFILE_KEY))
+        return next(value for value, p in DICTATION_CLOUD_PROFILES.items() if p == profile)
     if choice == "own_key":
         entry = _entry(cfg, cfg.get("speech_key_id"))
         if entry is not None and SPEECH_KEY_PROVIDERS.get(entry.get("provider")) == cfg.get("backend"):
@@ -796,7 +811,7 @@ def dictation_speech_value(cfg):
 def dictation_speech_source(value):
     """"local" | "cloud" | "own_key" for a picker value."""
     value = str(value or "")
-    if value in (DICTATION_CLOUD, DICTATION_CLOUD_BEST):
+    if value in DICTATION_CLOUD_PROFILES:
         return "cloud"
     if value in DICTATION_OWN or value.startswith(KEY_VALUE_PREFIX):
         return "own_key"
@@ -816,7 +831,7 @@ def dictation_speech_rows(cfg=None, pro=None, source=None):
     if source in (None, "local"):
         rows += _local_rows()
     if source in (None, "cloud"):
-        for value, profile in ((DICTATION_CLOUD, CLOUD_FAST), (DICTATION_CLOUD_BEST, CLOUD_BEST)):
+        for value, profile in DICTATION_CLOUD_PROFILES.items():
             name = CLOUD_PROFILE_NAMES[profile]
             rows.append(speech_row(value, name, "cloud", GROUP_GUSAN_CLOUD,
                                    note=CLOUD_PROFILE_NOTES[profile], pro=True, model=name,
@@ -849,7 +864,7 @@ def set_dictation_speech(app_or_cfg, value, *, pro=None, downloaded=None, turn_o
     if source == "cloud":
         res = set_speech_source(app_or_cfg, "cloud", pro=pro, turn_off_privacy=turn_off_privacy)
         if res.get("ok"):
-            res["changes"][SPEECH_PROFILE_KEY] = CLOUD_BEST if value == DICTATION_CLOUD_BEST else CLOUD_FAST
+            res["changes"][SPEECH_PROFILE_KEY] = DICTATION_CLOUD_PROFILES[value]
         return res
     if value.startswith(KEY_VALUE_PREFIX):
         # A saved key: it goes into the slot speech reads (mistral_api_key / google_api_key).
@@ -1575,8 +1590,8 @@ def file_model_id(cfg, value=None):
     "file_model". Pro, Privacy mode and keys are file_session's business."""
     cfg = cfg or {}
     value = str((cfg.get(FILE_KEY) if value is None else value) or "").strip()
-    if value == FILE_CLOUD:
-        return CLOUD_BEST
+    if value in FILE_MANAGED_PROFILES:
+        return FILE_MANAGED_PROFILES[value]
     if value == FILE_OWN_GOOGLE:
         return str(cfg.get("google_stt_model") or "").strip() or GOOGLE_STT_DEFAULT
     if value == FILE_OWN_MISTRAL:
@@ -1599,9 +1614,9 @@ def file_session(cfg, pro, language=None, signed_in=None):
     cfg = cfg or {}
     value = str(cfg.get(FILE_KEY) or "").strip()
     private = bool(cfg.get("privacy_mode"))
-    if value == FILE_CLOUD:
+    if value in FILE_MANAGED_PROFILES:
         if pro and not private:
-            return ("managed", CLOUD_BEST)
+            return ("managed", FILE_MANAGED_PROFILES[value])
         value = FILE_AUTO
     elif value in _FILE_OWN:
         backend, field = _FILE_OWN[value]
@@ -1624,10 +1639,10 @@ def file_session(cfg, pro, language=None, signed_in=None):
 def _file_cloud_engine(cfg, value, pro):
     """speech_engine's dict for a cloud Audio to text value, with model_id the model it runs (Gusan
     Cloud: the profile it asks for). The caller checks Pro, Privacy mode and the key."""
-    backend = "managed" if value == FILE_CLOUD else _FILE_OWN[value][0]
+    backend = "managed" if value in FILE_MANAGED_PROFILES else _FILE_OWN[value][0]
     mid = file_model_id(cfg, value)
     if backend == "managed":
-        return _cloud_profile_engine("audio_to_text", CLOUD_BEST, seen=False)
+        return _cloud_profile_engine("audio_to_text", mid, seen=False)
     over = {"backend": backend, "privacy_mode": False}
     if backend == "google":
         over["google_stt_model"] = mid
@@ -1662,10 +1677,11 @@ def file_rows(cfg=None, pro=None, language=None, signed_in=None):
                                       show_pro=pro_chip(pro))
     rows[0]["kind"] = "auto"
     rows += _local_rows()
-    name = CLOUD_PROFILE_NAMES[CLOUD_BEST]
-    rows.append(speech_row(FILE_CLOUD, name, "cloud", GROUP_GUSAN_CLOUD,
-                           note=CLOUD_PROFILE_NOTES[CLOUD_BEST], pro=True, model=name,
-                           show_pro=pro_chip(pro)))
+    for value, profile in FILE_MANAGED_PROFILES.items():
+        name = CLOUD_PROFILE_NAMES[profile]
+        rows.append(speech_row(value, name, "cloud", GROUP_GUSAN_CLOUD,
+                               note=CLOUD_PROFILE_NOTES[profile], pro=True, model=name,
+                               show_pro=pro_chip(pro)))
     for value, (_backend, field) in _FILE_OWN.items():
         if _has_key(cfg, field):
             res = _file_cloud_engine(cfg, value, False)
@@ -1696,7 +1712,7 @@ def set_file_model(app_or_cfg, value, *, pro=None):
     if value in FILE_CLOUD_VALUES:
         if cfg.get("privacy_mode"):
             return _outcome(problem="privacy_mode")
-        if value == FILE_CLOUD and not pro:
+        if value in FILE_MANAGED_PROFILES and not pro:
             return _outcome(problem="pro", upsell=UPSELL_SPEECH)
         if value in _FILE_OWN and not _has_key(cfg, _FILE_OWN[value][1]):
             return _outcome(problem="needs_key")
@@ -1831,7 +1847,7 @@ def file_engine(cfg, file_model=None, pro=False, language=None, signed_in=None):
     cfg = cfg or {}
     value = str((cfg.get(FILE_KEY) if file_model is None else file_model) or "").strip()
     backend, model = file_session(dict(cfg, **{FILE_KEY: value}), pro, language, signed_in)
-    picked_cloud = ((value == FILE_CLOUD and backend == "managed")
+    picked_cloud = ((value in FILE_MANAGED_PROFILES and backend == "managed")
                     or (value in _FILE_OWN and backend == _FILE_OWN[value][0]))
     if backend != "local":
         if picked_cloud:

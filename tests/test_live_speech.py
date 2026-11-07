@@ -117,7 +117,7 @@ class TestValues(unittest.TestCase):
                          ("gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash-preview"))
         for mid in ec.GEMINI_SPEECH_MODELS:                       # the Gemini ids are for YOUR OWN key only
             self.assertIn(mid, ec.MODEL_NAMES)
-        self.assertEqual(ec.CLOUD_PROFILES, ("fast", "best"))     # what Gusan Cloud is asked for
+        self.assertEqual(ec.CLOUD_PROFILES, ("fast", "best", "gladia", "gladia-fusion"))
         for word in ec.CLOUD_PROFILES:
             self.assertIn(word, ec.MODEL_NAMES)
         self.assertEqual(ec.CLOUD_SPEECH_IDS, {"gemini": "fast", "mistral": "fast"})
@@ -949,6 +949,7 @@ class TestProxySource(unittest.TestCase):
         src = _source()
         cat = self._catalog(src)
         self.assertEqual(cat, {
+            "solaria-1": "gladia", "solaria-3": "gladia", "solaria-fusion": "gladia",
             "scribe_v2": "elevenlabs",
             "voxtral-mini-latest": "mistral", "gpt-transcribe": "openai", "gpt-4o-transcribe": "openai",
             "gpt-4o-mini-transcribe": "openai", "whisper-1": "openai", "gemini-3.8-flash": "gemini",
@@ -992,11 +993,11 @@ class TestProxySource(unittest.TestCase):
     def test_every_attempt_has_a_timeout(self):
         src = _source()
         code = "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("//"))
-        self.assertEqual(code.count("fetch("), 4)                       # gemini, mistral, openai, elevenlabs
+        self.assertEqual(code.count("fetch("), 8)                       # includes Gladia upload, init, poll, delete
         # gemini and mistral each have their own timer; OpenAI and ElevenLabs make ONE and share it with
         # their language retry (a refused language cannot add a second timeout).
         self.assertEqual(code.count("signal: AbortSignal.timeout(timeoutMs)"), 2)
-        self.assertEqual(code.count("const signal = AbortSignal.timeout(timeoutMs);"), 2)
+        self.assertEqual(code.count("const signal = AbortSignal.timeout(timeoutMs);"), 3)
         self.assertIn("Math.min(60000, Math.max(3500, 2500 + seconds * 400))", src)
         self.assertIn("(audioB64.length * 0.75) / 32000", src)
         self.assertIn('env("STT_TIMEOUT_MS")', src)
@@ -1030,7 +1031,7 @@ class TestProxySource(unittest.TestCase):
         # the key only ever goes into the xi-api-key header, never into a log line or an answer
         self.assertEqual(code.count('engineKey("elevenlabs")'), 1)
         # no redirect is followed with the key in a custom header (fetch keeps it across origins)
-        self.assertEqual(code.count('redirect: "error"'), 1)
+        self.assertEqual(code.count('redirect: "error"'), 5)
 
     def test_it_says_what_ran(self):
         src = _source()

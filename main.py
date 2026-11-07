@@ -3616,7 +3616,7 @@ class AudioRecorder:
                 live_model if live_model is not None else cfg.get(engine_choice.SPEECH_PROFILE_KEY))
             if live_model is not None or provider not in ("gemini", "mistral"):
                 provider = "gemini"
-            if asked_model == engine_choice.CLOUD_BEST:
+            if asked_model != engine_choice.CLOUD_FAST:
                 provider = "gemini"
             # Custom vocabulary for the proxy to fold into its prompt. Older
             # proxy deployments ignore unknown fields, so this is a no-op until

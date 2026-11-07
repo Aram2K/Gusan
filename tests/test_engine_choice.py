@@ -206,7 +206,7 @@ class TestAudioToTextModels(unittest.TestCase):
     def test_constants(self):
         self.assertEqual((ec.FILE_KEY, ec.FILE_AUTO, ec.FILE_CLOUD, ec.FILE_OWN_GOOGLE, ec.FILE_OWN_MISTRAL),
                          ("file_model", "auto", "cloud", "own:google", "own:mistral"))
-        self.assertEqual(ec.FILE_CLOUD_VALUES, ("cloud", "own:google", "own:mistral"))
+        self.assertEqual(ec.FILE_CLOUD_VALUES, ("cloud", "cloud:gladia", "cloud:gladia-fusion", "own:google", "own:mistral"))
         self.assertFalse(set(ec.FILE_CLOUD_VALUES) & set(ec.SPEECH_MODELS))
 
     def test_session_matrix(self):
@@ -312,23 +312,23 @@ class TestAudioToTextModels(unittest.TestCase):
     def test_choices(self):
         choices = ec.file_choices()
         self.assertEqual(choices[0], ("auto", "Automatic", "Automatic · Local", False))
-        self.assertEqual([c[0] for c in choices[1:-1]], list(ec.SPEECH_MODELS))
+        self.assertEqual([c[0] for c in choices[1:-3]], list(ec.SPEECH_MODELS))
         # a REAL model name and where it runs - never a plain word, never "Gusan Cloud" as a model
         self.assertIn(("small", "Whisper Small", "Whisper Small · Local", False), choices)
-        self.assertTrue(all(not c[3] for c in choices[:-1]))
+        self.assertTrue(all(not c[3] for c in choices[:-3]))
         # Gusan Cloud is a heading and a PROFILE: its server chooses the model
-        self.assertEqual(choices[-1], ("cloud", "Best accuracy", "Best accuracy · Cloud · Pro", True))
+        self.assertEqual(choices[-3], ("cloud", "Best accuracy", "Best accuracy · Cloud · Pro", True))
         self.assertEqual([c[1] for c in choices],
                          ["Automatic", "Whisper Tiny", "Whisper Base", "Whisper Small", "Whisper Medium",
-                          "Whisper Large v3 Turbo", "Whisper Large v3", "Best accuracy"])
-        self.assertEqual(ec.file_choices({"managed_provider": "mistral"})[-1][2],
+                          "Whisper Large v3 Turbo", "Whisper Large v3", "Best accuracy", "Gladia Solaria", "Gladia Fusion"])
+        self.assertEqual(ec.file_choices({"managed_provider": "mistral"})[-3][2],
                          "Best accuracy · Cloud · Pro")
 
     def test_rows_group_the_models_and_wear_tags(self):
         rows = ec.file_rows(BOTH)
         self.assertEqual([r["group"] for r in rows],
                          [""] + [ec.GROUP_THIS_COMPUTER] * len(ec.SPEECH_MODELS)
-                         + [ec.GROUP_GUSAN_CLOUD, ec.GROUP_OWN_KEY, ec.GROUP_OWN_KEY])
+                         + [ec.GROUP_GUSAN_CLOUD] * 3 + [ec.GROUP_OWN_KEY, ec.GROUP_OWN_KEY])
         by = {r["value"]: r for r in rows}
         self.assertEqual(by["small"]["tags"], ("local",))
         self.assertEqual(by["small"]["note"], "Balanced")
@@ -386,7 +386,7 @@ class TestAudioToTextModels(unittest.TestCase):
         self.assertEqual(own(GKEY), [google])
         self.assertEqual(own(MKEY), [mistral])
         self.assertEqual(own(BOTH), [google, mistral])
-        self.assertEqual(ec.file_choices(BOTH)[-3][0], "cloud")             # Gusan Cloud, then own keys
+        self.assertEqual(ec.file_choices(BOTH)[-5][0], "cloud")             # Gusan Cloud, then own keys
         # The row names the model that will really run (same names as Dictation's).
         cfg = dict(BOTH, google_stt_model="gemini-2.5-pro", mistral_stt_model="voxtral-mini-2602")
         self.assertEqual([c[2] for c in own(cfg)],
@@ -396,7 +396,7 @@ class TestAudioToTextModels(unittest.TestCase):
                          "Gemini 2.5 Flash · your Google key · Cloud")
         # Privacy mode keeps them listed (the page greys them out), with the real names.
         self.assertEqual(own(dict(BOTH, privacy_mode=True)), [google, mistral])
-        self.assertEqual(ec.file_choices(dict(BOTH, privacy_mode=True))[-3][2],
+        self.assertEqual(ec.file_choices(dict(BOTH, privacy_mode=True))[-5][2],
                          "Best accuracy · Cloud · Pro")
 
     def test_engine_gusan_cloud(self):
@@ -801,7 +801,7 @@ class TestDictationSpeechPicker(unittest.TestCase):
         rows = ec.dictation_speech_rows(self.KEYS, pro=False)
         values = [r["value"] for r in rows]
         self.assertEqual(values[:6], ["tiny", "base", "small", "medium", "large-v3-turbo", "large-v3"])
-        self.assertEqual(values[-3:], ["cloud", "cloud:best", "key:k1"])      # only a key that can transcribe
+        self.assertEqual(values[-5:], ["cloud", "cloud:best", "cloud:gladia", "cloud:gladia-fusion", "key:k1"])
         cloud = rows[values.index("cloud:best")]
         self.assertEqual((cloud["group"], cloud["tags"], cloud["title"]),
                          (ec.GROUP_GUSAN_CLOUD, ("cloud", "pro"), "Best accuracy"))
@@ -809,7 +809,8 @@ class TestDictationSpeechPicker(unittest.TestCase):
         self.assertEqual((rows[0]["speed"], rows[0]["accuracy"]), (5, 2))       # the dots of Whisper Tiny
 
     def test_a_source_keeps_its_group_only(self):
-        self.assertEqual([r["value"] for r in ec.dictation_speech_rows({}, source="cloud")], ["cloud", "cloud:best"])
+        self.assertEqual([r["value"] for r in ec.dictation_speech_rows({}, source="cloud")],
+                         ["cloud", "cloud:best", "cloud:gladia", "cloud:gladia-fusion"])
         self.assertEqual(ec.dictation_speech_rows({}, source="own_key"), [])   # no saved key: nothing to list
 
     def test_value_follows_the_settings(self):

@@ -90,13 +90,40 @@ class FakeAI:
                 on_text(acc)
             time.sleep(step.get("gap", 0.06))
         if step["block"]:
-            self.gate.wait(8)
+            self.gate.wait()
             if cancelled and cancelled():
                 raise meeting_chat.Cancelled(acc)
         if step["error"]:
             raise meeting_chat.ChatError(*step["error"])
         cov = step["coverage"] or meeting_chat.Coverage()
         return meeting_chat.Answer(step["text"], cov, self.label, self.kind, 1.5, 0.3)
+
+
+def test_fake_ai_blocked_answer_waits_for_release(monkeypatch):
+    fake = FakeAI().push("Done.", block=True)
+    waiting = threading.Event()
+    wait = fake.gate.wait
+    timeouts, answers = [], []
+
+    def wait_for_release(timeout=None):
+        timeouts.append(timeout)
+        waiting.set()
+        return wait(timeout)
+
+    monkeypatch.setattr(fake.gate, "wait", wait_for_release)
+    worker = threading.Thread(target=lambda: answers.append(fake(None, "Q?", [], cfg={}, pro=True, resolve=None)))
+    worker.start()
+    try:
+        assert waiting.wait(20)
+        assert timeouts == [None]
+        assert answers == []
+        fake.release()
+        worker.join(20)
+        assert not worker.is_alive()
+        assert answers[0].text == "Done."
+    finally:
+        fake.release()
+        worker.join(20)
 
 
 @pytest.fixture
