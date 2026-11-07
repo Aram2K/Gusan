@@ -1,6 +1,7 @@
 import json
 import re
 import threading
+from urllib.parse import unquote, urlsplit
 from collections.abc import Mapping
 
 import requests
@@ -669,9 +670,30 @@ def server_mode(mode):
     return "live_assist" if mode in ("live_rule", "live_people") else mode
 
 
+def parse_web_sources(value):
+    try:
+        rows = json.loads(unquote(value))
+        if not isinstance(rows, list):
+            return []
+        sources = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            url = str(row.get("url") or "").strip()
+            parsed = urlsplit(url)
+            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                continue
+            sources.append({"title": str(row.get("title") or "").strip()[:200], "url": url})
+            if len(sources) == 5:
+                break
+        return sources
+    except (ValueError, TypeError):
+        return []
+
+
 def run_managed_action(text, mode, token, source_lang="auto", target_lang="en",
                        vocab_block="", image_b64=None, image_status=None,
-                       session_id="", note_ref="", prefer=""):
+                       session_id="", note_ref="", prefer="", web_search=False, config=None, info=None):
     """Pro Smart Actions via the server (no BYO key): we build the messages here
     and the edge function runs them on the founder's keys. ``mode`` picks the
     model there: Smart Actions go to DeepSeek V4.1 Flash, meeting notes and the
@@ -689,6 +711,8 @@ def run_managed_action(text, mode, token, source_lang="auto", target_lang="en",
     def _post(msgs):
         body = {"messages": msgs, "max_tokens": _max_tokens_for(mode, text), "mode": server_mode(mode)}
         body.update(_managed_extra(session_id, note_ref, prefer))
+        if web_search and not (config or {}).get("privacy_mode") and mode in ("live_assist", "meeting_chat"):
+            body["web_search"] = True
         return requests.post(
             SMART_ACTION_URL,
             json=body,
@@ -703,6 +727,8 @@ def run_managed_action(text, mode, token, source_lang="auto", target_lang="en",
     except requests.RequestException as e:
         raise ActionAPIError(f"Network error reaching Smart Actions: {e}")
     _raise_for_managed_status(resp)
+    if info is not None and (web_search or "sources" in info or resp.headers.get("X-Web-Sources")):
+        info["sources"] = parse_web_sources(resp.headers.get("X-Web-Sources"))
     raw = _json_or_error(resp).get("text") or ""
     text = strip_think(raw, _answer_family(resp) in ("deepseek", "qwen"))
     if raw.strip() and not text:
@@ -752,7 +778,8 @@ def _raise_for_managed_status(resp):
 
 def run_managed_action_stream(text, mode, token, on_token, source_lang="auto",
                               target_lang="en", vocab_block="", image_b64=None,
-                              image_status=None, session_id="", note_ref="", info=None, prefer=""):
+                              image_status=None, session_id="", note_ref="", info=None, prefer="",
+                              web_search=False, config=None):
     """Streaming Pro Smart Actions: the server relays the model's event stream,
     so the first words show as soon as they are generated. A server that
     predates streaming answers with plain JSON, delivered in one piece.
@@ -768,6 +795,8 @@ def run_managed_action_stream(text, mode, token, on_token, source_lang="auto",
         body = {"messages": msgs, "max_tokens": _max_tokens_for(mode, text),
                 "mode": server_mode(mode), "stream": True}
         body.update(_managed_extra(session_id, note_ref, prefer))
+        if web_search and not (config or {}).get("privacy_mode") and mode in ("live_assist", "meeting_chat"):
+            body["web_search"] = True
         return requests.post(
             SMART_ACTION_URL,
             json=body,
@@ -783,6 +812,8 @@ def run_managed_action_stream(text, mode, token, on_token, source_lang="auto",
     except requests.RequestException as e:
         raise ActionAPIError(f"Network error reaching Smart Actions: {e}")
     _raise_for_managed_status(resp)
+    if info is not None and (web_search or "sources" in info or resp.headers.get("X-Web-Sources")):
+        info["sources"] = parse_web_sources(resp.headers.get("X-Web-Sources"))
     template_opened = _answer_family(resp) in ("deepseek", "qwen")
     if "text/event-stream" not in (resp.headers.get("Content-Type") or ""):
         out = strip_think(_json_or_error(resp).get("text") or "", template_opened)

@@ -1761,6 +1761,9 @@ class LiveAssistantPage(QWidget):
         self.auto_toggle = Toggle("Answer questions by itself", bool(cfg.get("live_assist_auto_answer", True)))
         self.auto_toggle.toggled.connect(lambda on: self._apply_bool("live_assist_auto_answer", on, self.auto_toggle))
         rail.add_row(SettingRow("Answer questions by itself", self.auto_toggle))
+        self.web_toggle = Toggle("Search the web for answers (Gusan Cloud)", bool(cfg.get("live_assist_web_search", True)))
+        self.web_toggle.toggled.connect(lambda on: self._apply_bool("live_assist_web_search", on, self.web_toggle))
+        rail.add_row(SettingRow("Search the web for answers (Gusan Cloud)", self.web_toggle))
 
         self.screen_toggle = Toggle("Let it see my screen", bool(cfg.get("live_assist_screen_auto", True)))
         self.screen_toggle.toggled.connect(lambda on: self._apply_bool("live_assist_screen_auto", on, self.screen_toggle))
@@ -1978,7 +1981,7 @@ class LiveAssistantPage(QWidget):
         self._wanted_private = bool(cfg.get("live_assist_private", True))
         self.picture.set_owner(_first_name(self.app))
         for key in ("live_assist_private", "live_assist_hotkey", "live_assist_auto_answer",
-                    "live_assist_screen_auto", "live_assist_language", "live_assist_output_language",
+                    "live_assist_screen_auto", "live_assist_web_search", "live_assist_language", "live_assist_output_language",
                     "live_assist_theme", "live_assist_opacity", "live_assist_context",
                     live_rules.RULES_KEY, live_rules.DECLINED_KEY):
             self._sync_key(key, refresh_writer=False)
@@ -2011,6 +2014,10 @@ class LiveAssistantPage(QWidget):
             self.or_label.setVisible(has)
         elif key == "live_assist_auto_answer":
             self._set_checked(self.auto_toggle, bool(val(True)))
+        elif key == "live_assist_web_search":
+            privacy = bool(self._cfg_dict().get("privacy_mode"))
+            self.web_toggle.setEnabled(not privacy)
+            self._set_checked(self.web_toggle, not privacy and bool(val(True)))
         elif key == "live_assist_screen_auto":
             self._set_checked(self.screen_toggle, bool(val(True)))
         elif key == "live_assist_language":
@@ -2044,6 +2051,8 @@ class LiveAssistantPage(QWidget):
         elif key == live_rules.DECLINED_KEY:
             self.context_card.refresh_rules(declined=str(val("") or ""))
         elif refresh_writer and not key.startswith("live_assist_") or key == "live_assist_writer":
+            if key == "privacy_mode":
+                self._sync_key("live_assist_web_search", refresh_writer=False)
             # privacy_mode, action_model, keys, plan...: who writes the answers may have changed.
             self._refresh_writer()
 

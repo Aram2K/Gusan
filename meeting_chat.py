@@ -811,6 +811,7 @@ class Answer:
     first_word_seconds: object = None
     dropped: bool = False               # the connection ended before the answer did: it may be cut short
     cut: bool = False                   # the engine stopped at the longest answer it may write
+    sources: list = field(default_factory=list)
 
 
 def ask(folder, question, history, *, cfg, pro, resolve, on_text=None, cancelled=None, stream=None,
@@ -863,6 +864,9 @@ def ask(folder, question, history, *, cfg, pro, resolve, on_text=None, cancelled
     if choice.problem:
         raise ChatError(choice.problem, problem_text(choice.problem, choice))
     local = choice.kind == "local"
+    answer_info = {}
+    config["_answer_info"] = answer_info
+    config["_web_search"] = choice.kind == "cloud" and cfg.get("live_assist_web_search", True) and not cfg.get("privacy_mode")
     budget = local_budget() if local else (BUDGET_OWN_KEY if choice.kind == "own_key" else BUDGET_CLOUD)
     retries = RETRIES_OWN_KEY if choice.kind == "own_key" else RETRIES      # (its window is anybody's guess)
     attempt = 0
@@ -903,7 +907,8 @@ def ask(folder, question, history, *, cfg, pro, resolve, on_text=None, cancelled
     first = round(buf.first_at - started, 2) if buf.first_at else None
     return Answer(text=text, coverage=plan.coverage, engine_label=choice.label, kind=choice.kind,
                   seconds=round(now - started, 2), first_word_seconds=first,
-                  dropped=dropped, cut=bool(end.get("cut")) and not dropped)
+                  dropped=dropped, cut=bool(end.get("cut")) and not dropped,
+                  sources=answer_info.get("sources", []))
 
 
 # ── the file ─────────────────────────────────────────────────────────────────

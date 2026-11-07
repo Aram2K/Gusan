@@ -162,6 +162,7 @@ from live_context import others_of, start_session
 import invite_context
 import live_docs
 import live_rules
+from web_sources import sources_html
 import people_from_screen
 from rich_text import streaming_markdown  # noqa: F401  (it moved to rich_text: the meeting chat renders streams too)
 from ui import glass, live_docs_ui
@@ -1667,6 +1668,11 @@ class LiveAssistOverlay(QWidget):
         self.txt_suggestion.setObjectName("laCard")
         self.txt_suggestion.setPlaceholderText(ANSWER_PLACEHOLDER)
         body.addWidget(self.txt_suggestion, 1)
+        self.answer_sources = QLabel("", self.body)
+        self.answer_sources.setWordWrap(True)
+        self.answer_sources.setOpenExternalLinks(True)
+        self.answer_sources.hide()
+        body.addWidget(self.answer_sources)
 
         # What the answers can read: the documents the user added on the Live Assistant page
         # (hidden while there are none). A click opens the list to choose from.
@@ -3962,6 +3968,8 @@ class LiveAssistOverlay(QWidget):
         self._suggest_question = question or last_question(self._live_text)
         self._last_attached_screen = bool(image_b64)
         self._suggesting = True
+        self.answer_sources.clear()
+        self.answer_sources.hide()
         self._suggest_started = time.time()
         self._first_token_at = 0.0
         self._text_since_suggest = 0
@@ -4033,6 +4041,9 @@ class LiveAssistOverlay(QWidget):
             kind = actions.ACTION_MODELS.get(engine, {}).get("kind")
             cfg = dict(cfg or {})
             route = live_docs.route_id(kind, engine, cfg)   # a yes for the documents is for this service
+            answer_info = {}
+            cfg["_answer_info"] = answer_info
+            cfg["_web_search"] = kind == "managed" and cfg.get("live_assist_web_search", True) and not cfg.get("privacy_mode")
             doc_images = []                        # pictures from the user's documents
             if ctx_args is not None and any(history_docs):
                 try:
@@ -4109,6 +4120,8 @@ class LiveAssistOverlay(QWidget):
 
             text = actions.process_stream(context, actions.ACTION_LIVE_ASSIST, on_token,
                                           model=engine, config=cfg)
+            if gen == self._gen:
+                self._web_sources = (gen, answer_info.get("sources", []))
             if image_status.get("dropped"):
                 # The engine can't read images: the answer came from the
                 # conversation alone - don't claim "screen seen".
@@ -4177,6 +4190,10 @@ class LiveAssistOverlay(QWidget):
             return      # the answer to an older question - superseded
         self._suggesting = False
         self._stop_stream_render()          # the final answer replaces the streamed one
+        source_gen, sources = getattr(self, "_web_sources", (None, []))
+        html = sources_html(sources) if not error and source_gen == self._gen else ""
+        self.answer_sources.setText(html)
+        self.answer_sources.setVisible(bool(html))
         self.input_ask.setPlaceholderText(ASK_PLACEHOLDER)
         sent, self._sent_question = getattr(self, "_sent_question", ""), ""
         self._last_suggest_at = time.time()
