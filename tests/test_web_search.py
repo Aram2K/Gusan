@@ -105,6 +105,14 @@ def test_server_contract():
     assert 'liveData.test(q)' in src
 
 
+def test_meeting_chat_baseline_has_no_web_exception():
+    messages = action_api.build_messages("<question>Who is the current CEO of OpenAI?</question>", "meeting_chat")
+    assert "Answer only from this meeting." in messages[0]["content"]
+    assert "Never guess or invent names, numbers, dates or quotes." in messages[0]["content"]
+    assert "Linkup" not in messages[0]["content"]
+    assert "web results" not in messages[0]["content"]
+
+
 def test_heuristic_runtime(tmp_path):
     deno = shutil.which("deno")
     if not deno:
@@ -156,29 +164,42 @@ def test_server_linkup_runtime(tmp_path, stream, parts, keys):
     const text = r.empty''').replace('family: res.headers.get("X-Answer-Family"),',
         'family: res.headers.get("X-Answer-Family"), sources: res.headers.get("X-Web-Sources"),')
     harness = harness.replace("globalThis.Deno =", "globalThis.__testDeno =")
-    (tmp_path / "harness.mjs").write_text('import process from "node:process";\n' + harness)
     msg = [{"role": "user", "content": [{"type": "text", "text": "Private meeting notes\nUser's question: latest Acme news?"},
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}}]}]
     if not parts:
         msg[0]["content"] = msg[0]["content"][0]["text"]
+    meeting_messages = action_api.build_messages(
+        "Private transcript\n<question>Who is the current CEO of OpenAI?</question>", "meeting_chat")
     requests = [req("live_assist", stream=stream, messages=msg, web_search=True),
                 req("live_assist", stream=stream, messages=msg),
                 req("live_assist", stream=stream, messages=msg, web_search=True),
                 req("live_assist", stream=stream, messages=[{"role": "user", "content": "Private latest news in transcript"}], web_search=True),
                 req("meeting_chat", stream=stream, messages=[{"role": "user", "content": "Private latest news in transcript"}], web_search=True),
                 req("live_assist", stream=stream, messages=[{"role": "user", "content": "Private transcript and docs"}], web_search=True, web_query=" latest Acme news? "),
-                req("meeting_chat", stream=stream, messages=[{"role": "user", "content": "Private transcript\n<question>latest Acme news?</question>"}], web_search=True)]
+                req("meeting_chat", stream=stream, messages=[{"role": "user", "content": "Private transcript\n<question>latest Acme news?</question>"}], web_search=True),
+                req("meeting_chat", stream=stream, messages=meeting_messages, web_search=True,
+                    web_query="Who is the current CEO of OpenAI?"),
+                req("meeting_chat", stream=stream, messages=meeting_messages),
+                req("meeting_chat", stream=stream, messages=meeting_messages, web_search=True),
+                req("meeting_chat", stream=stream, messages=meeting_messages, web_search=True)]
     requests[2]["behave"] = {"other": [{"status": 500}]}
+    requests[9]["behave"] = {"other": [{"status": 500}]}
+    requests[10]["behave"] = {"other": [{"empty_results": True}]}
     for request in requests:
         for key in ("web_search", "web_query"):
             if key in request:
                 request["body"][key] = request.pop(key)
-    scenarios = [{"id": "web", "env": {"OPENAI_TOKEN": "test-openai", **keys}, "requests": requests}]
+    harness = harness.replace('if (host === "other") return',
+        'if (host === "other" && r.empty_results) return new Response(JSON.stringify({results: []}));\n    if (host === "other") return')
+    (tmp_path / "harness.mjs").write_text('import process from "node:process";\n' + harness)
+    scenarios = [{"id": "web", "env": {"OPENAI_TOKEN": "test-openai", **keys}, "requests": requests},
+                 {"id": "no_key", "env": {"OPENAI_TOKEN": "test-openai"}, "requests": [requests[7]]}]
     (tmp_path / "scenarios.json").write_text(json.dumps(scenarios))
     out = subprocess.run([deno, "run", "--allow-all", str(tmp_path / "harness.mjs"),
                           tmp_path.as_uri(), str(tmp_path / "scenarios.json")], capture_output=True, text=True, timeout=30)
     assert out.returncode == 0, out.stderr
-    good, old, failed, no_question_live, no_question_chat, explicit, tagged = json.loads(out.stdout)["web"]
+    results = json.loads(out.stdout)
+    good, old, failed, no_question_live, no_question_chat, explicit, tagged, meeting_web, meeting_off, meeting_failed, meeting_empty = results["web"]
     assert good["status"] == old["status"] == failed["status"] == 200
     calls = good["calls"]
     search = next(c for c in calls if "linkup.so" in c["url"])
@@ -201,6 +222,21 @@ def test_server_linkup_runtime(tmp_path, stream, parts, keys):
         assert not any("linkup.so" in c["url"] for c in response["calls"])
     for response in (explicit, tagged):
         assert next(c for c in response["calls"] if "linkup.so" in c["url"])["body"]["q"] == "latest Acme news?"
+    meeting_upstream = next(c for c in meeting_web["calls"] if c["host"] == "openai")["body"]["messages"]
+    assert len(meeting_upstream) == len(meeting_messages)
+    system = meeting_upstream[0]["content"]
+    assert system.startswith(action_api.MEETING_CHAT_SYSTEM + "\n\n")
+    assert "exception to the answer-only-from-this-meeting rule" in system
+    assert "cite each web-supported fact inline as [1], [2]" in system
+    assert "prefer the meeting transcript and notes" in system
+    assert "Never invent meeting content or attribute web facts to the meeting" in system
+    assert "Use only the supplied results for outside facts" in system
+    assert "Web search results (Linkup)" in meeting_upstream[-1]["content"]
+    for response in (meeting_off, meeting_failed, meeting_empty, results["no_key"][0]):
+        sent = next(c for c in response["calls"] if c["host"] == "openai")["body"]["messages"]
+        assert sent == meeting_messages
+        assert action_api.parse_web_sources(response["sources"]) == []
+    assert "exception to the answer-only-from-this-meeting rule" not in json.dumps(upstream["body"]["messages"])
     assert "test-linkup" not in "".join(good["logs"])
     assert "latest Acme news" not in "".join(good["logs"])
     if not stream:
