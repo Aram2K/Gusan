@@ -188,6 +188,12 @@ for (const question of ["search the web for Acme", "google Acme", "look up onlin
   equal((await decideWebSearch(question, "", () => { throw new Error("must not classify"); }, "meeting_chat")).source, "explicit");
 }
 for (const mode of ["live_assist", "meeting_chat"]) {
+  for (const question of ["search the web for how to advertise on Google", "google how to advertise on Google",
+                         "look up online how to advertise on Google"]) {
+    equal(explicitWebQuery(question, mode), "how to advertise on Google");
+    const d = await decideWebSearch(question, "", () => { throw new Error("must not classify"); }, mode);
+    equal([d.source, d.query], ["explicit", "how to advertise on Google"]);
+  }
   for (const question of ["search for Acme on the web", "search for Acme online", "search for Acme on the internet",
                          "search for Acme on google", "look up Acme online please", "find Acme online",
                          "cherche Acme sur internet", "cherche Acme en ligne", "busca Acme en internet",
