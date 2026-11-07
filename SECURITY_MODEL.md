@@ -2,8 +2,7 @@
 
 This file is the threat model for Gusan (`Aram2K/Gusan`) and the aibuben sites (`Aram2K/aibuben`); the same file lives in both repositories. Devin security scans rerank their findings against it, so keep it current when trust boundaries, entry points or the owner's priorities change.
 
-
-Scope: `Aram2K/Gusan` (desktop app + its Supabase backend) and `Aram2K/aibuben` (aibuben community site, its Supabase backend, and the Gusan marketing site in `transcribe-site/`). No separate infrastructure repository: the in-repo Supabase migrations/`config.toml` and `transcribe-site/wrangler.jsonc` are the infrastructure as code. Neither repository has a SECURITY_MODEL.md; this document was drafted from the code and the owner's answers (November 2026).
+Scope: `Aram2K/Gusan` (desktop app + its Supabase backend) and `Aram2K/aibuben` (aibuben community site, its Supabase backend, and the Gusan marketing site in `transcribe-site/`). No separate infrastructure repository: the in-repo Supabase migrations/`config.toml` and `transcribe-site/wrangler.jsonc` are the infrastructure as code. This document was drafted from the code and the owner's answers (November 2026).
 
 ## Owner's answers (user-provided facts)
 - **Assets:** all equally important — billing/Pro entitlements, users' audio/transcripts/meeting notes, server-held AI provider keys and cloud quota, aibuben member data, and integrity of the desktop app and its updates.
