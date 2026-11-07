@@ -286,10 +286,27 @@ final class VoiceTests: XCTestCase {
         defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
         let settings = VoiceSettings(group: suite)
         XCTAssertEqual(settings.language, "auto"); XCTAssertEqual(settings.defaultAction, .automatic)
-        XCTAssertEqual(settings.idleMinutes, 5); XCTAssertTrue(settings.autoReturn)
+        XCTAssertEqual(settings.idleMinutes, 2); XCTAssertTrue(settings.autoReturn)
         settings.language = "hy"; settings.defaultAction = .smart(.translate); settings.idleMinutes = 30; settings.autoReturn = false
         let read = VoiceSettings(group: suite)
         XCTAssertEqual(read.language, "hy"); XCTAssertEqual(read.defaultAction, .smart(.translate)); XCTAssertEqual(read.idleMinutes, 30); XCTAssertFalse(read.autoReturn)
+    }
+    func testDefaultIdleWindowReleasesCaptureAndAllowsInPlaceResume() {
+        var machine = VoiceMachine()
+        XCTAssertEqual(machine.idleTimeout, 120)
+        XCTAssertEqual(machine.handle(.sessionStarted(now)), [.publish])
+        let first = UUID()
+        XCTAssertEqual(machine.handle(.command(VoiceCommand(kind: .start, requestID: first, sentAt: now), now)), [.beginCapture, .publish])
+        XCTAssertEqual(machine.handle(.command(VoiceCommand(kind: .stop, requestID: first, sentAt: now), now)), [.finishCapture(first), .publish])
+        _ = machine.handle(.transcribed(first, "Hello"))
+        _ = machine.handle(.completed(first, JobResult(text: "Hello.", kind: .insert)))
+        _ = machine.handle(.acknowledged(first))
+        let second = UUID()
+        XCTAssertEqual(machine.handle(.command(VoiceCommand(kind: .start, requestID: second, sentAt: now), now)), [.beginCapture, .publish])
+        XCTAssertEqual(machine.handle(.command(VoiceCommand(kind: .cancel, requestID: second, sentAt: now), now)), [.discardCapture, .publish])
+        XCTAssertEqual(machine.phase, .ready)
+        XCTAssertEqual(machine.handle(.tick(now.addingTimeInterval(119))), [])
+        XCTAssertEqual(machine.handle(.tick(now.addingTimeInterval(120))), [.stopSession, .publish])
     }
     func testChannel() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

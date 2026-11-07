@@ -37,7 +37,7 @@ public struct VoiceMachine {
     public var idleTimeout: TimeInterval
     public var maxRecording: TimeInterval = 300
     public var action: VoiceAction
-    public init(idleTimeout: TimeInterval = 300, action: VoiceAction = .transcribeOnly) { self.idleTimeout = idleTimeout; self.action = action }
+    public init(idleTimeout: TimeInterval = 120, action: VoiceAction = .transcribeOnly) { self.idleTimeout = idleTimeout; self.action = action }
     public mutating func handle(_ event: Event) -> [Effect] {
         var effects: [Effect] = []
         switch event {

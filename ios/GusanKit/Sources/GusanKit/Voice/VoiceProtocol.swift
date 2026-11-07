@@ -19,7 +19,7 @@ public enum VoiceAction: Hashable, Codable {
 public final class VoiceSettings {
     private let defaults: UserDefaults
     public static let languages: [(code: String, name: String)] = [("auto", "Detect automatically"), ("en", "English"), ("hy", "Armenian"), ("ru", "Russian"), ("fr", "French"), ("de", "German"), ("es", "Spanish"), ("it", "Italian"), ("pt", "Portuguese"), ("ar", "Arabic")]
-    public static let idleOptions = [1, 5, 15, 30, 60]
+    public static let idleOptions = [1, 2, 5, 15, 30, 60]
     public init(group: String?) { defaults = group.flatMap(UserDefaults.init(suiteName:)) ?? .standard }
     public var language: String {
         get { let code = defaults.string(forKey: "voiceLanguage") ?? "auto"; return Self.languages.contains { $0.code == code } ? code : "auto" }
@@ -30,7 +30,7 @@ public final class VoiceSettings {
         set { defaults.set(try? JSONEncoder().encode(newValue), forKey: "voiceDefaultAction") }
     }
     public var idleMinutes: Int {
-        get { let value = defaults.integer(forKey: "voiceIdleMinutes"); return Self.idleOptions.contains(value) ? value : 5 }
+        get { let value = defaults.integer(forKey: "voiceIdleMinutes"); return Self.idleOptions.contains(value) ? value : 2 }
         set { defaults.set(newValue, forKey: "voiceIdleMinutes") }
     }
     public var autoReturn: Bool {

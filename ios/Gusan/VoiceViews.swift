@@ -42,7 +42,7 @@ struct VoiceReadyView: View {
                     }
                     Text(voice.alive ? "Your voice session is ready. Switch back to your app, keep Gusan selected, and tap the mic to dictate." : "Speak naturally, right from your Gusan keyboard. Tap Record to prepare a voice session, then return to your app.")
                         .font(.body).foregroundStyle(.secondary)
-                    Text("The microphone stays ready between dictations until you stop this session or the idle timeout ends it.").font(.footnote).foregroundStyle(.secondary)
+                    Text("The microphone stays reserved and uses some battery while this window is open (2 minutes by default). Capture pauses between dictations. iOS may end a background session early; the next tap will guide you through activation again.").font(.footnote).foregroundStyle(.secondary)
                     if !voice.alive && voice.error.isEmpty {
                         PrimaryButton(title: "Record", icon: "mic.fill") { voice.start() }
                     }
@@ -99,7 +99,7 @@ struct VoiceSettingsSection: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var language = "auto"
     @State private var action = VoiceAction.transcribeOnly
-    @State private var minutes = 5
+    @State private var minutes = 2
     @State private var autoReturn = true
     var body: some View {
         Section("Voice") {
@@ -111,7 +111,10 @@ struct VoiceSettingsSection: View {
             Picker("Spoken language", selection: $language) { ForEach(VoiceSettings.languages, id: \.code) { Text($0.name).tag($0.code) } }.onChange(of: language) { voice.settings.language = $0 }
             Picker("Default voice action", selection: $action) { ForEach(VoiceAction.all, id: \.self) { Text($0.label).tag($0) } }.onChange(of: action) { voice.settings.defaultAction = $0 }
             Picker("Keep session alive", selection: $minutes) { ForEach(VoiceSettings.idleOptions, id: \.self) { Text("\($0) min").tag($0) } }.onChange(of: minutes) { voice.settings.idleMinutes = $0 }
-            Toggle("Return to the previous app automatically (experimental)", isOn: $autoReturn).onChange(of: autoReturn) { voice.settings.autoReturn = $0 }
+            Text("An open session reserves the mic and uses some battery. Capture pauses while idle; iOS may end the window early.").font(.footnote).foregroundStyle(.secondary)
+            #if GUSAN_SIDELOAD
+            Toggle("Return to the previous app automatically (sideload only)", isOn: $autoReturn).onChange(of: autoReturn) { voice.settings.autoReturn = $0 }
+            #endif
         }.onAppear { language = voice.settings.language; action = voice.settings.defaultAction; minutes = voice.settings.idleMinutes; autoReturn = voice.settings.autoReturn; voice.refreshPermission() }
             .onChange(of: scenePhase) { if $0 == .active { voice.refreshPermission() } }
     }

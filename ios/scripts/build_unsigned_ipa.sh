@@ -11,7 +11,8 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 xcodebuild -project Gusan.xcodeproj -scheme Gusan \
     -configuration Release -destination 'generic/platform=iOS' \
     -derivedDataPath "$WORK_DIR/DerivedData" build \
-    CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+    CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+    'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) GUSAN_SIDELOAD'
 
 mkdir -p "$WORK_DIR/Payload"
 ditto "$WORK_DIR/DerivedData/Build/Products/Release-iphoneos/Gusan.app" "$WORK_DIR/Payload/Gusan.app"

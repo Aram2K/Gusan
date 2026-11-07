@@ -102,7 +102,7 @@ Short illustrated sections:
 2. Tap the Gusan button.
 3. Pick an action, or tap **Ask Gusan…** and type what you want ("make it more formal", "translate to Armenian").
 4. The result replaces your text; tap **Undo** to restore it.
-5. Tap the mic to open Gusan and start a voice session the first time, then return to the keyboard. Tap stop to process the recording; tap cancel while transcribing/thinking.
+5. Tap the keyboard mic to activate a voice session. Gusan briefly opens when activation is needed; follow its return guidance. Later taps record in place while the session is available. Tap Stop to process; Cancel discards the request.
 6. Troubleshooting: "Sign in to use Gusan" in the keyboard, Full Access, switching keyboards.
 
 ### 4.6 Diagnostics (hidden behind the row)
@@ -218,6 +218,11 @@ Smart voice is the default for users without an explicitly saved voice preset. E
 Extension point: a new file can implement the public `GusanJob` protocol and pass its instance directly to `JobRunner.events(for:)` or `JobRunner.result(of:progress:confirmation:)`. There is no job-type enum or central factory switch to modify. A producer yields `.needsConfirmation(JobConfirmation(prompt: ...))` and awaits the request's `response()` before continuing. A consumer can resolve the request directly, or provide the runner's async confirmation callback. Decisions are one-shot; cancellation unblocks the waiter. With no confirmation handler, the runner declines and cancels, never silently approves. Current keyboard actions do not request confirmation; no agent confirmation UI is included.
 
 DEBUG builds support `--gusan-debug-voice` on the containing app. This explicitly enables a local keyboard preview: mic starts a fake level feed, Stop advances to thinking, and Stop again delivers a fixed fake transcript/result through the normal snapshot/range/Undo guards. No microphone, credential or network access is involved and no fake IPC packets are persisted. Launch the app without the argument to disable it. Release builds omit the preview code.
+
+### 7.4 Idle audio and sideload-only return
+The idle window defaults to two minutes. Recording installs an input tap and starts the engine; Stop or Cancel pauses the engine and removes the tap. The audio session remains active until Stop session or timeout. This reserves the mic and uses some battery, but does not intentionally capture idle audio. Verify the orange indicator and background survival on a physical device: an active audio session alone does not guarantee that iOS will keep the app running. A suspended or terminated app requires guided activation again.
+
+Only `ios/scripts/build_unsigned_ipa.sh` enables `GUSAN_SIDELOAD`. Under that compilation condition, the experimental automatic return uses the private `LSApplicationWorkspace.openApplicationWithBundleID:` selector. Ordinary builds omit the private implementation and settings toggle; do not enable this flag for App Store or TestFlight. If automatic return is unavailable, the activation sheet explains how to return manually.
 
 ## 8. Agent actions (future)
 A future long-running job may call a server-side computer-use agent from H Company. Keep its credential only in Supabase as `H_company_computer_agents`, never on the phone or in a client request. The server owns agent execution and authorization. Stream progress events through the same job interface and return a card-only result that the user reviews and explicitly inserts. Do not add an on-device agent or automatic agent-result insertion.

@@ -121,6 +121,12 @@ Releases are built by GitHub Actions when a version tag is pushed. The steps, an
 | `installer/` | The Windows installer |
 | `tests/`, `tests_qt/` | Unit tests and screen tests |
 
+## iOS sideload voice sessions
+
+The default idle window is two minutes. Capture pauses and the input tap is removed between dictations, while the active audio session reserves the microphone and uses some battery. iOS may suspend or terminate the app before the window ends; subsequent recording then needs guided activation. Orange-indicator behaviour and background survival still need physical-device verification.
+
+`ios/scripts/build_unsigned_ipa.sh` enables `GUSAN_SIDELOAD` for experimental automatic return via the private `LSApplicationWorkspace.openApplicationWithBundleID:` selector. This is **sideload-only**, never App Store or TestFlight. Ordinary builds compile out that implementation and its settings toggle; manual return guidance remains available.
+
 ## License
 
 Free for personal, educational and non-commercial use. You may modify and share it with attribution; you may not sell it or use it in a paid product or service. See [LICENSE](LICENSE). For a commercial license, write to **aramatamian15@gmail.com**.

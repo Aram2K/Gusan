@@ -116,6 +116,8 @@ final class VoiceSession: ObservableObject {
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.playAndRecord, options: [.mixWithOthers, .allowBluetoothHFP, .defaultToSpeaker])
         try session.setActive(true)
+    }
+    private func resumeCapture() throws {
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, let target = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: false), let converter = AVAudioConverter(from: format, to: target) else { throw VoiceError.audioFailed("Microphone unavailable.") }
@@ -141,6 +143,10 @@ final class VoiceSession: ObservableObject {
         tapped = true
         engine.prepare(); try engine.start()
     }
+    private func pauseCapture() {
+        engine.pause()
+        if tapped { engine.inputNode.removeTap(onBus: 0); tapped = false }
+    }
     private func audioFailure(_ message: String) {
         let requestID = machine.requestID
         error = VoiceError.audioFailed(message).localizedDescription; stop()
@@ -162,10 +168,13 @@ final class VoiceSession: ObservableObject {
     private func execute(_ effects: [VoiceMachine.Effect]) {
         for effect in effects {
             switch effect {
-            case .beginCapture: audio.begin(); status.level = 0
-            case .discardCapture: _ = audio.finish(); status.level = 0
+            case .beginCapture:
+                do { try resumeCapture(); audio.begin(); status.level = 0 }
+                catch { audioFailure(error.localizedDescription); return }
+            case .discardCapture: pauseCapture(); _ = audio.finish(); status.level = 0
             case .cancelWork: work?.cancel(); work = nil
             case .finishCapture(let id):
+                pauseCapture()
                 let wav = WAV.encode(samples: audio.finish()); status.level = 0
                 work = Task {
                     do {
@@ -215,11 +224,14 @@ final class VoiceSession: ObservableObject {
     }
     private func interrupted(_ notification: Notification) {
         guard machine.phase != .off, let value = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt, let type = AVAudioSession.InterruptionType(rawValue: value) else { return }
-        if type == .began { engine.pause() }
+        if type == .began { pauseCapture() }
         else {
             let options = AVAudioSession.InterruptionOptions(rawValue: notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0)
             guard options.contains(.shouldResume) else { stop(); return }
-            do { try AVAudioSession.sharedInstance().setActive(true); try engine.start() } catch { audioFailure(error.localizedDescription) }
+            do {
+                try AVAudioSession.sharedInstance().setActive(true)
+                if machine.phase == .recording { try resumeCapture() }
+            } catch { audioFailure(error.localizedDescription) }
         }
     }
     private func scheduleReturn() {
@@ -228,6 +240,7 @@ final class VoiceSession: ObservableObject {
         Task { try? await Task.sleep(nanoseconds: 500_000_000); if alive { returnToHost(bundleID: bundleID) } }
     }
     func returnToHost(bundleID: String) {
+        #if GUSAN_SIDELOAD
         guard settings.autoReturn, let cls = NSClassFromString("LSApplicationWorkspace") as? NSObject.Type else { return }
         let selector = NSSelectorFromString("defaultWorkspace")
         guard cls.responds(to: selector), let workspace = cls.perform(selector)?.takeUnretainedValue() as? NSObject else { return }
@@ -236,5 +249,6 @@ final class VoiceSession: ObservableObject {
         typealias Open = @convention(c) (AnyObject, Selector, NSString) -> Bool
         let invoke = unsafeBitCast(workspace.method(for: open), to: Open.self)
         _ = invoke(workspace, open, bundleID as NSString)
+        #endif
     }
 }
