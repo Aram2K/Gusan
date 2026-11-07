@@ -47,6 +47,11 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        if #available(iOS 17.0, *) {
+            registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (controller: KeyboardViewController, _: UITraitCollection) in
+                controller.updateContext()
+            }
+        }
         height = view.heightAnchor.constraint(equalToConstant: 260)
         height.priority = .defaultHigh; height.isActive = true
         [toolbar, panel, instructionHeader, keyArea, explanationScroll].forEach { view.addSubview($0) }
@@ -124,7 +129,7 @@ final class KeyboardViewController: UIInputViewController {
         keyArea.keyClicks = settings.keyClicks; keyArea.doubleSpacePeriod = settings.doubleSpacePeriod
         keyArea.updateContext(before: editing ? instruction : textDocumentProxy.documentContextBeforeInput, capitalization: settings.autoCapitalization ? (editing ? .sentences : textDocumentProxy.autocapitalizationType) : UITextAutocapitalizationType.none, returnType: editing ? .go : textDocumentProxy.returnKeyType, appearance: textDocumentProxy.keyboardAppearance, needsGlobe: needsInputModeSwitchKey)
         let theme = KeyboardTheme(appearance: textDocumentProxy.keyboardAppearance, traits: traitCollection)
-        view.backgroundColor = theme.background; toolbar.apply(theme)
+        applyTheme(theme)
         let context = instructionContext ?? currentContext
         panel.update(theme: theme, target: settings.translateTarget, defaultAction: settings.keyboardAction.action, context: context.text)
         instructionHeader.update(text: instruction, theme: theme)
@@ -136,6 +141,12 @@ final class KeyboardViewController: UIInputViewController {
         toolbar.accessory.accessibilityHint = accessory == "Sign in" ? "Opens the Gusan app" : "Activates the status action"
         toolbar.mic.isEnabled = !busy; toolbar.logo.isEnabled = !busy
         toolbar.setNeedsLayout()
+    }
+    private func applyTheme(_ theme: KeyboardTheme) {
+        view.backgroundColor = theme.background
+        keyArea.applyTheme(theme)
+        toolbar.apply(theme)
+        voice.applyTheme(theme)
     }
     private func updateSurface() {
         keyArea.cancelTouches()
