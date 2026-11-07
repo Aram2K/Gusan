@@ -122,6 +122,10 @@ public struct VoiceEdit: Equatable {
     public let deleteCount: Int
     public let original: String
     public let restoreUTF16: Int
+    public static func containsInsertedResult(_ text: String, context: VoiceContext, documentID: String?) -> Bool {
+        guard let documentID, documentID == context.documentID, context.selected.isEmpty, !text.isEmpty, !context.before.isEmpty else { return false }
+        return context.before.hasSuffix(text) || text.hasSuffix(context.before)
+    }
     public static func plan(result: JobResult, context: VoiceContext) -> VoiceEdit? {
         guard !result.text.isEmpty else { return nil }
         switch result.kind {

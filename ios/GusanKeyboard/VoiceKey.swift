@@ -58,6 +58,8 @@ final class VoiceKeyController: NSObject {
     private var original = ""
     private var restoreUTF16 = 0
     private var undoContext: VoiceContext?
+    private var undoDocumentID: String?
+    private var awaitingUndoContext = false
     private var localMessage: String?
     private var reviewResult: String?
     private var resultPanel: UIView?
@@ -100,6 +102,10 @@ final class VoiceKeyController: NSObject {
         refresh()
     }
     func toggle() { tap() }
+    func documentDidChange() {
+        guard awaitingUndoContext, let inserted, let current = currentContext(), VoiceEdit.containsInsertedResult(inserted, context: current, documentID: undoDocumentID) else { return }
+        undoContext = current; awaitingUndoContext = false
+    }
     func dismiss() { inserted = nil; localMessage = nil; clearReview(); undoButton.isHidden = true; panelDismissed = true; refresh() }
     func disappear() { visible = false; observer = nil; timer?.invalidate(); timer = nil; closeResult() }
     private func currentContext() -> VoiceContext? {
@@ -181,6 +187,7 @@ final class VoiceKeyController: NSObject {
     #endif
     private func refresh() {
         guard visible else { return }
+        documentDidChange()
         let status = readStatus()
         let alive = status?.isAlive() == true
         if alive && timer == nil { timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.refresh() } }
@@ -253,7 +260,8 @@ final class VoiceKeyController: NSObject {
         for _ in 0..<edit.deleteCount { proxy.deleteBackward() }
         proxy.insertText(result)
         inserted = result; original = edit.original; restoreUTF16 = edit.restoreUTF16
-        undoContext = currentContext(); undoButton.isHidden = false
+        undoContext = nil; undoDocumentID = context.documentID; awaitingUndoContext = true
+        documentDidChange(); undoButton.isHidden = false
         UIAccessibility.post(notification: .announcement, argument: "Done. Undo available.")
     }
     private func clearReview() { closeResult(); reviewResult = nil; copyButton.isHidden = true; reviewButton.isHidden = true }
@@ -302,7 +310,8 @@ final class VoiceKeyController: NSObject {
             reviewHeading?.text = "Text changed. Use Copy."; return
         }
         proxy.insertText(result)
-        inserted = result; original = ""; restoreUTF16 = 0; undoContext = currentContext()
+        inserted = result; original = ""; restoreUTF16 = 0
+        undoContext = nil; undoDocumentID = expected.documentID; awaitingUndoContext = true; documentDidChange()
         clearReview(); undoButton.isHidden = false; show("Done")
     }
     @objc private func undo() {

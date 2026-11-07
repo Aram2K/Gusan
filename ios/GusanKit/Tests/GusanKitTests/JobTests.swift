@@ -50,6 +50,15 @@ final class JobTests: XCTestCase {
         XCTAssertNil(VoiceEdit.plan(result: JobResult(text: "New", kind: .cardOnly), context: context))
         XCTAssertNil(VoiceEdit.plan(result: JobResult(text: "", kind: .replaceContext), context: context))
     }
+    func testUndoCaptureWaitsForTheInsertedTextAndMatchingDocument() {
+        XCTAssertTrue(VoiceEdit.containsInsertedResult("Hello world", context: VoiceContext(before: "Prefix Hello world", documentID: "one"), documentID: "one"))
+        XCTAssertTrue(VoiceEdit.containsInsertedResult("Hello world", context: VoiceContext(before: "world", documentID: "one"), documentID: "one"))
+        for context in [VoiceContext(before: "Old text", documentID: "one"), VoiceContext(documentID: "one"), VoiceContext(before: "Hello world", documentID: "two"), VoiceContext(selected: "world", before: "Hello world", documentID: "one")] {
+            XCTAssertFalse(VoiceEdit.containsInsertedResult("Hello world", context: context, documentID: "one"))
+        }
+        XCTAssertFalse(VoiceEdit.containsInsertedResult("", context: VoiceContext(before: "Text", documentID: "one"), documentID: "one"))
+        XCTAssertFalse(VoiceEdit.containsInsertedResult("Text", context: VoiceContext(before: "Text"), documentID: nil))
+    }
     func testJobStreamNormalEmptyAndError() async throws {
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [StubProtocol.self]
         let client = SmartActionClient(transport: URLSession(configuration: config))
