@@ -838,7 +838,7 @@ class Settings(QDialog):
         self.chk_lp_auto.toggled.connect(self._apply_lp_auto)
         lp_lay.addWidget(self.chk_lp_auto)
         self.chk_lp_web = QCheckBox("Search the web for answers (Gusan Cloud)", lp_frame)
-        self.chk_lp_web.setChecked(bool(self.cfg_working.get("live_assist_web_search", True)))
+        self.chk_lp_web.setChecked(bool(self.cfg_working.get("live_assist_web_search", False)))
         self.chk_lp_web.setEnabled(not self.cfg_working.get("privacy_mode"))
         self.chk_lp_web.toggled.connect(self._apply_lp_web)
         lp_lay.addWidget(self.chk_lp_web)
@@ -4587,7 +4587,7 @@ class Settings(QDialog):
         if hasattr(self, "chk_lp_web"):
             self.chk_lp_web.setEnabled(not privacy)
             self.chk_lp_web.blockSignals(True)
-            self.chk_lp_web.setChecked(not privacy and bool(self.cfg_working.get("live_assist_web_search", True)))
+            self.chk_lp_web.setChecked(not privacy and bool(self.cfg_working.get("live_assist_web_search", False)))
             self.chk_lp_web.blockSignals(False)
         if hasattr(self, "chk_privacy") and self.chk_privacy.isChecked() != privacy:
             self.chk_privacy.blockSignals(True)

@@ -205,3 +205,13 @@ def test_server_linkup_runtime(tmp_path, stream, parts, keys):
     assert "latest Acme news" not in "".join(good["logs"])
     if not stream:
         assert good["json"]["sources"] == sources
+
+
+def test_web_search_is_off_until_the_person_turns_it_on():
+    """The founder's call (2026-11-07): Linkup searches only for someone who switched it on. Every place that reads
+    the setting falls back to off."""
+    main_src = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert re.search(r'"live_assist_web_search":\s*False', main_src)
+    for rel in ("main.py", "meeting_chat.py", "ui/live_assist.py", "ui/pages/live_assistant.py", "ui/settings.py"):
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        assert 'get("live_assist_web_search", True)' not in text, rel
