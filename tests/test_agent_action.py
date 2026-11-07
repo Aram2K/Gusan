@@ -75,7 +75,14 @@ for (let i=0; i<scenarios.length; i++) {
  const replies=[], snapshots=[];
  for(const r of s.requests??[{body:s.body??{action:'status',task_id:id}}]) {
   clockOffset+=r.advanceMs??0;
-  if(r.change)s.change=r.change;
+  if(r.change){
+   s.change=structuredClone(r.change);
+   for(const event of s.change.new_events??[]){
+    if(event.data?.kind==='message_event' && event.data.content?.[0]==='__RETRY_MESSAGE__'){
+     event.data.content=[calls.findLast(c=>c.url.endsWith('/messages'))?.body.message??'no retry'];
+    }
+   }
+  }
   const raw=JSON.stringify(r.body??{data:{session_id:'session1'}});
   let headers={'Content-Type':'application/json',Authorization:r.auth??s.auth??'Bearer aaa.bbb.ccc',...r.headers};
   if(r.webhook){
@@ -288,8 +295,14 @@ PLAN = {"summary": "Send $10 to Alice", "action_kind": "send",
         "start_url": "https://example.com/send", "steps": ["Recipient Alice", "Amount $10", "Click Send"]}
 
 
-def answered(answer, status="completed"):
-    return {"status": status, "answer": answer, "new_events": [
+def retry_message_event(caller="user"):
+    return {"type": "AgentEvent", "data": {"kind": "message_event",
+            "caller_id": caller, "content": ["__RETRY_MESSAGE__"]}}
+
+
+def answered(answer, status="completed", retry=False):
+    events = [retry_message_event()] if retry else []
+    return {"status": status, "answer": answer, "new_events": events + [
         {"type": "AgentEvent", "data": {"kind": "answer_event", "answer": answer}}]}
 
 
@@ -337,7 +350,7 @@ def test_prepare_no_action_retries_then_fails(run):
     out, = run({"row": {"mode": "do"}, "change": {"status": "completed", "answer": {
         "markdown": "Nothing to do", "needs_action": False}},
         "requests": [{"body": {"action": "status", "task_id": ID}},
-                     {"body": {"action": "status", "task_id": ID}, "change": answered(answer)}]})
+                     {"body": {"action": "status", "task_id": ID}, "change": answered(answer, retry=True)}]})
     assert [r["body"]["status"] for r in out["replies"]] == ["running", "failed"]
     assert out["row"]["error_code"] == "plan_missing"
     assert out["row"]["result"] is None
@@ -353,7 +366,7 @@ def test_prepare_no_action_retries_then_fails(run):
 def test_invalid_prepare_fails(run, answer):
     out, = run({"row": {"mode": "do"}, "change": {"status": "completed", "answer": answer},
                 "requests": [{"body": {"action": "status", "task_id": ID}},
-                             {"body": {"action": "status", "task_id": ID}, "change": answered(answer)}]})
+                             {"body": {"action": "status", "task_id": ID}, "change": answered(answer, retry=True)}]})
     assert out["row"]["status"] == "failed" and out["row"]["error_code"] == "plan_missing"
 
 
@@ -488,7 +501,7 @@ def test_step_length_boundary_never_truncates(run, length, expected):
         "markdown": "Plan", "needs_action": True, "plan": {**PLAN, "steps": [step]}}},
         "requests": [{"body": {"action": "status", "task_id": ID}},
                      {"body": {"action": "status", "task_id": ID}, "change": answered({
-                         "markdown": "Plan", "needs_action": True, "plan": {**PLAN, "steps": [step]}})}]})
+                         "markdown": "Plan", "needs_action": True, "plan": {**PLAN, "steps": [step]}}, retry=True)}]})
     assert out["row"]["status"] == expected
     if expected == "failed":
         assert out["row"]["error_code"] == "plan_missing"
@@ -523,7 +536,7 @@ def test_timezone_survives_start_prepare_and_execute(run, timezone):
 def test_prose_prepare_retries_once_then_fails(run, answer):
     out, = run({"row": {"mode": "do"}, "change": {"status": "completed", "answer": answer},
                 "requests": [{"body": {"action": "status", "task_id": ID}},
-                             {"body": {"action": "status", "task_id": ID}, "change": answered(answer)}]})
+                             {"body": {"action": "status", "task_id": ID}, "change": answered(answer, retry=True)}]})
     assert [r["body"]["status"] for r in out["replies"]] == ["running", "failed"]
     assert out["row"]["error_code"] == "plan_missing" and out["row"]["result"] is None
     retries = [c for c in out["calls"] if c["method"] == "POST"]
@@ -544,7 +557,7 @@ def test_prose_then_valid_plan_awaits_approval(run):
     out, = run({"row": {"mode": "do"}, "requests": [
         {"body": {"action": "status", "task_id": ID}, "change": {"status": "completed", "answer": "Do it manually."}},
         {"body": {"action": "status", "task_id": ID}, "change": answered({
-            "markdown": "Plan", "needs_action": True, "plan": PLAN})}]})
+            "markdown": "Plan", "needs_action": True, "plan": PLAN}, retry=True)}]})
     assert [r["body"]["status"] for r in out["replies"]] == ["running", "awaiting_confirmation"]
     assert out["row"]["confirmation"] == PLAN
 
@@ -629,7 +642,7 @@ def test_restart_ignores_old_terminal_answer_until_new_answer_event(run):
         {"body": {"action": "status", "task_id": ID}, "change": {
             "status": "completed", "answer": "Cannot act", "new_events": []}},
         {"body": {"action": "status", "task_id": ID}, "change": {
-            **answered(valid), "answer": "Stale top-level answer"}}]})
+            **answered(valid, retry=True), "answer": "Stale top-level answer"}}]})
     assert [r["body"]["status"] for r in out["replies"]] == [
         "running", "running", "awaiting_confirmation"]
     assert out["snapshots"][0]["run"]["plan"]["prepare_retry_from_index"] == 1
@@ -642,7 +655,7 @@ def test_retry_answer_seen_while_running_is_retained_for_terminal_poll(run):
     valid = {"markdown": "Plan", "needs_action": True, "plan": PLAN}
     out, = run({"row": {"mode": "do"}, "requests": [
         {"body": {"action": "status", "task_id": ID}, "change": answered("Cannot act")},
-        {"body": {"action": "status", "task_id": ID}, "change": answered(valid, "running")},
+        {"body": {"action": "status", "task_id": ID}, "change": answered(valid, "running", retry=True)},
         {"body": {"action": "status", "task_id": ID}, "change": {
             "status": "completed", "answer": "Stale answer", "new_events": []}}]})
     assert [r["body"]["status"] for r in out["replies"]] == [
@@ -655,3 +668,31 @@ def test_retry_without_new_answer_is_bounded_by_deadline(run):
         {"body": {"action": "status", "task_id": ID}, "change": answered("Cannot act")},
         {"body": {"action": "status", "task_id": ID}, "advanceMs": 481000}]})
     assert out["row"]["status"] == "timed_out" and out["row"]["error_code"] == "timeout"
+
+
+def test_late_original_answer_is_ignored_until_retry_message_then_answer(run):
+    valid = {"markdown": "Plan", "needs_action": True, "plan": PLAN}
+    out, = run({"row": {"mode": "do"}, "requests": [
+        {"body": {"action": "status", "task_id": ID}, "change": {"status": "completed", "answer": "Cannot act"}},
+        {"body": {"action": "status", "task_id": ID}, "change": answered("Late original refusal")},
+        {"body": {"action": "status", "task_id": ID}, "change": {
+            "status": "completed", "new_events": [retry_message_event()]}},
+        {"body": {"action": "status", "task_id": ID}, "change": answered(valid)}]})
+    assert [r["body"]["status"] for r in out["replies"]] == [
+        "running", "running", "running", "awaiting_confirmation"]
+    assert "prepare_retry_answer" not in out["snapshots"][1]["run"]["plan"]
+    assert out["snapshots"][2]["run"]["plan"]["prepare_retry_message_index"] == 1
+    assert out["row"]["confirmation"] == PLAN
+
+
+@pytest.mark.parametrize("message", [
+    retry_message_event("agent"),
+    {"type": "AgentEvent", "data": {"kind": "message_event", "caller_id": "user", "content": ["Unrelated message"]}},
+])
+def test_only_matching_user_retry_message_unlocks_answer(run, message):
+    out, = run({"row": {"mode": "do"}, "requests": [
+        {"body": {"action": "status", "task_id": ID}, "change": {"status": "completed", "answer": "Cannot act"}},
+        {"body": {"action": "status", "task_id": ID}, "change": {
+            **answered("Still refusing"), "new_events": [message, *answered("Still refusing")["new_events"]]}}]})
+    assert out["row"]["status"] == "running"
+    assert "prepare_retry_answer" not in out["run"]["plan"]

@@ -18,7 +18,7 @@
 // Do/prepare never completes: invalid/missing plans get one read-only
 // same-session restart, then fail with plan_missing. Restart failures fail
 // with agent_busy (429) or upstream_error. No automatic second retry.
-// Restart completion waits for a new answer_event at/after its event cursor;
+// Restart completion waits for an answer after its matching user message_event;
 // stale terminal status stays running until that answer or the deadline.
 // Plans contain 1–30 steps of at most 2000 characters; oversized steps fail.
 // Errors: bad_request (400, field), unauthorized (401), privacy_mode and
@@ -404,6 +404,7 @@ async function retryPrepare(db: any, row: Obj, run: Obj, patch: Obj) {
     ...run.plan,
     prepare_retry: "creating",
     prepare_retry_from_index: patch.event_index,
+    prepare_retry_marker: `gusan-prepare-retry:${crypto.randomUUID()}`,
   };
   // Compare the entire private plan and session: only one sync owns the retry.
   const claim = await db.from("agent_task_runs").update({ plan })
@@ -423,7 +424,7 @@ async function retryPrepare(db: any, row: Obj, run: Obj, patch: Obj) {
   if (terminal(row)) return row;
   let failure: string | null = null;
   try {
-    const message =
+    const message = `[${plan.prepare_retry_marker}]\n` +
       "Your previous preparation failed to return a valid plan. This is a mandatory correction: return ONLY the structured planning answer, never prose-only refusal or needs_action false.\n\n" +
       PLANNING_ONLY;
     await h(
@@ -546,14 +547,42 @@ async function sync(db: any, row: Obj, wait = 0) {
     row.mode === "do" && run.phase === "prepare" &&
     run.plan?.prepare_retry === "running"
   ) {
-    const answerEvent = events.findLast((event: Obj, offset: number) =>
-      row.event_index + offset >= run.plan.prepare_retry_from_index &&
-      event.type === "AgentEvent" && event.data?.kind === "answer_event"
-    );
-    if (answerEvent) {
-      retryAnswer = answerEvent.data;
+    let messageIndex = run.plan.prepare_retry_message_index;
+    for (const [offset, event] of events.entries()) {
+      const index = row.event_index + offset;
+      if (
+        index < run.plan.prepare_retry_from_index || event.type !== "AgentEvent"
+      ) continue;
+      const data = event.data;
+      const content = Array.isArray(data?.content)
+        ? data.content
+        : [data?.content];
+      if (
+        data?.kind === "message_event" && data.caller_id === "user" &&
+        typeof run.plan.prepare_retry_marker === "string" &&
+        content.some((part: unknown) =>
+          typeof part === "string" &&
+          part.includes(run.plan.prepare_retry_marker)
+        )
+      ) {
+        messageIndex = index;
+      } else if (
+        data?.kind === "answer_event" &&
+        Number.isInteger(messageIndex) && index > messageIndex
+      ) {
+        retryAnswer = data;
+      }
+    }
+    if (
+      messageIndex !== run.plan.prepare_retry_message_index ||
+      retryAnswer !== run.plan.prepare_retry_answer
+    ) {
       await saveRun(db, row, {
-        plan: { ...run.plan, prepare_retry_answer: retryAnswer },
+        plan: {
+          ...run.plan,
+          prepare_retry_message_index: messageIndex,
+          ...(retryAnswer ? { prepare_retry_answer: retryAnswer } : {}),
+        },
       });
     }
     if (
