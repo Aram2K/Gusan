@@ -59,6 +59,7 @@ final class VoiceKeyController: NSObject {
         observer = channel.observe(.status) { [weak self] in self?.refresh() }
         refresh()
     }
+    func toggle() { tap() }
     func disappear() { visible = false; observer = nil; timer?.invalidate(); timer = nil }
     private func currentContext() -> VoiceContext? {
         guard let proxy = host?.textDocumentProxy else { return nil }
