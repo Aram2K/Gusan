@@ -555,7 +555,7 @@ def test_runs_on_shows_the_list_and_nothing_changes_until_a_pick(env):
     assert card.sources == page.writer_card.sources == ("local", "cloud", "own_key")      # one order
     _runs_on(card, "cloud")
     assert card.source() == "cloud" and card.combo.currentIndex() == -1                 # "Select a model"
-    assert _rows(card.combo) == ["cloud", "cloud:best"]
+    assert _rows(card.combo) == ["cloud", "cloud:best", "cloud:gladia", "cloud:gladia-fusion"]
     assert app.cfg["backend"] == "local"                                                # nothing changed
     _pick(card, "cloud")
     assert ("_pro_upsell", "Fast cloud transcription") in app.calls
