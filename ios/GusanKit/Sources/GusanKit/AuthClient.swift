@@ -58,12 +58,16 @@ public final class AuthClient {
     }
     private func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         do {
+            try Task.checkCancellation()
             let (data, response) = try await transport.data(for: request)
+            try Task.checkCancellation()
             guard let response = response as? HTTPURLResponse else { throw GusanError.invalidResponse }
             return (data, response)
-        } catch let error as GusanError { throw error }
-        catch let error as URLError { throw error.code == .timedOut ? GusanError.timeout : GusanError.network }
-        catch { throw GusanError.network }
+        } catch {
+            if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled { throw CancellationError() }
+            if let error = error as? GusanError { throw error }
+            throw (error as? URLError)?.code == .timedOut ? GusanError.timeout : GusanError.network
+        }
     }
     private func signIn(grant: String, body: [String: String]) async throws -> Session {
         let (data, response) = try await send(request(path: "/auth/v1/token?grant_type=" + grant, body: body))

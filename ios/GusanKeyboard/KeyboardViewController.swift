@@ -16,7 +16,7 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
     private enum Surface { case typing, panel, instruction, explanation }
-    private let store = SessionStore()
+    private lazy var store = SessionStore(role: .keyboard, pasteboardAccessAllowed: { [weak self] in self?.hasFullAccess == true })
     private lazy var voice = VoiceKeyController(host: self, store: store)
     private lazy var auth = AuthClient(store: store)
     private lazy var settings = SettingsStore(group: store.resolution.chosen)
@@ -25,6 +25,7 @@ final class KeyboardViewController: UIInputViewController {
     private let instructionHeader = InstructionHeader()
     private let keyArea = TypingKeyboardView()
     private let explanation = UILabel()
+    private let explanationScroll = UIScrollView()
     private var surface: Surface = .typing
     private var instruction = ""
     private var instructionContext: Context?
@@ -46,7 +47,8 @@ final class KeyboardViewController: UIInputViewController {
         super.viewDidLoad()
         height = view.heightAnchor.constraint(equalToConstant: 260)
         height.priority = .defaultHigh; height.isActive = true
-        [toolbar, panel, instructionHeader, keyArea, explanation].forEach { view.addSubview($0) }
+        [toolbar, panel, instructionHeader, keyArea, explanationScroll].forEach { view.addSubview($0) }
+        explanationScroll.addSubview(explanation)
         explanation.numberOfLines = 0; explanation.font = .systemFont(ofSize: 15)
         toolbar.logo.addTarget(self, action: #selector(togglePanel), for: .touchUpInside)
         toolbar.logo.addGestureRecognizer(UILongPressGestureRecognizer(target: self, action: #selector(defaultAction(_:))))
@@ -74,7 +76,8 @@ final class KeyboardViewController: UIInputViewController {
     }
     override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); updateSurface(); voice.appear() }
     override func viewDidAppear(_ animated: Bool) {
-        super.viewDidAppear(animated); connected = true; updateContext()
+        super.viewDidAppear(animated); connected = true
+        _ = store.read(); _ = store.diagnostics(); updateContext()
     }
     override func viewWillLayoutSubviews() {
         super.viewWillLayoutSubviews()
@@ -85,7 +88,10 @@ final class KeyboardViewController: UIInputViewController {
         instructionHeader.frame = CGRect(x: 0, y: 44, width: width, height: extra)
         keyArea.frame = CGRect(x: 0, y: 44 + extra, width: width, height: max(0, view.bounds.height - 44 - extra))
         panel.frame = CGRect(x: 0, y: 44, width: width, height: max(0, view.bounds.height - 44))
-        explanation.frame = panel.frame.insetBy(dx: 18, dy: 12)
+        explanationScroll.frame = panel.frame
+        let explanationHeight = max(panel.bounds.height - 24, explanation.sizeThatFits(CGSize(width: width - 36, height: .greatestFiniteMagnitude)).height)
+        explanation.frame = CGRect(x: 18, y: 12, width: width - 36, height: explanationHeight)
+        explanationScroll.contentSize = CGSize(width: width, height: explanationHeight + 24)
         updateContext()
     }
     override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
@@ -116,10 +122,10 @@ final class KeyboardViewController: UIInputViewController {
     }
     private func updateSurface() {
         keyArea.cancelTouches()
-        panel.isHidden = surface != .panel; explanation.isHidden = surface != .explanation
+        panel.isHidden = surface != .panel; explanationScroll.isHidden = surface != .explanation
         instructionHeader.isHidden = surface != .instruction
         keyArea.isHidden = surface == .panel || surface == .explanation
-        keyArea.inputEnabled = !busy
+        keyArea.inputEnabled = true
         height.constant = 260
         updateContext(); view.setNeedsLayout()
     }
@@ -154,6 +160,7 @@ final class KeyboardViewController: UIInputViewController {
     @objc private func expandMessage() {
         guard !busy, let detail else { return }
         explanation.text = detail + "\n\nTap the Gusan logo to return to actions."
+        explanationScroll.setContentOffset(.zero, animated: false)
         surface = .explanation; updateSurface()
     }
     @objc private func accessoryPressed() {
@@ -161,7 +168,7 @@ final class KeyboardViewController: UIInputViewController {
         case "Sign in": openContainingApp(URL(string: "gusan://signin?from=keyboard")!)
         case "Undo": undo()
         case "Cancel": task?.cancel()
-        case "How to enable": expandMessage()
+        case "How to enable", "Details": expandMessage()
         case "See plans": openContainingApp(URL(string: "https://gusan.aibuben.xyz")!)
         case "Retry": if let retryAction, let retryContext { run(retryAction, context: retryContext) }
         default: break
@@ -169,7 +176,7 @@ final class KeyboardViewController: UIInputViewController {
     }
     private func beginInstruction() {
         guard !busy else { return }
-        instructionContext = currentContext; instruction = ""
+        if instructionContext != currentContext { instructionContext = currentContext; instruction = "" }
         message = nil; accessory = nil; detail = nil
         surface = .instruction; updateSurface()
     }
@@ -185,15 +192,21 @@ final class KeyboardViewController: UIInputViewController {
         voice.dismiss()
         guard !busy else { return }
         guard hasFullAccess else {
-            showTyping()
+            if surface != .instruction { showTyping() }
             UINotificationFeedbackGenerator().notificationOccurred(.error)
-            showMessage("Gusan needs Full Access to reach Gusan Cloud", detail: "Allow Full Access for Gusan in Settings › General › Keyboard › Keyboards › Gusan › Allow Full Access. Text is sent to Gusan Cloud only when you run an action.", accessory: "How to enable")
+            showMessage("Gusan needs Full Access to reach Gusan Cloud", detail: "Allow Full Access for Gusan in Settings › General › Keyboard › Keyboards › Gusan › Allow Full Access. Text is sent to Gusan Cloud only when you run an action.\n\n" + store.diagnostics().summary, accessory: "How to enable")
             return
         }
         guard store.read() != nil, store.diagnostics().isShared else {
             UINotificationFeedbackGenerator().notificationOccurred(.error)
-            showTyping(); showMessage("Sign in to use Gusan", accessory: "Sign in"); return
+            if surface != .instruction { showTyping() }
+            showMessage("Sign in to use Gusan", detail: store.diagnostics().summary, accessory: "Sign in"); return
         }
+        #if DEBUG
+        if store.read()?.accessToken == "gusan-debug-no-network" {
+            showMessage("DEBUG session available", detail: store.diagnostics().summary, accessory: "Details"); return
+        }
+        #endif
         do { _ = try Prompts.messages(text: context.text, action: action, target: settings.translateTarget) }
         catch { showMessage(error.localizedDescription, detail: error.localizedDescription); return }
         guard currentContext == context else { showMessage("Text changed. Select it and try again."); return }
@@ -254,21 +267,26 @@ final class KeyboardViewController: UIInputViewController {
         invalidateUndo(); showMessage("Undone")
     }
     private func invalidateUndo() { original = nil; replacement = nil; undoContext = nil; if accessory == "Undo" { accessory = nil } }
+    private func cancelForInput() -> Bool {
+        guard busy else { return false }
+        task?.cancel(); showMessage("Cancelled")
+        return true
+    }
     private func insert(_ text: String) {
-        guard !busy else { return }
+        let cancelled = cancelForInput()
         if surface == .instruction { instruction += text }
-        else { invalidateUndo(); message = nil; detail = nil; accessory = nil; textDocumentProxy.insertText(text) }
+        else { invalidateUndo(); if !cancelled { message = nil; detail = nil; accessory = nil }; textDocumentProxy.insertText(text) }
         updateContext()
     }
     private func returnPressed() { if surface == .instruction { runInstruction() } else { insert("\n") } }
     private func deleteOnce() {
-        guard !busy else { return }
+        let cancelled = cancelForInput()
         if surface == .instruction { if !instruction.isEmpty { instruction.removeLast() } }
-        else { invalidateUndo(); message = nil; detail = nil; accessory = nil; textDocumentProxy.deleteBackward() }
+        else { invalidateUndo(); if !cancelled { message = nil; detail = nil; accessory = nil }; textDocumentProxy.deleteBackward() }
         updateContext()
     }
     private func doubleSpace() {
-        guard !busy else { return }
+        _ = cancelForInput()
         if surface == .instruction { if instruction.last == " " { instruction.removeLast() }; instruction += ". " }
         else { invalidateUndo(); textDocumentProxy.deleteBackward(); textDocumentProxy.insertText(". ") }
         updateContext()

@@ -53,100 +53,120 @@ public enum AppGroupResolver {
     }
 }
 
-public struct SessionDiagnostics {
+public struct StoreHealth: Codable, Equatable {
+    public let name: String
+    public let readable: Bool
+    public let writable: Bool
+    public let hasSession: Bool
+    public var summary: String { "\(name): read \(readable ? "yes" : "no"), write \(writable ? "yes" : "no"), session \(hasSession ? "yes" : "no")" }
+}
+
+public enum SessionRole: String, Codable { case app, keyboard }
+
+public struct SessionReport: Codable {
+    public let role: SessionRole
+    public let timestamp: Date
     public let groupID: String?
-    public let keychainOK: Bool
-    public let fileOK: Bool
-    public var isShared: Bool { groupID != nil && (keychainOK || fileOK) }
+    public let keychainGroupID: String?
+    public let stores: [StoreHealth]
+}
+
+public struct SessionDiagnostics {
+    public let local: SessionReport
+    public let peer: SessionReport?
+    public var groupID: String? { local.groupID }
+    public var keychainOK: Bool { local.stores.contains { $0.name == "Keychain" && $0.readable && $0.writable } }
+    public var fileOK: Bool { local.stores.contains { $0.name == "App-group file" && $0.readable && $0.writable } }
+    public var pasteboardOK: Bool { local.stores.contains { $0.name == "Team pasteboard" && $0.readable && $0.writable } }
+    public var isShared: Bool { local.stores.contains { $0.readable && $0.writable } }
     public var sharingStatus: String { isShared ? "shared" : "not shared" }
+    public var summary: String { local.stores.map(\.summary).joined(separator: "\n") }
 }
 
 public final class SessionStore: SessionStorage {
     public let resolution: AppGroupResolution
-    private var keychainOK = false
-    private var fileOK = false
+    public let role: SessionRole
+    private let backends: [SessionBackend]
+    private let privateBackend: SessionBackend
+    private let keychainGroup: String?
     private let lock = NSLock()
-    private var fileURL: URL? { resolution.container?.appendingPathComponent("session.json") }
-    public init(resolution: AppGroupResolution = AppGroupResolver.resolve()) { self.resolution = resolution }
-    private func query(shared: Bool) -> [String: Any] {
-        var q: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "Gusan.session", kSecAttrAccount as String: "session"]
-        if shared, let group = resolution.chosen { q[kSecAttrAccessGroup as String] = group }
-        return q
+    public init(resolution: AppGroupResolution = AppGroupResolver.resolve(), role: SessionRole = .app, pasteboardAccessAllowed: @escaping () -> Bool = { true }) {
+        self.role = role
+        let pasteboard = NamedSessionPasteboard(accessAllowed: pasteboardAccessAllowed)
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--gusan-end-storage-test") {
+            pasteboard.clear("debug-mode")
+            let isolatedStore = NamedSessionPasteboard(namespace: "com.aram2k.gusan.debug.session", accessAllowed: pasteboardAccessAllowed)
+            for key in ["session", "report.app", "report.keyboard"] { isolatedStore.clear(key) }
+        }
+        if ProcessInfo.processInfo.arguments.contains("--gusan-pasteboard-only") {
+            _ = pasteboard.write(Data([1]), key: "debug-mode")
+        }
+        let isolated = pasteboard.read("debug-mode").data == Data([1])
+        #else
+        let isolated = false
+        #endif
+        self.resolution = isolated ? AppGroupResolution(candidatesTried: [], chosen: nil, container: nil) : resolution
+        keychainGroup = isolated ? nil : resolution.chosen
+        backends = [KeychainSessionBackend(group: keychainGroup, enabled: keychainGroup != nil), FileSessionBackend(container: self.resolution.container), NamedSessionPasteboard(namespace: isolated ? "com.aram2k.gusan.debug.session" : "com.aram2k.gusan.session", accessAllowed: pasteboardAccessAllowed)]
+        privateBackend = KeychainSessionBackend(group: nil, enabled: !isolated)
     }
-    private func loadKeychain(shared: Bool) -> Session? {
-        var q = query(shared: shared)
-        q[kSecReturnData as String] = true
-        q[kSecMatchLimit as String] = kSecMatchLimitOne
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(q as CFDictionary, &result)
-        if shared { keychainOK = status == errSecSuccess || status == errSecItemNotFound }
-        guard status == errSecSuccess, let data = result as? Data else { return nil }
-        return try? JSONDecoder().decode(Session.self, from: data)
+    init(resolution: AppGroupResolution, backends: [SessionBackend], privateBackend: SessionBackend, role: SessionRole = .app) {
+        self.resolution = resolution; self.backends = backends; self.privateBackend = privateBackend; self.role = role
+        keychainGroup = resolution.chosen
     }
+    private func synchronized<T>(_ body: () -> T) -> T {
+        #if canImport(UIKit)
+        if !Thread.isMainThread { return DispatchQueue.main.sync { self.synchronized(body) } }
+        #endif
+        lock.lock(); defer { lock.unlock() }; return body()
+    }
+    private func decode(_ data: Data?) -> Session? { data.flatMap { try? JSONDecoder().decode(Session.self, from: $0) } }
     public func read() -> Session? {
-        lock.lock(); defer { lock.unlock() }
-        var sessions: [Session] = []
-        if resolution.chosen != nil, let session = loadKeychain(shared: true) { sessions.append(session) }
-        fileOK = fileURL.map { FileManager.default.isWritableFile(atPath: $0.deletingLastPathComponent().path) } ?? false
-        if let url = fileURL, let data = try? Data(contentsOf: url), let session = try? JSONDecoder().decode(Session.self, from: data) {
-            fileOK = true; sessions.append(session)
+        synchronized {
+            let sessions = backends.compactMap { decode($0.read("session").data) }
+            if let newest = sessions.max(by: { $0.updatedAt == $1.updatedAt ? $0.expiresAt < $1.expiresAt : $0.updatedAt < $1.updatedAt }) { return newest }
+            guard let session = decode(privateBackend.read("session").data) else { return nil }
+            if let data = try? JSONEncoder().encode(session), writeShared(data) { privateBackend.clear("session") }
+            return session
         }
-        if !sharedBackendAvailable, let session = loadKeychain(shared: false) { sessions.append(session) }
-        else if sessions.isEmpty, let session = loadKeychain(shared: false) {
-            // Signed in while the group was unavailable: move that login into the shared store.
-            if let data = try? JSONEncoder().encode(session), migrateToShared(data) {
-                SecItemDelete(query(shared: false) as CFDictionary)
-            }
-            sessions.append(session)
-        }
-        return sessions.max { $0.updatedAt < $1.updatedAt }
     }
     static func sharedBackendAvailable(group: String?, keychainOK: Bool, fileOK: Bool) -> Bool {
         group != nil && (keychainOK || fileOK)
     }
-    private var sharedBackendAvailable: Bool {
-        Self.sharedBackendAvailable(group: resolution.chosen, keychainOK: keychainOK, fileOK: fileOK)
-    }
-    private func saveKeychain(_ data: Data, shared: Bool) -> Bool {
-        let q = query(shared: shared)
-        let attributes: [String: Any] = [kSecValueData as String: data, kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock]
-        var status = SecItemUpdate(q as CFDictionary, attributes as CFDictionary)
-        if status == errSecItemNotFound { status = SecItemAdd(q.merging(attributes) { _, new in new } as CFDictionary, nil) }
-        return status == errSecSuccess
-    }
-    private func saveFile(_ data: Data, to url: URL) -> Bool {
-        #if os(iOS)
-        let options: Data.WritingOptions = [.atomic, .completeFileProtectionUntilFirstUserAuthentication]
-        #else
-        let options: Data.WritingOptions = .atomic
-        #endif
-        return (try? data.write(to: url, options: options)) != nil
-    }
-    private func migrateToShared(_ data: Data) -> Bool {
-        let savedKeychain = resolution.chosen != nil && saveKeychain(data, shared: true)
-        let savedFile = fileURL.map { saveFile(data, to: $0) } ?? false
-        if savedKeychain { keychainOK = true }
-        if savedFile { fileOK = true }
-        return savedKeychain || savedFile
+    private func writeShared(_ data: Data) -> Bool {
+        var saved = false
+        for backend in backends { if backend.write(data, key: "session") { saved = true } }
+        return saved
     }
     public func write(_ session: Session) {
-        lock.lock(); defer { lock.unlock() }
-        guard let data = try? JSONEncoder().encode(session) else { return }
-        keychainOK = resolution.chosen != nil && saveKeychain(data, shared: true)
-        fileOK = false
-        if let url = fileURL { fileOK = saveFile(data, to: url) }
-        if sharedBackendAvailable { SecItemDelete(query(shared: false) as CFDictionary) }
-        else { _ = saveKeychain(data, shared: false) }
+        synchronized {
+            guard let data = try? JSONEncoder().encode(session) else { return }
+            if writeShared(data) { privateBackend.clear("session") }
+            else { _ = privateBackend.write(data, key: "session") }
+        }
     }
     public func clear() {
-        lock.lock(); defer { lock.unlock() }
-        SecItemDelete(query(shared: false) as CFDictionary)
-        if resolution.chosen != nil { SecItemDelete(query(shared: true) as CFDictionary) }
-        if let url = fileURL { try? FileManager.default.removeItem(at: url) }
+        synchronized {
+            for backend in backends { backend.clear("session") }
+            privateBackend.clear("session")
+        }
     }
     public func diagnostics() -> SessionDiagnostics {
-        lock.lock(); defer { lock.unlock() }
-        return SessionDiagnostics(groupID: resolution.chosen, keychainOK: keychainOK, fileOK: fileOK)
+        synchronized {
+            let reportKey = "report." + role.rawValue
+            let stores = backends.map { backend -> StoreHealth in
+                let value = backend.read("session")
+                let writable = backend.write(Data([0]), key: "probe." + role.rawValue)
+                backend.clear("probe." + role.rawValue)
+                return StoreHealth(name: backend.name, readable: value.readable, writable: writable, hasSession: decode(value.data) != nil)
+            }
+            let report = SessionReport(role: role, timestamp: Date(), groupID: resolution.chosen, keychainGroupID: keychainGroup, stores: stores)
+            if let data = try? JSONEncoder().encode(report) { for backend in backends { _ = backend.write(data, key: reportKey) } }
+            let peerKey = "report." + (role == .app ? "keyboard" : "app")
+            let peer = backends.compactMap { $0.read(peerKey).data.flatMap { try? JSONDecoder().decode(SessionReport.self, from: $0) } }.max { $0.timestamp < $1.timestamp }
+            return SessionDiagnostics(local: report, peer: peer)
+        }
     }
 }
 
