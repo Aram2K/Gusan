@@ -50,6 +50,7 @@ public enum Prompts {
 public enum GusanError: Error, LocalizedError, Equatable {
     case emptyInput, unauthorized, proRequired, dailyLimit, serverNotConfigured, failed, tooLong
     case network, timeout, invalidResponse, thoughtOnly
+    case signInFailed(String)
     public var errorDescription: String? {
         switch self {
         case .emptyInput: return "Enter some text first."
@@ -63,6 +64,7 @@ public enum GusanError: Error, LocalizedError, Equatable {
         case .timeout: return "The request timed out. Try again."
         case .invalidResponse: return "The server returned an invalid response."
         case .thoughtOnly: return "The AI model spent its whole answer thinking and never answered - ask again."
+        case .signInFailed(let message): return message
         }
     }
 }

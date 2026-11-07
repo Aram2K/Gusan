@@ -197,4 +197,9 @@ final class GusanKitTests: XCTestCase {
         XCTAssertEqual(forced?.refreshToken, "rotated")
         XCTAssertFalse(AuthClient.refreshTokenRejected(status: 500, data: Data("Invalid Refresh Token".utf8)))
     }
+    func testSignInMessages() {
+        XCTAssertEqual(AuthClient.signInMessage(Data(#"{"error":"invalid_grant","error_description":"Invalid login credentials"}"#.utf8)), "Incorrect email or password.")
+        XCTAssertEqual(AuthClient.signInMessage(Data(#"{"code":400,"error_code":"email_not_confirmed","msg":"Email not confirmed"}"#.utf8)), "Please verify your email first - check your inbox.")
+        XCTAssertEqual(AuthClient.signInMessage(Data("oops".utf8)), "Sign-in failed. Try again.")
+    }
 }

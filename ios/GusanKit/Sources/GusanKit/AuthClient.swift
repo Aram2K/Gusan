@@ -67,10 +67,19 @@ public final class AuthClient {
     }
     private func signIn(grant: String, body: [String: String]) async throws -> Session {
         let (data, response) = try await send(request(path: "/auth/v1/token?grant_type=" + grant, body: body))
-        guard response.statusCode == 200 else { throw GusanError.unauthorized }
+        guard response.statusCode == 200 else { throw GusanError.signInFailed(Self.signInMessage(data)) }
         let session = try Self.decodeSession(data)
         store.write(session)
         return session
+    }
+    /// Same wording as auth.py sign_in_email.
+    public static func signInMessage(_ data: Data) -> String {
+        let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        let message = ["msg", "error_description", "message", "error"].lazy.compactMap { json?[$0] as? String }.first { !$0.isEmpty } ?? "Sign-in failed. Try again."
+        let low = message.lowercased()
+        if low.contains("not confirmed") || low.contains("not been confirmed") { return "Please verify your email first - check your inbox." }
+        if low.contains("invalid") || low.contains("credential") { return "Incorrect email or password." }
+        return message
     }
     public func signIn(email: String, password: String) async throws -> Session {
         try await signIn(grant: "password", body: ["email": email, "password": password])
