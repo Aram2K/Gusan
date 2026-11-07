@@ -92,6 +92,13 @@ public final class SessionStore: SessionStorage {
             fileOK = true; sessions.append(session)
         }
         if !sharedBackendAvailable, let session = loadKeychain(shared: false) { sessions.append(session) }
+        else if sessions.isEmpty, let session = loadKeychain(shared: false) {
+            // Signed in while the group was unavailable: move that login into the shared store.
+            if let data = try? JSONEncoder().encode(session), migrateToShared(data) {
+                SecItemDelete(query(shared: false) as CFDictionary)
+            }
+            sessions.append(session)
+        }
         return sessions.max { $0.updatedAt < $1.updatedAt }
     }
     static func sharedBackendAvailable(group: String?, keychainOK: Bool, fileOK: Bool) -> Bool {
@@ -106,6 +113,11 @@ public final class SessionStore: SessionStorage {
         var status = SecItemUpdate(q as CFDictionary, attributes as CFDictionary)
         if status == errSecItemNotFound { status = SecItemAdd(q.merging(attributes) { _, new in new } as CFDictionary, nil) }
         return status == errSecSuccess
+    }
+    private func migrateToShared(_ data: Data) -> Bool {
+        if resolution.chosen != nil, saveKeychain(data, shared: true) { keychainOK = true }
+        if let url = fileURL, (try? data.write(to: url, options: .atomic)) != nil { fileOK = true }
+        return sharedBackendAvailable
     }
     public func write(_ session: Session) {
         lock.lock(); defer { lock.unlock() }
