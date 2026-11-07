@@ -48,7 +48,7 @@
 //   never sleeps, but a dedicated one can scale to zero.
 //
 // Secrets (at least one of the chat keys must be set):
-//          LINKUP_API_KEY / LINKUP_KEY / LINKUP_TOKEN (optional; no key = no web search),
+//          Linkup_web / LINKUP_API_KEY / LINKUP_KEY / LINKUP_TOKEN (first non-empty; optional; no key = no web search),
 //          LINKUP_DEPTH (flash|fast|standard, default flash),
 //          LINKUP_TIMEOUT_MS (optional, default 2500, clamped to 250-8000),
 //          MISTRAL_STT_KEY (the founder's Mistral key; also used for speech),
@@ -82,7 +82,7 @@ declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void } | undefined;
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
-const LINKUP_KEY = ["LINKUP_API_KEY", "LINKUP_KEY", "LINKUP_TOKEN"]
+const LINKUP_KEY = ["Linkup_web", "LINKUP_API_KEY", "LINKUP_KEY", "LINKUP_TOKEN"]
   .map((name) => (Deno.env.get(name) ?? "").trim()).find(Boolean) ?? "";
 const LINKUP_DEPTH = ["flash", "fast", "standard"].includes((Deno.env.get("LINKUP_DEPTH") ?? "").trim())
   ? Deno.env.get("LINKUP_DEPTH")!.trim() : "flash";

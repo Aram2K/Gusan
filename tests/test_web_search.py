@@ -91,8 +91,9 @@ def test_actions_only_questions_opt_in(mode):
 
 def test_server_contract():
     src = SERVER.read_text()
-    for name in ("LINKUP_API_KEY", "LINKUP_KEY", "LINKUP_TOKEN", "LINKUP_TIMEOUT_MS", "LINKUP_DEPTH"):
+    for name in ("Linkup_web", "LINKUP_API_KEY", "LINKUP_KEY", "LINKUP_TOKEN", "LINKUP_TIMEOUT_MS", "LINKUP_DEPTH"):
         assert name in src
+    assert '["Linkup_web", "LINKUP_API_KEY", "LINKUP_KEY", "LINKUP_TOKEN"]' in src
     assert 'body.web_search === true' in src
     assert 'AbortSignal.timeout(LINKUP_TIMEOUT_MS)' in src
     assert 'catch { console.log("Linkup unavailable - answering without web search")' in src
@@ -132,7 +133,11 @@ def test_heuristic_runtime(tmp_path):
 
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("parts", [False, True])
-def test_server_linkup_runtime(tmp_path, stream, parts):
+@pytest.mark.parametrize("keys", [
+    {"Linkup_web": " test-linkup ", "LINKUP_API_KEY": "other", "LINKUP_KEY": "other"},
+    {"Linkup_web": " ", "LINKUP_API_KEY": " ", "LINKUP_KEY": " test-linkup "},
+])
+def test_server_linkup_runtime(tmp_path, stream, parts, keys):
     from tests.test_smart_action_routes import HARNESS, STUB_SUPABASE, STUB_ANTHROPIC, req
     deno = shutil.which("deno")
     if not deno:
@@ -168,7 +173,7 @@ def test_server_linkup_runtime(tmp_path, stream, parts):
         for key in ("web_search", "web_query"):
             if key in request:
                 request["body"][key] = request.pop(key)
-    scenarios = [{"id": "web", "env": {"OPENAI_TOKEN": "test-openai", "LINKUP_API_KEY": " ", "LINKUP_KEY": " test-linkup "}, "requests": requests}]
+    scenarios = [{"id": "web", "env": {"OPENAI_TOKEN": "test-openai", **keys}, "requests": requests}]
     (tmp_path / "scenarios.json").write_text(json.dumps(scenarios))
     out = subprocess.run([deno, "run", "--allow-all", str(tmp_path / "harness.mjs"),
                           tmp_path.as_uri(), str(tmp_path / "scenarios.json")], capture_output=True, text=True, timeout=30)
