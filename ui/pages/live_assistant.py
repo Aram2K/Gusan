@@ -275,17 +275,13 @@ def load_sessions():
     for m in meeting_store.list_live_sessions():
         folder = str(m.get("dir") or "")
         question, answers = _answers_log(folder)
-        title = str(m.get("title") or "").strip()
+        title = " ".join(str(m.get("title") or "").split())
         if title and not meeting_titles.is_placeholder(title):
-            text = title                                  # named by the person, or by the AI from the notes
+            text = title                     # its title: the person's, or the AI's from the notes
         elif question:
-            text = "“%s”" % question
+            text = "“%s”" % question         # what was asked tells the session apart
         else:
-            try:
-                text = meeting_store.summary_preview(meeting_store.load_notes(folder))
-            except Exception:
-                text = ""
-            text = text or "Live session"
+            text = meeting_titles.people_title(m.get("attendees_list") or []) or "Live session"
         out.append({"dir": folder, "id": m.get("id", ""),
                     "started": str(m.get("started") or m.get("timestamp") or ""),
                     "duration_sec": m.get("duration_sec") or 0,

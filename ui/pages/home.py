@@ -365,7 +365,19 @@ def meeting_title_from_entry(text):
     return first.strip() or "Meeting"
 
 
-def recent_items(entries, meetings, transcripts, active_dir=None, active_state=None):
+def _first_name(app):
+    """The signed-in person's first name ('' for a guest): never "who a meeting was with"."""
+    auth = getattr(app, "auth", None)
+    if not getattr(auth, "is_authenticated", False):
+        return ""
+    name = (getattr(auth, "user_name", None) or "").strip()
+    if not name:
+        email = (getattr(auth, "user_email", None) or "").strip()
+        name = email.split("@")[0] if email else ""
+    return name.split()[0] if name else ""
+
+
+def recent_items(entries, meetings, transcripts, active_dir=None, active_state=None, me=""):
     """One newest-first list of Recent rows from the three stores.
 
     Each row: kind ("dictation" | "smart" | "meeting" | "audio"), when (naive
@@ -415,7 +427,7 @@ def recent_items(entries, meetings, transcripts, active_dir=None, active_state=N
             status = "notes_ready" if m.get("has_notes") else "audio_only"
         dur = short_duration(m.get("duration_sec"))
         lab = "Meeting · " + dur if dur else "Meeting"
-        title = meeting_titles.display_title(m)          # "Meeting · Tue 14:30" -> a name from its notes
+        title = meeting_titles.display_title(m, me=me)   # the list's name ("Meeting with Anna" until the AI names it)
         # The Meetings page's on_open: folder=<dir> opens its notes; the one
         # being recorded opens the live view instead.
         busy = status in ("recording", "processing")
@@ -1615,10 +1627,11 @@ class HomePage(QWidget):
         # The meeting being recorded is read here (GUI thread); the merge runs on
         # the worker too (meeting_status resolves each folder path - disk work).
         active_dir, phase = self._active_meeting()
+        me = _first_name(self.app)
 
         def work():
             entries, meetings, transcripts = load_sources()
-            return recent_items(entries, meetings, transcripts, active_dir, phase)
+            return recent_items(entries, meetings, transcripts, active_dir, phase, me=me)
 
         def then(items, g=gen):
             if g != self._gen:

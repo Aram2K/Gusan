@@ -1774,7 +1774,7 @@ class NotesView(QWidget):
             self.tabs.set_index(0)
             self.stack.setCurrentIndex(0)
         if item:
-            self.title_label.setText(meeting_titles.display_title(item, fallback=item.get("title") or "Meeting"))
+            self.title_label.setText(meeting_titles.display_title(item, me=self.page.me()))
         self._load_token += 1
         token = self._load_token
         folder = self.folder
@@ -1856,7 +1856,10 @@ class NotesView(QWidget):
     def render(self):
         d = self.data
         meta = d.get("meta") or {}
-        title = d.get("display_title") or d.get("title") or "Meeting"
+        # the list's name for it ("Meeting with Anna" while it still has the app's "Meeting · Tue 14:30")
+        title = meeting_titles.display_title({"title": d.get("title"), "attendees_list": d.get("people") or [],
+                                              "source": meta.get("source")}, me=self.page.me())
+        d["display_title"] = title                     # (the delete question says the same)
         self.title_label.setText(title)
         self.title_label.setAccessibleName(title)
         clear_layout(self._meta)
@@ -2302,10 +2305,9 @@ class NotesView(QWidget):
         def done(ok, err):
             if ok and err is None:
                 self.data["title"] = " ".join(str(text or "").split()) or "Untitled Meeting"
-                import meeting_store
                 self.data["display_title"] = meeting_titles.display_title(
-                    {"title": self.data["title"], "preview": meeting_store.summary_preview(self.data.get("notes") or "")},
-                    fallback=self.data["title"])
+                    {"title": self.data["title"], "attendees_list": self.data.get("people") or [],
+                     "source": (self.data.get("meta") or {}).get("source")}, me=self.page.me())
                 self.title_label.setText(self.data["display_title"])
                 self.page.list_changed()
             else:
@@ -2460,11 +2462,9 @@ def read_meeting(folder):
     # segments and the call's sound)? Two small files read here, off the window's thread: the page
     # offers "Identify speakers" for a meeting that still says "Them" only when it can.
     can_name_call = bool(meeting_speakers.refinable(folder)) if "Them:" in transcript else False
-    # "title" is the stored one (the rename box, exports); the page shows "display_title" - for a meeting still called
-    # "Meeting · Tue 14:30", the same short name from its notes as the list.
+    # "title" is the stored one (the rename box, exports); render() shows the list's name for it.
     title = str(meta.get("title") or "Untitled Meeting")
-    shown = meeting_titles.display_title({"title": title, "preview": meeting_store.summary_preview(notes)}, fallback=title)
-    return {"folder": str(folder), "meta": meta, "title": title, "display_title": shown,
+    return {"folder": str(folder), "meta": meta, "title": title,
             "notes": notes, "transcript": transcript, "my_notes": my_notes, "parts": parts,
             "people": list(people), "screen_people": meeting_store.screen_people(meta),
             "started": started, "duration_sec": duration,

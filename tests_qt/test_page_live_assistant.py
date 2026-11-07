@@ -805,7 +805,8 @@ def test_load_sessions_reads_the_library(qapp):
         meeting("20250101_101500", "Live session 10:15")              # a 1.9 live session (no source)
         mine = {str(d) for d in made}
         out = [s for s in la.load_sessions() if s["dir"] in mine]   # other tests share the library
-        assert [s["text"] for s in out] == ["“Aram, when can we launch?”", "Demo moves to Thursday",
+        # a real title, else the first question, else who it was with - never a sentence from the notes
+        assert [s["text"] for s in out] == ["“Aram, when can we launch?”", "Live session",
                                             "Customer call", "Live session"]
         assert out[0]["answers"] == 2 and out[0]["duration_sec"] == 2280
         assert out[1]["answers"] is None
