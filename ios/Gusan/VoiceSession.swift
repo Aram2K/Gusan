@@ -81,11 +81,8 @@ final class VoiceSession: ObservableObject {
         startup = Task {
             defer { startup = nil }
             do {
-                guard channel.available else { throw channel.unavailableError }
+                if let error = store.sessionState(fullAccess: store.diagnostics().peer?.fullAccess).voiceError { throw error }
                 guard let session = store.read() else { throw VoiceError.notSignedIn }
-                #if DEBUG
-                if session.accessToken == "gusan-debug-no-network" { throw VoiceError.notSignedIn }
-                #endif
                 let allowed = await withCheckedContinuation { continuation in
                     if #available(iOS 17.0, *) { AVAudioApplication.requestRecordPermission { continuation.resume(returning: $0) } }
                     else { AVAudioSession.sharedInstance().requestRecordPermission { continuation.resume(returning: $0) } }
