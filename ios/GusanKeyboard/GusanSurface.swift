@@ -1,6 +1,10 @@
 import UIKit
 import GusanKit
 
+func keyboardFont(_ size: CGFloat, style: UIFont.TextStyle, maximum: CGFloat, weight: UIFont.Weight = .regular, traits: UITraitCollection) -> UIFont {
+    UIFontMetrics(forTextStyle: style).scaledFont(for: .systemFont(ofSize: size, weight: weight), maximumPointSize: maximum, compatibleWith: traits)
+}
+
 class ToolbarButton: UIButton {
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         bounds.insetBy(dx: -max(0, (44 - bounds.width) / 2), dy: -max(0, (44 - bounds.height) / 2)).contains(point)
@@ -33,6 +37,9 @@ final class VoiceKey: ToolbarButton {
 }
 
 final class GusanToolbar: UIView {
+    var contextHeight: CGFloat { max(24, ceil((context.titleLabel?.font.lineHeight ?? 16) + 8)) }
+    var controlsHeight: CGFloat { max(44, ceil((message.titleLabel?.font.lineHeight ?? 16) * 2 + 8)) }
+    var preferredHeight: CGFloat { contextHeight + controlsHeight }
     let logo = ToolbarButton(type: .system)
     let mic = VoiceKey(frame: .zero)
     let message = UIButton(type: .system)
@@ -60,14 +67,14 @@ final class GusanToolbar: UIView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func layoutSubviews() {
         super.layoutSubviews()
-        context.frame = CGRect(x: 8, y: 0, width: bounds.width - 16, height: 20)
-        logo.frame = CGRect(x: 10, y: 27, width: 30, height: 30)
-        mic.frame = CGRect(x: bounds.width - 44, y: 25, width: 34, height: 34)
-        let extra: CGFloat = accessory.isHidden ? 0 : (accessory.currentTitle == "How to enable" ? 88 : 56)
-        accessory.frame = CGRect(x: mic.frame.minX - extra - 4, y: 20, width: extra, height: 44)
-        spinner.frame = CGRect(x: 48, y: 32, width: 20, height: 20)
+        context.frame = CGRect(x: 8, y: 0, width: bounds.width - 16, height: contextHeight)
+        logo.frame = CGRect(x: 10, y: contextHeight + (controlsHeight - 30) / 2, width: 30, height: 30)
+        mic.frame = CGRect(x: bounds.width - 44, y: contextHeight + (controlsHeight - 34) / 2, width: 34, height: 34)
+        let extra: CGFloat = accessory.isHidden ? 0 : max(48, accessory.intrinsicContentSize.width + 8)
+        accessory.frame = CGRect(x: mic.frame.minX - extra - 4, y: contextHeight, width: extra, height: controlsHeight)
+        spinner.frame = CGRect(x: 48, y: contextHeight + (controlsHeight - 20) / 2, width: 20, height: 20)
         let start: CGFloat = spinner.isAnimating ? 74 : 50
-        message.frame = CGRect(x: start, y: 20, width: max(0, mic.frame.minX - start - extra - 8), height: 44)
+        message.frame = CGRect(x: start, y: contextHeight, width: max(0, mic.frame.minX - start - extra - 8), height: controlsHeight)
     }
     func apply(_ theme: KeyboardTheme) {
         message.setTitleColor(theme.foreground, for: .normal)
@@ -77,6 +84,12 @@ final class GusanToolbar: UIView {
         accessory.tintColor = KeyboardTheme.blue
         logo.backgroundColor = theme.letter; logo.layer.cornerRadius = 15
         mic.apply(theme)
+    }
+    func updateTypography(_ traits: UITraitCollection) {
+        context.titleLabel?.font = keyboardFont(12, style: .caption1, maximum: 20, weight: .medium, traits: traits)
+        message.titleLabel?.font = keyboardFont(12, style: .caption1, maximum: 20, weight: .medium, traits: traits)
+        accessory.titleLabel?.font = keyboardFont(13, style: .footnote, maximum: 20, weight: .semibold, traits: traits)
+        setNeedsLayout()
     }
 }
 
@@ -89,6 +102,8 @@ final class GusanPanel: UIView {
     private let close = UIButton(type: .system)
     private let preview = UIButton(type: .system)
     private var tiles: [UIButton] = []
+    private var actionFont = UIFont.systemFont(ofSize: 11, weight: .medium)
+    var preferredHeight: CGFloat { max(216, 104 + 2 * ceil(actionFont.lineHeight * 2 + 28)) }
     private let actions: [SmartAction] = [.mode(.smartAuto), .rephrase, .fixGrammar, .mode(.writeEmail), .mode(.makeTodoList), .mode(.translate), .mode(.summarize)]
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -122,6 +137,7 @@ final class GusanPanel: UIView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func update(theme: KeyboardTheme, target: String, defaultAction: SmartAction, context: String) {
         let names = ["Smart", "Rephrase", "Fix grammar", "Email", "To-do", "Translate → " + target.uppercased(), "Summarize"]
+        let font = actionFont
         for (index, tile) in tiles.enumerated() {
             let selected = actions[index] == defaultAction
             var config = UIButton.Configuration.plain()
@@ -130,9 +146,10 @@ final class GusanPanel: UIView {
             config.title = names[index]
             config.baseForegroundColor = theme.dark ? .white : KeyboardTheme.blue
             config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
-                var result = attributes; result.font = .systemFont(ofSize: 11, weight: .medium); return result
+                var result = attributes; result.font = font; return result
             }
             config.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: 2, bottom: 4, trailing: 2)
+            config.titleLineBreakMode = .byWordWrapping
             tile.configuration = config
             tile.viewWithTag(100)?.isHidden = !selected
             (tile.viewWithTag(100) as? UILabel)?.textColor = theme.dark ? .white : KeyboardTheme.blue
@@ -151,8 +168,8 @@ final class GusanPanel: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         let width = bounds.width
-        ask.frame = CGRect(x: 8, y: 0, width: width - 64, height: 38)
-        close.frame = CGRect(x: width - 48, y: 0, width: 40, height: 38)
+        ask.frame = CGRect(x: 8, y: 0, width: width - 64, height: 44)
+        close.frame = CGRect(x: width - 48, y: 0, width: 44, height: 44)
         let tileWidth = (width - 40) / 4
         let tileHeight = max(44, (bounds.height - 104) / 2)
         for (index, tile) in tiles.enumerated() {
@@ -162,12 +179,19 @@ final class GusanPanel: UIView {
         preview.frame = CGRect(x: 8, y: bounds.height - 44, width: width - 16, height: 44)
     }
     @objc private func snapshotPressed() { onSnapshot?() }
+    func updateTypography(_ traits: UITraitCollection) {
+        actionFont = keyboardFont(11, style: .caption1, maximum: 18, weight: .medium, traits: traits)
+        ask.titleLabel?.font = keyboardFont(16, style: .body, maximum: 22, weight: .semibold, traits: traits)
+        preview.titleLabel?.font = keyboardFont(12, style: .caption1, maximum: 18, traits: traits)
+        setNeedsLayout()
+    }
     @objc private func askPressed() { onAsk?() }
     @objc private func closePressed() { onClose?() }
     @objc private func tilePressed(_ sender: UIButton) { onAction?(actions[sender.tag]) }
 }
 
 final class InstructionHeader: UIView {
+    let preferredHeight: CGFloat = 88
     var onSuggestion: ((String) -> Void)?
     var onRun: (() -> Void)?
     var onCancel: (() -> Void)?
@@ -216,6 +240,13 @@ final class InstructionHeader: UIView {
         scroll.frame = CGRect(x: 12, y: 44, width: bounds.width - 24, height: 44)
     }
     @objc private func suggestionPressed(_ sender: UIButton) { if let title = sender.currentTitle { onSuggestion?(title) } }
+    func updateTypography(_ traits: UITraitCollection) {
+        field.font = keyboardFont(16, style: .body, maximum: 22, traits: traits)
+        for case let chip as UIButton in suggestions.arrangedSubviews {
+            chip.titleLabel?.font = keyboardFont(12, style: .caption1, maximum: 20, weight: .medium, traits: traits)
+        }
+        setNeedsLayout()
+    }
     @objc private func runPressed() { onRun?() }
     @objc private func cancelPressed() { onCancel?() }
 }

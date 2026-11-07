@@ -45,12 +45,13 @@ final class KeyboardViewController: UIInputViewController {
     private var retryAction: SmartAction?
     private var retryContext: Context?
     private var connected = false
+    private var fontCategory: UIContentSizeCategory?
     private var accessState = SessionState(signedIn: false, fullAccess: false, shareable: false)
 
     override func viewDidLoad() {
         super.viewDidLoad()
         if #available(iOS 17.0, *) {
-            registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (controller: KeyboardViewController, _: UITraitCollection) in
+            registerForTraitChanges([UITraitUserInterfaceStyle.self, UITraitPreferredContentSizeCategory.self]) { (controller: KeyboardViewController, _: UITraitCollection) in
                 controller.updateContext()
             }
         }
@@ -105,13 +106,14 @@ final class KeyboardViewController: UIInputViewController {
     override func viewWillLayoutSubviews() {
         super.viewWillLayoutSubviews()
         let width = view.bounds.width
-        toolbar.frame = CGRect(x: 0, y: 0, width: width, height: 64)
-        voice.bar.frame = CGRect(x: 50, y: 20, width: max(0, width - 100), height: 44)
+        let barHeight = toolbar.preferredHeight
+        toolbar.frame = CGRect(x: 0, y: 0, width: width, height: barHeight)
+        voice.bar.frame = CGRect(x: 50, y: toolbar.contextHeight, width: max(0, width - 100), height: toolbar.controlsHeight)
         voice.panel.frame = view.bounds
-        let extra: CGFloat = surface == .instruction ? 88 : 0
-        instructionHeader.frame = CGRect(x: 0, y: 64, width: width, height: extra)
-        keyArea.frame = CGRect(x: 0, y: 64 + extra, width: width, height: max(0, view.bounds.height - 64 - extra))
-        panel.frame = CGRect(x: 0, y: 64, width: width, height: max(0, view.bounds.height - 64))
+        let extra: CGFloat = surface == .instruction ? instructionHeader.preferredHeight : 0
+        instructionHeader.frame = CGRect(x: 0, y: barHeight, width: width, height: extra)
+        keyArea.frame = CGRect(x: 0, y: barHeight + extra, width: width, height: max(0, view.bounds.height - barHeight - extra))
+        panel.frame = CGRect(x: 0, y: barHeight, width: width, height: max(0, view.bounds.height - barHeight))
         explanationScroll.frame = panel.frame
         let explanationHeight = max(panel.bounds.height - 24, explanation.sizeThatFits(CGSize(width: width - 36, height: .greatestFiniteMagnitude)).height)
         explanation.frame = CGRect(x: 18, y: 12, width: width - 36, height: explanationHeight)
@@ -129,6 +131,7 @@ final class KeyboardViewController: UIInputViewController {
     }
     private func updateContext() {
         guard connected else { return }
+        updateTypography()
         let editing = surface == .instruction
         keyArea.returnTitle = editing ? "Run" : nil
         keyArea.keyClicks = settings.keyClicks; keyArea.doubleSpacePeriod = settings.doubleSpacePeriod
@@ -162,10 +165,22 @@ final class KeyboardViewController: UIInputViewController {
         instructionHeader.isHidden = surface != .instruction
         keyArea.isHidden = surface == .panel || surface == .explanation
         keyArea.inputEnabled = true
-        height.constant = 280 + (surface == .instruction ? 88 : 0)
+        height.constant = keyboardHeight
         updateContext(); view.setNeedsLayout()
     }
     private func showTyping() { snapshotReturnSurface = nil; instructionContext = nil; surface = .typing; updateSurface() }
+    private var keyboardHeight: CGFloat { toolbar.preferredHeight + panel.preferredHeight + (surface == .instruction ? instructionHeader.preferredHeight : 0) }
+    private func updateTypography() {
+        guard fontCategory != traitCollection.preferredContentSizeCategory else { return }
+        fontCategory = traitCollection.preferredContentSizeCategory
+        toolbar.updateTypography(traitCollection)
+        panel.updateTypography(traitCollection)
+        instructionHeader.updateTypography(traitCollection)
+        voice.updateTypography(traitCollection)
+        explanation.font = keyboardFont(15, style: .body, maximum: 22, traits: traitCollection)
+        height.constant = keyboardHeight
+        view.setNeedsLayout()
+    }
     private func impact() { if settings.haptics { UIImpactFeedbackGenerator(style: .light).impactOccurred() } }
     private func notify(_ type: UINotificationFeedbackGenerator.FeedbackType) { if settings.haptics { UINotificationFeedbackGenerator().notificationOccurred(type) } }
     @objc private func defaultAction(_ gesture: UILongPressGestureRecognizer) {

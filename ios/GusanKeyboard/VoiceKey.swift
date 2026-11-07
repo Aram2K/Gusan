@@ -157,6 +157,14 @@ final class VoiceKeyController: NSObject {
         label.textColor = theme.foreground
         panel.status.textColor = theme.foreground
     }
+    func updateTypography(_ traits: UITraitCollection) {
+        label.font = keyboardFont(12, style: .caption1, maximum: 20, traits: traits)
+        panel.status.font = keyboardFont(20, style: .title3, maximum: 26, weight: .semibold, traits: traits)
+        panel.stop.titleLabel?.font = keyboardFont(22, style: .title2, maximum: 28, weight: .semibold, traits: traits)
+        for button in [panel.cancel, panel.undo, undoButton, copyButton, reviewButton, settingsButton] {
+            button.titleLabel?.font = keyboardFont(14, style: .callout, maximum: 20, traits: traits)
+        }
+    }
     func disappear() { visible = false; observer = nil; timer?.invalidate(); timer = nil; statusTask?.cancel(); statusTask = nil; statusLoadID = nil; panel.waveform.update(level: 0, animated: false); closeResult() }
     private func currentContext() -> VoiceContext? {
         guard let proxy = host?.textDocumentProxy else { return nil }
