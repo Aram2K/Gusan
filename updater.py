@@ -57,7 +57,10 @@ has one yet).
   main.py: can_self_install() is False) opens updater.release_page(tag) instead. install() and
   launch() remain the plain wizard path, used by Settings only when there is no controller.
   "Install updates when I quit": cached_download(tag) ahead of time, then launch_installer(path,
-  all_users=False, relaunch=False) from quit_app - per-user installed copies only.
+  all_users=False, relaunch=False) from quit_app - per-user installed copies only. quit_app puts every
+  window and the tray icon away first and starts Setup through launch_installer_waiting(): Windows can
+  take many seconds to start a ~115 MB program, and from the window's own thread that was a window
+  "Not responding" (6 s on the 2.1.0 to 2.1.1 update).
 * main._parse_version / _sha256_from_checksum_text / _trusted_update_url /
   _update_info_from_release / _update_info_from_manifest have equals here
   (parse_version, sha256_from_checksum_text, trusted_update_url,
@@ -96,6 +99,8 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import urllib.request
 import uuid
 from urllib.parse import urlparse
@@ -135,6 +140,11 @@ MSG_BLOCKED = "Your antivirus blocked the installer."
 MSG_NO_START = "Windows wouldn't start the installer."
 MSG_FILE_MISSING = "The downloaded update couldn't be found any more. Try again."
 MSG_SETUP_RUNNING = "Another installer is still running. Try again in a minute."
+MSG_STILL_STARTING = "Windows was still starting the installer when Gusan stopped waiting."
+# Quitting to update waits at most this long (seconds) for Windows to start Setup. Starting a ~115 MB
+# program that has never run here can take many seconds (Windows checks it first: 6 s on a normal PC,
+# more with a busy antivirus or a slow disk). After this, Gusan quits anyway.
+QUIT_START_WAIT_S = 45
 # What a dictation, a meeting or a file job is told once the installer is running.
 UPDATING_TITLE = "%s is updating" % APP_NAME
 UPDATING_TEXT = "It closes and opens again in a moment."
@@ -867,6 +877,38 @@ def launch_installer(path, *, all_users=False, log_path=None, relaunch=False, st
         if held is not None:
             held.close()
     return True, path
+
+
+def launch_installer_waiting(path, *, wait=None, **kw):
+    """launch_installer(path, **kw) on its own thread, waited for here for at most ``wait`` seconds
+    (QUIT_START_WAIT_S). The start is a call into Windows that can take many seconds; made straight
+    from the window's thread, it left the window "Not responding" for all of them - and a call that
+    never came back would have kept Gusan from quitting for ever. Now the caller can put its windows
+    away first, and the wait has an end. Returns what launch_installer returns; (False, MSG_NO_START)
+    when it raised; (False, MSG_STILL_STARTING) when the time ran out (the start goes on in the
+    background and may still succeed)."""
+    done = threading.Event()
+    box = {}
+
+    def _start():
+        try:
+            box["result"] = launch_installer(path, **kw)
+        except Exception:
+            logger.warning("Starting the installer failed", exc_info=True)
+            box["result"] = (False, MSG_NO_START)
+        finally:
+            done.set()
+
+    began = time.monotonic()
+    threading.Thread(target=_start, name="gusan-update-start", daemon=True).start()
+    seconds = QUIT_START_WAIT_S if wait is None else wait
+    if not done.wait(seconds):
+        logger.warning("Windows had not started the installer after %s s - not waiting any longer", seconds)
+        return False, MSG_STILL_STARTING
+    # How long Windows takes is what this change is about: it is in the log (a stall line just before it
+    # in the same log is this wait - nothing is on screen by then).
+    logger.info("Windows took %.1f s to start the installer", time.monotonic() - began)
+    return box["result"]
 
 
 # One log per attempt, in %TEMP%\gusan-update\logs: the watcher waits for THIS one to close, and

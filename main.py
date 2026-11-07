@@ -5620,7 +5620,16 @@ class AppController(QObject):
             return
         self.track("update_install_started", {"manual": False, "to": tag})
         log = updater.new_log_path()
-        ok, info = updater.launch_installer(path, all_users=False, log_path=log, relaunch=False)
+        # The person chose to quit, so nothing of Gusan stays on screen while Windows starts Setup. That
+        # takes many seconds (it checks a ~115 MB program first); a window left up would show "Not
+        # responding" for all of them. Setup's own small window follows.
+        for put_away in (lambda: [w.hide() for w in self.qapp.topLevelWidgets()],
+                         lambda: self.tray_icon.hide()):
+            try:
+                put_away()
+            except Exception:
+                logger.debug("Could not put a window away before the update", exc_info=True)
+        ok, info = updater.launch_installer_waiting(path, all_users=False, log_path=log, relaunch=False)
         self.track("update_install_result", {"manual": False, "ok": bool(ok)})
         if ok:
             # A failed install is said at the next start; pending_update_version stays until then.
