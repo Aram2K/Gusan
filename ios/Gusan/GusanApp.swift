@@ -38,6 +38,8 @@ final class AccountModel: NSObject, ObservableObject, ASWebAuthenticationPresent
                     let entitlement = try await auth.entitlement(accessToken: session.accessToken)
                     tier = entitlement.isPro ? "Gusan Pro" : "Free"
                 }
+            } catch GusanError.unauthorized {
+                session = store.read(); tier = ""
             } catch { self.error = error.localizedDescription; tier = "Plan unavailable" }
         }
         diagnostics = store.diagnostics()
