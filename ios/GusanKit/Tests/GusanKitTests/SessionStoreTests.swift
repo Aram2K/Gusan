@@ -26,6 +26,29 @@ final class SessionStoreTests: XCTestCase {
         let report = SessionReport(role: role, timestamp: Date(), groupID: group, keychainGroupID: keychain, stores: stores, fullAccess: true)
         backend.values["report." + role.rawValue] = try! JSONEncoder().encode(report)
     }
+    func testVoiceDiagnosticsCombineKeyboardHealthAndExportWithoutSecrets() throws {
+        let healthy = StoreHealth(name: "App-group file", readable: true, writable: true, hasSession: false)
+        let denied = StoreHealth(name: "App-group file", readable: false, writable: false, hasSession: false)
+        let board = StoreHealth(name: "Team pasteboard", readable: true, writable: true, hasSession: false)
+        let app = SessionReport(role: .app, timestamp: Date(), groupID: "group", keychainGroupID: nil, stores: [healthy, board], fullAccess: nil, voiceChannel: "App Group")
+        func diagnostics(_ access: Bool, _ file: StoreHealth = healthy, voice: String? = nil, channel: String = "App Group") -> SessionDiagnostics {
+            let keyboard = SessionReport(role: .keyboard, timestamp: Date(), groupID: "group", keychainGroupID: nil, stores: [file, board], fullAccess: access, voiceChannel: voice)
+            return SessionDiagnostics(local: app, peer: keyboard, pasteboardFallback: "not needed", localVoiceChannel: channel)
+        }
+        XCTAssertEqual(diagnostics(true).voiceChannel, "App Group")
+        XCTAssertEqual(diagnostics(false).voiceChannel, "Unavailable (keyboard reports Full Access off)")
+        XCTAssertEqual(diagnostics(true, denied).voiceChannel, "Unavailable (keyboard cannot use the App Group)")
+        XCTAssertTrue(diagnostics(true, voice: "Unavailable (pasteboard fallback is off)").voiceChannel.contains("pasteboard fallback is off"))
+        XCTAssertEqual(diagnostics(true, voice: "App Group", channel: "Pasteboard fallback").voiceChannel, "Unavailable (app and keyboard voice channels differ)")
+        let empty = SessionDiagnostics(local: app, peer: nil, pasteboardFallback: "not needed", localVoiceChannel: "App Group")
+        XCTAssertEqual(empty.voiceChannel, "Unavailable (keyboard has not reported)")
+        let data = try diagnostics(false).encodedReport()
+        let report = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(report["voiceChannel"] as? String, "Unavailable (keyboard reports Full Access off)")
+        XCTAssertEqual(report["localVoiceChannel"] as? String, "App Group")
+        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("accessToken"))
+        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("context"))
+    }
     func testNewestWinsAndExpiryBreaksTies() {
         let keychain = Backend("Keychain"), file = Backend("App-group file"), pasteboard = Backend("Team pasteboard")
         let store = SessionStore(resolution: resolution, backends: [keychain, file, pasteboard], privateBackend: Backend("private"))

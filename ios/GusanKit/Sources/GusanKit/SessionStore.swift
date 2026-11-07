@@ -90,13 +90,39 @@ public struct SessionReport: Codable {
     public let keychainGroupID: String?
     public let stores: [StoreHealth]
     public let fullAccess: Bool?
+    public var voiceChannel: String? = nil
 }
 
 public struct SessionDiagnostics {
     public let local: SessionReport
     public let peer: SessionReport?
     public let pasteboardFallback: String
-    public let voiceChannel: String
+    public let localVoiceChannel: String
+    public var voiceChannel: String {
+        guard local.role == .app else { return localVoiceChannel }
+        guard let peer else { return "Unavailable (keyboard has not reported)" }
+        if peer.fullAccess == false { return "Unavailable (keyboard reports Full Access off)" }
+        if localVoiceChannel.hasPrefix("Unavailable") { return localVoiceChannel }
+        if let voice = peer.voiceChannel, voice.hasPrefix("Unavailable") { return voice.replacingOccurrences(of: "Unavailable (", with: "Unavailable (keyboard: ", options: .anchored) }
+        if localVoiceChannel == "App Group" {
+            guard local.groupID != nil, local.groupID == peer.groupID,
+                  peer.stores.contains(where: { $0.name == "App-group file" && $0.readable && $0.writable }) else { return "Unavailable (keyboard cannot use the App Group)" }
+        } else if localVoiceChannel == "Pasteboard fallback" {
+            guard peer.stores.contains(where: { $0.name == "Team pasteboard" && $0.readable && $0.writable }) else { return "Unavailable (keyboard cannot read/write the pasteboard)" }
+        }
+        if let voice = peer.voiceChannel, voice != localVoiceChannel { return "Unavailable (app and keyboard voice channels differ)" }
+        return localVoiceChannel
+    }
+    public func encodedReport() throws -> Data {
+        struct Report: Encodable {
+            let app: SessionReport
+            let keyboard: SessionReport?
+            let voiceChannel: String
+            let localVoiceChannel: String
+        }
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(Report(app: local, keyboard: peer, voiceChannel: voiceChannel, localVoiceChannel: localVoiceChannel))
+    }
     public var groupID: String? { local.groupID }
     public var keychainOK: Bool { local.stores.contains { $0.name == "Keychain" && $0.readable && $0.writable } }
     public var fileOK: Bool { local.stores.contains { $0.name == "App-group file" && $0.readable && $0.writable } }
@@ -172,13 +198,15 @@ public final class SessionStore: SessionStorage {
                 if cachedVoiceRoute != .disabled || !allowed { return cachedVoiceRoute }
             }
             let stores = backends.map(health)
-            let report = SessionReport(role: role, timestamp: Date(), groupID: resolution.chosen, keychainGroupID: keychainGroup, stores: stores, fullAccess: fullAccess())
-            if let data = try? JSONEncoder().encode(report) { for backend in backends { _ = backend.write(data, key: "report." + role.rawValue) } }
             let peer = peerReport()
             let localFile = resolution.container != nil && stores.contains { $0.name == "App-group file" && $0.readable && $0.writable }
             let sharedFile = peer == nil || (resolution.chosen != nil && resolution.chosen == peer?.groupID && peer!.stores.contains { $0.name == "App-group file" && $0.readable && $0.writable })
             cachedVoiceRoute = localFile && sharedFile ? .file : (allowed ? .pasteboard : .disabled)
             voiceCheckedAt = Date()
+            let selected = cachedVoiceRoute
+            let voice = VoiceChannel(container: resolution.container, group: "com.aram2k.gusan", pasteboard: voicePasteboard, route: { selected }).diagnosticsDescription
+            let report = SessionReport(role: role, timestamp: Date(), groupID: resolution.chosen, keychainGroupID: keychainGroup, stores: stores, fullAccess: fullAccess(), voiceChannel: voice)
+            if let data = try? JSONEncoder().encode(report) { for backend in backends { _ = backend.write(data, key: "report." + role.rawValue) } }
             return cachedVoiceRoute
         }
     }
@@ -309,11 +337,11 @@ public final class SessionStore: SessionStorage {
             _ = reconcile()
             let reportKey = "report." + role.rawValue
             let stores = backends.map(health)
-            let report = SessionReport(role: role, timestamp: Date(), groupID: resolution.chosen, keychainGroupID: keychainGroup, stores: stores, fullAccess: fullAccess())
+            let report = SessionReport(role: role, timestamp: Date(), groupID: resolution.chosen, keychainGroupID: keychainGroup, stores: stores, fullAccess: fullAccess(), voiceChannel: voice)
             if let data = try? JSONEncoder().encode(report) { for backend in backends { _ = backend.write(data, key: reportKey) } }
             let peer = peerReport()
             let fallback = !fallbackAllowed() ? "off" : (usePasteboard() && stores.contains { $0.name == "Team pasteboard" && $0.hasSession } ? "in use" : "not needed")
-            return SessionDiagnostics(local: report, peer: peer, pasteboardFallback: fallback, voiceChannel: voice)
+            return SessionDiagnostics(local: report, peer: peer, pasteboardFallback: fallback, localVoiceChannel: voice)
         }
     }
 }

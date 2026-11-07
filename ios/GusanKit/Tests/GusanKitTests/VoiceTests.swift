@@ -157,8 +157,10 @@ final class VoiceTests: XCTestCase {
             let channel = store.makeVoiceChannel()
             XCTAssertEqual(channel.available, writable || enabled)
             let expected = writable ? "App Group" : (enabled ? "Pasteboard fallback" : "Unavailable (pasteboard fallback is off)")
-            XCTAssertEqual(store.diagnostics().voiceChannel, expected)
-            XCTAssertTrue(store.diagnostics().summary.contains("Voice: " + expected))
+            XCTAssertEqual(store.diagnostics().localVoiceChannel, expected)
+            let combined = !writable && enabled ? "Unavailable (keyboard cannot read/write the pasteboard)" : expected
+            XCTAssertEqual(store.diagnostics().voiceChannel, combined)
+            XCTAssertTrue(store.diagnostics().summary.contains("Voice: " + combined))
             if writable || !enabled { XCTAssertTrue(voice.values.isEmpty) }
             if !writable && !enabled { XCTAssertEqual(channel.unavailableError, .fallbackOff) }
             channel.clear()

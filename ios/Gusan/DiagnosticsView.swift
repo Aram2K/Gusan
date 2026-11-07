@@ -1,11 +1,6 @@
 import SwiftUI
 import GusanKit
 
-private struct DiagnosticExport: Encodable {
-    let app: SessionReport
-    let keyboard: SessionReport?
-}
-
 struct DiagnosticsView: View {
     @EnvironmentObject private var model: AppModel
     @State private var copied = false
@@ -65,8 +60,7 @@ struct DiagnosticsView: View {
     }
     private func copyReport() {
         guard let diagnostics = model.diagnostics else { return }
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; encoder.dateEncodingStrategy = .iso8601
-        guard let data = try? encoder.encode(DiagnosticExport(app: diagnostics.local, keyboard: diagnostics.peer)), let report = String(data: data, encoding: .utf8) else { return }
+        guard let data = try? diagnostics.encodedReport(), let report = String(data: data, encoding: .utf8) else { return }
         UIPasteboard.general.string = report; copied = true
         UIAccessibility.post(notification: .announcement, argument: "Report copied")
     }
