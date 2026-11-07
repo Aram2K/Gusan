@@ -364,7 +364,7 @@ struct NewTaskView: View {
         .toolbar {
             ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
             ToolbarItem(placement: .confirmationAction) {
-                Button(starting ? "Starting…" : "Start") { start() }.disabled(starting || instruction.trimmingCharacters(in: .whitespaces).count < 3)
+                Button(starting ? "Starting…" : "Start") { start() }.disabled(starting || instruction.trimmingCharacters(in: .whitespacesAndNewlines).count < 3)
             }
         }
         .onAppear { focused = true }
