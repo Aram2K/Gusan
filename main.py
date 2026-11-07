@@ -261,6 +261,7 @@ DEFAULT = {
     # 1.9.0 stored "live_assist_auto": false (its periodic refresh, off by
     # default) in every config.json, which would keep this off after updating.
     "live_assist_auto_answer": True,
+    "live_assist_web_search": True,
     "live_assist_pos": None,
     # Transcription language of a Live Assistant session ("" = the dictation
     # language) and of its answers ("" = the call's language). 1.9.x saved

@@ -40,6 +40,7 @@ import actions
 import meeting_chat
 import meeting_store
 import rich_text
+from web_sources import sources_html
 from ui import theme
 from ui.components import Button, Card, label, mini_prompt
 from ui.components import clipboard as rich_clipboard
@@ -198,6 +199,11 @@ class _AnswerRow(QWidget):
         self.body.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.body.hide()
         lay.addWidget(self.body)
+        self.sources = QLabel("", self)
+        self.sources.setWordWrap(True)
+        self.sources.setOpenExternalLinks(True)
+        self.sources.hide()
+        lay.addWidget(self.sources)
         self.status = views.tlabel("", 12.5, 400, "muted", parent=self, wrap=True)
         self.status.setTextFormat(Qt.PlainText)                  # a sentence, never markup
         self.status.hide()
@@ -246,6 +252,7 @@ class _AnswerRow(QWidget):
 
     # the states
     def show_thinking(self, text=THINKING):
+        self.sources.hide()
         self.set_text("")
         self.set_status(text)
         self.set_note("")
@@ -265,6 +272,9 @@ class _AnswerRow(QWidget):
         self.msg = msg
         stopped = msg.get("status") != "done"
         self.set_text(msg.get("text") or "", streaming=stopped or bool(msg.get("cut")))
+        html = sources_html(msg.get("sources", []))
+        self.sources.setText(html)
+        self.sources.setVisible(bool(html))
         if stopped:
             self.set_status(meeting_chat.DROPPED if msg.get("why") == "dropped" else STOPPED)
         else:
@@ -899,7 +909,7 @@ class ChatCard(Card):
             ans = value
             msg = {"role": "assistant", "text": ans.text, "status": "done", "engine": ans.engine_label,
                    "kind": ans.kind, "coverage": ans.coverage.as_dict(), "seconds": ans.seconds,
-                   "ts": int(time.time())}
+                   "ts": int(time.time()), "sources": ans.sources}
             if ans.dropped:                                # the connection ended before the answer did: it is not
                 msg["status"], msg["why"] = "stopped", "dropped"      # kept as a finished one (nor sent back to the model)
             elif ans.cut:

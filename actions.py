@@ -494,6 +494,9 @@ def process_stream(text, mode, on_token, source_lang="auto", target_lang="en",
                 session_id=(config or {}).get("_live_session_id") or "",
                 note_ref=(config or {}).get("_note_ref") or "",
                 prefer=(config or {}).get("cloud_writer_model") or "",
+                web_search=bool((config or {}).get("_web_search")) and mode in (ACTION_LIVE_ASSIST, ACTION_MEETING_CHAT),
+                config=config, info=(config or {}).get("_answer_info"),
+                web_query=(config or {}).get("_web_query", ""),
             )
     except local_llm.ContextTooLong as e:
         raise ContextTooLong(str(e)) from e

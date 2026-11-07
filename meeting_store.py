@@ -38,6 +38,7 @@ import tempfile
 import threading
 import time
 import wave
+from urllib.parse import urlsplit
 from pathlib import Path
 
 import meeting_titles
@@ -268,6 +269,21 @@ def clean_chat(messages):
         if ts is not None:
             row["ts"] = ts
         if m["role"] == "assistant":
+            sources = []
+            for source in m.get("sources", []) if isinstance(m.get("sources"), list) else []:
+                if not isinstance(source, dict):
+                    continue
+                try:
+                    url = str(source.get("url") or "").strip()[:4000]
+                    parsed = urlsplit(url)
+                    if parsed.scheme in ("http", "https") and parsed.netloc:
+                        sources.append({"title": str(source.get("title") or "").strip()[:200], "url": url})
+                except ValueError:
+                    continue
+                if len(sources) == 5:
+                    break
+            if sources:
+                row["sources"] = sources
             row["status"] = m.get("status") if m.get("status") in CHAT_STATUSES else "stopped"
             if m.get("why") in CHAT_WHYS and row["status"] == "stopped":
                 row["why"] = m["why"]                      # the connection dropped: the answer may be cut short
