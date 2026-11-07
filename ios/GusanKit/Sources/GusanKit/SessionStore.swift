@@ -114,26 +114,27 @@ public final class SessionStore: SessionStorage {
         if status == errSecItemNotFound { status = SecItemAdd(q.merging(attributes) { _, new in new } as CFDictionary, nil) }
         return status == errSecSuccess
     }
+    private func saveFile(_ data: Data, to url: URL) -> Bool {
+        #if os(iOS)
+        let options: Data.WritingOptions = [.atomic, .completeFileProtectionUntilFirstUserAuthentication]
+        #else
+        let options: Data.WritingOptions = .atomic
+        #endif
+        return (try? data.write(to: url, options: options)) != nil
+    }
     private func migrateToShared(_ data: Data) -> Bool {
-        if resolution.chosen != nil, saveKeychain(data, shared: true) { keychainOK = true }
-        if let url = fileURL, (try? data.write(to: url, options: .atomic)) != nil { fileOK = true }
-        return sharedBackendAvailable
+        let savedKeychain = resolution.chosen != nil && saveKeychain(data, shared: true)
+        let savedFile = fileURL.map { saveFile(data, to: $0) } ?? false
+        if savedKeychain { keychainOK = true }
+        if savedFile { fileOK = true }
+        return savedKeychain || savedFile
     }
     public func write(_ session: Session) {
         lock.lock(); defer { lock.unlock() }
         guard let data = try? JSONEncoder().encode(session) else { return }
         keychainOK = resolution.chosen != nil && saveKeychain(data, shared: true)
         fileOK = false
-        if let url = fileURL {
-            do {
-                #if os(iOS)
-                try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-                #else
-                try data.write(to: url, options: .atomic)
-                #endif
-                fileOK = true
-            } catch { fileOK = false }
-        }
+        if let url = fileURL { fileOK = saveFile(data, to: url) }
         if sharedBackendAvailable { SecItemDelete(query(shared: false) as CFDictionary) }
         else { _ = saveKeychain(data, shared: false) }
     }
