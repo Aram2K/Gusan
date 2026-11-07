@@ -61,7 +61,8 @@ struct DiagnosticsView: View {
     private func copyReport() {
         guard let diagnostics = model.diagnostics else { return }
         guard let data = try? diagnostics.encodedReport(), let report = String(data: data, encoding: .utf8) else { return }
-        UIPasteboard.general.string = report; copied = true
+        UIPasteboard.general.setItems([["public.utf8-plain-text": report]], options: [.localOnly: true, .expirationDate: Date().addingTimeInterval(600)])
+        copied = true
         UIAccessibility.post(notification: .announcement, argument: "Report copied")
     }
 }
