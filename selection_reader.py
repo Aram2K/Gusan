@@ -27,6 +27,10 @@ COPY_WAIT_S = 0.4              # how long the app may take to put its selection 
 # Windows: no copy chord into these (window classes / programs where Ctrl+C can stop a running program).
 _TERMINAL_CLASSES = {"ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS", "mintty", "PuTTY", "VirtualConsoleClass",
                      "org.wezfurlong.wezterm", "Alacritty", "TMobaXtermForm"}
+# Browsers: their page reports itself read-only to UI Automation even where you can type (Google Docs draws its own
+# text), so in a browser "can the cursor take typing" is not known - the result is pasted and stays on the clipboard.
+_BROWSERS = {"chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe", "vivaldi.exe", "arc.exe",
+             "iexplore.exe", "chromium.exe", "thorium.exe", "librewolf.exe", "zen.exe"}
 _TERMINAL_PROGRAMS = {"windowsterminal.exe", "cmd.exe", "powershell.exe", "pwsh.exe", "conhost.exe",
                       "wezterm-gui.exe", "alacritty.exe", "mintty.exe", "putty.exe", "kitty.exe", "mobaxterm.exe",
                       "code.exe", "code - insiders.exe", "cursor.exe", "windsurf.exe", "idea64.exe", "pycharm64.exe",
@@ -207,33 +211,39 @@ def _uia_selection():
             _release(el)
 
 
-def _foreground_is_terminal():
-    """True when the window in front is a terminal, or a program with one built in (no copy chord there)."""
+def _foreground_window():
+    """(window class, program file name in lower case) of the window in front; (None, None) when there is none or it
+    can't be read."""
     try:
         user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
         hwnd = user32.GetForegroundWindow()
         if not hwnd:
-            return True                         # nothing in front: send nothing
+            return None, None
         buf = ctypes.create_unicode_buffer(256)
         user32.GetClassNameW(hwnd, buf, 256)
-        if buf.value in _TERMINAL_CLASSES:
-            return True
         pid = ctypes.c_ulong(0)
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        name = ""
         handle = kernel32.OpenProcess(0x1000, False, pid.value)          # PROCESS_QUERY_LIMITED_INFORMATION
-        if not handle:
-            return False
-        try:
-            size = ctypes.c_ulong(1024)
-            path = ctypes.create_unicode_buffer(1024)
-            if kernel32.QueryFullProcessImageNameW(handle, 0, path, ctypes.byref(size)):
-                name = path.value.replace("/", "\\").rsplit("\\", 1)[-1].lower()
-                return name in _TERMINAL_PROGRAMS
-        finally:
-            kernel32.CloseHandle(handle)
+        if handle:
+            try:
+                size = ctypes.c_ulong(1024)
+                path = ctypes.create_unicode_buffer(1024)
+                if kernel32.QueryFullProcessImageNameW(handle, 0, path, ctypes.byref(size)):
+                    name = path.value.replace("/", "\\").rsplit("\\", 1)[-1].lower()
+            finally:
+                kernel32.CloseHandle(handle)
+        return buf.value, name
     except Exception:
-        return True
-    return False
+        return None, None
+
+
+def _foreground_is_terminal():
+    """True when the window in front is a terminal, or a program with one built in (no copy chord there)."""
+    cls, name = _foreground_window()
+    if cls is None:
+        return True                             # nothing in front, or unreadable: send nothing
+    return cls in _TERMINAL_CLASSES or name in _TERMINAL_PROGRAMS
 
 
 # ── the copy-chord fallback (both systems) ────────────────────────────────────────────────────
@@ -386,9 +396,12 @@ def read_selection(platform=None):
 
 def focus_editable():
     """True / False: the place the cursor is now takes typing (Windows UI Automation's Value pattern); None when it
-    can't be told (macOS, or an app that does not say). Worker thread."""
+    can't be told (macOS, a browser, or an app that does not say) - the caller pastes then. Worker thread."""
     if sys.platform != "win32" or not enabled():
         return None
+    cls, name = _foreground_window()
+    if name in _BROWSERS or cls in ("Chrome_WidgetWin_1", "MozillaWindowClass"):
+        return None                     # browsers and the apps built on one (Slack, Teams, Notion...): paste first
     try:
         with _UIA() as uia:
             el = uia.focused()

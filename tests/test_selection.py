@@ -179,3 +179,30 @@ class TestWhatIsPasted(unittest.TestCase):
         for ask in ("translate", "shorten", "summarize", "rewrite", "a reply"):
             self.assertIn(ask, change)
         self.assertIn("When unsure, it is a CHANGE", answer)
+
+
+class TestWhereItGoes(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, {"TRANSCRIBE_NO_SELECTION": "", "QT_QPA_PLATFORM": ""})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_browser_or_an_app_built_on_one_is_paste_first(self):
+        """Chrome says its page is read-only even in Google Docs: in a browser the result is pasted (seen 2026-11-07:
+        a Docs letter came back as a "Copied" card instead of replacing the selection)."""
+        for window in (("Chrome_WidgetWin_1", "chrome.exe"), ("Chrome_WidgetWin_1", "slack.exe"),
+                       ("MozillaWindowClass", "firefox.exe"), ("SomethingElse", "msedge.exe")):
+            with mock.patch.object(sr.sys, "platform", "win32"), \
+                    mock.patch.object(sr, "_foreground_window", return_value=window), \
+                    mock.patch.object(sr, "_UIA", side_effect=AssertionError("asked")):
+                self.assertIsNone(sr.focus_editable(), window)
+
+    def test_another_app_that_says_read_only_gets_the_card(self):
+        fake_uia = mock.MagicMock()
+        fake_uia.__enter__.return_value.focused.return_value = 123
+        with mock.patch.object(sr.sys, "platform", "win32"), \
+                mock.patch.object(sr, "_foreground_window", return_value=("AcrobatSDIWindow", "acrobat.exe")), \
+                mock.patch.object(sr, "_UIA", return_value=fake_uia), \
+                mock.patch.object(sr, "_read_only", return_value=True), \
+                mock.patch.object(sr, "_release"):
+            self.assertIs(sr.focus_editable(), False)

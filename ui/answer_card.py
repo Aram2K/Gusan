@@ -84,7 +84,7 @@ class AnswerCard(QWidget):
         self.body.setOpenExternalLinks(True)
         self.body.setFocusPolicy(Qt.NoFocus)
         self.body.setAccessibleName("Result")
-        self.body.setFont(theme.font(14))
+        self.body.setFont(theme.font(13.5))
         self.body.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.body.setStyleSheet("QLabel { background: transparent; color: %s; padding: 0px; }" % theme.qss_color("text"))
         self.scroll = QScrollArea(self.card)
@@ -134,9 +134,11 @@ class AnswerCard(QWidget):
         icon_name, color = ("check", "ok") if self._kind == KIND_COPIED else ("sparkle", "blue")
         self.mark.setPixmap(icons.pixmap(icon_name, 18, theme.qss_color(color)))
         self._copy_again()
-        html = rich_text.qt_html(self._text, {"text": theme.qss_color("text"), "muted": theme.qss_color("muted"),
-                                              "item_gap": "3px"})
-        self.body.setText(html)
+        # The same type as every AI answer in the app (Ask about this meeting): 13.5 px, 21 px lines, its colours.
+        html = rich_text.qt_html(rich_text.answer_text(self._text), {
+            "text": theme.qss_color("text"), "muted": theme.qss_color("muted"), "head": theme.qss_color("ink"),
+            "code_bg": theme.qss_color("bg2"), "item_gap": "3px"})
+        self.body.setText("<div style='line-height:21px'>%s</div>" % html)
         text_h = self.body.heightForWidth(BODY_W)
         if text_h > MAX_TEXT_H:                                 # it scrolls: the bar takes some of the width
             text_h = MAX_TEXT_H
