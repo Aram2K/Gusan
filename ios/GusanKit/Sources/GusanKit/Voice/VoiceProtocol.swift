@@ -87,8 +87,10 @@ public struct VoiceChannel {
     }
     public func readStatus() -> VoiceStatus? { read("status", as: VoiceStatus.self) }
     public func readCommand() -> VoiceCommand? { read("command", as: VoiceCommand.self) }
+    public func readKeyboardState() -> KeyboardVoiceState? { read("keyboard", as: KeyboardVoiceState.self) }
     public func write(status: VoiceStatus) throws { try write(status, name: "status") }
     public func write(command: VoiceCommand) throws { try write(command, name: "command") }
+    public func write(keyboard: KeyboardVoiceState) throws { try write(keyboard, name: "keyboard") }
     public func name(_ notification: Notification) -> String { "gusan.voice.\(notification.rawValue).\(group)" }
     public func post(_ notification: Notification) { CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFNotificationName(name(notification) as CFString), nil, nil, true) }
     public func observe(_ notification: Notification, handler: @escaping () -> Void) -> DarwinObserver { DarwinObserver(name: name(notification), handler: handler) }

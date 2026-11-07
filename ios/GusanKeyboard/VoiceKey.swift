@@ -28,9 +28,10 @@ final class VoiceKeyController: NSObject {
     private var observer: DarwinObserver?
     private var timer: Timer?
     private var visible = false
-    private var requestID: UUID?
-    private var context: VoiceContext?
-    private var insertedID: UUID?
+    private var pending = KeyboardVoiceState()
+    private var requestID: UUID? { pending.requestID }
+    private var context: VoiceContext? { pending.context }
+    private var insertedID: UUID? { pending.insertedID }
     private var inserted: String?
     private var original = ""
     private var undoContext: VoiceContext?
@@ -39,6 +40,7 @@ final class VoiceKeyController: NSObject {
         self.host = host; self.store = store
         channel = VoiceChannel(container: store.resolution.container, group: store.resolution.chosen ?? "group.com.aram2k.gusan")
         super.init()
+        restorePending()
         micButton.setImage(UIImage(systemName: "mic.fill"), for: .normal)
         micButton.accessibilityLabel = "Start dictation"
         micButton.backgroundColor = .tertiarySystemBackground; micButton.layer.cornerRadius = 8
@@ -52,6 +54,7 @@ final class VoiceKeyController: NSObject {
         bar.isHidden = true
     }
     func appear() {
+        restorePending()
         visible = true
         observer = channel.observe(.status) { [weak self] in self?.refresh() }
         refresh()
@@ -78,9 +81,13 @@ final class VoiceKeyController: NSObject {
         }
     }
     private func sendStart() -> Bool {
-        requestID = UUID(); context = currentContext(); inserted = nil; undoButton.isHidden = true
+        pending = KeyboardVoiceState(requestID: UUID(), context: currentContext())
+        do { try channel.write(keyboard: pending) }
+        catch { show(error.localizedDescription); return false }
+        inserted = nil; undoButton.isHidden = true
         return send(.start, id: requestID, context: context)
     }
+    private func restorePending() { if let saved = channel.readKeyboardState() { pending = saved } }
     @discardableResult private func send(_ kind: VoiceCommand.Kind, id: UUID?, context: VoiceContext? = nil) -> Bool {
         guard let id else { return false }
         do {
@@ -118,14 +125,14 @@ final class VoiceKeyController: NSObject {
     }
     private func deliver(_ status: VoiceStatus) {
         guard let id = requestID else { return }
-        insertedID = id
-        guard let result = status.result, !result.isEmpty, let context, let current = currentContext(), current.documentID == context.documentID, let proxy = host?.textDocumentProxy else {
+        pending.insertedID = id
+        do { try channel.write(keyboard: pending) }
+        catch { pending.insertedID = nil; show(error.localizedDescription); return }
+        guard !pending.isStale(status: status) else { return }
+        guard let result = status.result, !result.isEmpty, let context, let current = currentContext(), let proxy = host?.textDocumentProxy else {
             if let result = status.result { UIPasteboard.general.string = result; show("Text changed — result copied, paste it") }; return
         }
-        if !context.selected.isEmpty && current.selected != context.selected {
-            UIPasteboard.general.string = result; show("Text changed — result copied, paste it"); return
-        }
-        if context.selected.isEmpty && !current.selected.isEmpty {
+        if !pending.canInsert(selected: current.selected) {
             UIPasteboard.general.string = result; show("Text changed — result copied, paste it"); return
         }
         proxy.insertText(result)

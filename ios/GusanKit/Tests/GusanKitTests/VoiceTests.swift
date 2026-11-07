@@ -94,6 +94,34 @@ final class VoiceTests: XCTestCase {
         XCTAssertFalse(VoiceStatus(phase: .off, heartbeat: now).isAlive(now: now))
         XCTAssertThrowsError(try VoiceChannel(container: nil).write(status: status)) { XCTAssertEqual($0 as? VoiceError, .notShared) }
     }
+    func testKeyboardStateRoundTrip() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let channel = VoiceChannel(container: directory)
+        XCTAssertNil(channel.readKeyboardState())
+        var state = KeyboardVoiceState(requestID: UUID(), context: VoiceContext(selected: "selection", before: "before", after: "after", documentID: "old"), startedAt: now)
+        try channel.write(keyboard: state)
+        XCTAssertEqual(VoiceChannel(container: directory).readKeyboardState(), state)
+        state.insertedID = state.requestID
+        try channel.write(keyboard: state)
+        XCTAssertEqual(channel.readKeyboardState(), state)
+        XCTAssertThrowsError(try VoiceChannel(container: nil).write(keyboard: state)) { XCTAssertEqual($0 as? VoiceError, .notShared) }
+    }
+    func testKeyboardDeliveryRules() {
+        let state = KeyboardVoiceState(requestID: UUID(), context: VoiceContext(selected: "selection", documentID: "old"), startedAt: now)
+        XCTAssertTrue(state.canInsert(selected: "selection"))
+        XCTAssertFalse(state.canInsert(selected: "changed")); XCTAssertFalse(state.canInsert(selected: ""))
+        let empty = KeyboardVoiceState(context: VoiceContext(), startedAt: now)
+        XCTAssertTrue(empty.canInsert(selected: "")); XCTAssertFalse(empty.canInsert(selected: "new selection"))
+        XCTAssertFalse(KeyboardVoiceState().canInsert(selected: ""))
+        let status = VoiceStatus(phase: .done, requestID: state.requestID, heartbeat: now, result: "result")
+        XCTAssertFalse(state.isStale(status: status, now: now.addingTimeInterval(599)))
+        XCTAssertTrue(state.isStale(status: status, now: now.addingTimeInterval(600)))
+        let fresh = KeyboardVoiceState(startedAt: now.addingTimeInterval(601))
+        XCTAssertTrue(fresh.isStale(status: status, now: now.addingTimeInterval(601)))
+        let renewed = VoiceStatus(phase: .done, heartbeat: now.addingTimeInterval(601))
+        XCTAssertTrue(state.isStale(status: renewed, now: now.addingTimeInterval(601)))
+    }
     func start(_ machine: inout VoiceMachine, id: UUID, context: VoiceContext? = nil) {
         _ = machine.handle(.sessionStarted(now))
         XCTAssertEqual(machine.handle(.command(VoiceCommand(kind: .start, requestID: id, context: context, sentAt: now), now)), [.beginCapture, .publish])
