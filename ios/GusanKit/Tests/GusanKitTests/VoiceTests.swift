@@ -339,7 +339,8 @@ final class VoiceTests: XCTestCase {
         XCTAssertEqual(machine.handle(.transcribed(UUID(), "stale")), [])
         XCTAssertEqual(machine.handle(.failed(UUID(), "stale")), [])
         XCTAssertEqual(machine.handle(.finished(UUID(), "stale", false)), [])
-        XCTAssertEqual(machine.handle(.transcribed(id, "hello")), [.deliver("hello"), .publish])
+        XCTAssertEqual(machine.handle(.transcribed(id, "hello")), [.runAction(id, "hello", nil), .publish])
+        XCTAssertEqual(machine.handle(.completed(id, JobResult(text: "hello", kind: .insert))), [.deliver("hello"), .publish])
         XCTAssertEqual(machine.phase, .done); XCTAssertEqual(machine.result, "hello")
     }
     func testPlansAndSmartMachine() {

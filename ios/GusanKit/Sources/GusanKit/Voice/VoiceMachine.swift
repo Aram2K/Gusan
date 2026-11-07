@@ -63,9 +63,7 @@ public struct VoiceMachine {
             }
         case .transcribed(let id, let text):
             guard requestID == id, phase == .transcribing else { return [] }
-            if case .insert(let result) = VoicePlan.plan(transcript: text, context: context, action: action) {
-                phase = .done; self.result = result; replacesSelection = false; effects = [.deliver(result)]
-            } else { phase = .thinking; effects = [.runAction(id, text, context)] }
+            phase = .thinking; effects = [.runAction(id, text, context)]
         case .finished(let id, let result, let replaces):
             guard requestID == id, phase == .thinking else { return [] }
             phase = .done; self.result = result; replacesSelection = replaces; effects = [.deliver(result)]
