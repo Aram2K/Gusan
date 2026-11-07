@@ -106,12 +106,16 @@ export function webSearchQuery(question: string): string {
 
 export function explicitWebQuery(question: string, mode = "live_assist"): string {
   const q = question.trim();
-  const trigger = /^(?:(?:please|(?:can|could|would)\s+you)\s+)*(?:search\s+(?:the\s+)?(?:web|online|internet)(?:\s+for)?|google|look\s+up(?:\s+(?:on\s+)?(?:the\s+)?(?:web|online|internet))?|(?:check|find)\s+online|(?:can|could|would)\s+you\s+(?:please\s+)?search(?:\s+for)?|search\s+for|browse(?:\s+(?:the\s+)?(?:web|online|internet))?|what\s+does\s+the\s+internet\s+say\s+about|cherche(?:r|z)?\s+sur\s+internet|busca(?:r)?\s+en\s+internet|such(?:e)?\s+im\s+internet)\b/i.exec(q);
+  const command = q.replace(/[,\s]*(?:please|thanks|thank you|s'il vous plaît|por favor|bitte)[.!?\s]*$/i, "").trim();
+  const trailingWeb = /\s+(?:on\s+(?:the\s+)?(?:web|internet|google)|online|sur\s+(?:internet|le\s+web|google)|en\s+(?:internet|ligne|l[ií]nea|google)|im\s+(?:internet|netz)|auf\s+google)[.!?]*$/i;
+  const trigger = /^(?:(?:please|(?:can|could|would)\s+you)\s+)*(?:search\s+(?:the\s+)?(?:web|online|internet)(?:\s+for)?|google|look\s+up(?:\s+(?:on\s+)?(?:the\s+)?(?:web|online|internet))?|(?:check|find)\s+online|(?:can|could|would)\s+you\s+(?:please\s+)?search(?:\s+for)?|search\s+for|browse(?:\s+(?:the\s+)?(?:web|online|internet))?|what\s+does\s+the\s+internet\s+say\s+about|cherche(?:r|z)?\s+sur\s+internet|busca(?:r)?\s+en\s+internet|such(?:e)?\s+im\s+internet)\b/i.exec(command)
+    ?? (trailingWeb.test(command) ? /^(?:(?:please|(?:can|could|would)\s+you)\s+)*(?:search(?:\s+for)?|find|cherche(?:r|z)?|busca(?:r)?|such(?:e)?)\b/i.exec(command) : null);
   if (!trigger) return "";
-  if (mode === "meeting_chat" && !/\b(?:google|web|online|internet)\b/i.test(trigger[0])) return "";
-  const rest = q.slice(trigger.index + trigger[0].length)
+  const qualified = /\b(?:google|web|online|internet)\b/i.test(trigger[0]) || trailingWeb.test(command);
+  if (mode === "meeting_chat" && !qualified) return "";
+  const rest = command.slice(trigger.index + trigger[0].length).replace(trailingWeb, "")
     .replace(/^[\s:,-]*(?:(?:please|for|about|pour|por|bitte)\b[\s:,-]*)*/i, "")
-    .replace(/[,\s]*(?:please|thanks|thank you|s'il vous plaît|por favor|bitte)[.!?\s]*$/i, "").trim();
+    .trim();
   return (rest || q).slice(0, 400);
 }
 
