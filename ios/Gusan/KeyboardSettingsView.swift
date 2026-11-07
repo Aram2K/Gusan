@@ -2,6 +2,7 @@ import SwiftUI
 import GusanKit
 
 struct KeyboardSettingsView: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var voice: VoiceSession
     @State private var action = KeyboardDefaultAction.smartAuto
@@ -36,7 +37,8 @@ struct KeyboardSettingsView: View {
                 Text(model.keyboardCheck).font(.caption).foregroundStyle(.secondary)
             } header: { Text("Setup") }
             Section { NavigationLink { DiagnosticsView() } label: { Label("Diagnostics", systemImage: "stethoscope").font(.footnote).frame(minHeight: 44) } }
-        }.navigationTitle("Keyboard")
+        }.modifier(SettingsPickerStyle(accessibility: dynamicTypeSize.isAccessibilitySize))
+            .navigationTitle("Keyboard")
             .onAppear { model.settings.refresh(); action = model.settings.keyboardAction; target = model.settings.translateTarget; keyClicks = model.settings.keyClicks; autoCapitalization = model.settings.autoCapitalization; doubleSpacePeriod = model.settings.doubleSpacePeriod; haptics = model.settings.haptics; model.refreshDiagnostics() }
             .onChange(of: action) { model.settings.keyboardAction = $0 }
             .onChange(of: target) { model.settings.translateTarget = $0 }
@@ -46,5 +48,13 @@ struct KeyboardSettingsView: View {
             .onChange(of: haptics) { model.settings.haptics = $0 }
             .onAppear { pasteboardFallback = model.settings.pasteboardFallback }
             .onChange(of: pasteboardFallback) { model.settings.pasteboardFallback = $0; if !$0 { model.store.makeVoiceChannel().clearPasteboard() }; _ = model.store.read(); model.refreshDiagnostics() }
+    }
+}
+
+struct SettingsPickerStyle: ViewModifier {
+    let accessibility: Bool
+    @ViewBuilder func body(content: Content) -> some View {
+        if accessibility { content.pickerStyle(.navigationLink) }
+        else { content.pickerStyle(.menu) }
     }
 }
