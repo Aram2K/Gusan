@@ -321,7 +321,7 @@ final class VoiceKeyController: NSObject {
             self.inserted = nil; undoButton.isHidden = true; show("Text changed. Undo is no longer available."); return
         }
         for _ in inserted { proxy.deleteBackward() }
-        proxy.insertText(original)
+        if !original.isEmpty { proxy.insertText(original) }
         if restoreUTF16 != 0 { proxy.adjustTextPosition(byCharacterOffset: -restoreUTF16) }
         self.inserted = nil; undoButton.isHidden = true; show("Undone")
         panelDismissed = true; refresh()
