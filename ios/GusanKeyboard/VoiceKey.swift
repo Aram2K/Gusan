@@ -151,6 +151,12 @@ final class VoiceKeyController: NSObject {
         if hasSelection || undoRecord?.deleteBackward() == false { undoRecord = nil; undoContext = nil }
     }
     func dismiss() { inserted = nil; undoRecord = nil; undoContext = nil; awaitingUndoContext = false; localMessage = nil; clearReview(); undoButton.isHidden = true; panelDismissed = true; refresh() }
+    func applyTheme(_ theme: KeyboardTheme) {
+        bar.overrideUserInterfaceStyle = theme.dark ? .dark : .light
+        panel.overrideUserInterfaceStyle = theme.dark ? .dark : .light
+        label.textColor = theme.foreground
+        panel.status.textColor = theme.foreground
+    }
     func disappear() { visible = false; observer = nil; timer?.invalidate(); timer = nil; statusTask?.cancel(); statusTask = nil; statusLoadID = nil; panel.waveform.update(level: 0, animated: false); closeResult() }
     private func currentContext() -> VoiceContext? {
         guard let proxy = host?.textDocumentProxy else { return nil }
@@ -171,10 +177,10 @@ final class VoiceKeyController: NSObject {
         #if DEBUG
         if previewEnabled { advancePreview(); return }
         #endif
-        let signedIn = store.read() != nil
+        let access = store.sessionState(fullAccess: host.hasFullAccess)
         let status = readStatus()
         settingsButton.isHidden = true; settingsURL = nil
-        switch KeyboardVoice.tap(status: status, hasFullAccess: host.hasFullAccess, shared: channel.available, signedIn: signedIn, fallbackOff: channel.unavailableError == .fallbackOff) {
+        switch KeyboardVoice.tap(status: status, access: access) {
         case .error(let error):
             if error == .fullAccessRequired || error == .fallbackOff {
                 settingsURL = URL(string: error == .fullAccessRequired ? "gusan://open-settings" : "gusan://keyboard-settings")

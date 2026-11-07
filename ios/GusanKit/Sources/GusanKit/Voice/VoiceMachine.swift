@@ -94,9 +94,10 @@ public struct VoiceMachine {
 public enum KeyboardVoice {
     public enum TapResult: Equatable { case error(VoiceError), openApp, start, stop, cancel }
     public static func tap(status: VoiceStatus?, now: Date = Date(), hasFullAccess: Bool, shared: Bool, signedIn: Bool, fallbackOff: Bool = false) -> TapResult {
-        guard hasFullAccess else { return .error(.fullAccessRequired) }
-        guard shared else { return .error(fallbackOff ? .fallbackOff : .notShared) }
-        guard signedIn else { return .error(.notSignedIn) }
+        tap(status: status, now: now, access: SessionState(signedIn: signedIn, fullAccess: hasFullAccess, shareable: true, voiceError: shared ? nil : (fallbackOff ? .fallbackOff : .notShared)))
+    }
+    public static func tap(status: VoiceStatus?, now: Date = Date(), access: SessionState) -> TapResult {
+        if let error = access.voiceError { return .error(error) }
         guard let status, status.isAlive(now: now) else { return .openApp }
         switch status.phase {
         case .ready, .done, .failed: return .start

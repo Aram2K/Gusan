@@ -54,7 +54,8 @@ final class AppModel: NSObject, ObservableObject, ASWebAuthenticationPresentatio
     var keyboardAdded: Bool { diagnostics?.peer != nil }
     var fullAccess: Bool? { diagnostics?.peer?.fullAccess }
     var keyboardHasSession: Bool { diagnostics?.peer?.stores.contains { $0.hasSession && $0.readable } == true }
-    var ready: Bool { keyboardAdded && fullAccess == true && keyboardHasSession && session != nil }
+    var sessionState: SessionState { store.sessionState(fullAccess: fullAccess == true) }
+    var ready: Bool { keyboardHasSession && sessionState.voiceReady }
     var mainKeyboardConfirmed: Bool { UserDefaults.standard.bool(forKey: "mainKeyboardConfirmed") }
     var setupFinished: Bool { ready && mainKeyboardConfirmed }
     var keyboardCheck: String { diagnostics?.peer.map { "Last checked " + $0.timestamp.formatted(date: .omitted, time: .shortened) } ?? "Open the Gusan keyboard to check setup." }

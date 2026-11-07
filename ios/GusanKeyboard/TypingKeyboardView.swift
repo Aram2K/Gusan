@@ -83,6 +83,10 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
         }
         shift = shouldCapitalize ? .once : .off
     }
+    func applyTheme(_ value: KeyboardTheme) {
+        theme = value
+        setNeedsLayout()
+    }
     private var rows: [[Key]] {
         let top: [Key]
         let middle: [Key]
