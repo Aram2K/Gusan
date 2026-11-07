@@ -54,7 +54,7 @@ final class GusanToolbar: UIView {
         accessory.titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
         accessory.titleLabel?.numberOfLines = 2
         accessory.titleLabel?.lineBreakMode = .byWordWrapping
-        [logo, mic, message, accessory, spinner].forEach { addSubview($0) }
+        [logo, message, accessory, spinner, mic].forEach { addSubview($0) }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func layoutSubviews() {
