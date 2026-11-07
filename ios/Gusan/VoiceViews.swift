@@ -35,7 +35,7 @@ struct VoiceReadyView: View {
         NavigationStack {
             ScreenContent {
                 AppCard {
-                    BrandMark(large: true)
+                    Image("VoiceMark").resizable().scaledToFit().frame(width: 96, height: 96).accessibilityLabel("Gusan")
                     Text("Voice dictation").font(.largeTitle).bold().accessibilityAddTraits(.isHeader)
                     Text(voice.alive ? "Your voice session is ready. Switch back to your app, keep Gusan selected, and tap the mic to dictate." : "Speak naturally, right from your Gusan keyboard. Tap Record to prepare a voice session, then return to your app.")
                         .font(.body).foregroundStyle(.secondary)
@@ -53,7 +53,7 @@ struct VoiceReadyView: View {
                 }
                 if !voice.error.isEmpty {
                     AppCard {
-                        Label("Voice needs attention", systemImage: "exclamationmark.circle").font(.headline).foregroundStyle(Theme.danger)
+                        Label("Voice needs attention", systemImage: "exclamationmark.circle").font(.headline).foregroundStyle(Theme.accent)
                         Text(voice.inAppError).font(.body)
                         if voice.error == VoiceError.notSignedIn.localizedDescription || voice.error == VoiceError.unauthorized.localizedDescription {
                             PrimaryButton(title: "Sign in", icon: "person.crop.circle") { onSignIn(); dismiss() }
@@ -68,7 +68,7 @@ struct VoiceReadyView: View {
                 }
                 if voice.alive {
                     AppCard {
-                        Button(role: .destructive) { voice.stop() } label: {
+                        Button { voice.stop() } label: {
                             Label("Stop voice session", systemImage: "stop.circle").frame(maxWidth: .infinity, minHeight: 44)
                         }
                     }
@@ -102,7 +102,7 @@ struct VoiceSettingsSection: View {
             Button(voice.alive ? "Stop voice session" : "Start voice session") { if voice.alive { voice.stop() } else { voice.start() } }
             LabeledContent("Microphone", value: voice.permission == .granted ? "Allowed" : voice.permission == .denied ? "Denied" : "Not requested")
             if voice.permission == .denied { Button("Open Settings") { UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!) } }
-            if !voice.error.isEmpty { Text(voice.inAppError).foregroundStyle(Theme.danger) }
+            if !voice.error.isEmpty { Text(voice.inAppError).foregroundStyle(Theme.accent) }
             Picker("Spoken language", selection: $language) { ForEach(VoiceSettings.languages, id: \.code) { Text($0.name).tag($0.code) } }.onChange(of: language) { voice.settings.language = $0 }
             Picker("Default voice action", selection: $action) { ForEach(VoiceAction.all, id: \.self) { Text($0.label).tag($0) } }.onChange(of: action) { voice.settings.defaultAction = $0 }
             Picker("Keep session alive", selection: $minutes) { ForEach(VoiceSettings.idleOptions, id: \.self) { Text("\($0) min").tag($0) } }.onChange(of: minutes) { voice.settings.idleMinutes = $0 }

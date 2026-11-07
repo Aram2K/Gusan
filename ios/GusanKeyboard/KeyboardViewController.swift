@@ -55,6 +55,17 @@ final class KeyboardViewController: UIInputViewController {
         toolbar.mic.addTarget(self, action: #selector(startVoice), for: .touchUpInside)
         onVoice = { [weak self] in self?.voice.toggle() }
         view.addSubview(voice.bar)
+        view.addSubview(voice.panel)
+        voice.onPanelVisibility = { [weak self] visible in
+            guard let self else { return }
+            self.keyArea.cancelTouches()
+            let changes = {
+                [self.toolbar, self.panel, self.instructionHeader, self.keyArea, self.explanationScroll].forEach { $0.alpha = visible ? 0 : 1 }
+                self.voice.panel.isHidden = !visible
+            }
+            if UIAccessibility.isReduceMotionEnabled { changes() }
+            else { UIView.transition(with: self.view, duration: 0.2, options: [.transitionCrossDissolve, .allowAnimatedContent], animations: changes) }
+        }
         voice.bar.backgroundColor = .secondarySystemBackground; voice.bar.layer.cornerRadius = 8
         toolbar.accessory.addTarget(self, action: #selector(accessoryPressed), for: .touchUpInside)
         toolbar.message.addTarget(self, action: #selector(expandMessage), for: .touchUpInside)
@@ -84,6 +95,7 @@ final class KeyboardViewController: UIInputViewController {
         let width = view.bounds.width
         toolbar.frame = CGRect(x: 0, y: 0, width: width, height: 44)
         voice.bar.frame = CGRect(x: 50, y: 0, width: max(0, width - 100), height: 44)
+        voice.panel.frame = view.bounds
         let extra: CGFloat = surface == .instruction ? 74 : 0
         instructionHeader.frame = CGRect(x: 0, y: 44, width: width, height: extra)
         keyArea.frame = CGRect(x: 0, y: 44 + extra, width: width, height: max(0, view.bounds.height - 44 - extra))

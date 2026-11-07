@@ -33,6 +33,7 @@ final class AppModel: NSObject, ObservableObject, ASWebAuthenticationPresentatio
         super.init()
         #if DEBUG
         let args = ProcessInfo.processInfo.arguments
+        UserDefaults(suiteName: store.resolution.chosen)?.set(args.contains("--gusan-debug-voice"), forKey: "debugVoicePreview")
         if args.contains("--gusan-pasteboard-only"), args.contains("--gusan-debug-session") {
             store.write(Session(accessToken: "gusan-debug-no-network", expiresAt: .distantFuture, refreshToken: "gusan-debug-no-network", userID: "debug", email: "alex@example.invalid"))
         }
