@@ -244,10 +244,14 @@ struct TaskDetailView: View {
             if agent.atActiveLimit {
                 Text("You already have \(AgentTask.maxActive) tasks running; wait for one to finish before running this again.").font(.footnote).foregroundStyle(.secondary)
             }
-            PrimaryButton(title: working ? "Starting…" : "Run again") {
-                Task { working = true; if let started = try? await agent.runAgain(task) { agent.openTaskID = started.id }; working = false }
+            if agent.canRunAgain(task) {
+                PrimaryButton(title: working ? "Starting…" : "Run again") {
+                    Task { working = true; if let started = try? await agent.runAgain(task) { agent.openTaskID = started.id }; working = false }
+                }
+                .disabled(working || agent.atActiveLimit || agent.privacyMode)
+            } else {
+                Text("The full instruction isn't stored on this device; start it again from New task.").font(.footnote).foregroundStyle(.secondary)
             }
-            .disabled(working || agent.atActiveLimit || agent.privacyMode)
         }
     }
 

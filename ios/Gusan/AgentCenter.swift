@@ -47,6 +47,10 @@ final class AgentCenter: NSObject, ObservableObject {
     var atActiveLimit: Bool { activeCount >= AgentTask.maxActive }
     /// Tasks the user confirmed from this device; if one is awaiting again, the server is asking to confirm again.
     @Published private(set) var confirmedIDs: Set<UUID> = []
+    /// Full instructions of tasks started on this device (the server keeps only a 120-char title).
+    private var instructions: [UUID: (instruction: String, context: String?)] = [:]
+    /// Whether "Run again" can reproduce the original request faithfully.
+    func canRunAgain(_ task: AgentTask) -> Bool { instructions[task.id] != nil || task.title.count < 120 }
     func needsReconfirm(_ task: AgentTask) -> Bool { task.status == .awaitingConfirmation && confirmedIDs.contains(task.id) }
 
     func setPrivacyMode(_ on: Bool) {
@@ -121,6 +125,7 @@ final class AgentCenter: NSObject, ObservableObject {
         guard !privacyMode else { throw AgentError.privacyMode }
         guard let service = currentService() else { throw AgentError.unauthorized }
         let task = try await service.start(intent, context: context)
+        instructions[task.id] = (intent.instruction, context)
         tracker.markNotified(task)
         tasks.insert(task, at: 0)
         if notificationStatus == .notDetermined { await requestNotifications() }
@@ -132,9 +137,10 @@ final class AgentCenter: NSObject, ObservableObject {
         await mutate(id) { try await $0.confirm(id) }
     }
 
-    /// Starts the same request again (e.g. after a confirmation expired).
+    /// Starts the same request again (e.g. after a confirmation expired), with the original wording when known.
     func runAgain(_ task: AgentTask) async throws -> AgentTask {
-        try await start(AgentIntent(mode: task.mode, instruction: task.title))
+        let original = instructions[task.id]
+        return try await start(AgentIntent(mode: task.mode, instruction: original?.instruction ?? task.title), context: original?.context)
     }
 
     func cancel(_ id: UUID) async {
