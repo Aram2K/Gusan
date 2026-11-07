@@ -1107,7 +1107,7 @@ def test_dictation_model_lists_every_choice_and_follows_settings(dict_page):
     assert box.accessibleName() == "Speech model"
     values = [box.itemData(i) for i in range(box.count()) if not box.is_heading(i)]
     assert values[:len(hardware.SPEECH_MODEL_IDS)] == list(hardware.SPEECH_MODEL_IDS)
-    assert values[-4:] == ["cloud", "cloud:best", "cloud:gladia", "cloud:gladia-fusion"]
+    assert values[-3:] == ["cloud", "cloud:best", "cloud:gladia"]
     assert box.currentData() == "small"
     assert box.itemData(box.findData("base"), MARK_ROLE) == MARK_DOWNLOAD
     app.cfg["whisper_model"] = "base"

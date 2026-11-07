@@ -42,7 +42,13 @@
 //   "best" or "gemini-2.5-pro"    the BEST profile (the app's "Best accuracy" / Audio to text)
 //   "fast", "gemini-2.5-flash",
 //   unknown, missing              the FAST profile
-//   "gladia", "gladia-fusion"     Solaria / Fusion first, then the BEST order
+//   "gladia" ("gladia-fusion")   Solaria-3 (en, fr, de, es, it) then Solaria-1, then the BEST order
+//                                 (2.1.2 test builds asked for "gladia-fusion": Gladia's solaria-fusion is
+//                                 undocumented and our account is refused it, 403)
+// Gladia is told the language: one named language is THE language (no switching), "multi" with a list is that
+// list with code switching, "auto" lets it detect (switching allowed). The request's `vocabulary` (the person's
+// names and terms, Settings > Vocabulary) goes to Gladia as custom_vocabulary (default_intensity 0.5, at most
+// 100 terms of 80 characters); if Gladia refuses it for a model (400/422) the job is started once more without it.
 //   any other catalog id          PINNED: that engine first, then the FAST order
 // Old clients may also send `provider: "mistral"`: Voxtral first when no model is pinned.
 // Apps 2.0.x send no `model` for Audio to text, so their files run the FAST profile (unless the
@@ -60,8 +66,7 @@
 //          GEMINI_KEY), ELEVENLABS_API_KEY (or ELEVENLABS_KEY / ELEVEN_API_KEY / XI_API_KEY, the first
 //          one that is not empty). At least one must be set or the proxy returns 503.
 //          Gladia_STT (or GLADIA_API_KEY / GLADIA_KEY / GLADIA_TOKEN / GLADIA_API_TOKEN, first non-empty).
-//          STT_GLADIA_ORDER (solaria-3,solaria-1), STT_GLADIA_FUSION_ORDER
-//          (solaria-fusion,solaria-1): Gladia profiles, followed by the BEST order.
+//          STT_GLADIA_ORDER (solaria-3,solaria-1): the Gladia profile, followed by the BEST order.
 //          Optional: STT_FAST_ORDER, STT_BEST_ORDER (comma-separated; an entry is a catalog id or
 //          "provider:model" such as openai:gpt-transcribe-2 - provider mistral, openai, gemini or
 //          elevenlabs (elevenlabs:scribe_v3) or gladia (gladia:solaria-1) -
@@ -102,7 +107,6 @@ type Engine = { id: string; kind: Kind };
 const CATALOG: Record<string, Kind> = {
   "solaria-1": "gladia",
   "solaria-3": "gladia",
-  "solaria-fusion": "gladia",
   "scribe_v2": "elevenlabs",
   "voxtral-mini-latest": "mistral",
   "gpt-transcribe": "openai",
@@ -169,9 +173,7 @@ function orderFor(secret: string, fallback: string[]): Engine[] {
 // The engines to try, in order, for what the client asked.
 function plan(asked: string, provider: string): Engine[] {
   if (asked === "gladia" || asked === "gladia-fusion") {
-    const head = asked === "gladia"
-      ? orderFor("STT_GLADIA_ORDER", ["solaria-3", "solaria-1"])
-      : orderFor("STT_GLADIA_FUSION_ORDER", ["solaria-fusion", "solaria-1"]);
+    const head = orderFor("STT_GLADIA_ORDER", ["solaria-3", "solaria-1"]);
     return [...head, ...orderFor("STT_BEST_ORDER", BEST_ORDER)]
       .filter((e, i, a) => a.findIndex((x) => x.id === e.id) === i);
   }
@@ -459,8 +461,26 @@ async function transcribeOpenAI(bytes: Uint8Array, language: string, model: stri
 }
 
 // Gladia's asynchronous batch API: upload, start, poll inside ONE timer; delete the job afterwards.
+// The person's vocabulary from the request: strings only, trimmed, no repeats, at most 100 of 80 characters.
+const VOCAB_MAX = 100;
+const VOCAB_TERM_MAX = 80;
+function vocabularyOf(body: any): string[] {
+  if (!Array.isArray(body?.vocabulary)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const v of body.vocabulary) {
+    if (typeof v !== "string") continue;
+    const term = v.replace(/\s+/g, " ").trim().slice(0, VOCAB_TERM_MAX);
+    if (!term || seen.has(term.toLowerCase())) continue;
+    seen.add(term.toLowerCase());
+    out.push(term);
+    if (out.length >= VOCAB_MAX) break;
+  }
+  return out;
+}
+
 async function transcribeGladia(bytes: Uint8Array, language: string, languages: string[] | null,
-                               model: string, timeoutMs: number) {
+                               model: string, timeoutMs: number, vocabulary: string[] = []) {
   const signal = AbortSignal.timeout(timeoutMs);
   const headers = { "x-gladia-key": engineKey("gladia") };
   const base = "https://api.gladia.io/v2";
@@ -475,10 +495,20 @@ async function transcribeGladia(bytes: Uint8Array, language: string, languages: 
   const language_config = explicit ? { languages: [language], code_switching: false }
     : language === "multi" && languages?.length ? { languages, code_switching: true }
     : { code_switching: true };
-  const init = await fetch(`${base}/pre-recorded`, {
+  const start = (withVocabulary: boolean) => fetch(`${base}/pre-recorded`, {
     method: "POST", headers: { ...headers, "Content-Type": "application/json" },
-    body: JSON.stringify({ audio_url: audio.audio_url, model, language_config }), signal, redirect: "error",
+    body: JSON.stringify({
+      audio_url: audio.audio_url, model, language_config,
+      ...(withVocabulary
+        ? { custom_vocabulary: true, custom_vocabulary_config: { vocabulary, default_intensity: 0.5 } }
+        : {}),
+    }), signal, redirect: "error",
   });
+  let init = await start(vocabulary.length > 0);
+  if (!init.ok && vocabulary.length > 0 && (init.status === 400 || init.status === 422)) {
+    failed("gladia", model, init.status, await init.text());     // logged; the job may still run without it
+    init = await start(false);
+  }
   if (!init.ok) return failed("gladia", model, init.status, await init.text());
   const job = await init.json();
   if (typeof job.id !== "string" || !job.id) return failed("gladia", model, 500, "no_job");
@@ -600,6 +630,7 @@ Deno.serve(async (req) => {
   // What the client asked for: the body field, else the header (the body wins). Only a catalog id
   // or a profile word means anything; the rest is the FAST profile.
   const asked = (typeof body?.model === "string" ? body.model : (req.headers.get("X-Gusan-Model") ?? "")).trim();
+  const vocabulary = vocabularyOf(body);
 
   // The engines to try in order: those with a key (none at all = not configured), then those that
   // can take this language (none left = no engine for it: the 502 stt_failed the app expects, but sent
@@ -649,7 +680,7 @@ Deno.serve(async (req) => {
       result = kind === "mistral" ? await transcribeMistral(bytes, language, id, t)
         : kind === "openai" ? await transcribeOpenAI(bytes, language, id, t)
         : kind === "elevenlabs" ? await transcribeElevenLabs(bytes, language, id, t)
-        : kind === "gladia" ? await transcribeGladia(bytes, language, languages, id, t)
+        : kind === "gladia" ? await transcribeGladia(bytes, language, languages, id, t, vocabulary)
         : await transcribeGemini(audio, language, languages, id, t);
     } catch (e) {
       // A timeout or a network error: never the error's own text (a URL may carry a key).

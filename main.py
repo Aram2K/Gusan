@@ -374,6 +374,11 @@ def _migrate_config(loaded, on_disk):
                      settings_apply.norm_hotkey(loaded.get("live_assist_hotkey"))}
             loaded["smart_actions_hotkey"] = ("" if SMART_ACTIONS_HOTKEY_DEFAULT in taken
                                               else SMART_ACTIONS_HOTKEY_DEFAULT)
+    # "Gladia Fusion" (2.1.2 test builds) is gone - our Gladia account is refused that model: a saved pick is Gladia Solaria.
+    if loaded.get("file_model") == "cloud:gladia-fusion":
+        loaded["file_model"] = "cloud:gladia"
+    if loaded.get("managed_speech_profile") == "gladia-fusion":
+        loaded["managed_speech_profile"] = "gladia"
     loaded["config_schema_version"] = CONFIG_SCHEMA_VERSION
 
 storage.migrate_legacy_file(LEGACY_CONFIG_PATH, CONFIG_PATH)
