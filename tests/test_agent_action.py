@@ -289,3 +289,11 @@ def test_failed_confirmation_can_retry(run, failure):
     assert out["replies"][1]["body"]["status"] == "running"
     assert out["run"]["confirmed_call_ids"] == [CALL["id"]]
     assert len(out["calls"]) == 2
+
+
+def test_overdue_tasks_do_not_consume_active_slots():
+    sql = (ROOT / "supabase/migrations/202611070001_agent_tasks.sql").read_text().lower()
+    active_count = re.search(r"if \(select count\(\*\) from public.agent_tasks[^;]+", sql).group()
+    assert "user_id = p_user_id" in active_count
+    assert "deadline_at > now()" in active_count
+    assert "status in ('queued', 'running', 'awaiting_confirmation')" in active_count

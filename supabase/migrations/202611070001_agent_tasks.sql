@@ -52,7 +52,7 @@ as $$
 declare task public.agent_tasks;
 begin
   perform pg_advisory_xact_lock(hashtextextended(p_user_id::text, 0));
-  if (select count(*) from public.agent_tasks where user_id = p_user_id and status in ('queued', 'running', 'awaiting_confirmation')) >= p_max_active then
+  if (select count(*) from public.agent_tasks where user_id = p_user_id and deadline_at > now() and status in ('queued', 'running', 'awaiting_confirmation')) >= p_max_active then
     raise exception using errcode = 'P0001', message = 'too_many_active';
   end if;
   if (select count(*) from public.agent_task_starts where user_id = p_user_id and started_at >= now() - interval '24 hours') >= p_max_per_day then
