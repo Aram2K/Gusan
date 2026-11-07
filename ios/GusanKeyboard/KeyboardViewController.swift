@@ -113,7 +113,7 @@ final class KeyboardViewController: UIInputViewController {
         panel.isHidden = surface != .panel; explanation.isHidden = surface != .explanation
         instructionHeader.isHidden = surface != .instruction
         keyArea.isHidden = surface == .panel || surface == .explanation
-        keyArea.inputEnabled = !busy
+        keyArea.inputEnabled = true
         height.constant = 260
         updateContext(); view.setNeedsLayout()
     }
@@ -246,21 +246,26 @@ final class KeyboardViewController: UIInputViewController {
         invalidateUndo(); showMessage("Undone")
     }
     private func invalidateUndo() { original = nil; replacement = nil; undoContext = nil; if accessory == "Undo" { accessory = nil } }
+    private func cancelForInput() -> Bool {
+        guard busy else { return false }
+        task?.cancel(); showMessage("Cancelled")
+        return true
+    }
     private func insert(_ text: String) {
-        guard !busy else { return }
+        let cancelled = cancelForInput()
         if surface == .instruction { instruction += text }
-        else { invalidateUndo(); message = nil; detail = nil; accessory = nil; textDocumentProxy.insertText(text) }
+        else { invalidateUndo(); if !cancelled { message = nil; detail = nil; accessory = nil }; textDocumentProxy.insertText(text) }
         updateContext()
     }
     private func returnPressed() { if surface == .instruction { runInstruction() } else { insert("\n") } }
     private func deleteOnce() {
-        guard !busy else { return }
+        let cancelled = cancelForInput()
         if surface == .instruction { if !instruction.isEmpty { instruction.removeLast() } }
-        else { invalidateUndo(); message = nil; detail = nil; accessory = nil; textDocumentProxy.deleteBackward() }
+        else { invalidateUndo(); if !cancelled { message = nil; detail = nil; accessory = nil }; textDocumentProxy.deleteBackward() }
         updateContext()
     }
     private func doubleSpace() {
-        guard !busy else { return }
+        _ = cancelForInput()
         if surface == .instruction { if instruction.last == " " { instruction.removeLast() }; instruction += ". " }
         else { invalidateUndo(); textDocumentProxy.deleteBackward(); textDocumentProxy.insertText(". ") }
         updateContext()
