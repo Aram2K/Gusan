@@ -26,11 +26,14 @@ final class AppModel: NSObject, ObservableObject, ASWebAuthenticationPresentatio
     private var webSession: ASWebAuthenticationSession?
     private var pkce: PKCE?
     private var updating = false
+    private let impactGenerator = UIImpactFeedbackGenerator(style: .light)
+    private let notificationGenerator = UINotificationFeedbackGenerator()
     var pendingSignIn = false
     var pendingOnboarding = false
 
     override init() {
         super.init()
+        impactGenerator.prepare(); notificationGenerator.prepare()
         #if DEBUG
         let args = ProcessInfo.processInfo.arguments
         UserDefaults(suiteName: store.resolution.chosen)?.set(args.contains("--gusan-debug-voice"), forKey: "debugVoicePreview")
@@ -143,8 +146,8 @@ final class AppModel: NSObject, ObservableObject, ASWebAuthenticationPresentatio
     }
     func finishOnboarding() { UserDefaults.standard.set(true, forKey: "onboardingComplete"); showingOnboarding = false }
     func resumeSetup() { onboardingStep = missingStep; showingOnboarding = true }
-    func impact() { if settings.haptics { UIImpactFeedbackGenerator(style: .light).impactOccurred() } }
-    private func feedback(_ type: UINotificationFeedbackGenerator.FeedbackType) { if settings.haptics { UINotificationFeedbackGenerator().notificationOccurred(type) } }
+    func impact() { if settings.haptics { impactGenerator.impactOccurred(); impactGenerator.prepare() } }
+    private func feedback(_ type: UINotificationFeedbackGenerator.FeedbackType) { if settings.haptics { notificationGenerator.notificationOccurred(type); notificationGenerator.prepare() } }
     private func friendly(_ error: Error) -> String {
         switch error as? GusanError {
         case .network: return "You're offline. Check your connection and try again."

@@ -27,8 +27,10 @@ struct KeyboardSettingsView: View {
                 Toggle("Key clicks", isOn: $keyClicks).frame(minHeight: 44)
                 Toggle("Auto-capitalization", isOn: $autoCapitalization).frame(minHeight: 44)
                 Toggle("Double-space for period", isOn: $doubleSpacePeriod).frame(minHeight: 44)
-                Toggle("Haptic feedback", isOn: $haptics).frame(minHeight: 44)
             }
+            Section {
+                Toggle("In-app haptic feedback", isOn: $haptics).frame(minHeight: 44)
+            } footer: { Text("Haptics apply only inside the Gusan app. iOS doesn't reliably support haptic feedback in keyboard extensions.") }
             Section {
                 StatusRow(title: "Keyboard added", detail: model.keyboardAdded ? "Seen on this iPhone." : "Open Gusan once to check.", confirmed: model.keyboardAdded)
                 Button("Set up keyboard") { model.onboardingStep = .addKeyboard; model.showingOnboarding = true }.frame(minHeight: 44)

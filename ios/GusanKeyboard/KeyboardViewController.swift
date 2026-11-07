@@ -83,7 +83,7 @@ final class KeyboardViewController: UIInputViewController {
         panel.onClose = { [weak self] in self?.showTyping() }
         panel.onSnapshot = { [weak self] in self?.expandContext() }
         panel.onAsk = { [weak self] in self?.beginInstruction() }
-        panel.onAction = { [weak self] in guard let self else { return }; self.impact(); self.run($0, context: self.currentContext) }
+        panel.onAction = { [weak self] in guard let self else { return }; self.run($0, context: self.currentContext) }
         instructionHeader.onSuggestion = { [weak self] in self?.setInstruction($0) }
         instructionHeader.onRun = { [weak self] in self?.runInstruction() }
         instructionHeader.onCancel = { [weak self] in self?.cancelInstruction() }
@@ -181,17 +181,13 @@ final class KeyboardViewController: UIInputViewController {
         height.constant = keyboardHeight
         view.setNeedsLayout()
     }
-    private func impact() { if settings.haptics { UIImpactFeedbackGenerator(style: .light).impactOccurred() } }
-    private func notify(_ type: UINotificationFeedbackGenerator.FeedbackType) { if settings.haptics { UINotificationFeedbackGenerator().notificationOccurred(type) } }
     @objc private func defaultAction(_ gesture: UILongPressGestureRecognizer) {
         guard gesture.state == .began, !busy else { return }
-        impact()
         run(settings.keyboardAction.action, context: currentContext)
     }
     @objc private func togglePanel() {
         guard !busy else { return }
         accessState = store.sessionState(fullAccess: hasFullAccess)
-        impact()
         if surface == .instruction { cancelInstruction(); return }
         surface = surface == .panel ? .typing : .panel
         snapshotReturnSurface = nil
@@ -206,7 +202,6 @@ final class KeyboardViewController: UIInputViewController {
     @objc func startVoice() {
         guard !busy else { return }
         invalidateUndo()
-        impact()
         if let onVoice { onVoice() } else { showMessage("Tap the mic to open the Gusan app and start a voice session the first time") }
     }
     private func showMessage(_ text: String, detail: String? = nil, accessory: String? = nil) {
@@ -262,12 +257,10 @@ final class KeyboardViewController: UIInputViewController {
         accessState = access
         if access.actionError == .fullAccessRequired {
             if surface != .instruction { showTyping() }
-            notify(.error)
             showMessage("Gusan needs Full Access to reach Gusan Cloud", detail: "Allow Full Access for Gusan in Settings › General › Keyboard › Keyboards › Gusan › Allow Full Access. Text is sent to Gusan Cloud only when you run an action.\n\n" + store.diagnostics().summary, accessory: "How to enable")
             return
         }
         if let error = access.actionError {
-            notify(.error)
             if surface != .instruction { showTyping() }
             showMessage(error == .notSignedIn ? "Sign in to use Gusan" : "Gusan can't read shared sign-in", detail: store.diagnostics().summary, accessory: error == .notSignedIn ? "Sign in" : "Details"); return
         }
@@ -307,16 +300,13 @@ final class KeyboardViewController: UIInputViewController {
                 original = context.text; replacement = result; captureUndo(restoreUTF16: context.selected.isEmpty ? context.after.utf16.count : 0)
                 instructionContext = nil; instruction = ""; showTyping()
                 showMessage("Replaced", accessory: "Undo")
-                notify(.success)
                 UIAccessibility.post(notification: .announcement, argument: "Replaced. Undo available.")
             } catch is CancellationError { showMessage("Cancelled") }
             catch GusanError.unauthorized { showMessage("Sign in to use Gusan", accessory: "Sign in") }
             catch GusanError.proRequired {
-                notify(.error)
                 showMessage("Gusan Pro is needed for AI actions", accessory: "See plans")
             }
             catch {
-                notify(.error)
                 let retry = [GusanError.network, .timeout, .failed, .serverNotConfigured, .invalidResponse].contains(error as? GusanError ?? .emptyInput)
                 let title = error as? GusanError == .network ? "You're offline. Tap for details." : "Action failed. Tap for details."
                 showMessage(title, detail: error.localizedDescription, accessory: retry ? "Retry" : nil)
