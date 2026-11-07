@@ -136,7 +136,10 @@ export async function classifyWebSearch(question: string, context: string): Prom
   ];
   const ms = LINKUP_DECIDE_TIMEOUT_MS;
   const signal = AbortSignal.timeout(ms);
-  const knownLiveModel = LIVE_URL && LIVE_TOKEN ? await liveModel(false, signal) : "";
+  const hasBackup = OPENAI_KEY || claude || MISTRAL_KEY || GEMINI_KEY;
+  const discoverySignal = hasBackup
+    ? AbortSignal.any([signal, AbortSignal.timeout(Math.min(400, Math.floor(ms / 2)))]) : signal;
+  const knownLiveModel = LIVE_URL && LIVE_TOKEN ? await liveModel(false, discoverySignal) : "";
   if (signal.aborted) return null;
   const route = LIVE_URL && LIVE_TOKEN && knownLiveModel
     ? liveRoute(knownLiveModel, messages, 60, false, { temperature: 0 })

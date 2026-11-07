@@ -389,7 +389,7 @@ def test_classifier_live_discovery_deno(tmp_path):
       return new Response(JSON.stringify({data:[{id:"deepseek-ai/test"}]}));
     }
     if (host === "other") return new Response(JSON.stringify({results:[]}));
-    if (body?.max_tokens === 60) {
+    if (body?.max_tokens === 60 || body?.max_completion_tokens === 60) {
       return new Response(JSON.stringify({choices:[{message:{content:'{"search":true,"query":"Acme size"}'}}]}));
     }
     const text = r.empty''')
@@ -403,6 +403,8 @@ def test_classifier_live_discovery_deno(tmp_path):
     scenarios = [
         {"id": "cold", "env": env, "requests": [question, question]},
         {"id": "timeout", "env": env, "requests": [latest], "behave": {"live": [{"stall": True}, {}]}},
+        {"id": "backup", "env": {**env, "OPENAI_TOKEN": "test-openai"}, "requests": [latest],
+         "behave": {"live": [{"stall": True}, {}]}},
         {"id": "no_route", "env": {"Linkup_web": "test-linkup"}, "requests": [latest]},
     ]
     (tmp_path / "scenarios.json").write_text(json.dumps(scenarios))
@@ -432,3 +434,12 @@ def test_classifier_live_discovery_deno(tmp_path):
         assert next(c for c in result["calls"] if "linkup.so" in c["url"])["body"]["q"] == "latest Acme news?"
         assert any('"source":"heuristic"' in line for line in result["logs"])
     assert results["no_route"][0]["status"] == 503
+    backup = results["backup"][0]
+    assert backup["status"] == 200
+    classifier = [c for c in backup["calls"] if c["body"] and
+                  (c["body"].get("max_tokens") == 60 or c["body"].get("max_completion_tokens") == 60)]
+    assert len(classifier) == 1
+    assert classifier[0]["host"] == "openai"
+    assert classifier[0]["body"]["model"] == "gpt-5.4-nano"
+    assert next(c for c in backup["calls"] if "linkup.so" in c["url"])["body"]["q"] == "Acme size"
+    assert any('"source":"model"' in line for line in backup["logs"])
