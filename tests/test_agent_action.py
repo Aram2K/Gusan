@@ -270,7 +270,7 @@ PLAN = {"summary": "Send $10 to Alice", "action_kind": "send",
 
 def waiting(**extra):
     return {"row": {"mode": "do", "status": "awaiting_confirmation",
-                    "confirmation": {"summary": PLAN["summary"], "action_kind": "send"},
+                    "confirmation": PLAN,
                     "confirmation_at": "2099-01-01T00:00:00Z"},
             "run": {"plan": {**PLAN, "instruction": "SECRET instruction"}}, **extra}
 
@@ -292,7 +292,8 @@ def test_prepare_waits_with_private_plan(run):
         "markdown": "Prepared", "needs_action": True, "plan": PLAN}},
         "requests": [{"body": {"action": "status", "task_id": ID}}] * 2})
     assert all(r["body"]["status"] == "awaiting_confirmation" for r in out["replies"])
-    assert out["row"]["confirmation"] == {"summary": PLAN["summary"], "action_kind": "send"}
+    assert out["row"]["confirmation"] == PLAN
+    assert out["replies"][0]["body"]["confirmation"] == PLAN
     assert out["row"]["finished_at"] is None
     assert "plan" not in out["row"] and "SECRET instruction" not in json.dumps(out["row"])
     assert out["run"]["plan"] == {**PLAN, "instruction": "SECRET instruction"}
@@ -336,6 +337,16 @@ def test_confirm_creates_execute_once(run):
     assert "<approved_plan>" in body["messages"][0]["message"]
     assert out["run"]["phase"] == "execute"
     assert out["row"]["event_index"] == 0 and out["row"]["confirmation"] is None
+
+
+def test_execute_uses_the_visible_approved_plan(run):
+    out, = run(waiting(run={"plan": {**PLAN, "steps": ["Unapproved action"],
+                                    "instruction": "SECRET instruction"}},
+                       body={"action": "confirm", "task_id": ID}))
+    message = out["calls"][0]["body"]["messages"][0]["message"]
+    approved = json.loads(message.split("<approved_plan>")[1].split("</approved_plan>")[0])
+    assert approved == PLAN
+    assert "Unapproved action" not in message
 
 
 @pytest.mark.parametrize("code,error,status", [(429, "agent_busy", 503), (500, "upstream_error", 502)])

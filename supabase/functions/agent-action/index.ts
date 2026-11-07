@@ -6,7 +6,7 @@
 //   status: task_id UUID, wait_s (integer 0..20).
 //   confirm / cancel: task_id UUID, always scoped to the verified owner.
 // Responses are task objects: task_id, mode, status, title, steps,
-// confirmation ({summary, action_kind} | null), result ({markdown, links,
+// confirmation ({summary, action_kind, start_url, steps} | null), result ({markdown, links,
 // images} | null), outcome, error_code, created_at, updated_at, finished_at,
 // deadline_at. No session or call ids are client-visible.
 // Statuses: queued, running, awaiting_confirmation, completed, failed,
@@ -110,6 +110,8 @@ function task(row: Obj) {
     ? {
       summary: row.confirmation.summary,
       action_kind: row.confirmation.action_kind,
+      start_url: row.confirmation.start_url,
+      steps: row.confirmation.steps,
     }
     : null;
   return out;
@@ -504,10 +506,7 @@ async function sync(db: any, row: Obj, wait = 0) {
             plan: { ...plan, instruction: run.plan.instruction },
           });
           patch.status = "awaiting_confirmation";
-          patch.confirmation = {
-            summary: plan.summary,
-            action_kind: plan.action_kind,
-          };
+          patch.confirmation = plan;
           patch.confirmation_at = new Date().toISOString();
           patch.deadline_at = new Date(Date.now() + (900 + 180) * 1000)
             .toISOString();
@@ -728,7 +727,7 @@ Deno.serve(async (req: Request) => {
       if (row.status !== "awaiting_confirmation") {
         return json({ error: "not_awaiting_confirmation" }, 409);
       }
-      const plan = validPlan(run.plan);
+      const plan = validPlan(row.confirmation);
       if (
         row.mode !== "do" || !plan || typeof run.plan?.instruction !== "string"
       ) {
@@ -740,7 +739,7 @@ Deno.serve(async (req: Request) => {
         "/sessions",
         "POST",
         sessionRequest(
-          { plan: run.plan },
+          { plan: { ...plan, instruction: run.plan.instruction } },
           "do",
           run.plan.instruction,
           "execute",
