@@ -1,13 +1,15 @@
 import Foundation
 
 public enum VoiceError: Error, LocalizedError, Equatable {
-    case micPermissionDenied, notSignedIn, notShared, proRequired, unauthorized, dailyLimit, serverNotConfigured, tooLong, noEngine, transcriptionFailed, nothingHeard, offline, network, timeout, invalidResponse, sessionEnded
+    case micPermissionDenied, fullAccessRequired, fallbackOff, notSignedIn, notShared, proRequired, unauthorized, dailyLimit, serverNotConfigured, tooLong, noEngine, transcriptionFailed, nothingHeard, offline, network, timeout, invalidResponse, sessionEnded
     case audioFailed(String)
     public var errorDescription: String? {
         switch self {
         case .micPermissionDenied: return "Allow microphone access in Settings to dictate."
         case .notSignedIn: return "Open the Gusan app and sign in."
-        case .notShared: return "Allow Full Access and open Gusan to enable shared voice sessions."
+        case .fullAccessRequired: return "Turn on Full Access"
+        case .fallbackOff: return "Voice sharing is off. Enable pasteboard fallback in Keyboard settings."
+        case .notShared: return "Open Gusan to reconnect voice sharing."
         case .proRequired: return "Voice needs Gusan Pro."
         case .unauthorized: return "Sign in again in the Gusan app."
         case .dailyLimit: return "Daily voice limit reached. Try again tomorrow."

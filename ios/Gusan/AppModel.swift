@@ -120,6 +120,10 @@ final class AppModel: NSObject, ObservableObject, ASWebAuthenticationPresentatio
             cancelGoogle(); onboardingStep = .welcome
             if showingSignIn { pendingOnboarding = true; showingSignIn = false }
             else { showingOnboarding = true }
+        case "keyboard-settings":
+            showingSignIn = false; showingOnboarding = false; selectedTab = .keyboard
+        case "open-settings":
+            UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!)
         case "auth-callback":
             guard let proof = pkce else { return }
             pkce = nil

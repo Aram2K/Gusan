@@ -19,6 +19,9 @@ struct VoiceReadyView: View {
                 Text(voice.status.phase.rawValue.capitalized).foregroundStyle(.secondary)
                 if let end = voice.status.sessionEndsAt, voice.alive { Text("Session until \(end.formatted(date: .omitted, time: .shortened))") }
                 if !voice.error.isEmpty { Text(voice.error).foregroundStyle(.red) }
+                if voice.error == VoiceError.fallbackOff.localizedDescription {
+                    Button("Keyboard settings") { dismiss(); UIApplication.shared.open(URL(string: "gusan://keyboard-settings")!) }.frame(minHeight: 44)
+                }
                 if voice.alive { Button("Stop voice session", role: .destructive) { voice.stop() }.frame(minHeight: 44) }
             }.padding().toolbar { Button("Close") { dismiss() } }
         }

@@ -11,7 +11,7 @@ public enum VoicePlan: Equatable {
 
 public struct VoiceMachine {
     public enum Event {
-        case sessionStarted(Date), command(VoiceCommand, Date), transcribed(UUID, String), finished(UUID, String, Bool), failed(UUID, String), tick(Date), sessionStopped
+        case sessionStarted(Date), command(VoiceCommand, Date), transcribed(UUID, String), finished(UUID, String, Bool), failed(UUID, String), acknowledged(UUID), tick(Date), sessionStopped
     }
     public enum Effect: Equatable {
         case beginCapture, finishCapture(UUID), discardCapture, cancelWork, runAction(UUID, String, VoiceContext?), deliver(String), stopSession, publish
@@ -50,7 +50,7 @@ public struct VoiceMachine {
                 if phase == .recording { effects = [.discardCapture] }
                 else if phase == .transcribing || phase == .thinking { effects = [.cancelWork] }
                 else { return [] }
-                phase = .ready; requestID = nil; lastActivity = now
+                phase = .ready; requestID = nil; context = nil; result = nil; message = nil; lastActivity = now
             }
         case .transcribed(let id, let text):
             guard requestID == id, phase == .transcribing else { return [] }
@@ -69,8 +69,11 @@ public struct VoiceMachine {
                 phase = .transcribing; lastActivity = now; effects = [.finishCapture(id)]
             } else if [.ready, .done, .failed].contains(phase), now.timeIntervalSince(lastActivity) >= idleTimeout { phase = .off; effects = [.stopSession] }
             else { return [] }
+        case .acknowledged(let id):
+            guard requestID == id, phase == .done || phase == .failed else { return [] }
+            phase = .ready; requestID = nil; context = nil; result = nil; message = nil; replacesSelection = false
         case .sessionStopped:
-            phase = .off; requestID = nil; recordingStarted = nil; effects = [.discardCapture, .cancelWork]
+            phase = .off; requestID = nil; recordingStarted = nil; context = nil; result = nil; message = nil; effects = [.discardCapture, .cancelWork]
         }
         return effects + [.publish]
     }
@@ -78,8 +81,9 @@ public struct VoiceMachine {
 
 public enum KeyboardVoice {
     public enum TapResult: Equatable { case error(VoiceError), openApp, start, stop, cancel }
-    public static func tap(status: VoiceStatus?, now: Date = Date(), hasFullAccess: Bool, shared: Bool, signedIn: Bool) -> TapResult {
-        guard hasFullAccess && shared else { return .error(.notShared) }
+    public static func tap(status: VoiceStatus?, now: Date = Date(), hasFullAccess: Bool, shared: Bool, signedIn: Bool, fallbackOff: Bool = false) -> TapResult {
+        guard hasFullAccess else { return .error(.fullAccessRequired) }
+        guard shared else { return .error(fallbackOff ? .fallbackOff : .notShared) }
         guard signedIn else { return .error(.notSignedIn) }
         guard let status, status.isAlive(now: now) else { return .openApp }
         switch status.phase {

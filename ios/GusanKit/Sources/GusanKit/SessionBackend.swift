@@ -71,8 +71,9 @@ final class NamedSessionPasteboard: SessionBackend {
     let name = "Team pasteboard"
     private let namespace: String
     private let accessAllowed: () -> Bool
-    init(namespace: String = "com.aram2k.gusan.session", accessAllowed: @escaping () -> Bool = { true }) {
-        self.namespace = namespace; self.accessAllowed = accessAllowed
+    private let lifetime: TimeInterval?
+    init(namespace: String = "com.aram2k.gusan.session", lifetime: TimeInterval? = nil, accessAllowed: @escaping () -> Bool = { true }) {
+        self.namespace = namespace; self.accessAllowed = accessAllowed; self.lifetime = lifetime
     }
     #if canImport(UIKit)
     private func board(_ key: String, create: Bool) -> UIPasteboard? {
@@ -95,7 +96,9 @@ final class NamedSessionPasteboard: SessionBackend {
         if !Thread.isMainThread { return DispatchQueue.main.sync { self.write(data, key: key) } }
         guard let value = board(key, create: true) else { return false }
         value.setPersistent(true)
-        value.setItems([[namespace: data]], options: [.localOnly: true])
+        var options: [UIPasteboard.OptionsKey: Any] = [.localOnly: true]
+        if let lifetime { options[.expirationDate] = Date().addingTimeInterval(lifetime) }
+        value.setItems([[namespace: data]], options: options)
         return value.data(forPasteboardType: namespace) == data
         #else
         return false

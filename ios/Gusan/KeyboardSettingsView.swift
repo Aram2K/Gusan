@@ -21,7 +21,7 @@ struct KeyboardSettingsView: View {
             VoiceSettingsSection(voice: voice)
             Section {
                 Toggle("Share sign-in via pasteboard fallback", isOn: $pasteboardFallback).frame(minHeight: 44)
-            } footer: { Text("Only used if the keyboard can't see your sign-in after sideloading. Other apps signed with the same Apple ID could read it.") }
+            } footer: { Text("Used only if sign-in or voice can't be shared after sideloading. Other apps signed with the same Apple ID could read it.") }
             Section("Typing") {
                 Toggle("Key clicks", isOn: $keyClicks).frame(minHeight: 44)
                 Toggle("Auto-capitalization", isOn: $autoCapitalization).frame(minHeight: 44)
@@ -45,6 +45,6 @@ struct KeyboardSettingsView: View {
             .onChange(of: doubleSpacePeriod) { model.settings.doubleSpacePeriod = $0 }
             .onChange(of: haptics) { model.settings.haptics = $0 }
             .onAppear { pasteboardFallback = model.settings.pasteboardFallback }
-            .onChange(of: pasteboardFallback) { model.settings.pasteboardFallback = $0; _ = model.store.read(); model.refreshDiagnostics() }
+            .onChange(of: pasteboardFallback) { model.settings.pasteboardFallback = $0; if !$0 { model.store.makeVoiceChannel().clear() }; _ = model.store.read(); model.refreshDiagnostics() }
     }
 }

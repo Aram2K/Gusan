@@ -113,6 +113,9 @@ public final class SessionStore: SessionStorage {
     private let keychainGroup: String?
     private let fullAccess: () -> Bool?
     private let fallbackAllowed: () -> Bool
+    private let voicePasteboard: SessionBackend
+    private var voiceCheckedAt = Date.distantPast
+    private var cachedVoiceRoute = VoiceChannel.Route.unavailable
     private let lock = NSLock()
     public init(resolution: AppGroupResolution = AppGroupResolver.resolve(), role: SessionRole = .app, pasteboardAccessAllowed: @escaping () -> Bool = { true }) {
         self.role = role
@@ -123,6 +126,8 @@ public final class SessionStore: SessionStorage {
             pasteboard.clear("debug-mode")
             let isolatedStore = NamedSessionPasteboard(namespace: "com.aram2k.gusan.debug.session", accessAllowed: pasteboardAccessAllowed)
             for key in ["session", "report.app", "report.keyboard"] { isolatedStore.clear(key) }
+            let voice = NamedSessionPasteboard(namespace: "com.aram2k.gusan.debug.voice", accessAllowed: pasteboardAccessAllowed)
+            for key in ["command", "status", "keyboard", "launch", "transcript", "receipt", "probe"] { voice.clear(key) }
         }
         if ProcessInfo.processInfo.arguments.contains("--gusan-pasteboard-only") {
             _ = pasteboard.write(Data([1]), key: "debug-mode")
@@ -132,6 +137,7 @@ public final class SessionStore: SessionStorage {
         let isolated = false
         #endif
         self.resolution = isolated ? AppGroupResolution(candidatesTried: [], chosen: nil, container: nil) : resolution
+        voicePasteboard = NamedSessionPasteboard(namespace: isolated ? "com.aram2k.gusan.debug.voice" : "com.aram2k.gusan.voice", lifetime: 600, accessAllowed: pasteboardAccessAllowed)
         keychainGroup = isolated ? nil : resolution.chosen
         backends = [KeychainSessionBackend(group: keychainGroup, enabled: keychainGroup != nil), FileSessionBackend(container: self.resolution.container), NamedSessionPasteboard(namespace: isolated ? "com.aram2k.gusan.debug.session" : "com.aram2k.gusan.session", accessAllowed: pasteboardAccessAllowed)]
         #if DEBUG
@@ -146,11 +152,34 @@ public final class SessionStore: SessionStorage {
         let settings = SettingsStore(group: self.resolution.chosen, pasteboardAccessAllowed: pasteboardAccessAllowed)
         fallbackAllowed = { settings.refresh(); return settings.pasteboardFallback }
     }
-    init(resolution: AppGroupResolution, backends: [SessionBackend], privateBackend: SessionBackend, role: SessionRole = .app, pasteboardFallbackAllowed: @escaping () -> Bool = { true }) {
+    init(resolution: AppGroupResolution, backends: [SessionBackend], privateBackend: SessionBackend, role: SessionRole = .app, pasteboardFallbackAllowed: @escaping () -> Bool = { true }, voicePasteboard: SessionBackend? = nil) {
         self.resolution = resolution; self.backends = backends; self.privateBackend = privateBackend; self.role = role
         keychainGroup = resolution.chosen
         fullAccess = { nil }
         fallbackAllowed = pasteboardFallbackAllowed
+        self.voicePasteboard = voicePasteboard ?? NamedSessionPasteboard(namespace: "com.aram2k.gusan.voice", lifetime: 600)
+    }
+    public func makeVoiceChannel() -> VoiceChannel {
+        VoiceChannel(container: resolution.container, group: "com.aram2k.gusan", pasteboard: voicePasteboard, route: { self.voiceRoute() })
+    }
+    private func voiceRoute() -> VoiceChannel.Route {
+        synchronized {
+            guard role != .keyboard || fullAccess() != false else { return .unavailable }
+            let allowed = fallbackAllowed()
+            if Date().timeIntervalSince(voiceCheckedAt) < 1 {
+                if cachedVoiceRoute == .pasteboard && !allowed { return .disabled }
+                if cachedVoiceRoute != .disabled || !allowed { return cachedVoiceRoute }
+            }
+            let stores = backends.map(health)
+            let report = SessionReport(role: role, timestamp: Date(), groupID: resolution.chosen, keychainGroupID: keychainGroup, stores: stores, fullAccess: fullAccess())
+            if let data = try? JSONEncoder().encode(report) { for backend in backends { _ = backend.write(data, key: "report." + role.rawValue) } }
+            let peer = peerReport()
+            let localFile = resolution.container != nil && stores.contains { $0.name == "App-group file" && $0.readable && $0.writable }
+            let sharedFile = peer == nil || (resolution.chosen != nil && resolution.chosen == peer?.groupID && peer!.stores.contains { $0.name == "App-group file" && $0.readable && $0.writable })
+            cachedVoiceRoute = localFile && sharedFile ? .file : (allowed ? .pasteboard : .disabled)
+            voiceCheckedAt = Date()
+            return cachedVoiceRoute
+        }
     }
     private func synchronized<T>(_ body: () -> T) -> T {
         #if canImport(UIKit)
@@ -270,6 +299,7 @@ public final class SessionStore: SessionStorage {
         synchronized {
             for backend in backends { backend.clear("session") }
             privateBackend.clear("session")
+            makeVoiceChannel().clear()
         }
     }
     public func diagnostics() -> SessionDiagnostics {

@@ -76,15 +76,61 @@ public struct VoiceLaunch: Codable {
     }
 }
 
+public struct VoiceTranscript: Codable, Equatable {
+    public let requestID: UUID
+    public let text: String
+    public init(requestID: UUID, text: String) { self.requestID = requestID; self.text = text }
+}
+
 public struct VoiceChannel {
+    enum Route { case file, pasteboard, unavailable, disabled }
+    private struct Packet<Value: Codable>: Codable { let issuedAt: Date; let value: Value }
     public enum Notification: String { case command, status }
     public let container: URL?
     public let group: String
-    public init(container: URL?, group: String = "group.com.aram2k.gusan") { self.container = container; self.group = group }
-    public var available: Bool { container != nil }
+    private let pasteboard: SessionBackend?
+    private let route: () -> Route
+    private let keys = ["command", "status", "keyboard", "launch", "transcript", "receipt", "probe"]
+    public init(container: URL?, group: String = "group.com.aram2k.gusan") {
+        self.container = container; self.group = group; pasteboard = nil; route = { container == nil ? .unavailable : .file }
+    }
+    init(container: URL?, group: String, pasteboard: SessionBackend, route: @escaping () -> Route) {
+        self.container = container; self.group = group; self.pasteboard = pasteboard; self.route = route
+    }
+    public var unavailableError: VoiceError { route() == .disabled ? .fallbackOff : .notShared }
+    public var available: Bool {
+        switch storage() {
+        case .file: return container != nil
+        case .pasteboard:
+            let readable = pasteboard?.read("probe").readable == true
+            let writable = pasteboard?.write(Data([0]), key: "probe") == true
+            pasteboard?.clear("probe"); return readable && writable
+        default: return false
+        }
+    }
+    private func storage() -> Route {
+        let selected = route()
+        if selected != .pasteboard { for key in keys { pasteboard?.clear(key) } }
+        if selected != .file { for key in keys { if let url = file(key) { try? FileManager.default.removeItem(at: url) } } }
+        return selected
+    }
     private func file(_ name: String) -> URL? { container?.appendingPathComponent("voice", isDirectory: true).appendingPathComponent(name + ".json") }
-    private func read<T: Decodable>(_ name: String, as: T.Type) -> T? { file(name).flatMap { try? Data(contentsOf: $0) }.flatMap { try? JSONDecoder().decode(T.self, from: $0) } }
-    private func write<T: Encodable>(_ value: T, name: String) throws {
+    private func read<T: Codable>(_ name: String, as: T.Type) -> T? {
+        if storage() == .pasteboard {
+            guard let data = pasteboard?.read(name).data, let packet = try? JSONDecoder().decode(Packet<T>.self, from: data) else { return nil }
+            guard (0..<600).contains(Date().timeIntervalSince(packet.issuedAt)) else { pasteboard?.clear(name); return nil }
+            return packet.value
+        }
+        guard storage() == .file else { return nil }
+        return file(name).flatMap { try? Data(contentsOf: $0) }.flatMap { try? JSONDecoder().decode(T.self, from: $0) }
+    }
+    private func write<T: Codable>(_ value: T, name: String) throws {
+        let selected = storage()
+        if selected == .pasteboard {
+            let data = try JSONEncoder().encode(Packet(issuedAt: Date(), value: value))
+            guard pasteboard?.write(data, key: name) == true else { throw VoiceError.notShared }; return
+        }
+        guard selected == .file else { throw unavailableError }
         guard let url = file(name) else { throw VoiceError.notShared }
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         #if os(iOS)
@@ -96,6 +142,9 @@ public struct VoiceChannel {
     }
     public func readStatus() -> VoiceStatus? { read("status", as: VoiceStatus.self) }
     public func readCommand() -> VoiceCommand? { read("command", as: VoiceCommand.self) }
+    public func consumeCommand() -> VoiceCommand? { let command = readCommand(); if command != nil { _ = remove("command") }; return command }
+    public func readTranscript() -> VoiceTranscript? { read("transcript", as: VoiceTranscript.self) }
+    public func write(transcript: VoiceTranscript) throws { try write(transcript, name: "transcript") }
     public func readKeyboardState() -> KeyboardVoiceState? { read("keyboard", as: KeyboardVoiceState.self) }
     public func write(launch: VoiceLaunch) throws { try write(launch, name: "launch") }
     public func consumeLaunch(nonce: String?, now: Date = Date()) -> Bool {
@@ -103,10 +152,36 @@ public struct VoiceChannel {
               now.timeIntervalSince(launch.issuedAt) >= 0, now.timeIntervalSince(launch.issuedAt) < 60,
               let command = readCommand(), command.kind == .start, command.requestID == launch.requestID,
               now.timeIntervalSince(command.sentAt) >= 0, now.timeIntervalSince(command.sentAt) < 60,
-              let url = file("launch"), (try? FileManager.default.removeItem(at: url)) != nil else { return false }
+              remove("launch") else { return false }
         return true
     }
-    public func write(status: VoiceStatus) throws { try write(status, name: "status") }
+    @discardableResult private func remove(_ name: String) -> Bool {
+        if storage() == .pasteboard { pasteboard?.clear(name); return pasteboard?.read(name).data == nil }
+        guard let url = file(name) else { return false }
+        return (try? FileManager.default.removeItem(at: url)) != nil
+    }
+    public func clear() {
+        for key in keys { pasteboard?.clear(key); if let url = file(key) { try? FileManager.default.removeItem(at: url) } }
+    }
+    public func consumeResult(requestID: UUID) throws {
+        guard readStatus()?.requestID == requestID else { return }
+        try write(requestID, name: "receipt")
+        discardRequest(requestID)
+        if readStatus()?.requestID == requestID { _ = remove("status") }
+    }
+    public func discardRequest(_ id: UUID) {
+        if readCommand()?.requestID == id { _ = remove("command") }
+        if readKeyboardState()?.requestID == id { _ = remove("keyboard") }
+        if readTranscript()?.requestID == id { _ = remove("transcript") }
+        if read("launch", as: VoiceLaunch.self)?.requestID == id { _ = remove("launch") }
+    }
+    public func consumeReceipt() -> UUID? { let id = read("receipt", as: UUID.self); if id != nil { _ = remove("receipt") }; return id }
+    public func write(status: VoiceStatus) throws {
+        if status.phase == .off { clear(); return }
+        if status.phase == .failed, let id = status.requestID { discardRequest(id) }
+        if status.phase == .done, let id = status.requestID, read("receipt", as: UUID.self) == id { return }
+        try write(status, name: "status")
+    }
     public func write(command: VoiceCommand) throws { try write(command, name: "command") }
     public func write(keyboard: KeyboardVoiceState) throws { try write(keyboard, name: "keyboard") }
     public func name(_ notification: Notification) -> String { "gusan.voice.\(notification.rawValue).\(group)" }

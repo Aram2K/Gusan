@@ -27,6 +27,8 @@ final class VoiceKeyController: NSObject {
     private let undoButton = UIButton(type: .system)
     private let copyButton = UIButton(type: .system)
     private let reviewButton = UIButton(type: .system)
+    private let settingsButton = UIButton(type: .system)
+    private var settingsURL: URL?
     private var observer: DarwinObserver?
     private var timer: Timer?
     private var visible = false
@@ -44,7 +46,7 @@ final class VoiceKeyController: NSObject {
     private var reviewHeading: UILabel?
     init(host: UIInputViewController, store: SessionStore) {
         self.host = host; self.store = store
-        channel = VoiceChannel(container: store.resolution.container, group: store.resolution.chosen ?? "group.com.aram2k.gusan")
+        channel = store.makeVoiceChannel()
         super.init()
         restorePending()
         micButton.setImage(UIImage(systemName: "mic.fill"), for: .normal)
@@ -57,7 +59,9 @@ final class VoiceKeyController: NSObject {
         copyButton.addTarget(self, action: #selector(copyResult), for: .touchUpInside)
         reviewButton.setTitle("View", for: .normal); reviewButton.accessibilityLabel = "Review voice result"
         reviewButton.addTarget(self, action: #selector(viewResult), for: .touchUpInside)
-        for button in [copyButton, reviewButton] {
+        settingsButton.setTitle("Open Settings", for: .normal)
+        settingsButton.addTarget(self, action: #selector(openSettings), for: .touchUpInside)
+        for button in [copyButton, reviewButton, settingsButton] {
             button.isHidden = true
             button.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
             button.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -65,7 +69,7 @@ final class VoiceKeyController: NSObject {
         waveform.setContentHuggingPriority(.required, for: .horizontal)
         undoButton.setContentHuggingPriority(.required, for: .horizontal)
         bar.spacing = 8; bar.alignment = .center
-        [waveform, label, undoButton, reviewButton, copyButton].forEach { bar.addArrangedSubview($0) }
+        [waveform, label, undoButton, reviewButton, copyButton, settingsButton].forEach { bar.addArrangedSubview($0) }
         bar.isHidden = true
     }
     func appear() {
@@ -85,8 +89,15 @@ final class VoiceKeyController: NSObject {
         guard let host else { return }
         let signedIn = store.read() != nil
         let status = channel.readStatus()
-        switch KeyboardVoice.tap(status: status, hasFullAccess: host.hasFullAccess, shared: channel.available && store.diagnostics().isShared, signedIn: signedIn) {
-        case .error(let error): show(error.localizedDescription)
+        settingsButton.isHidden = true; settingsURL = nil
+        switch KeyboardVoice.tap(status: status, hasFullAccess: host.hasFullAccess, shared: channel.available, signedIn: signedIn, fallbackOff: channel.unavailableError == .fallbackOff) {
+        case .error(let error):
+            if error == .fullAccessRequired || error == .fallbackOff {
+                settingsURL = URL(string: error == .fullAccessRequired ? "gusan://open-settings" : "gusan://keyboard-settings")
+                settingsButton.setTitle(error == .fullAccessRequired ? "Open Settings" : "Settings", for: .normal)
+                settingsButton.isHidden = false
+            }
+            show(error.localizedDescription)
         case .openApp:
             guard sendStart(), let requestID else { return }
             let launch = VoiceLaunch(requestID: requestID)
@@ -149,6 +160,10 @@ final class VoiceKeyController: NSObject {
         pending.insertedID = id
         do { try channel.write(keyboard: pending) }
         catch { pending.insertedID = nil; show(error.localizedDescription); return }
+        defer {
+            do { try channel.consumeResult(requestID: id); channel.post(.command) }
+            catch { show(error.localizedDescription) }
+        }
         guard !pending.isStale(status: status) else { return }
         guard let result = status.result, !result.isEmpty, let context, let current = currentContext(), let proxy = host?.textDocumentProxy else {
             if let result = status.result { offerResult(result) }; return
@@ -170,6 +185,7 @@ final class VoiceKeyController: NSObject {
         UIPasteboard.general.string = reviewResult
         show("Result copied")
     }
+    @objc private func openSettings() { if let settingsURL { open(settingsURL) } }
     @objc private func viewResult() {
         guard let result = reviewResult, let host else { return }
         closeResult()

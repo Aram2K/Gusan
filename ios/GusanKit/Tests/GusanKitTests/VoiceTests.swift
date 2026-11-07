@@ -2,6 +2,110 @@ import XCTest
 @testable import GusanKit
 
 final class VoiceTests: XCTestCase {
+    final class Board: SessionBackend {
+        let name: String
+        var values: [String: Data] = [:]
+        var writable = true
+        init(_ name: String = "Team pasteboard") { self.name = name }
+        func read(_ key: String) -> SessionBackendRead { .init(data: values[key], readable: true) }
+        func write(_ data: Data, key: String) -> Bool { guard writable else { return false }; values[key] = data; return true }
+        func clear(_ key: String) { values.removeValue(forKey: key) }
+    }
+    func testPasteboardVoiceStartTranscriptResultAndCleanupWithoutAppGroup() throws {
+        let board = Board()
+        let keyboard = VoiceChannel(container: nil, group: "voice", pasteboard: board, route: { .pasteboard })
+        let app = VoiceChannel(container: nil, group: "voice", pasteboard: board, route: { .pasteboard })
+        let id = UUID(), context = VoiceContext(selected: "Original text", documentID: "doc")
+        XCTAssertTrue(keyboard.available)
+        XCTAssertNil(keyboard.readStatus()); XCTAssertNil(app.consumeCommand()); XCTAssertNil(app.readTranscript())
+        XCTAssertEqual(KeyboardVoice.tap(status: nil, hasFullAccess: true, shared: keyboard.available, signedIn: true), .openApp)
+        try keyboard.write(keyboard: KeyboardVoiceState(requestID: id, context: context))
+        try keyboard.write(command: VoiceCommand(kind: .start, requestID: id, context: context))
+        let launch = VoiceLaunch(requestID: id); try keyboard.write(launch: launch)
+        XCTAssertTrue(app.consumeLaunch(nonce: launch.nonce.uuidString))
+        XCTAssertFalse(app.consumeLaunch(nonce: launch.nonce.uuidString))
+        var machine = VoiceMachine(action: .smart(.summarize))
+        _ = machine.handle(.sessionStarted(Date()))
+        _ = machine.handle(.command(try XCTUnwrap(app.consumeCommand()), Date()))
+        XCTAssertNil(board.values["command"])
+        try app.write(status: VoiceStatus(phase: machine.phase, requestID: id))
+        XCTAssertTrue(try XCTUnwrap(keyboard.readStatus()).isAlive())
+        try keyboard.write(command: VoiceCommand(kind: .stop, requestID: id))
+        _ = machine.handle(.command(try XCTUnwrap(app.consumeCommand()), Date()))
+        let transcript = VoiceTranscript(requestID: id, text: "Spoken instruction")
+        try app.write(transcript: transcript)
+        XCTAssertEqual(keyboard.readTranscript(), transcript)
+        _ = machine.handle(.transcribed(id, transcript.text))
+        _ = machine.handle(.finished(id, "Rewritten result", true))
+        let done = VoiceStatus(phase: machine.phase, requestID: id, result: machine.result, replacesSelection: true)
+        try app.write(status: done)
+        XCTAssertEqual(keyboard.readKeyboardState()?.context, context)
+        XCTAssertEqual(keyboard.readStatus()?.result, "Rewritten result")
+        try keyboard.consumeResult(requestID: id)
+        for key in ["command", "keyboard", "launch", "transcript", "status"] { XCTAssertNil(board.values[key]) }
+        try app.write(status: done)
+        XCTAssertNil(keyboard.readStatus(), "An unacknowledged result must not be republished")
+        _ = machine.handle(.acknowledged(try XCTUnwrap(app.consumeReceipt())))
+        XCTAssertNil(machine.result); XCTAssertNil(machine.context)
+        try app.write(status: VoiceStatus(phase: machine.phase))
+        XCTAssertNil(keyboard.readStatus()?.result)
+        _ = machine.handle(.sessionStopped)
+        try app.write(status: VoiceStatus(phase: machine.phase))
+        XCTAssertTrue(board.values.isEmpty)
+        try app.write(transcript: transcript); try keyboard.write(keyboard: KeyboardVoiceState(requestID: id, context: context))
+        try app.write(status: VoiceStatus(phase: .failed, requestID: id, message: "Network error"))
+        XCTAssertNil(board.values["transcript"]); XCTAssertNil(board.values["keyboard"])
+        app.clear(); XCTAssertTrue(board.values.isEmpty)
+    }
+    func testVoiceFallbackOffPurgesDataAndRejectsRequests() throws {
+        let board = Board(); var enabled = true
+        let channel = VoiceChannel(container: nil, group: "voice", pasteboard: board, route: { enabled ? .pasteboard : .disabled })
+        try channel.write(command: VoiceCommand(kind: .start, requestID: UUID(), context: VoiceContext(selected: "private")))
+        enabled = false
+        XCTAssertFalse(channel.available); XCTAssertTrue(board.values.isEmpty)
+        XCTAssertEqual(channel.unavailableError, .fallbackOff)
+        XCTAssertThrowsError(try channel.write(command: VoiceCommand(kind: .start, requestID: UUID()))) { XCTAssertEqual($0 as? VoiceError, .fallbackOff) }
+        XCTAssertEqual(KeyboardVoice.tap(status: nil, hasFullAccess: true, shared: false, signedIn: true, fallbackOff: true), .error(.fallbackOff))
+        XCTAssertEqual(KeyboardVoice.tap(status: nil, hasFullAccess: false, shared: false, signedIn: true, fallbackOff: true), .error(.fullAccessRequired))
+        enabled = true; board.writable = false
+        XCTAssertFalse(channel.available)
+        XCTAssertThrowsError(try channel.write(command: VoiceCommand(kind: .start, requestID: UUID()))) { XCTAssertEqual($0 as? VoiceError, .notShared) }
+    }
+    func testAbandonedPasteboardVoiceDataExpires() throws {
+        let board = Board()
+        let channel = VoiceChannel(container: nil, group: "voice", pasteboard: board, route: { .pasteboard })
+        for age in [-60.0, 601.0] {
+            board.values["status"] = try JSONSerialization.data(withJSONObject: ["issuedAt": Date().addingTimeInterval(-age).timeIntervalSinceReferenceDate, "value": ["phase": "done", "heartbeat": Date().timeIntervalSinceReferenceDate, "level": 0, "result": "Expired", "replacesSelection": false]])
+            XCTAssertNil(channel.readStatus()); XCTAssertNil(board.values["status"])
+        }
+    }
+    func testVoiceUsesPasteboardWhenFileGroupsDifferEvenIfKeychainIsShared() throws {
+        let file = Board("App-group file"), keychain = Board("Keychain"), reports = Board(), voice = Board("voice")
+        let peer = SessionReport(role: .keyboard, timestamp: Date(), groupID: "other", keychainGroupID: "app", stores: ["Keychain", "App-group file"].map { .init(name: $0, readable: true, writable: true, hasSession: false) }, fullAccess: true)
+        reports.values["report.keyboard"] = try JSONEncoder().encode(peer)
+        let resolution = AppGroupResolution(candidatesTried: [], chosen: "app", container: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        let store = SessionStore(resolution: resolution, backends: [file, keychain, reports], privateBackend: Board("private"), voicePasteboard: voice)
+        let channel = store.makeVoiceChannel()
+        try channel.write(command: VoiceCommand(kind: .start, requestID: UUID()))
+        XCTAssertNotNil(voice.values["command"])
+        channel.clear(); XCTAssertTrue(voice.values.isEmpty)
+    }
+    func testVoiceNormalSharingAndLocalFailureRespectToggle() throws {
+        for (writable, enabled) in [(true, true), (true, false), (false, true), (false, false)] {
+            let file = Board("App-group file"), reports = Board(), voice = Board("voice")
+            file.writable = writable
+            let peer = SessionReport(role: .keyboard, timestamp: Date(), groupID: "app", keychainGroupID: "app", stores: [.init(name: "App-group file", readable: true, writable: true, hasSession: false)], fullAccess: true)
+            reports.values["report.keyboard"] = try JSONEncoder().encode(peer)
+            voice.values["status"] = Data("old".utf8)
+            let resolution = AppGroupResolution(candidatesTried: [], chosen: "app", container: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+            let store = SessionStore(resolution: resolution, backends: [file, reports], privateBackend: Board("private"), pasteboardFallbackAllowed: { enabled }, voicePasteboard: voice)
+            let channel = store.makeVoiceChannel()
+            XCTAssertEqual(channel.available, writable || enabled)
+            if writable || !enabled { XCTAssertTrue(voice.values.isEmpty) }
+            if !writable && !enabled { XCTAssertEqual(channel.unavailableError, .fallbackOff) }
+            channel.clear()
+        }
+    }
     func testLiveVoiceInstruction() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard let token = environment["GUSAN_LIVE_ACCESS_TOKEN"], !token.isEmpty else { throw XCTSkip("Set GUSAN_LIVE_ACCESS_TOKEN to run live voice integration.") }
@@ -220,7 +324,7 @@ final class VoiceTests: XCTestCase {
         _ = machine.handle(.sessionStopped); XCTAssertEqual(machine.phase, .off)
     }
     func testTapTable() {
-        XCTAssertEqual(KeyboardVoice.tap(status: nil, now: now, hasFullAccess: false, shared: true, signedIn: true), .error(.notShared))
+        XCTAssertEqual(KeyboardVoice.tap(status: nil, now: now, hasFullAccess: false, shared: true, signedIn: true), .error(.fullAccessRequired))
         XCTAssertEqual(KeyboardVoice.tap(status: nil, now: now, hasFullAccess: true, shared: false, signedIn: true), .error(.notShared))
         XCTAssertEqual(KeyboardVoice.tap(status: nil, now: now, hasFullAccess: true, shared: true, signedIn: false), .error(.notSignedIn))
         XCTAssertEqual(KeyboardVoice.tap(status: nil, now: now, hasFullAccess: true, shared: true, signedIn: true), .openApp)

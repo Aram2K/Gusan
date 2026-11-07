@@ -9,6 +9,7 @@ struct GusanApp: App {
             AppRootView().environmentObject(model).environmentObject(voice).tint(Theme.accent)
                 .onOpenURL { if $0.host == "voice" { voice.handleURL($0) } else { model.handleURL($0) } }
                 .sheet(isPresented: $voice.presented) { VoiceReadyView(voice: voice) }
+                .onChange(of: model.session) { if $0 == nil { voice.stop() } }
         }
     }
 }

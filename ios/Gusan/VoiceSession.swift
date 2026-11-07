@@ -48,7 +48,7 @@ final class VoiceSession: ObservableObject {
     init(store: SessionStore = SessionStore()) {
         self.store = store; auth = AuthClient(store: store)
         settings = VoiceSettings(group: store.resolution.chosen)
-        channel = VoiceChannel(container: store.resolution.container, group: store.resolution.chosen ?? "group.com.aram2k.gusan")
+        channel = store.makeVoiceChannel()
         observer = channel.observe(.command) { [weak self] in self?.receive() }
         audioObservers.append(NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] notification in
             Task { @MainActor in self?.interrupted(notification) }
@@ -74,8 +74,11 @@ final class VoiceSession: ObservableObject {
         startup = Task {
             defer { startup = nil }
             do {
-                guard channel.available else { throw VoiceError.notShared }
-                guard store.read() != nil else { throw VoiceError.notSignedIn }
+                guard channel.available else { throw channel.unavailableError }
+                guard let session = store.read() else { throw VoiceError.notSignedIn }
+                #if DEBUG
+                if session.accessToken == "gusan-debug-no-network" { throw VoiceError.notSignedIn }
+                #endif
                 let allowed = await withCheckedContinuation { continuation in
                     if #available(iOS 17.0, *) { AVAudioApplication.requestRecordPermission { continuation.resume(returning: $0) } }
                     else { AVAudioSession.sharedInstance().requestRecordPermission { continuation.resume(returning: $0) } }
@@ -140,10 +143,13 @@ final class VoiceSession: ObservableObject {
         try? channel.write(status: status); channel.post(.status)
     }
     private func receive() {
-        guard machine.phase != .off, let command = channel.readCommand(), command.id != consumed else { return }
+        guard machine.phase != .off else { return }
+        if let id = channel.consumeReceipt() { execute(machine.handle(.acknowledged(id))) }
+        guard let command = channel.consumeCommand(), command.id != consumed else { return }
         consumed = command.id
         if command.kind == .start { machine.action = settings.defaultAction }
         execute(machine.handle(.command(command, Date())))
+        if command.kind == .cancel { channel.discardRequest(command.requestID) }
     }
     private func execute(_ effects: [VoiceMachine.Effect]) {
         for effect in effects {
@@ -157,6 +163,7 @@ final class VoiceSession: ObservableObject {
                     do {
                         let text = try await authorized { token in try await TranscribeClient().run(wav: wav, language: self.settings.language, accessToken: token) }
                         try Task.checkCancellation()
+                        try channel.write(transcript: VoiceTranscript(requestID: id, text: text))
                         execute(machine.handle(.transcribed(id, text)))
                     } catch is CancellationError {} catch { execute(machine.handle(.failed(id, error.localizedDescription))) }
                 }
@@ -191,6 +198,7 @@ final class VoiceSession: ObservableObject {
         }
     }
     private func publish() {
+        if machine.phase != .off && !channel.available { error = channel.unavailableError.localizedDescription; stop(); return }
         status = VoiceStatus(phase: machine.phase, requestID: machine.requestID, sessionEndsAt: machine.phase == .recording ? machine.recordingStarted?.addingTimeInterval(machine.maxRecording) : machine.lastActivity.addingTimeInterval(machine.idleTimeout), level: status.level, message: machine.message, result: machine.result, replacesSelection: machine.replacesSelection)
         try? channel.write(status: status); channel.post(.status)
     }
