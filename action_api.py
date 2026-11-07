@@ -379,6 +379,8 @@ def _max_tokens_for(mode, text=None):
         return 1400      # a short answer, or a drafted email; the server caps a request at 2000
     if mode == "meeting_title":
         return 160       # 3-7 words (room for a model that thinks a little first)
+    if mode == "smart_selection":
+        return 2000      # a rewritten selection can be as long as the selection
     return 1000
 
 
@@ -609,6 +611,8 @@ def build_messages(text, mode, source_lang="auto", target_lang="en", vocab_block
         ]
     if mode == "smart_auto":
         return smart_prompt.build_messages(text, vocab_block=vocab_block)
+    if mode == "smart_selection":
+        return smart_prompt.build_selection_messages(text, vocab_block=vocab_block)
     if mode == "write_email":
         instruction = (
             "Turn this dictated text into a comprehensive, professional email draft. "
@@ -676,6 +680,8 @@ def server_mode(mode):
     already lets that through for Free (the same meeting's note_ref is not counted twice) and for Pro."""
     if mode in ("live_rule", "live_people"):
         return "live_assist"
+    if mode == "smart_selection":
+        return "smart_auto"          # a Smart Action (on the selected text): the server's Smart Actions route
     return "meeting_notes" if mode == "meeting_title" else mode
 
 

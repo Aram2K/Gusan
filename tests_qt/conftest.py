@@ -22,6 +22,7 @@ _DATA = tempfile.mkdtemp(prefix="gusan-qt-test-")
 os.environ["TRANSCRIBE_APP_DATA_DIR"] = _DATA
 os.environ["TRANSCRIBE_DISABLE_KEYRING"] = "1"
 os.environ["TRANSCRIBE_SKIP_MIGRATION"] = "1"
+os.environ["TRANSCRIBE_NO_SELECTION"] = "1"     # never read the selection of the app in front (selection_reader)
 os.environ.pop("TRANSCRIBE_DEV_TIER", None)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

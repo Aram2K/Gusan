@@ -71,6 +71,7 @@ import history as hist
 import actions
 import action_api
 import local_llm
+import smart_prompt
 import telemetry
 import auth
 import entitlements
@@ -3864,6 +3865,11 @@ PENDING_NOTES_MAX_TRIES = 240
 TITLE_PASS_DELAY_MS = 60_000
 TITLE_PASS_RETRY_MS = 120_000
 TITLE_PASS_MAX_TRIES = 30
+# Smart Actions on the selected text (selection_reader.py, docs/redesign/selected-text-spec.md): how long a take waits,
+# after the person stops speaking, for a selection still being read; an on-computer model reads at most this much of
+# a long selection (its whole window is 8192 tokens).
+SELECTION_WAIT_S = 1.5
+LOCAL_SELECTION_CHARS = 8000
 
 
 # ── Main PySide6 Application Controller ───────────────────────────────────────
@@ -6850,6 +6856,17 @@ class AppController(QObject):
         try:
             self.is_rec = True
             self._oneshot_action = actions.ACTION_SMART_AUTO if smart else None
+            # A Smart Action reads the text selected on screen now, while the person speaks (selection_reader.py).
+            self._take_selection = None
+            if smart:
+                AppController._hide_answer_card(self)
+                if (getattr(self, "cfg", None) or {}).get("smart_selection", True):
+                    try:
+                        import selection_reader
+                        if selection_reader.enabled():
+                            self._take_selection = selection_reader.SelectionJob()
+                    except Exception:
+                        logger.debug("Could not start reading the selection", exc_info=True)
             dictation_model = self.cfg.get("whisper_model") or "base"
             # Dictation's model is loaded again after a take that used
             # another one (or the cloud): _restore_dictation_speech.
@@ -7198,6 +7215,9 @@ class AppController(QObject):
         oneshot = getattr(self, "_oneshot_action", None)
         if oneshot != actions.ACTION_SMART_AUTO:
             oneshot = None
+        # ...and the selection it read when the shortcut was pressed (None: not a Smart Action, or none started).
+        sel_job = getattr(self, "_take_selection", None) if oneshot else None
+        sel_kind = None
         # What THIS take transcribes with (a Smart Action may use its own;
         # a cloud pick stays on this computer once Privacy mode is on, as
         # AudioRecorder._backend decides).
@@ -7351,15 +7371,25 @@ class AppController(QObject):
             self.overlay.call_soon(self.overlay.set_state, PROCESSING)
             # Pick the engine + inject the auth token for Pro managed actions.
             action_model, action_config = self._resolve_action_engine()
+            # Text selected on screen: the spoken words are the instruction, the selection what they are about.
+            action_input = text
+            if sel_job is not None and action_mode == actions.ACTION_SMART_AUTO:
+                sel = AppController._selection_for_take(self, sel_job, action_model, action_config)
+                if sel:
+                    action_mode = actions.ACTION_SMART_SELECTION
+                    action_input = smart_prompt.selection_input(sel.text, text)
             try:
                 output_text = actions.process(
-                    text,
+                    action_input,
                     action_mode,
                     source_lang=lang or "auto",
                     target_lang=self.cfg.get("translate_target", "en"),
                     model=action_model,
                     config=action_config,
                 )
+                if action_mode == actions.ACTION_SMART_SELECTION:
+                    # "<answer>" first: something to read (a card, never pasted); else the changed text.
+                    sel_kind, output_text = smart_prompt.split_selection_result(output_text)
                 telemetry.track(
                     "action_completed",
                     {
@@ -7392,6 +7422,9 @@ class AppController(QObject):
             # one that really transcribed this take.
             extra = ({"action": action_mode, "said": text}
                      if action_mode != actions.ACTION_TRANSCRIBE_ONLY else {})
+            if action_mode == actions.ACTION_SMART_SELECTION:
+                # The pages know Smart Actions by their mode; the selected text itself is never kept.
+                extra = {"action": actions.ACTION_SMART_AUTO, "said": text, "on_selection": True}
             hist.save_entry(output_text, lang, used_backend, **extra)
             self.notify_history_changed()
 
@@ -7409,7 +7442,9 @@ class AppController(QObject):
         )
 
         self._wait_keys_released(0.35)
-        if action_mode != actions.ACTION_TRANSCRIBE_ONLY:
+        if action_mode == actions.ACTION_SMART_SELECTION:
+            AppController._deliver_selection_result(self, sel_kind, output_text, pill_kind)
+        elif action_mode != actions.ACTION_TRANSCRIBE_ONLY:
             # A Smart Action's Markdown: real lists / bold / headings where
             # the app takes HTML, nice plain text everywhere else.
             pasted = self._paste_via_clipboard(output_text, rich=True)
@@ -7421,6 +7456,74 @@ class AppController(QObject):
         # A pending update: one quiet notice a run (not after every dictation),
         # shown after the "done" pill - the next dictation never waits for it.
         self._nudge_update_after_dictation()
+
+    def _selection_for_take(self, job, engine, config):
+        """The selection read at the shortcut press, when the AI that will run can read it - else None: nothing
+        selected, the built-in formatter, a cloud engine without its key or token, Privacy mode with a cloud engine,
+        an on-computer model that is not downloaded. Worker thread."""
+        config = config or {}
+        kind = actions.ACTION_MODELS.get(engine, {}).get("kind")
+        if kind in ("cloud", "managed") and config.get("privacy_mode"):
+            return None
+        if ((kind == "managed" and not config.get("_managed_token"))
+                or (kind == "cloud" and not actions.engine_has_key(engine, config))
+                or (kind == "local_llm" and not local_llm.model_downloaded(engine))
+                or kind not in ("managed", "cloud", "local_llm")):
+            return None
+        sel = job.result(SELECTION_WAIT_S)
+        if not sel:
+            return None
+        if kind == "local_llm" and len(sel.text) > LOCAL_SELECTION_CHARS:
+            sel.text, sel.cut = sel.text[:LOCAL_SELECTION_CHARS], True
+        if sel.cut:
+            logger.info("The selection was long: the AI read the first %d characters", len(sel.text))
+        return sel
+
+    def _copy_result(self, text):
+        """A Smart Action's result on the clipboard (rich, as a paste would put it), not pasted."""
+        try:
+            put = AppController._rich_copy(text)
+        except Exception:
+            put = None
+        if put is None:
+            pyperclip.copy(text)
+
+    def _deliver_selection_result(self, kind, text, pill_kind=None):
+        """Worker thread. An answer about the selection: a card, and copied - never pasted. A changed text: pasted
+        where the cursor is (over the selection when it is still selected in a box you can type in) and left on the
+        clipboard; when the cursor is somewhere nothing can be typed (a web page), copied and shown instead."""
+        import selection_reader
+        if kind == smart_prompt.KIND_ANSWER:
+            AppController._copy_result(self, text)
+            self.overlay.call_soon(self.overlay.show_done, False)
+            self._run_on_gui(AppController._show_answer_card, self, text, "Answer")
+            return
+        if selection_reader.focus_editable() is False:
+            AppController._copy_result(self, text)
+            self.overlay.call_soon(self.overlay.show_done, False, kind=pill_kind)
+            self._run_on_gui(AppController._show_answer_card, self, text, "Copied")
+            return
+        pasted = self._paste_via_clipboard(text, restore=False, rich=True)
+        self.overlay.call_soon(self.overlay.show_done, pasted, kind=pill_kind)
+
+    def _show_answer_card(self, text, title="Answer"):
+        """GUI thread: the small card above the pill (ui/answer_card.py)."""
+        try:
+            card = getattr(self, "_answer_card", None)
+            if card is None:
+                from ui.answer_card import AnswerCard
+                card = self._answer_card = AnswerCard()
+            card.show_text(text, title, near=getattr(self, "overlay", None))
+        except Exception:
+            logger.warning("Could not show the answer card", exc_info=True)
+
+    def _hide_answer_card(self):
+        card = getattr(self, "_answer_card", None)
+        if card is not None:
+            try:
+                card.hide()
+            except Exception:
+                pass
 
     def paste_text(self, text, rich=False):
         # Triggers cursor paste for clicked history logs. ``rich``: a Smart

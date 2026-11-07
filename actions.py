@@ -20,6 +20,7 @@ ACTION_LIVE_RULE = "live_rule"           # the Live Assistant's standing instruc
 ACTION_MEETING_CHAT = "meeting_chat"     # "Ask about this meeting" (meeting_chat.py): free-form questions on one meeting
 ACTION_LIVE_PEOPLE = "live_people"       # the names of the people on the call, read off the Live Assistant's screenshot
 ACTION_MEETING_TITLE = "meeting_title"   # a 3-7 word name for a meeting, from its finished notes (meeting_titles.py)
+ACTION_SMART_SELECTION = "smart_selection"  # a Smart Action on the text selected on screen (smart_prompt.selection_input)
 
 RULE_BASED_ID = "rule_based"
 API_OPENAI_ID = "api_openai_compatible"
@@ -192,7 +193,7 @@ _ACTION_MODE_WHITELIST = {
     ACTION_TRANSCRIBE_ONLY, ACTION_SMART_AUTO, ACTION_WRITE_EMAIL,
     ACTION_MAKE_TODO, ACTION_TRANSLATE, ACTION_SUMMARIZE, ACTION_MEETING_NOTES,
     ACTION_LIVE_ASSIST, ACTION_LIVE_RECAP, ACTION_LIVE_RULE, ACTION_MEETING_CHAT, ACTION_LIVE_PEOPLE,
-    ACTION_MEETING_TITLE,
+    ACTION_MEETING_TITLE, ACTION_SMART_SELECTION,
 }
 
 
@@ -365,6 +366,11 @@ def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_I
         return _meeting_notes_extractive(text)
     if mode == ACTION_MEETING_TITLE:
         return ""            # no AI engine answered: no title (the list shows a name from the notes)
+    if mode == ACTION_SMART_SELECTION:
+        # No AI to read the selection with: the spoken words get the built-in Smart routing, as without a selection.
+        spoken = smart_prompt.instruction_of(text)
+        routed = _run_smart_rule_based(spoken, source_lang, target_lang, config)
+        return routed if routed is not None else _clean_transcript(spoken)
     if mode == ACTION_LIVE_ASSIST:
         return _live_assist_basic(text)
     if mode == ACTION_LIVE_RECAP:
