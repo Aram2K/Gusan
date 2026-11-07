@@ -113,13 +113,20 @@ export function smartWebQuery(request: string): string {
   return explicitWebQuery(q) || (SMART_LIVE_DATA.test(q) ? q.slice(0, 400) : "");
 }
 
-export function explicitWebQuery(question: string): string {
+export function explicitWebQuery(question: string, mode = "live_assist"): string {
   const q = question.trim();
-  const trigger = /\b(?:search\s+(?:the\s+)?(?:web|online|internet)(?:\s+for)?|google|look\s+up|(?:check|find)\s+online|can\s+you\s+search(?:\s+for)?|search\s+for|browse|what\s+does\s+the\s+internet\s+say\s+about|cherche(?:r|z)?\s+sur\s+internet|busca(?:r)?\s+en\s+internet|such(?:e)?\s+im\s+internet)\b/i.exec(q);
+  const command = q.replace(/[,\s]*(?:please|thanks|thank you|s'il vous plaît|por favor|bitte)[.!?\s]*$/i, "").trim();
+  const trailingWeb = /\s+(?:on\s+(?:the\s+)?(?:web|internet|google)|online|sur\s+(?:internet|le\s+web|google)|en\s+(?:internet|ligne|l[ií]nea|google)|im\s+(?:internet|netz)|auf\s+google)[.!?]*$/i;
+  const trigger = /^(?:(?:please|(?:can|could|would)\s+you)\s+)*(?:search\s+(?:the\s+)?(?:web|online|internet)(?:\s+for)?|google|look\s+up(?:\s+(?:on\s+)?(?:the\s+)?(?:web|online|internet))?|(?:check|find)\s+online|(?:can|could|would)\s+you\s+(?:please\s+)?search(?:\s+for)?|search\s+for|browse(?:\s+(?:the\s+)?(?:web|online|internet))?|what\s+does\s+the\s+internet\s+say\s+about|cherche(?:r|z)?\s+sur\s+internet|busca(?:r)?\s+en\s+internet|such(?:e)?\s+im\s+internet)\b/i.exec(command)
+    ?? (trailingWeb.test(command) ? /^(?:(?:please|(?:can|could|would)\s+you)\s+)*(?:search(?:\s+for)?|find|cherche(?:r|z)?|busca(?:r)?|such(?:e)?)\b/i.exec(command) : null);
   if (!trigger) return "";
-  const rest = q.slice(trigger.index + trigger[0].length)
+  const leadingQualified = /\b(?:google|web|online|internet)\b/i.test(trigger[0]);
+  const qualified = leadingQualified || trailingWeb.test(command);
+  if (mode === "meeting_chat" && !qualified) return "";
+  const remainder = command.slice(trigger.index + trigger[0].length);
+  const rest = (leadingQualified ? remainder : remainder.replace(trailingWeb, ""))
     .replace(/^[\s:,-]*(?:(?:please|for|about|pour|por|bitte)\b[\s:,-]*)*/i, "")
-    .replace(/[,\s]*(?:please|thanks|thank you|s'il vous plaît|por favor|bitte)[.!?\s]*$/i, "").trim();
+    .trim();
   return (rest || q).slice(0, 400);
 }
 
@@ -143,7 +150,12 @@ export async function classifyWebSearch(question: string, context: string): Prom
     { role: "user", content: JSON.stringify({ question: question.slice(0, 400), context: context.slice(-1200) }) },
   ];
   const ms = LINKUP_DECIDE_TIMEOUT_MS;
-  const knownLiveModel = LIVE_MODEL_SETTING || liveModelCache;
+  const signal = AbortSignal.timeout(ms);
+  const hasBackup = OPENAI_KEY || claude || MISTRAL_KEY || GEMINI_KEY;
+  const discoverySignal = hasBackup
+    ? AbortSignal.any([signal, AbortSignal.timeout(Math.min(400, Math.floor(ms / 2)))]) : signal;
+  const knownLiveModel = LIVE_URL && LIVE_TOKEN ? await liveModel(false, discoverySignal) : "";
+  if (signal.aborted) return null;
   const route = LIVE_URL && LIVE_TOKEN && knownLiveModel
     ? liveRoute(knownLiveModel, messages, 60, false, { temperature: 0 })
     : OPENAI_KEY ? openaiRoute(OPENAI_LIVE_MODEL, messages, 60, false, ms, ms, 0)
@@ -151,7 +163,6 @@ export async function classifyWebSearch(question: string, context: string): Prom
       ?? (MISTRAL_KEY ? mistralRoute(messages, 60, false, ms)
         : GEMINI_KEY ? geminiRoutes(messages, 60, false, ms)[0] : null);
   if (!route) return null;
-  const signal = AbortSignal.timeout(ms);
   if (route.claude) {
     const d: any = await claude!.messages.create(route.claude as any, { signal, maxRetries: 0 });
     return parseWebDecision((d.content ?? []).filter((p: any) => p.type === "text").map((p: any) => p.text).join(""));
@@ -165,11 +176,12 @@ export async function classifyWebSearch(question: string, context: string): Prom
 }
 
 export async function decideWebSearch(question: string, context: string,
-  classify: (question: string, context: string) => Promise<WebDecision | null> = classifyWebSearch
+  classify: (question: string, context: string) => Promise<WebDecision | null> = classifyWebSearch,
+  mode = "live_assist"
 ): Promise<{ query: string; source: string; classifier_ms: number }> {
   const q = question.trim().slice(0, 400);
   if (q.length < 8) return { query: "", source: "none", classifier_ms: 0 };
-  const explicit = explicitWebQuery(q);
+  const explicit = explicitWebQuery(q, mode);
   if (explicit) return { query: explicit, source: "explicit", classifier_ms: 0 };
   const start = Date.now();
   try {
@@ -178,7 +190,8 @@ export async function decideWebSearch(question: string, context: string,
       return { query: d.search ? (d.query.trim() || q).slice(0, 400) : "", source: "model", classifier_ms: Date.now() - start };
     }
   } catch { /* Fall back to the heuristic. */ }
-  const query = webSearchQuery(q);
+  const meetingLookup = mode === "meeting_chat" && /^(?:(?:please|(?:can|could|would)\s+you)\s+)*(?:search|look\s+up|find|browse)\b/i.test(q);
+  const query = meetingLookup ? "" : webSearchQuery(q);
   return { query, source: query ? "heuristic" : "none", classifier_ms: Date.now() - start };
 }
 
@@ -193,7 +206,7 @@ async function webSearch(messages: unknown[], mode: string, webQuery: unknown): 
     : content.match(/<question>\s*([\s\S]*?)\s*<\/question>/)?.[1] ?? "");
   const decision = mode === "smart_auto"
     ? { query: smartWebQuery(question), source: "smart", classifier_ms: 0 }
-    : await decideWebSearch(question, content);
+    : await decideWebSearch(question, content, classifyWebSearch, mode);
   const query = decision.query;
   if (!query) {
     console.log("Linkup decision", JSON.stringify({ source: decision.source, classifier_ms: decision.classifier_ms, search_ms: 0, results: 0 }));
@@ -445,14 +458,14 @@ function liveSampling(model: string): Record<string, unknown> {
 let liveModelFailedAt = 0;
 const LIVE_MODEL_RETRY_MS = 30_000;
 
-async function liveModel(force = false): Promise<string> {
+async function liveModel(force = false, signal?: AbortSignal): Promise<string> {
   if (LIVE_MODEL_SETTING) return LIVE_MODEL_SETTING;
   if (liveModelCache) return liveModelCache;
   if (!force && liveModelFailedAt && Date.now() - liveModelFailedAt < LIVE_MODEL_RETRY_MS) return "";
   try {
     const r = await fetch(`${LIVE_URL}/models`, {
       headers: { "Authorization": `Bearer ${LIVE_TOKEN}` },
-      signal: AbortSignal.timeout(force ? 10_000 : 2_000),
+      signal: signal ?? AbortSignal.timeout(force ? 10_000 : 2_000),
     });
     if (r.ok) {
       const d = await r.json();
@@ -461,6 +474,7 @@ async function liveModel(force = false): Promise<string> {
       console.error("live model lookup failed", r.status);
     }
   } catch (e) {
+    if (signal?.aborted) return "";
     console.error("live model lookup unreachable", scrub(String(e), LIVE_TOKEN).slice(0, 160));
   }
   if (!liveModelCache) liveModelFailedAt = Date.now();
