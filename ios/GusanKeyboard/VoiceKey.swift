@@ -2,14 +2,24 @@ import UIKit
 import GusanKit
 
 final class VoiceWaveform: UIView {
+    private var animation: CADisplayLink?
+    private var idleAnimating = false
     var levels: [Float] = [] { didSet { setNeedsDisplay() } }
     override init(frame: CGRect) { super.init(frame: frame); isOpaque = false; backgroundColor = .clear }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override var intrinsicContentSize: CGSize { CGSize(width: 65, height: 24) }
+    override func didMoveToWindow() { super.didMoveToWindow(); updateAnimation() }
+    @objc private func animate() { setNeedsDisplay() }
+    private func updateAnimation() {
+        if idleAnimating && window != nil {
+            if animation == nil { animation = CADisplayLink(target: self, selector: #selector(animate)); animation?.add(to: .main, forMode: .common) }
+        } else { animation?.invalidate(); animation = nil }
+    }
     override func draw(_ rect: CGRect) {
         KeyboardTheme.blue.setStroke()
         let path = UIBezierPath(); path.lineWidth = 2
-        for (index, level) in levels.enumerated() {
+        let drawn = idleAnimating ? (0..<30).map { Float(0.12 + abs(sin(Double($0) * 0.48 + Date.timeIntervalSinceReferenceDate * 4)) * 0.4) } : levels
+        for (index, level) in drawn.enumerated() {
             let x = CGFloat(index) * rect.width / 30
             let height = max(2, CGFloat(level) * rect.height)
             path.move(to: CGPoint(x: x, y: (rect.height - height) / 2)); path.addLine(to: CGPoint(x: x, y: (rect.height + height) / 2))
@@ -17,6 +27,8 @@ final class VoiceWaveform: UIView {
         path.stroke()
     }
     func update(level: Float, animated: Bool) {
+        idleAnimating = level <= 0 && animated && !UIAccessibility.isReduceMotionEnabled
+        updateAnimation()
         if level > 0 { levels = Array((levels + [level]).suffix(30)) }
         else {
             let time = animated && !UIAccessibility.isReduceMotionEnabled ? Date.timeIntervalSinceReferenceDate * 4 : 0
@@ -34,6 +46,10 @@ final class VoiceKeyController: NSObject {
     private var panelDismissed = false
     private var cancelledID: UUID?
     private var previewEnabled = false
+    private var cachedStatus: VoiceStatus?
+    private var statusTask: Task<Void, Never>?
+    private var statusLoadID: UUID?
+    private var handlingTap = false
     #if DEBUG
     private var previewStatus: VoiceStatus?
     #endif
@@ -101,8 +117,22 @@ final class VoiceKeyController: NSObject {
         #endif
         if !previewEnabled { restorePending() }
         visible = true
-        observer = channel.observe(.status) { [weak self] in self?.refresh() }
-        refresh()
+        observer = channel.observe(.status) { [weak self] in self?.loadStatus() }
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.loadStatus() }
+        loadStatus()
+    }
+    private func loadStatus() {
+        guard visible else { return }
+        if previewEnabled { refresh(); return }
+        guard statusTask == nil else { return }
+        let id = UUID(); statusLoadID = id
+        statusTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let status = await channel.readStatusSnapshot()
+            guard !Task.isCancelled, visible, statusLoadID == id else { return }
+            cachedStatus = status; statusTask = nil; refresh()
+        }
     }
     func toggle() { tap() }
     func documentDidChange() {
@@ -121,12 +151,22 @@ final class VoiceKeyController: NSObject {
         if hasSelection || undoRecord?.deleteBackward() == false { undoRecord = nil; undoContext = nil }
     }
     func dismiss() { inserted = nil; undoRecord = nil; undoContext = nil; awaitingUndoContext = false; localMessage = nil; clearReview(); undoButton.isHidden = true; panelDismissed = true; refresh() }
-    func disappear() { visible = false; observer = nil; timer?.invalidate(); timer = nil; closeResult() }
+    func disappear() { visible = false; observer = nil; timer?.invalidate(); timer = nil; statusTask?.cancel(); statusTask = nil; statusLoadID = nil; panel.waveform.update(level: 0, animated: false); closeResult() }
     private func currentContext() -> VoiceContext? {
         guard let proxy = host?.textDocumentProxy else { return nil }
         return VoiceContext(selected: proxy.selectedText ?? "", before: proxy.documentContextBeforeInput ?? "", after: proxy.documentContextAfterInput ?? "", documentID: proxy.documentIdentifier.uuidString)
     }
     @objc private func tap() {
+        guard !handlingTap else { return }; handlingTap = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { handlingTap = false }
+            if !previewEnabled { cachedStatus = await channel.readStatusSnapshot() }
+            guard visible else { return }
+            handleTap()
+        }
+    }
+    private func handleTap() {
         guard let host else { return }
         #if DEBUG
         if previewEnabled { advancePreview(); return }
@@ -182,7 +222,7 @@ final class VoiceKeyController: NSObject {
             return status
         }
         #endif
-        return channel.readStatus()
+        return cachedStatus
     }
     #if DEBUG
     private func advancePreview() {
@@ -204,8 +244,6 @@ final class VoiceKeyController: NSObject {
         documentDidChange()
         let status = readStatus()
         let alive = status?.isAlive() == true
-        if alive && timer == nil { timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.refresh() } }
-        if !alive { timer?.invalidate(); timer = nil }
         let phase = cancelledID != nil && cancelledID == status?.requestID ? VoicePhase.off : (alive ? status?.phase ?? .off : .off)
         micKey?.update(phase: phase)
         if phase == .recording { waveform.levels = Array((waveform.levels + [status?.level ?? 0]).suffix(30)) }

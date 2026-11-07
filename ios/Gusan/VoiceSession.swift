@@ -15,7 +15,7 @@ private final class VoiceAudioBuffer {
         let count = Int(buffer.frameLength)
         let chunk = UnsafeBufferPointer(start: pointer, count: count)
         if samples.count < 16000 * 300 { samples.append(contentsOf: chunk.prefix(16000 * 300 - samples.count)) }
-        guard Date().timeIntervalSince(lastLevel) >= 1.0 / 15 else { return nil }
+        guard Date().timeIntervalSince(lastLevel) >= 1.0 / 4 else { return nil }
         lastLevel = Date()
         let energy = chunk.reduce(0.0) { $0 + pow(Double($1) / 32768, 2) }
         return Float(min(1, sqrt(energy / Double(max(1, count))) * 5))

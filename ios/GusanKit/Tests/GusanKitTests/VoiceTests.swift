@@ -2,6 +2,25 @@ import XCTest
 @testable import GusanKit
 
 final class VoiceTests: XCTestCase {
+    func testAsyncStatusSnapshotReadsFileAndPasteboardAndRejectsMissingOrMalformedData() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = VoiceChannel(container: directory)
+        let board = Board()
+        let pasteboard = VoiceChannel(container: nil, group: "test", pasteboard: board, route: { .pasteboard })
+        let missing = await file.readStatusSnapshot()
+        XCTAssertNil(missing)
+        let status = VoiceStatus(phase: .recording, requestID: UUID(), level: 0.5)
+        for channel in [file, pasteboard] {
+            try channel.write(status: status)
+            let read = await channel.readStatusSnapshot()
+            XCTAssertEqual(read, status)
+        }
+        try Data("invalid".utf8).write(to: directory.appendingPathComponent("voice/status.json"))
+        board.values["status"] = Data("invalid".utf8)
+        let malformedFile = await file.readStatusSnapshot(), malformedBoard = await pasteboard.readStatusSnapshot()
+        XCTAssertNil(malformedFile); XCTAssertNil(malformedBoard)
+    }
     func testWarmSessionKeepsLaterMicTapsInPlaceUntilTimeout() {
         let now = Date()
         var machine = VoiceMachine(idleTimeout: 300)
