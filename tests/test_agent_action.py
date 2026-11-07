@@ -413,7 +413,7 @@ def test_plan_caps_and_execute_delimiter_stripping(run):
         "requests": [{"body": {"action": "status", "task_id": ID}},
                      {"body": {"action": "confirm", "task_id": ID}}]})
     assert len(out["run"]["plan"]["summary"]) == 1000
-    assert len(out["run"]["plan"]["steps"][0]) == 500
+    assert len(out["run"]["plan"]["steps"][0]) == 600
     message = out["calls"][-1]["body"]["messages"][0]["message"]
     assert message.count("<approved_plan>") == message.count("</approved_plan>") == 1
     assert out["replies"][-1]["body"]["status"] == "running"
@@ -443,3 +443,17 @@ def test_empty_links_and_link_caps(run):
     assert empty["row"]["result"]["links"] == []
     assert len(capped["row"]["result"]["links"]) == 20
     assert all(len(link["title"]) == 200 for link in capped["row"]["result"]["links"])
+
+
+@pytest.mark.parametrize("length,expected", [(2000, "awaiting_confirmation"), (2001, "failed")])
+def test_step_length_boundary_never_truncates(run, length, expected):
+    step = " " + "x" * (length - 2) + " "
+    out, = run({"row": {"mode": "do"}, "change": {"status": "completed", "answer": {
+        "markdown": "Plan", "needs_action": True, "plan": {**PLAN, "steps": [step]}}}})
+    assert out["row"]["status"] == expected
+    if expected == "failed":
+        assert out["row"]["error_code"] == "plan_missing"
+        assert out["row"]["confirmation"] is None
+    else:
+        assert out["row"]["confirmation"]["steps"] == [step]
+        assert out["run"]["plan"]["steps"] == [step]

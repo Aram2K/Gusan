@@ -16,6 +16,7 @@
 // Deadlines add 180s grace. A prepared plan waits up to 15 minutes for approval;
 // expiration cancels locally. Progress retains 25 short steps, saved per sync.
 // Missing/invalid prepare plans fail with task error_code plan_missing.
+// Plans contain 1–30 steps of at most 2000 characters; oversized steps fail.
 // Errors: bad_request (400, field), unauthorized (401), privacy_mode and
 // pro_required (403), not_found (404), not_awaiting_confirmation (409),
 // body_too_large (413), too_many_active / quota_exceeded (429),
@@ -250,7 +251,12 @@ const PREPARE_FORMAT = {
         summary: { type: "string" },
         action_kind: { type: "string", enum: kinds },
         start_url: { type: "string" },
-        steps: { type: "array", items: { type: "string" } },
+        steps: {
+          type: "array",
+          minItems: 1,
+          maxItems: 30,
+          items: { type: "string", maxLength: 2000 },
+        },
       },
       required: ["summary", "action_kind", "start_url", "steps"],
     },
@@ -274,13 +280,15 @@ function validPlan(value: unknown) {
   }
   if (
     !Array.isArray(p.steps) || p.steps.length < 1 || p.steps.length > 30 ||
-    p.steps.some((s: unknown) => typeof s !== "string" || !s.trim())
+    p.steps.some((s: unknown) =>
+      typeof s !== "string" || !s.trim() || s.length > 2000
+    )
   ) return null;
   return {
     summary: p.summary.trim().slice(0, 1000),
     action_kind: p.action_kind,
     start_url: p.start_url,
-    steps: p.steps.map((s: string) => s.trim().slice(0, 500)),
+    steps: [...p.steps],
   };
 }
 function executePrompt(plan: Obj) {
