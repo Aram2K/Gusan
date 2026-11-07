@@ -164,3 +164,12 @@ class TestJob(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWhatIsPasted(unittest.TestCase):
+    def test_anything_that_makes_text_is_a_change_to_paste_and_only_a_question_is_an_answer(self):
+        prompt = sp.SELECTION_SYSTEM_PROMPT
+        change, answer = prompt.split("- ANSWER:")
+        for ask in ("translate", "shorten", "summarize", "rewrite", "a reply"):
+            self.assertIn(ask, change)
+        self.assertIn("When unsure, it is a CHANGE", answer)

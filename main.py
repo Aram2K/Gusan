@@ -7496,24 +7496,24 @@ class AppController(QObject):
         if kind == smart_prompt.KIND_ANSWER:
             AppController._copy_result(self, text)
             self.overlay.call_soon(self.overlay.show_done, False)
-            self._run_on_gui(AppController._show_answer_card, self, text, "Answer")
+            self._run_on_gui(AppController._show_answer_card, self, text, "answer")
             return
         if selection_reader.focus_editable() is False:
             AppController._copy_result(self, text)
             self.overlay.call_soon(self.overlay.show_done, False, kind=pill_kind)
-            self._run_on_gui(AppController._show_answer_card, self, text, "Copied")
+            self._run_on_gui(AppController._show_answer_card, self, text, "copied")
             return
         pasted = self._paste_via_clipboard(text, restore=False, rich=True)
         self.overlay.call_soon(self.overlay.show_done, pasted, kind=pill_kind)
 
-    def _show_answer_card(self, text, title="Answer"):
-        """GUI thread: the small card above the pill (ui/answer_card.py)."""
+    def _show_answer_card(self, text, kind="answer"):
+        """GUI thread: the small card above the pill (ui/answer_card.py); ``kind``: "answer" or "copied"."""
         try:
             card = getattr(self, "_answer_card", None)
             if card is None:
                 from ui.answer_card import AnswerCard
                 card = self._answer_card = AnswerCard()
-            card.show_text(text, title, near=getattr(self, "overlay", None))
+            card.show_text(text, kind, near=getattr(self, "overlay", None))
         except Exception:
             logger.warning("Could not show the answer card", exc_info=True)
 

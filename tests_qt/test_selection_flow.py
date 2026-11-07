@@ -1,5 +1,6 @@
 """Smart Actions on the selected text, in the app: when the selection is used, and where the result goes - an answer
 in a card (copied, never pasted), a change pasted where the cursor is, or copied when nothing can be typed there."""
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -70,7 +71,7 @@ def _stub(controller):
 def routed(controller, monkeypatch):
     copied, cards = [], []
     monkeypatch.setattr(controller, "_rich_copy", staticmethod(lambda text: copied.append(text) or text))
-    monkeypatch.setattr(controller, "_show_answer_card", lambda self, text, title="Answer": cards.append((title, text)))
+    monkeypatch.setattr(controller, "_show_answer_card", lambda self, text, kind="answer": cards.append((kind, text)))
     return copied, cards
 
 
@@ -78,7 +79,7 @@ def test_an_answer_is_shown_and_copied_never_pasted(controller, routed):
     copied, cards = routed
     app = _stub(controller)
     controller._deliver_selection_result(app, smart_prompt.KIND_ANSWER, "It means *see you tomorrow*.")
-    assert cards == [("Answer", "It means *see you tomorrow*.")]
+    assert cards == [("answer", "It means *see you tomorrow*.")]
     assert copied == ["It means *see you tomorrow*."]
     assert not any(c[0] == "paste" for c in app.calls)
     assert ("done", False, None) in app.calls
@@ -100,7 +101,7 @@ def test_a_change_with_nowhere_to_type_is_copied_and_shown(controller, routed, m
     app = _stub(controller)
     controller._deliver_selection_result(app, smart_prompt.KIND_CHANGE, "Hello everyone.", "translate")
     assert not any(c[0] == "paste" for c in app.calls)
-    assert copied == ["Hello everyone."] and cards == [("Copied", "Hello everyone.")]
+    assert copied == ["Hello everyone."] and cards == [("copied", "Hello everyone.")]
 
 
 def test_the_test_suite_never_starts_reading_a_selection():
@@ -111,16 +112,33 @@ def test_the_card_shows_the_answer_without_taking_the_keyboard(qapp):
     from ui.answer_card import AnswerCard
     card = AnswerCard()
     try:
-        card.show_text("**Yes.** It is polite.\n\n- warm\n- short", "Answer")
+        card.show_text("**Yes.** It is polite.\n\n- warm\n- short", "answer")
         QApplication.processEvents()
         assert card.isVisible()
         assert card.title.text() == "Answer"
-        assert "**" not in card.body.toPlainText() and "Yes." in card.body.toPlainText()
+        assert "**" not in card.body.text() and "Yes." in card.body.text()
         assert card.windowFlags() & Qt.WindowDoesNotAcceptFocus
         assert card.testAttribute(Qt.WA_ShowWithoutActivating)
-        card.copy()
-        assert QGuiApplication.clipboard().text() == "**Yes.** It is polite.\n\n- warm\n- short"
-        assert card.title.text() == "Copied"
+    finally:
+        card.hide()
+        card.deleteLater()
+
+
+def test_copy_says_copied_then_goes_back(qapp, monkeypatch):
+    from ui import answer_card
+    monkeypatch.setattr(answer_card, "COPIED_MS", 50)
+    card = answer_card.AnswerCard()
+    try:
+        card.show_text("Hello everyone.", "copied")
+        assert card.title.text().startswith("Copied · press ")
+        assert card.copy_button.text() == "Copy"
+        card.copy_button.click()
+        assert QGuiApplication.clipboard().text() == "Hello everyone."
+        assert card.copy_button.text() == "Copied" and card.copy_button.accessibleName() == "Copied"
+        end = time.monotonic() + 3                                   # (COPIED_MS is 50 ms here)
+        while card.copy_button.text() != "Copy" and time.monotonic() < end:
+            QApplication.processEvents()
+        assert card.copy_button.text() == "Copy"
     finally:
         card.hide()
         card.deleteLater()

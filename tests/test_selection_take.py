@@ -70,7 +70,7 @@ class TestSelectionTake(unittest.TestCase):
                 mock.patch.object(sr, "focus_editable", lambda: editable), \
                 mock.patch.object(main.AppController, "_rich_copy", staticmethod(lambda t: app.copied.append(t) or t)), \
                 mock.patch.object(main.AppController, "_show_answer_card",
-                                  lambda self, text, title="Answer": app.cards.append((title, text))):
+                                  lambda self, text, kind="answer": app.cards.append((kind, text))):
             main.AppController._stop_impl(app, 1)
         app.job = job
         return app
@@ -94,13 +94,13 @@ class TestSelectionTake(unittest.TestCase):
     def test_an_answer_is_shown_and_copied_not_pasted(self):
         app = self._run(answer="<answer>\nIt is a greeting to everyone.")
         self.assertEqual(app.pastes, [])
-        self.assertEqual(app.cards, [("Answer", "It is a greeting to everyone.")])
+        self.assertEqual(app.cards, [("answer", "It is a greeting to everyone.")])
         self.assertEqual(app.copied, ["It is a greeting to everyone."])
 
     def test_with_nowhere_to_type_the_change_is_copied_and_shown(self):
         app = self._run(editable=False)
         self.assertEqual(app.pastes, [])
-        self.assertEqual(app.cards, [("Copied", "Hello everyone.")])
+        self.assertEqual(app.cards, [("copied", "Hello everyone.")])
 
     def test_nothing_selected_is_a_smart_action_as_before(self):
         app = self._run(selected="")
