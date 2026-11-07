@@ -1,13 +1,12 @@
 """Safe, compact source links shared by the live answer surfaces."""
 from html import escape
-import json
 from urllib.parse import urlsplit
 
-from action_api import parse_web_sources
+from action_api import sanitize_web_sources
 
 
 def sources_html(sources):
-    rows = parse_web_sources(json.dumps(sources))
+    rows = sanitize_web_sources(sources)
     if not rows:
         return ""
     links = []

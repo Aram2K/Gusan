@@ -672,28 +672,35 @@ def server_mode(mode):
 
 def parse_web_sources(value):
     try:
-        rows = json.loads(unquote(value))
-        if not isinstance(rows, list):
-            return []
-        sources = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            url = str(row.get("url") or "").strip()
-            parsed = urlsplit(url)
-            if parsed.scheme not in ("http", "https") or not parsed.netloc:
-                continue
-            sources.append({"title": str(row.get("title") or "").strip()[:200], "url": url})
-            if len(sources) == 5:
-                break
-        return sources
+        return sanitize_web_sources(json.loads(unquote(value)))
     except (ValueError, TypeError):
         return []
 
 
+def sanitize_web_sources(rows):
+    if not isinstance(rows, list):
+        return []
+    sources = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        url = str(row.get("url") or "").strip()
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            continue
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            continue
+        sources.append({"title": str(row.get("title") or "").strip()[:200], "url": url})
+        if len(sources) == 5:
+            break
+    return sources
+
+
 def run_managed_action(text, mode, token, source_lang="auto", target_lang="en",
                        vocab_block="", image_b64=None, image_status=None,
-                       session_id="", note_ref="", prefer="", web_search=False, config=None, info=None):
+                       session_id="", note_ref="", prefer="", web_search=False, config=None, info=None,
+                       web_query=""):
     """Pro Smart Actions via the server (no BYO key): we build the messages here
     and the edge function runs them on the founder's keys. ``mode`` picks the
     model there: Smart Actions go to DeepSeek V4.1 Flash, meeting notes and the
@@ -713,6 +720,8 @@ def run_managed_action(text, mode, token, source_lang="auto", target_lang="en",
         body.update(_managed_extra(session_id, note_ref, prefer))
         if web_search and not (config or {}).get("privacy_mode") and mode in ("live_assist", "meeting_chat"):
             body["web_search"] = True
+            if isinstance(web_query, str) and web_query.strip():
+                body["web_query"] = web_query.strip()[:400]
         return requests.post(
             SMART_ACTION_URL,
             json=body,
@@ -779,7 +788,7 @@ def _raise_for_managed_status(resp):
 def run_managed_action_stream(text, mode, token, on_token, source_lang="auto",
                               target_lang="en", vocab_block="", image_b64=None,
                               image_status=None, session_id="", note_ref="", info=None, prefer="",
-                              web_search=False, config=None):
+                              web_search=False, config=None, web_query=""):
     """Streaming Pro Smart Actions: the server relays the model's event stream,
     so the first words show as soon as they are generated. A server that
     predates streaming answers with plain JSON, delivered in one piece.
@@ -797,6 +806,8 @@ def run_managed_action_stream(text, mode, token, on_token, source_lang="auto",
         body.update(_managed_extra(session_id, note_ref, prefer))
         if web_search and not (config or {}).get("privacy_mode") and mode in ("live_assist", "meeting_chat"):
             body["web_search"] = True
+            if isinstance(web_query, str) and web_query.strip():
+                body["web_query"] = web_query.strip()[:400]
         return requests.post(
             SMART_ACTION_URL,
             json=body,

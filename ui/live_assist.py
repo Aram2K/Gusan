@@ -4044,6 +4044,7 @@ class LiveAssistOverlay(QWidget):
             answer_info = {}
             cfg["_answer_info"] = answer_info
             cfg["_web_search"] = kind == "managed" and cfg.get("live_assist_web_search", True) and not cfg.get("privacy_mode")
+            cfg["_web_query"] = self._suggest_question
             doc_images = []                        # pictures from the user's documents
             if ctx_args is not None and any(history_docs):
                 try:

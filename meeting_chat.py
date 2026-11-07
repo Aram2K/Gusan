@@ -867,6 +867,7 @@ def ask(folder, question, history, *, cfg, pro, resolve, on_text=None, cancelled
     answer_info = {}
     config["_answer_info"] = answer_info
     config["_web_search"] = choice.kind == "cloud" and cfg.get("live_assist_web_search", True) and not cfg.get("privacy_mode")
+    config["_web_query"] = question
     budget = local_budget() if local else (BUDGET_OWN_KEY if choice.kind == "own_key" else BUDGET_CLOUD)
     retries = RETRIES_OWN_KEY if choice.kind == "own_key" else RETRIES      # (its window is anybody's guess)
     attempt = 0
