@@ -151,8 +151,8 @@ def test_headings_are_not_rows_and_a_row_has_its_chips_and_its_second_line(build
                                                     "own:google:gemini-2.5-pro")] == [
         ("cloud", "pro"), ("local",), ("cloud", "pro"), ("cloud", "pro"), ("cloud",)]
     assert box.row_note(box.findData("small")) == "Balanced"
-    assert box.row_note(box.findData("cloud:best")) == "Most accurate · Gusan chooses the model"
-    assert box.row_note(box.findData("cloud")) == "Quick answers · Gusan chooses the model"
+    assert box.row_note(box.findData("cloud:best")) == "ElevenLabs Scribe v2 · OpenAI GPT Transcribe · GPT-4o Transcribe"
+    assert box.row_note(box.findData("cloud")) == "ElevenLabs Scribe v2 · Mistral Voxtral · OpenAI GPT Transcribe"
     assert box.row_note(box.findData("")) == "for Armenian"       # Automatic says what it would pick, and why
     assert box.itemText(box.findData("")) == "Automatic · Fast · Cloud · Pro"
 
@@ -437,7 +437,7 @@ def test_the_row_has_names_and_a_keyboard_path(build):
     free, _a = build("free")
     box = free.speech.combo
     spoken = box.itemData(box.findData("cloud:best"), Qt.AccessibleTextRole)
-    assert spoken == "Best accuracy · Cloud · Pro. Most accurate · Gusan chooses the model"   # its tags and its second line are spoken
+    assert spoken == "Best accuracy · Cloud · Pro. ElevenLabs Scribe v2 · OpenAI GPT Transcribe · GPT-4o Transcribe"   # its tags and its second line are spoken
     assert int(box.focusPolicy().value) & int(Qt.TabFocus.value)                 # Tab reaches it
     box.setFocus()
     QTest.keyClick(box, Qt.Key_Down)                                             # opens the list, picks nothing

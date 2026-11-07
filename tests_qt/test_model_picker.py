@@ -412,7 +412,15 @@ def _click_row(box, value):
     QApplication.processEvents()
     QTest.qWait(QApplication.doubleClickInterval() + 120)    # Qt ignores a release right after it opens
     view = box.view()
-    rect = view.visualRect(box.model().index(box.findData(value), 0))
+    index = box.model().index(box.findData(value), 0)
+    # A list that opens above its box (no room below) can be shorter than its rows: a person scrolls to the row.
+    view.scrollTo(index)
+    QApplication.processEvents()
+    rect = view.visualRect(index)
+    # The pointer reaches a row before it clicks it: Qt's list selects the HIGHLIGHTED row on release, and
+    # only a move highlights one (a click with no move before it picks whatever was highlighted last).
+    QTest.mouseMove(view.viewport(), rect.center())
+    QApplication.processEvents()
     QTest.mouseClick(view.viewport(), Qt.LeftButton, Qt.NoModifier, rect.center())
     QApplication.processEvents()
 

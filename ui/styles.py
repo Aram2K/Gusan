@@ -181,14 +181,21 @@ QComboBox::down-arrow:on {
     /* keep the same chevron while the popup is open */
     image: url("assets/chevron.svg");
 }
+QComboBox {
+    combobox-popup: 0;          /* the list drops down under the box, never over it */
+}
+QComboBoxPrivateContainer {
+    background: transparent;    /* only the rounded card below shows, not a square frame around it */
+    border: none;
+}
 QComboBox QAbstractItemView {
     background-color: #ffffff;
     border: 1px solid #cbd5e1;
-    border-radius: 8px;
+    border-radius: 12px;
     selection-background-color: #3b82f6;
     selection-color: #ffffff;
     outline: 0;
-    padding: 2px;
+    padding: 4px;
     color: #1e293b;
 }
 QComboBox QAbstractItemView::item {

@@ -156,7 +156,8 @@ SPEECH_SOURCES_UI = (("local", engine_choice.THIS_COMPUTER), ("cloud", engine_ch
 WRITER_SOURCES_UI = SPEECH_SOURCES_UI          # the same order in both cards
 SPEECH_KIND = "Speech-to-text (STT)"
 SPEECH_HELP = ("The speech-to-text (STT) model turns your voice into text. "
-               "Dictation and meetings use it.")
+               "Dictation and meetings use it. On Gusan Cloud, Gusan tries the engines listed under each choice, "
+               "in that order, and uses the first one that answers; History says which one transcribed.")
 WRITER_KIND = "Language model (LLM)"
 WRITER_HELP = ("The large language model (LLM) writes for you: Smart Actions, meeting notes "
                "and the Live Assistant's answers. On Gusan Cloud, the model you pick answers "

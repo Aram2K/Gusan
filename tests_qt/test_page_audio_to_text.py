@@ -352,7 +352,7 @@ def test_language_list_and_model_list(build, store):
     assert box.itemText(box.findData("large-v3-turbo")) == "Whisper Large v3 Turbo · Local"
     assert box.itemText(box.findData("cloud")) == "Best accuracy · Cloud · Pro"
     assert box.row_note(box.findData("medium")) == "Accurate"
-    assert box.row_note(box.findData("cloud")) == "Most accurate · Gusan chooses the model"
+    assert box.row_note(box.findData("cloud")) == "ElevenLabs Scribe v2 · OpenAI GPT Transcribe · GPT-4o Transcribe"
     assert box.headings() == ["On this computer", "Gusan Cloud"]
     box.showPopup()
     QApplication.processEvents()

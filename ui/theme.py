@@ -712,11 +712,16 @@ QComboBox::drop-down {{
 QComboBox::down-arrow, QComboBox::down-arrow:on {{
     image: url("{chev}"); width: 12px; height: 8px; margin-right: 10px;
 }}
+/* The list drops down UNDER the box (Fusion's default draws it over the box, hiding it), as one rounded card:
+   the popup window's own frame is taken off, so there is no second, square outline around it. (The window's
+   flags are left alone: changing them makes the list stop selecting.) */
+QComboBox {{ combobox-popup: 0; }}
+QComboBoxPrivateContainer {{ background: transparent; border: none; }}
 QComboBox QAbstractItemView {{
-    background: #ffffff; border: 1px solid {t['line2']}; border-radius: 8px; outline: 0px; padding: 4px;
+    background: #ffffff; border: 1px solid {t['line2']}; border-radius: 12px; outline: 0px; padding: 6px;
     color: {t['text']}; selection-background-color: {t['blue-sub']}; selection-color: {t['blue-tx']};
 }}
-QComboBox QAbstractItemView::item {{ min-height: 30px; padding: 4px 10px; border-radius: 6px; }}
+QComboBox QAbstractItemView::item {{ min-height: 30px; padding: 4px 10px; border-radius: 8px; }}
 QComboBox QAbstractItemView::item:hover {{ background: {t['bg2']}; color: {t['ink']}; }}
 QComboBox QAbstractItemView::item:selected {{ background: {t['blue-sub']}; color: {t['blue-tx']}; }}
 QCheckBox, QRadioButton {{ spacing: 10px; color: {t['text']}; background: transparent; }}

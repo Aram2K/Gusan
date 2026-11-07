@@ -6,6 +6,7 @@ need main, which only loads under test_core's PySide6 stand-ins (the whole
 tests/ run); run alone they skip.
 """
 import os
+import re
 import sys
 import unittest
 from types import SimpleNamespace
@@ -875,6 +876,63 @@ class TestWriterPicker(unittest.TestCase):
     def test_the_cloud_writer_is_named(self):
         self.assertEqual(ec.cloud_writer_name({"cloud_writer_model": "openai"}), "OpenAI GPT")
         self.assertEqual(ec.cloud_writer_name({"cloud_writer_model": "nonsense"}), "DeepSeek V4.1 Flash")
+
+
+class TestCloudRowsMatchTheServer(unittest.TestCase):
+    """The second line of a Gusan Cloud row names real engines: providers and models. The server owns the truth
+    (supabase/functions/transcribe-proxy and smart-action), so the text is checked against its source: it cannot
+    drift away from what the server does without this failing."""
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    SPEECH = {"scribe_v2": "ElevenLabs Scribe v2", "voxtral-mini-latest": "Mistral Voxtral",
+              "gpt-transcribe": "OpenAI GPT Transcribe", "gpt-4o-transcribe": "GPT-4o Transcribe"}
+
+    def _source(self, function):
+        path = os.path.join(self.ROOT, "supabase", "functions", function, "index.ts")
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    def _order(self, name):
+        found = re.search(r"const %s = \[([^\]]*)\]" % name, self._source("transcribe-proxy"))
+        self.assertTrue(found, name)
+        return re.findall(r'"([^"]+)"', found.group(1))
+
+    def test_the_speech_profiles_name_the_first_three_engines_the_server_tries(self):
+        for profile, order in ((ec.CLOUD_FAST, "FAST_ORDER"), (ec.CLOUD_BEST, "BEST_ORDER")):
+            ids = self._order(order)[:3]
+            self.assertEqual(ec.CLOUD_PROFILE_NOTES[profile], " \u00b7 ".join(self.SPEECH[i] for i in ids), profile)
+
+    def test_every_engine_in_a_profile_note_is_one_the_server_knows(self):
+        for note in ec.CLOUD_PROFILE_NOTES.values():
+            for name in note.split(" \u00b7 "):
+                self.assertIn(name, self.SPEECH.values())
+
+    def test_the_writers_name_the_models_the_server_runs_for_answers(self):
+        source = self._source("smart-action")
+
+        def shown(model_id):
+            gpt = re.fullmatch(r"gpt-([\d.]+)-(\w+)", model_id)
+            if gpt:
+                return "GPT-%s %s" % gpt.groups()
+            claude = re.fullmatch(r"claude-(\w+)-(\d+)-(\d+)", model_id)
+            self.assertTrue(claude, model_id)
+            return "Claude %s %s.%s" % (claude.group(1).capitalize(), claude.group(2), claude.group(3))
+
+        fast = re.search(r'OPENAI_FAST_MODEL"\), "([^"]+)"', source).group(1)
+        live = re.search(r'OPENAI_LIVE_MODEL"\), "([^"]+)"', source).group(1)
+        haiku = re.search(r'CLAUDE_FAST_MODEL = "([^"]+)"', source).group(1)
+        notes = {fam: note for fam, _name, note in ec.CLOUD_WRITERS}
+        self.assertIn(shown(fast), notes["openai"])
+        self.assertIn(shown(live), notes["openai"])
+        self.assertIn(shown(haiku), notes["claude"])
+
+    def test_the_picker_rows_carry_those_lines(self):
+        rows = ec.writer_rows({}, False, choice="cloud")
+        by_value = {r["value"]: r for r in rows}
+        self.assertIn("GPT-5.4 mini", by_value["cloud:openai"]["note"])
+        self.assertIn("Claude Haiku 5.5", by_value["cloud:claude"]["note"])
+        self.assertEqual(by_value["cloud"]["note"], "Gusan's default \u00b7 fastest")
+
 
 if __name__ == "__main__":
     unittest.main()

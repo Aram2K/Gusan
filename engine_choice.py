@@ -160,8 +160,10 @@ MODEL_NOTES = {
 CLOUD_FAST, CLOUD_BEST = "fast", "best"
 CLOUD_PROFILES = (CLOUD_FAST, CLOUD_BEST)
 CLOUD_PROFILE_NAMES = {CLOUD_FAST: "Fast", CLOUD_BEST: "Best accuracy"}
-CLOUD_PROFILE_NOTES = {CLOUD_FAST: "Quick answers · Gusan chooses the model",
-                       CLOUD_BEST: "Most accurate · Gusan chooses the model"}
+# What each profile tries, first to last (transcribe-proxy FAST_ORDER / BEST_ORDER, the first three; the server
+# may change the order without an app update, so the line says what it tries, not what it will use).
+CLOUD_PROFILE_NOTES = {CLOUD_FAST: "ElevenLabs Scribe v2 · Mistral Voxtral · OpenAI GPT Transcribe",
+                       CLOUD_BEST: "ElevenLabs Scribe v2 · OpenAI GPT Transcribe · GPT-4o Transcribe"}
 _PROFILE_ALIASES = {"best": CLOUD_BEST, "gemini-2.5-pro": CLOUD_BEST, "fast": CLOUD_FAST}
 
 
@@ -434,8 +436,9 @@ CLOUD_SMART_MODEL = hardware.CLOUD_SMART_MODEL        # Smart Actions on Gusan C
 CLOUD_WRITER_KEY = "cloud_writer_model"
 CLOUD_WRITERS = (
     ("deepseek", hardware.CLOUD_LIVE_MODEL, "Gusan's default · fastest"),
-    ("openai", "OpenAI GPT", "By OpenAI"),
-    ("claude", "Anthropic Claude", "By Anthropic"),
+    # The models smart-action runs by default for answers (OPENAI_FAST_MODEL / OPENAI_LIVE_MODEL / CLAUDE_FAST_MODEL).
+    ("openai", "OpenAI GPT", "GPT-5.4 mini · Live Assistant: GPT-5.4 nano"),
+    ("claude", "Anthropic Claude", "Claude Haiku 5.5"),
     ("mistral", "Mistral Small", "By Mistral AI"),
     ("gemini", "Gemini 2.5 Flash", "By Google"),
 )
