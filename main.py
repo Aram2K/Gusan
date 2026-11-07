@@ -374,12 +374,6 @@ def _migrate_config(loaded, on_disk):
                      settings_apply.norm_hotkey(loaded.get("live_assist_hotkey"))}
             loaded["smart_actions_hotkey"] = ("" if SMART_ACTIONS_HOTKEY_DEFAULT in taken
                                               else SMART_ACTIONS_HOTKEY_DEFAULT)
-    # "Gladia Fusion" (2.1.2 test builds) is gone - our Gladia account is refused that model: a saved pick is Gladia Solaria.
-    if loaded.get("file_model") == "cloud:gladia-fusion":
-        loaded["file_model"] = "cloud:gladia"
-    # Dictation no longer runs on Gladia (2-5 s a piece, engine_choice.DICTATION_CLOUD_PROFILES): Fast instead.
-    if loaded.get("managed_speech_profile") in ("gladia", "gladia-fusion"):
-        loaded["managed_speech_profile"] = "fast"
     loaded["config_schema_version"] = CONFIG_SCHEMA_VERSION
 
 storage.migrate_legacy_file(LEGACY_CONFIG_PATH, CONFIG_PATH)
@@ -555,6 +549,9 @@ def load_config():
         data = {}
     loaded = {**DEFAULT, **data}
     _migrate_config(loaded, data)
+    # Every load (not a schema step: a current file must be healed too) - the 2.1.2 test builds' Gladia picks.
+    import engine_choice
+    engine_choice.heal_speech_settings(loaded)
     # Keep initial_prompt in step with the structured vocabulary list, so a
     # hand-edited or older config self-heals on load.
     vocabulary.sync_config(loaded)
@@ -3621,6 +3618,9 @@ class AudioRecorder:
             # picked in Settings › Speech & AI (Fast / Best accuracy).
             asked_model = engine_choice.cloud_profile(
                 live_model if live_model is not None else cfg.get(engine_choice.SPEECH_PROFILE_KEY))
+            if asked_model not in (engine_choice.CLOUD_FAST, engine_choice.CLOUD_BEST):
+                # Dictation, Smart Actions and meetings never run on Gladia's file API (2-5 s a piece).
+                asked_model = engine_choice.CLOUD_FAST
             if live_model is not None or provider not in ("gemini", "mistral"):
                 provider = "gemini"
             if asked_model != engine_choice.CLOUD_FAST:
