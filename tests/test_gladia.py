@@ -118,3 +118,19 @@ def test_dictation_does_not_offer_gladia_and_a_saved_pick_is_fast():
     for saved in ("gladia", "gladia-fusion"):
         assert ec.dictation_speech_value({"backend": "managed", ec.SPEECH_PROFILE_KEY: saved}) == "cloud"
     assert "cloud:gladia" in {r["value"] for r in ec.file_rows({}, pro=True)}
+
+
+def test_a_saved_gladia_pick_is_healed_on_every_load():
+    """The heal used to sit in the schema migration, which returns at once for a current file: it never ran."""
+    assert ec.FILE_KEY_NAME == ec.FILE_KEY and ec.SPEECH_PROFILE_KEY_NAME == ec.SPEECH_PROFILE_KEY
+    cfg = {"config_schema_version": 3, "managed_speech_profile": "gladia-fusion", "file_model": "cloud:gladia-fusion"}
+    ec.heal_speech_settings(cfg)
+    assert cfg["managed_speech_profile"] == "fast" and cfg["file_model"] == "cloud:gladia"
+    cfg = {"managed_speech_profile": "Gladia"}
+    assert ec.heal_speech_settings(cfg)["managed_speech_profile"] == "fast"
+    keep = {"managed_speech_profile": "best", "file_model": "cloud:gladia"}
+    assert ec.heal_speech_settings(dict(keep)) == keep
+    source = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
+    load = source.split("def load_config():", 1)[1].split("\ndef ", 1)[0]
+    assert "engine_choice.heal_speech_settings(loaded)" in load
+    assert "asked_model = engine_choice.CLOUD_FAST" in source        # the request itself never asks Gladia
