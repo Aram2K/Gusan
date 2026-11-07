@@ -8,12 +8,13 @@ final class KeyboardViewController: UIInputViewController {
         let selected: String
         let before: String
         let after: String
-        var text: String { selected.isEmpty ? before + after : selected }
+        var paragraph: VoiceContext { voiceContext.paragraph }
+        var text: String { selected.isEmpty ? paragraph.before + paragraph.after : selected }
         var voiceContext: VoiceContext { VoiceContext(selected: selected, before: before, after: after, documentID: document.uuidString) }
         var summary: String {
             if text.isEmpty { return "No text: Ask Gusan writes it" }
             let count = text.split(whereSeparator: { $0.isWhitespace }).count
-            return "\(selected.isEmpty ? "Around cursor" : "Selected") · \(count) \(count == 1 ? "word" : "words")"
+            return "\(selected.isEmpty ? "Near cursor" : "Selected") · \(count) \(count == 1 ? "word" : "words")"
         }
     }
     private enum Surface { case typing, panel, instruction, explanation }
@@ -306,12 +307,12 @@ final class KeyboardViewController: UIInputViewController {
                 guard currentContext == context else { showMessage("Text changed. Select it and try again."); return }
                 guard !result.isEmpty else { throw GusanError.invalidResponse }
                 if context.selected.isEmpty {
-                    textDocumentProxy.adjustTextPosition(byCharacterOffset: context.after.utf16.count)
+                    textDocumentProxy.adjustTextPosition(byCharacterOffset: context.paragraph.after.utf16.count)
                     for _ in context.text { textDocumentProxy.deleteBackward() }
                 }
                 undoSnapshot = currentContext.voiceContext
                 textDocumentProxy.insertText(result)
-                original = context.text; replacement = result; captureUndo(restoreUTF16: context.selected.isEmpty ? context.after.utf16.count : 0)
+                original = context.text; replacement = result; captureUndo(restoreUTF16: context.selected.isEmpty ? context.paragraph.after.utf16.count : 0)
                 instructionContext = nil; instruction = ""; showTyping()
                 showMessage("Replaced", accessory: "Undo")
                 UIAccessibility.post(notification: .announcement, argument: "Replaced. Undo available.")

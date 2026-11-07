@@ -6,7 +6,8 @@ public enum VoicePlan: Equatable {
     public static func plan(transcript: String, context: VoiceContext?, action: VoiceAction) -> VoicePlan {
         if let selected = context?.selected, !selected.isEmpty { return .instruction(instruction: transcript, text: selected) }
         if action == .automatic {
-            let text = (context?.before ?? "") + (context?.after ?? "")
+            let paragraph = context?.paragraph
+            let text = (paragraph?.before ?? "") + (paragraph?.after ?? "")
             if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return .automatic(.custom(instruction: "Polish this dictation: fix punctuation, spelling and grammar without adding facts or changing its language."), transcript, .insert)
             }
