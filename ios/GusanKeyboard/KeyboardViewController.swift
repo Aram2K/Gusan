@@ -19,7 +19,7 @@ final class KeyboardViewController: UIInputViewController {
     private lazy var store = SessionStore(role: .keyboard, pasteboardAccessAllowed: { [weak self] in self?.hasFullAccess == true })
     private lazy var voice = VoiceKeyController(host: self, store: store)
     private lazy var auth = AuthClient(store: store)
-    private lazy var settings = SettingsStore(group: store.resolution.chosen)
+    private lazy var settings = SettingsStore(group: store.resolution.chosen, pasteboardAccessAllowed: { [weak self] in self?.hasFullAccess == true })
     private let toolbar = GusanToolbar()
     private let panel = GusanPanel()
     private let instructionHeader = InstructionHeader()
@@ -60,7 +60,7 @@ final class KeyboardViewController: UIInputViewController {
         toolbar.message.addTarget(self, action: #selector(expandMessage), for: .touchUpInside)
         panel.onClose = { [weak self] in self?.showTyping() }
         panel.onAsk = { [weak self] in self?.beginInstruction() }
-        panel.onAction = { [weak self] in guard let self else { return }; UIImpactFeedbackGenerator(style: .light).impactOccurred(); self.run($0, context: self.currentContext) }
+        panel.onAction = { [weak self] in guard let self else { return }; self.impact(); self.run($0, context: self.currentContext) }
         instructionHeader.onSuggestion = { [weak self] in self?.setInstruction($0) }
         instructionHeader.onRun = { [weak self] in self?.runInstruction() }
         instructionHeader.onCancel = { [weak self] in self?.cancelInstruction() }
@@ -77,7 +77,7 @@ final class KeyboardViewController: UIInputViewController {
     override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); updateSurface(); voice.appear() }
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated); connected = true
-        _ = store.read(); _ = store.diagnostics(); updateContext()
+        _ = store.read(); _ = store.diagnostics(); settings.refresh(); updateContext()
     }
     override func viewWillLayoutSubviews() {
         super.viewWillLayoutSubviews()
@@ -107,11 +107,12 @@ final class KeyboardViewController: UIInputViewController {
         guard connected else { return }
         let editing = surface == .instruction
         keyArea.returnTitle = editing ? "Run" : nil
-        keyArea.updateContext(before: editing ? instruction : textDocumentProxy.documentContextBeforeInput, capitalization: editing ? .sentences : textDocumentProxy.autocapitalizationType, returnType: editing ? .go : textDocumentProxy.returnKeyType, appearance: textDocumentProxy.keyboardAppearance, needsGlobe: needsInputModeSwitchKey)
+        keyArea.keyClicks = settings.keyClicks; keyArea.doubleSpacePeriod = settings.doubleSpacePeriod
+        keyArea.updateContext(before: editing ? instruction : textDocumentProxy.documentContextBeforeInput, capitalization: settings.autoCapitalization ? (editing ? .sentences : textDocumentProxy.autocapitalizationType) : UITextAutocapitalizationType.none, returnType: editing ? .go : textDocumentProxy.returnKeyType, appearance: textDocumentProxy.keyboardAppearance, needsGlobe: needsInputModeSwitchKey)
         let theme = KeyboardTheme(appearance: textDocumentProxy.keyboardAppearance, traits: traitCollection)
         view.backgroundColor = theme.background; toolbar.apply(theme)
         let context = instructionContext ?? currentContext
-        panel.update(theme: theme, target: settings.translateTarget, defaultMode: settings.defaultAction, context: context.text)
+        panel.update(theme: theme, target: settings.translateTarget, defaultAction: settings.keyboardAction.action, context: context.text)
         instructionHeader.update(text: instruction, theme: theme)
         explanation.textColor = theme.foreground
         toolbar.message.setTitle(message ?? context.summary, for: .normal)
@@ -130,14 +131,16 @@ final class KeyboardViewController: UIInputViewController {
         updateContext(); view.setNeedsLayout()
     }
     private func showTyping() { instructionContext = nil; surface = .typing; updateSurface() }
+    private func impact() { if settings.haptics { UIImpactFeedbackGenerator(style: .light).impactOccurred() } }
+    private func notify(_ type: UINotificationFeedbackGenerator.FeedbackType) { if settings.haptics { UINotificationFeedbackGenerator().notificationOccurred(type) } }
     @objc private func defaultAction(_ gesture: UILongPressGestureRecognizer) {
         guard gesture.state == .began, !busy else { return }
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        run(.mode(settings.defaultAction), context: currentContext)
+        impact()
+        run(settings.keyboardAction.action, context: currentContext)
     }
     @objc private func togglePanel() {
         guard !busy else { return }
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        impact()
         if surface == .instruction { cancelInstruction(); return }
         surface = surface == .panel ? .typing : .panel
         message = nil; detail = nil; accessory = nil; updateSurface()
@@ -150,7 +153,7 @@ final class KeyboardViewController: UIInputViewController {
     }
     @objc func startVoice() {
         guard !busy else { return }
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        impact()
         if let onVoice { onVoice() } else { showMessage("Voice is coming soon") }
     }
     private func showMessage(_ text: String, detail: String? = nil, accessory: String? = nil) {
@@ -193,12 +196,12 @@ final class KeyboardViewController: UIInputViewController {
         guard !busy else { return }
         guard hasFullAccess else {
             if surface != .instruction { showTyping() }
-            UINotificationFeedbackGenerator().notificationOccurred(.error)
+            notify(.error)
             showMessage("Gusan needs Full Access to reach Gusan Cloud", detail: "Allow Full Access for Gusan in Settings › General › Keyboard › Keyboards › Gusan › Allow Full Access. Text is sent to Gusan Cloud only when you run an action.\n\n" + store.diagnostics().summary, accessory: "How to enable")
             return
         }
         guard store.read() != nil, store.diagnostics().isShared else {
-            UINotificationFeedbackGenerator().notificationOccurred(.error)
+            notify(.error)
             if surface != .instruction { showTyping() }
             showMessage("Sign in to use Gusan", detail: store.diagnostics().summary, accessory: "Sign in"); return
         }
@@ -237,7 +240,7 @@ final class KeyboardViewController: UIInputViewController {
                 original = context.text; replacement = result; undoContext = currentContext
                 instructionContext = nil; instruction = ""; showTyping()
                 showMessage("Replaced", accessory: "Undo")
-                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                notify(.success)
                 UIAccessibility.post(notification: .announcement, argument: "Replaced. Undo available.")
                 resultTimer = Timer.scheduledTimer(withTimeInterval: 8, repeats: false) { [weak self] _ in
                     guard let self, self.message == "Replaced" else { return }
@@ -246,11 +249,11 @@ final class KeyboardViewController: UIInputViewController {
             } catch is CancellationError { showMessage("Cancelled") }
             catch GusanError.unauthorized { showMessage("Sign in to use Gusan", accessory: "Sign in") }
             catch GusanError.proRequired {
-                UINotificationFeedbackGenerator().notificationOccurred(.error)
+                notify(.error)
                 showMessage("Gusan Pro is needed for AI actions", accessory: "See plans")
             }
             catch {
-                UINotificationFeedbackGenerator().notificationOccurred(.error)
+                notify(.error)
                 let retry = [GusanError.network, .timeout, .failed, .serverNotConfigured, .invalidResponse].contains(error as? GusanError ?? .emptyInput)
                 let title = error as? GusanError == .network ? "You're offline. Tap for details." : "Action failed. Tap for details."
                 showMessage(title, detail: error.localizedDescription, accessory: retry ? "Retry" : nil)

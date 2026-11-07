@@ -96,10 +96,10 @@ final class GusanPanel: UIView {
         [ask, close, preview].forEach { addSubview($0) }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    func update(theme: KeyboardTheme, target: String, defaultMode: SmartActionMode, context: String) {
+    func update(theme: KeyboardTheme, target: String, defaultAction: SmartAction, context: String) {
         let names = ["Smart", "Rephrase", "Fix grammar", "Email", "To-do", "Translate → " + target.uppercased(), "Summarize"]
         for (index, tile) in tiles.enumerated() {
-            let selected = actions[index] == .mode(defaultMode)
+            let selected = actions[index] == defaultAction
             var config = UIButton.Configuration.plain()
             config.image = tile.image(for: .normal)
             config.imagePlacement = .top; config.imagePadding = 4

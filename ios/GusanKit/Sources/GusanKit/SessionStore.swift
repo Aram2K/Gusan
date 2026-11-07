@@ -69,6 +69,7 @@ public struct SessionReport: Codable {
     public let groupID: String?
     public let keychainGroupID: String?
     public let stores: [StoreHealth]
+    public let fullAccess: Bool?
 }
 
 public struct SessionDiagnostics {
@@ -89,9 +90,11 @@ public final class SessionStore: SessionStorage {
     private let backends: [SessionBackend]
     private let privateBackend: SessionBackend
     private let keychainGroup: String?
+    private let fullAccess: () -> Bool?
     private let lock = NSLock()
     public init(resolution: AppGroupResolution = AppGroupResolver.resolve(), role: SessionRole = .app, pasteboardAccessAllowed: @escaping () -> Bool = { true }) {
         self.role = role
+        fullAccess = { role == .keyboard ? pasteboardAccessAllowed() : nil }
         let pasteboard = NamedSessionPasteboard(accessAllowed: pasteboardAccessAllowed)
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--gusan-end-storage-test") {
@@ -114,6 +117,7 @@ public final class SessionStore: SessionStorage {
     init(resolution: AppGroupResolution, backends: [SessionBackend], privateBackend: SessionBackend, role: SessionRole = .app) {
         self.resolution = resolution; self.backends = backends; self.privateBackend = privateBackend; self.role = role
         keychainGroup = resolution.chosen
+        fullAccess = { nil }
     }
     private func synchronized<T>(_ body: () -> T) -> T {
         #if canImport(UIKit)
@@ -161,7 +165,7 @@ public final class SessionStore: SessionStorage {
                 backend.clear("probe." + role.rawValue)
                 return StoreHealth(name: backend.name, readable: value.readable, writable: writable, hasSession: decode(value.data) != nil)
             }
-            let report = SessionReport(role: role, timestamp: Date(), groupID: resolution.chosen, keychainGroupID: keychainGroup, stores: stores)
+            let report = SessionReport(role: role, timestamp: Date(), groupID: resolution.chosen, keychainGroupID: keychainGroup, stores: stores, fullAccess: fullAccess())
             if let data = try? JSONEncoder().encode(report) { for backend in backends { _ = backend.write(data, key: reportKey) } }
             let peerKey = "report." + (role == .app ? "keyboard" : "app")
             let peer = backends.compactMap { $0.read(peerKey).data.flatMap { try? JSONDecoder().decode(SessionReport.self, from: $0) } }.max { $0.timestamp < $1.timestamp }
@@ -172,13 +176,103 @@ public final class SessionStore: SessionStorage {
 
 public final class SettingsStore {
     private let defaults: UserDefaults
-    public init(group: String?) { defaults = group.flatMap(UserDefaults.init(suiteName:)) ?? .standard }
+    private let shared: SessionBackend
+    private let lock = NSLock()
+    private var cached: [String: Any] = [:]
+    private var lastRead = Date.distantPast
+    private let keys = ["defaultAction", "translateTarget", "keyClicks", "autoCapitalization", "doubleSpacePeriod", "haptics"]
+    public init(group: String?, pasteboardAccessAllowed: @escaping () -> Bool = { true }) {
+        defaults = group.flatMap(UserDefaults.init(suiteName:)) ?? .standard
+        shared = NamedSessionPasteboard(namespace: "com.aram2k.gusan.settings", accessAllowed: pasteboardAccessAllowed)
+    }
+    init(defaults: UserDefaults, shared: SessionBackend) { self.defaults = defaults; self.shared = shared }
+    private func synchronized<T>(_ body: () -> T) -> T {
+        #if canImport(UIKit)
+        if !Thread.isMainThread { return DispatchQueue.main.sync { self.synchronized(body) } }
+        #endif
+        lock.lock(); defer { lock.unlock() }; return body()
+    }
+    private func loadShared(force: Bool = false) {
+        guard force || Date().timeIntervalSince(lastRead) > 0.5 else { return }
+        lastRead = Date()
+        cached = shared.read("session").data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        if let timestamp = cached["updatedAt"] as? Double, timestamp > defaults.double(forKey: "settingsUpdatedAt") {
+            for key in keys { if let value = cached[key] { defaults.set(value, forKey: key) } }
+            defaults.set(timestamp, forKey: "settingsUpdatedAt")
+        }
+    }
+    public func refresh() { synchronized { loadShared(force: true) } }
+    private func preference(_ key: String) -> Any? {
+        synchronized {
+            loadShared()
+            if (cached["updatedAt"] as? Double ?? 0) > defaults.double(forKey: "settingsUpdatedAt") { return cached[key] ?? defaults.object(forKey: key) }
+            return defaults.object(forKey: key)
+        }
+    }
+    private func setPreference(_ value: Any, key: String) {
+        synchronized {
+            loadShared(force: true)
+            var values = Dictionary(uniqueKeysWithValues: keys.compactMap { key in defaults.object(forKey: key).map { (key, $0) } })
+            if (cached["updatedAt"] as? Double ?? 0) > defaults.double(forKey: "settingsUpdatedAt") {
+                for key in keys { if let value = cached[key] { values[key] = value } }
+            }
+            values[key] = value
+            let timestamp = Date().timeIntervalSince1970
+            for (key, value) in values { defaults.set(value, forKey: key) }
+            defaults.set(timestamp, forKey: "settingsUpdatedAt")
+            values["updatedAt"] = timestamp; cached = values
+            if let data = try? JSONSerialization.data(withJSONObject: values) { _ = shared.write(data, key: "session") }
+        }
+    }
     public var defaultAction: SmartActionMode {
-        get { defaults.string(forKey: "defaultAction").flatMap(SmartActionMode.init(rawValue:)) ?? .smartAuto }
-        set { defaults.set(newValue.rawValue, forKey: "defaultAction") }
+        get { (preference("defaultAction") as? String).flatMap(SmartActionMode.init(rawValue:)) ?? .smartAuto }
+        set { setPreference(newValue.rawValue, key: "defaultAction") }
     }
     public var translateTarget: String {
-        get { Prompts.normalizeTarget(defaults.string(forKey: "translateTarget") ?? "en") }
-        set { defaults.set(Prompts.normalizeTarget(newValue), forKey: "translateTarget") }
+        get { Prompts.normalizeTarget(preference("translateTarget") as? String ?? "en") }
+        set { setPreference(Prompts.normalizeTarget(newValue), key: "translateTarget") }
+    }
+    public var keyboardAction: KeyboardDefaultAction {
+        get { (preference("defaultAction") as? String).flatMap(KeyboardDefaultAction.init(rawValue:)) ?? .smartAuto }
+        set { setPreference(newValue.rawValue, key: "defaultAction") }
+    }
+    public var keyClicks: Bool {
+        get { preference("keyClicks") as? Bool ?? true }
+        set { setPreference(newValue, key: "keyClicks") }
+    }
+    public var autoCapitalization: Bool {
+        get { preference("autoCapitalization") as? Bool ?? true }
+        set { setPreference(newValue, key: "autoCapitalization") }
+    }
+    public var doubleSpacePeriod: Bool {
+        get { preference("doubleSpacePeriod") as? Bool ?? true }
+        set { setPreference(newValue, key: "doubleSpacePeriod") }
+    }
+    public var haptics: Bool {
+        get { preference("haptics") as? Bool ?? true }
+        set { setPreference(newValue, key: "haptics") }
+    }
+}
+
+public enum KeyboardDefaultAction: String, CaseIterable, Identifiable {
+    case smartAuto = "smart_auto", rephrase, fixGrammar = "fix_grammar", writeEmail = "write_email", makeTodoList = "make_todo_list", translate, summarize
+    public var id: String { rawValue }
+    public var action: SmartAction {
+        switch self {
+        case .rephrase: return .rephrase
+        case .fixGrammar: return .fixGrammar
+        default: return .mode(SmartActionMode(rawValue: rawValue) ?? .smartAuto)
+        }
+    }
+    public var label: String {
+        switch self {
+        case .smartAuto: return "Smart"
+        case .rephrase: return "Rephrase"
+        case .fixGrammar: return "Fix grammar"
+        case .writeEmail: return "Email"
+        case .makeTodoList: return "To-do"
+        case .translate: return "Translate"
+        case .summarize: return "Summarize"
+        }
     }
 }
