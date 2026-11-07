@@ -72,10 +72,17 @@ def test_gladia_proxy_source():
     for text in ('form.append("audio"', '"x-gladia-key": engineKey("gladia")',
                  'languages: [language], code_switching: false', 'languages, code_switching: true',
                  'data.status === "error"', 'data.status === "done"', 'full_transcript',
-                 '"no_text"', 'method: "DELETE"', '.catch(() => {})'):
+                 '"no_text"', 'method: "DELETE"'):
         assert text in body
     assert body.count('redirect: "error"') == 4
     assert body.count('AbortSignal.timeout(timeoutMs)') == 1
     assert 'if (typeof text !== "string") return failed("gladia", model, 500, "no_text");' in body
     assert 'return { ok: true, text: text.trim(), model };' in body
     assert '!text.trim()' not in body
+    cleanup = body.split('  } finally {', 1)[1]
+    assert 'void fetch(url,' in cleanup
+    assert 'if (!response.ok)' in cleanup
+    assert '{ stt_cleanup_failed: "gladia", status: response.status }' in cleanup
+    assert '.catch(() => { console.error(JSON.stringify({ stt_cleanup_failed: "gladia", status: 0 })); });' in cleanup
+    assert 'job.id' not in cleanup
+    assert 'engineKey' not in cleanup

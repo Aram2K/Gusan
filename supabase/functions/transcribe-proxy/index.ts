@@ -503,7 +503,10 @@ async function transcribeGladia(bytes: Uint8Array, language: string, languages: 
     }
   } finally {
     void fetch(url, { method: "DELETE", headers, redirect: "error", signal: AbortSignal.timeout(5000) })
-      .catch(() => {});
+      .then((response) => {
+        if (!response.ok) console.error(JSON.stringify({ stt_cleanup_failed: "gladia", status: response.status }));
+      })
+      .catch(() => { console.error(JSON.stringify({ stt_cleanup_failed: "gladia", status: 0 })); });
   }
 }
 
