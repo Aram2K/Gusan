@@ -221,3 +221,39 @@ DEBUG builds support `--gusan-debug-voice` on the containing app. This explicitl
 
 ## 8. Agent actions (future)
 A future long-running job may call a server-side computer-use agent from H Company. Keep its credential only in Supabase as `H_company_computer_agents`, never on the phone or in a client request. The server owns agent execution and authorization. Stream progress events through the same job interface and return a card-only result that the user reviews and explicitly inserts. Do not add an on-device agent or automatic agent-result insertion.
+
+## 9. Gusan Screen (live screen context)
+The user lets Gusan see the iPhone screen through a ReplayKit **broadcast upload extension** (`ios/GusanScreen`, bundle `com.aram2k.gusan.screen`), started from the app's **Gusan Screen** page (`RPSystemBroadcastPickerView`) or from Control Center's screen recording control. The extension never uploads anything: it holds exactly one downscaled copy of the latest frame in memory and gives it to the keyboard only when the keyboard asks.
+
+### 9.1 App page (Home › Gusan Screen, Keyboard › Screen)
+- Hero with the `eye` glyph in Gusan blue, one-line value ("say 'reply to this' or 'what does this say?' from the keyboard").
+- **What is shared** card: red indicator, nothing leaves the phone on its own, one picture is sent only on request together with the instruction and field text, secure fields are blanked by iOS, automatic stop after the idle period.
+- First visit: primary button **I understand, continue** (`ScreenSettings.explained`). The keyboard never offers the screen before this, including for Control Center starts.
+- Then a status card (**Live** with start time, picture size, idle deadline, or **Not running** with the **Start Gusan Screen** picker button and the Control Center hint) and a **Stop after** picker (2, 5, 10, 20, 30 min; default 10).
+- The picker is the system view stretched under a `PrimaryButton` label; it opens Apple's broadcast sheet, where the user taps Start Broadcast.
+
+### 9.2 Keyboard
+- A capsule **Screen** chip (`eye`, 12pt semibold) appears in the toolbar left of the mic only while a broadcast heartbeat is live, the user has read the explanation, Full Access is on and the field is not secure (`isSecureTextEntry`). It is hidden otherwise; nothing else moves.
+- Tap arms it (`eye.fill`, blue fill) and opens Instruction mode with the placeholder "Ask about your screen…" and the chips "Reply to this", "What does this say?", "Summarize", "Translate this". The context label reads "Screen + Around cursor · 12 words". Tapping again, ✕ or Keyboard disarms it.
+- Run sends the instruction, the field text and the CURRENT frame to `smart-action` (mode `smart_auto`, the image as an OpenAI `image_url` data-URL content part on the last user turn, the shape the desktop uses in `action_api.openai_messages_with_image`). Status: "Looking at your screen…" then "Thinking…", with Cancel.
+- The answer replaces the selection or is inserted at the cursor; it never rewrites the around-cursor text. Undo works like text actions. Errors: "No picture from Gusan Screen" (Retry), "Gusan Screen isn't available" (tap for details, which include the channel diagnostics).
+- Voice: `ScreenInstructionJob` is a `GusanJob`; a voice transcript can be routed through it the same way a typed instruction is. The voice redesign owns that wiring.
+
+### 9.3 IPC (`GusanKit/Screen/ScreenChannel.swift`)
+Sideloadly with a free Apple ID often breaks the App Group and the shared keychain, so the channel does not pick one store: every packet is written to **every** store that works and read back newest-first. Stores: the App Group file directory `screen/` (when the container resolves) and the team-scoped named pasteboard `com.aram2k.gusan.screen` (when the user's pasteboard-fallback setting allows it). Packets carry `issuedAt` and expire (status 60 s, request 30 s, frame 45 s); expired or future-dated packets are deleted on read.
+- `status`: heartbeat every second from the extension (start time, idle deadline, frame size, request count). Live = heartbeat younger than 7 s. Cleared when the broadcast ends.
+- `request` → Darwin `gusan.screen.request.com.aram2k.gusan`: the keyboard asks for the current frame. The extension also polls once a second in case the notification is lost.
+- `frame` → Darwin `gusan.screen.frame.com.aram2k.gusan`: one JPEG (long edge 1280, quality stepped down to fit 450 KB) tagged with the request id. The keyboard removes it from every store as soon as it takes it; unconsumed frames expire after 45 s.
+- The keyboard, not the extension, calls Gusan Cloud: it already owns the session token, refresh, errors and Undo, so the extension never holds a token, never talks to the network and stays small.
+- `ScreenSettings` (idle minutes, explanation acknowledged) mirrors `SettingsStore`: App Group defaults plus a pasteboard copy, newest wins, so the extension reads the idle period even when the group is broken.
+
+### 9.4 Extension (`GusanScreen/SampleHandler.swift`)
+- Accepts at most one video frame every 0.4 s, orients it, downscales it with Core Image to a 1280 px long edge (about 3 MB as a bitmap), and keeps only that `CGImage`. No disk, no log, no network.
+- Encodes a JPEG only to answer a request. `broadcastPaused` drops the kept frame.
+- `ScreenIdleTimer`: without a request for the configured period the extension calls `finishBroadcastWithError` with a plain-language message, which is how iOS lets an upload extension end a broadcast.
+- The system shows the red recording indicator for the whole broadcast; tapping it, or Control Center, stops it.
+
+### 9.5 Privacy and limits
+- Sent to Gusan Cloud, only on an explicit request: one downscaled JPEG of the screen, the instruction, the field text iOS exposes to the keyboard, and the session token. Never sent: audio, continuous frames, secure fields (blanked by iOS and the chip is hidden there). The iOS app has no Privacy Mode; the explanation acknowledgement and the chip gate are the equivalent opt-in.
+- The pasteboard copy of a frame is readable by apps signed by the same team for up to 45 s; the pasteboard-fallback toggle in Keyboard settings turns that store off.
+- Free Apple ID: the app, keyboard and broadcast extension are 3 App IDs (10 per 7 days allowed). The broadcast extension needs no extra entitlement beyond the App Group; Sideloadly may rename the bundle, so the picker's `preferredExtension` is derived from `Bundle.main.bundleIdentifier + ".screen"`.

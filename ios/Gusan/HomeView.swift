@@ -54,6 +54,7 @@ struct HomeView: View {
                 if !model.setupFinished { PrimaryButton(title: "Finish setup", icon: "arrow.right") { model.impact(); model.resumeSetup() } }
             }
             PlaygroundCard()
+            ScreenCard()
             AppCard {
                 NavigationLink { HowToUseView() } label: { Label("How to use Gusan", systemImage: "questionmark.circle").frame(minHeight: 44) }
                 Button("Review keyboard setup") { model.resumeSetup() }.frame(minHeight: 44)

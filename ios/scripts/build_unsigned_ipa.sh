@@ -17,7 +17,8 @@ mkdir -p "$WORK_DIR/Payload"
 ditto "$WORK_DIR/DerivedData/Build/Products/Release-iphoneos/Gusan.app" "$WORK_DIR/Payload/Gusan.app"
 APP="$WORK_DIR/Payload/Gusan.app"
 KEYBOARD="$APP/PlugIns/GusanKeyboard.appex"
-for entitlements in Gusan/Gusan.entitlements GusanKeyboard/GusanKeyboard.entitlements; do
+SCREEN="$APP/PlugIns/GusanScreen.appex"
+for entitlements in Gusan/Gusan.entitlements GusanKeyboard/GusanKeyboard.entitlements GusanScreen/GusanScreen.entitlements; do
     plutil -lint "$entitlements"
     if /usr/bin/grep -q '\$(' "$entitlements"; then
         echo "Unresolved build variable in $entitlements" >&2
@@ -26,10 +27,13 @@ for entitlements in Gusan/Gusan.entitlements GusanKeyboard/GusanKeyboard.entitle
 done
 
 codesign --force --sign - --entitlements GusanKeyboard/GusanKeyboard.entitlements "$KEYBOARD"
+codesign --force --sign - --entitlements GusanScreen/GusanScreen.entitlements "$SCREEN"
 codesign --force --sign - --entitlements Gusan/Gusan.entitlements "$APP"
 codesign --verify --deep --strict "$APP"
 codesign -d --entitlements - "$APP"
 codesign -d --entitlements - "$KEYBOARD"
+codesign -d --entitlements - "$SCREEN"
+/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$SCREEN/Info.plist"
 /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes' "$APP/Info.plist"
 /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist"
 /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist"

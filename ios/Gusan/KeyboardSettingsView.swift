@@ -20,6 +20,7 @@ struct KeyboardSettingsView: View {
                 Picker("Translate to", selection: $target) { ForEach(languages, id: \.0) { Text($0.1).tag($0.0) } }.frame(minHeight: 44)
             } header: { Text("Gusan actions") } footer: { Text("Hold the Gusan button to run your default action.") }
             VoiceSettingsSection(voice: voice)
+            ScreenSettingsSection()
             Section {
                 Toggle("Share sign-in via pasteboard fallback", isOn: $pasteboardFallback).frame(minHeight: 44)
             } footer: { Text("Used only if sign-in or voice can't be shared after sideloading. Other apps signed with the same Apple ID could read it.") }

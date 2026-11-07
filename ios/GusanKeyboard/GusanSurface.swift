@@ -174,18 +174,26 @@ final class InstructionHeader: UIView {
         suggestions.spacing = 8; suggestions.translatesAutoresizingMaskIntoConstraints = false
         scroll.showsHorizontalScrollIndicator = false; scroll.addSubview(suggestions)
         NSLayoutConstraint.activate([suggestions.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor), suggestions.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor), suggestions.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor), suggestions.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor), suggestions.heightAnchor.constraint(equalTo: scroll.frameLayoutGuide.heightAnchor)])
-        for title in ["More formal", "Shorter", "Friendlier", "Fix grammar", "Translate to Armenian"] {
-            let chip = UIButton(type: .system); chip.setTitle(title, for: .normal)
-            chip.titleLabel?.font = .systemFont(ofSize: 12, weight: .medium)
-            chip.accessibilityHint = "Use this instruction"
-            chip.addTarget(self, action: #selector(suggestionPressed(_:)), for: .touchUpInside)
-            suggestions.addArrangedSubview(chip)
-        }
+        InstructionHeader.defaultSuggestions.forEach { suggestions.addArrangedSubview(makeChip($0)) }
         [field, run, cancel, scroll].forEach { addSubview($0) }
     }
+    private func makeChip(_ title: String) -> UIButton {
+        let chip = UIButton(type: .system); chip.setTitle(title, for: .normal)
+        chip.titleLabel?.font = .systemFont(ofSize: 12, weight: .medium)
+        chip.accessibilityHint = "Use this instruction"
+        chip.addTarget(self, action: #selector(suggestionPressed(_:)), for: .touchUpInside)
+        return chip
+    }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    func update(text: String, theme: KeyboardTheme) {
-        field.text = text.isEmpty ? "Tell Gusan what to do… │" : text + "│"
+    static let defaultSuggestions = ["More formal", "Shorter", "Friendlier", "Fix grammar", "Translate to Armenian"]
+    private var currentSuggestions = InstructionHeader.defaultSuggestions
+    func update(text: String, theme: KeyboardTheme, placeholder: String = "Tell Gusan what to do…", suggestions: [String] = InstructionHeader.defaultSuggestions) {
+        if suggestions != currentSuggestions {
+            currentSuggestions = suggestions
+            self.suggestions.arrangedSubviews.forEach { $0.removeFromSuperview() }
+            suggestions.forEach { self.suggestions.addArrangedSubview(makeChip($0)) }
+        }
+        field.text = text.isEmpty ? placeholder + " │" : text + "│"
         field.accessibilityValue = text
         field.textColor = text.isEmpty ? .secondaryLabel : theme.foreground
         run.tintColor = KeyboardTheme.blue; cancel.tintColor = theme.foreground
