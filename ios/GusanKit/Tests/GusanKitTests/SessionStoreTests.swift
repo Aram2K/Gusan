@@ -193,6 +193,40 @@ final class SessionStoreTests: XCTestCase {
         XCTAssertEqual(store.read(), session(20))
         XCTAssertEqual(privateStore.sessionWrites, 0)
     }
+    func testMatchingPeerGroupStillRequiresOurStoreReadableAndWritable() {
+        for name in ["Keychain", "App-group file"] {
+            for unreadable in [true, false] {
+                let normal = Backend(name), board = Backend("Team pasteboard")
+                normal.readable = !unreadable; normal.writable = unreadable
+                let local = AppGroupResolution(candidatesTried: [], chosen: "same", container: nil)
+                peer(board, group: "same", keychain: "same", stores: [.init(name: name, readable: true, writable: true, hasSession: false)])
+                let store = SessionStore(resolution: local, backends: [normal, board], privateBackend: Backend("private"))
+                store.write(session(10))
+                XCTAssertNotNil(board.values["session"])
+                XCTAssertEqual(store.diagnostics().pasteboardFallback, "in use")
+            }
+        }
+    }
+    func testMissingOwnStoreCannotDisableFallbackFromPeerReportAlone() {
+        let board = Backend("Team pasteboard")
+        let local = AppGroupResolution(candidatesTried: [], chosen: "same", container: nil)
+        peer(board, group: "same", keychain: "same", stores: ["Keychain", "App-group file"].map { .init(name: $0, readable: true, writable: true, hasSession: false) })
+        let store = SessionStore(resolution: local, backends: [board], privateBackend: Backend("private"))
+        store.write(session(10))
+        XCTAssertNotNil(board.values["session"])
+    }
+    func testRecoveringLocalNormalStorePurgesFallbackImmediately() {
+        let normal = Backend("App-group file"), board = Backend("Team pasteboard")
+        normal.writable = false
+        let local = AppGroupResolution(candidatesTried: [], chosen: "same", container: nil)
+        peer(board, group: "same", stores: [.init(name: normal.name, readable: true, writable: true, hasSession: false)])
+        let store = SessionStore(resolution: local, backends: [normal, board], privateBackend: Backend("private"))
+        store.write(session(10)); XCTAssertNotNil(board.values["session"])
+        normal.writable = true
+        XCTAssertEqual(store.diagnostics().pasteboardFallback, "not needed")
+        XCTAssertNil(board.values["session"])
+        XCTAssertNotNil(normal.values["session"])
+    }
     func testUnavailablePasteboardOnMacDoesNotReportSharing() {
         #if !canImport(UIKit)
         let backend = NamedSessionPasteboard()

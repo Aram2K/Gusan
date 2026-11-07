@@ -153,12 +153,22 @@ public final class SessionStore: SessionStorage {
         guard let peer else { return false }
         return peer.stores.contains { store in
             guard store.readable && store.writable else { return false }
+            let matchingGroup: Bool
             switch store.name {
-            case "Keychain": return keychainGroup != nil && keychainGroup == peer.keychainGroupID
-            case "App-group file": return resolution.chosen != nil && resolution.chosen == peer.groupID
+            case "Keychain": matchingGroup = keychainGroup != nil && keychainGroup == peer.keychainGroupID
+            case "App-group file": matchingGroup = resolution.chosen != nil && resolution.chosen == peer.groupID
             default: return false
             }
+            guard matchingGroup, let backend = backends.first(where: { $0.name == store.name }) else { return false }
+            let local = health(backend)
+            return local.readable && local.writable
         }
+    }
+    private func health(_ backend: SessionBackend) -> StoreHealth {
+        let value = backend.read("session")
+        let writable = backend.write(Data([0]), key: "probe." + role.rawValue)
+        backend.clear("probe." + role.rawValue)
+        return StoreHealth(name: backend.name, readable: value.readable, writable: writable, hasSession: decode(value.data) != nil)
     }
     private func usePasteboard() -> Bool {
         let peer = peerReport()
@@ -207,12 +217,7 @@ public final class SessionStore: SessionStorage {
         synchronized {
             _ = reconcile()
             let reportKey = "report." + role.rawValue
-            let stores = backends.map { backend -> StoreHealth in
-                let value = backend.read("session")
-                let writable = backend.write(Data([0]), key: "probe." + role.rawValue)
-                backend.clear("probe." + role.rawValue)
-                return StoreHealth(name: backend.name, readable: value.readable, writable: writable, hasSession: decode(value.data) != nil)
-            }
+            let stores = backends.map(health)
             let report = SessionReport(role: role, timestamp: Date(), groupID: resolution.chosen, keychainGroupID: keychainGroup, stores: stores, fullAccess: fullAccess())
             if let data = try? JSONEncoder().encode(report) { for backend in backends { _ = backend.write(data, key: reportKey) } }
             let peer = peerReport()
