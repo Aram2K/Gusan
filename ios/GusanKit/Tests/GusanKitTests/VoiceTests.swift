@@ -104,6 +104,24 @@ final class VoiceTests: XCTestCase {
             channel.clear(); XCTAssertTrue(board.values.isEmpty)
         }
     }
+    func testDisablingPasteboardDoesNotClearActiveFileVoiceState() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let board = Board()
+        let channel = VoiceChannel(container: directory, group: "voice", pasteboard: board, route: { .file })
+        let id = UUID(), state = KeyboardVoiceState(requestID: id, context: VoiceContext(selected: "original"))
+        let command = VoiceCommand(kind: .start, requestID: id), launch = VoiceLaunch(requestID: id)
+        let status = VoiceStatus(phase: .recording, requestID: id), transcript = VoiceTranscript(requestID: id, text: "speech")
+        try channel.write(keyboard: state); try channel.write(command: command); try channel.write(launch: launch)
+        try channel.write(status: status); try channel.write(transcript: transcript)
+        board.values["status"] = Data("old pasteboard state".utf8)
+        channel.clearPasteboard()
+        XCTAssertTrue(board.values.isEmpty)
+        XCTAssertEqual(channel.readCommand(), command); XCTAssertEqual(channel.readKeyboardState(), state)
+        XCTAssertEqual(channel.readStatus(), status); XCTAssertEqual(channel.readTranscript(), transcript)
+        XCTAssertTrue(channel.consumeLaunch(nonce: launch.nonce.uuidString))
+        XCTAssertTrue(channel.available)
+    }
     func testVoiceUsesPasteboardWhenFileGroupsDifferEvenIfKeychainIsShared() throws {
         let file = Board("App-group file"), keychain = Board("Keychain"), reports = Board(), voice = Board("voice")
         let peer = SessionReport(role: .keyboard, timestamp: Date(), groupID: "other", keychainGroupID: "app", stores: ["Keychain", "App-group file"].map { .init(name: $0, readable: true, writable: true, hasSession: false) }, fullAccess: true)

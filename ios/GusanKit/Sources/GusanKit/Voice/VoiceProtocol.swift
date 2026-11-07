@@ -166,6 +166,7 @@ public struct VoiceChannel {
     public func clear() {
         for key in keys { pasteboard?.clear(key); if let url = file(key) { try? FileManager.default.removeItem(at: url) } }
     }
+    public func clearPasteboard() { for key in keys { pasteboard?.clear(key) } }
     public func consumeResult(requestID: UUID) throws {
         guard readStatus()?.requestID == requestID else { return }
         try write(requestID, name: "receipt")

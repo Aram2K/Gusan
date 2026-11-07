@@ -45,6 +45,6 @@ struct KeyboardSettingsView: View {
             .onChange(of: doubleSpacePeriod) { model.settings.doubleSpacePeriod = $0 }
             .onChange(of: haptics) { model.settings.haptics = $0 }
             .onAppear { pasteboardFallback = model.settings.pasteboardFallback }
-            .onChange(of: pasteboardFallback) { model.settings.pasteboardFallback = $0; if !$0 { model.store.makeVoiceChannel().clear() }; _ = model.store.read(); model.refreshDiagnostics() }
+            .onChange(of: pasteboardFallback) { model.settings.pasteboardFallback = $0; if !$0 { model.store.makeVoiceChannel().clearPasteboard() }; _ = model.store.read(); model.refreshDiagnostics() }
     }
 }
