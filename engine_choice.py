@@ -176,6 +176,10 @@ _PROFILE_ALIASES = {"best": CLOUD_BEST, "gemini-2.5-pro": CLOUD_BEST, "fast": CL
 # Real-time (live_stt.py): a dictation or Smart Action on Gusan Cloud streams to Gladia Solaria 1 live first; the
 # profile's own engines are its backup. So their rows name it first (Live Assistant and files don't stream).
 REALTIME_ENGINE = "Gladia Solaria 1 live"
+# Set to a language Gladia writes poorly (Armenian, speech_langs.LIVE_POOR): Fast streams to OpenAI's live model,
+# then the Fast profile's engines that cover it (no Voxtral: transcribe-proxy keeps Armenian off it); Best accuracy
+# does not stream (its own line: ElevenLabs Scribe v2 first).
+REALTIME_POOR_FAST_NOTE = "OpenAI GPT Live Transcribe · ElevenLabs Scribe v2 · OpenAI GPT Transcribe"
 
 
 def realtime_note(profile, cfg=None):
@@ -185,6 +189,9 @@ def realtime_note(profile, cfg=None):
     note = CLOUD_PROFILE_NOTES[profile]
     if cfg.get("privacy_mode") or not cfg.get("live_stt", True):
         return note
+    import speech_langs
+    if speech_langs.normalize(cfg.get("language"), default="auto") in speech_langs.LIVE_POOR:
+        return REALTIME_POOR_FAST_NOTE if profile == CLOUD_FAST else note
     return " · ".join([REALTIME_ENGINE] + note.split(" · ")[:2])
 
 
@@ -583,6 +590,7 @@ MODEL_NAMES = {
     "gpt-4o-transcribe": "GPT-4o Transcribe", "gpt-4o-mini-transcribe": "GPT-4o mini Transcribe",
     "whisper-1": "Whisper (OpenAI)",
     "solaria-1": "Gladia Solaria-1", "solaria-3": "Gladia Solaria-3",
+    "gpt-live-transcribe": "OpenAI GPT Live Transcribe",
     # Gusan Cloud's two profiles (a job that asked for one and has no answer yet).
     CLOUD_FAST: CLOUD_PROFILE_NAMES[CLOUD_FAST], CLOUD_BEST: CLOUD_PROFILE_NAMES[CLOUD_BEST],
     CLOUD_GLADIA: CLOUD_PROFILE_NAMES[CLOUD_GLADIA],

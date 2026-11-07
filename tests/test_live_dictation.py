@@ -18,8 +18,9 @@ AR = main.AudioRecorder
 
 
 class FakeSession:
-    def __init__(self, text="Hello everyone.", failed="", dropped=False, language="en"):
+    def __init__(self, text="Hello everyone.", failed="", dropped=False, language="en", languages=("en",)):
         self._text, self.failed, self.dropped_audio, self.language = text, failed, dropped, language
+        self.languages = list(languages)
         self.stopped = self.cancelled = False
 
     def stop(self, timeout=None):
@@ -32,6 +33,7 @@ class FakeSession:
 
 def _rec(**kw):
     r = SimpleNamespace(_chunk_pipeline=None, _abort=False, _live_session=None, fast_live_chunks=False,
+                        language_override=None,
                         get_auth_token=lambda: "tok", _speech_ran=None)
     for k, v in kw.items():
         setattr(r, k, v)
@@ -47,6 +49,21 @@ class TestWhenItRuns(unittest.TestCase):
 
     def test_a_dictation_on_gusan_cloud_streams(self):
         self.assertTrue(self._wanted())
+
+    def _engine(self, **cfg):
+        r = _rec()
+        with mock.patch.dict(main.cfg, dict({"privacy_mode": False, "live_stt": True}, **cfg)), \
+                mock.patch.object(AR, "_backend", lambda self: "managed"):
+            return AR._live_engine(r, None)
+
+    def test_armenian_streams_to_openai_on_fast_and_not_at_all_on_best_accuracy(self):
+        """The founder's pick (2026-11-07): Armenian Fast = OpenAI gpt-live-transcribe (Gladia writes it poorly),
+        Armenian Best accuracy = ElevenLabs Scribe v2 (the pieces); every other language = Gladia."""
+        self.assertEqual(self._engine(language="hy", managed_speech_profile="fast"), "openai")
+        self.assertIsNone(self._engine(language="hy", managed_speech_profile="best"))
+        self.assertEqual(self._engine(language="fr", managed_speech_profile="best"), "gladia")
+        self.assertEqual(self._engine(language="auto", managed_speech_profile="fast"), "gladia")
+        self.assertIsNone(self._engine(language="hy", managed_speech_profile="fast", privacy_mode=True))
 
     def test_never_a_meeting_another_engine_privacy_mode_or_signed_out(self):
         self.assertFalse(self._wanted(capture_mode="smart_meeting"))
@@ -114,6 +131,22 @@ class TestAtStop(unittest.TestCase):
         AR.request_abort(r)
         self.assertTrue(s.cancelled)
         self.assertIsNone(r._live_session)
+
+    def test_openais_armenian_text_is_used(self):
+        s = FakeSession("Ուրեմն վաղը պետք է գնամ։", language="hy", languages=("hy",))
+        s.engine = "openai"
+        r = _rec(_live_session=s, _speech_ran={})
+        self.assertEqual(AR._finish_live(r), ("Ուրեմն վաղը պետք է գնամ։", "hy"))
+        self.assertEqual(r._speech_ran["ran_model"], "gpt-live-transcribe")
+
+    def test_a_take_with_armenian_uses_the_pieces_text(self):
+        """Real-time Gladia writes Armenian poorly: Gusan Cloud's own engines (ElevenLabs Scribe first) do it."""
+        s = FakeSession("I'm testing. Je voudrais dormir. Armenian.", language="en", languages=("en", "fr", "hy"))
+        r = _rec(_live_session=s)
+        self.assertIsNone(AR._finish_live(r))
+        self.assertTrue(s.stopped)
+        s = FakeSession("I'm testing. Je voudrais dormir.", languages=("en", "fr"))
+        self.assertEqual(AR._finish_live(_rec(_live_session=s)), ("I'm testing. Je voudrais dormir.", "en"))
 
     def test_the_stop_waits_at_most_a_moment(self):
         self.assertLessEqual(main.LIVE_STOP_S, 3)

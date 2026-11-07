@@ -2676,12 +2676,27 @@ class AudioRecorder:
             return False
         return AudioRecorder._backend(self) == "managed"
 
+    def _live_engine(self, capture_mode):
+        """The real-time engine of this take (live_stt.ENGINE_*), or None (the pieces only). A language Gladia writes
+        poorly (speech_langs.LIVE_POOR: Armenian) on Fast streams to OpenAI gpt-live-transcribe; on Best accuracy it
+        does not stream (ElevenLabs Scribe v2, the most accurate - the founder's pick, 2026-11-07). Every other
+        language streams to Gladia."""
+        if not AudioRecorder._live_wanted(self, capture_mode):
+            return None
+        import live_stt
+        if AudioRecorder._lang_setting(self) in speech_langs.LIVE_POOR:
+            import engine_choice
+            profile = engine_choice.cloud_profile(cfg.get(engine_choice.SPEECH_PROFILE_KEY))
+            return live_stt.ENGINE_OPENAI if profile == engine_choice.CLOUD_FAST else None
+        return live_stt.ENGINE_GLADIA
+
     def _start_live(self, capture_mode):
         """Open this take's live session on its own thread (the audio waits in its queue meanwhile). Never raises:
         no session means the pieces carry the take, as before."""
         self._live_session = None
         try:
-            if not AudioRecorder._live_wanted(self, capture_mode):
+            engine = AudioRecorder._live_engine(self, capture_mode)
+            if engine is None:
                 return
             import live_stt
             terms = ()
@@ -2704,7 +2719,7 @@ class AudioRecorder:
             # Auto-detect: each sentence in its own language, among the person's languages (speech_langs).
             language, languages = speech_langs.live_languages(AudioRecorder._lang_setting(self), cfg)
             session = live_stt.LiveSession(self.get_auth_token, language, languages, terms, purpose="dictation",
-                                           on_partial=on_partial, on_final=on_final)
+                                           on_partial=on_partial, on_final=on_final, engine=engine)
             self._live_session = session
 
             def opener():
@@ -2732,9 +2747,16 @@ class AudioRecorder:
             logger.info("Real-time transcript not used (%s): the pieces' text instead",
                         session.failed or ("audio missing" if session.dropped_audio else "empty"))
             return None
-        logger.info("Real-time transcript: %d characters, final %d ms after Stop", len(text),
+        engine = getattr(session, "engine", "gladia")
+        poor = [speech_langs.LIVE_POOR[c] for c in (getattr(session, "languages", None) or ())
+                if c in speech_langs.LIVE_POOR] if engine == "gladia" else []
+        if poor:
+            logger.info("Real-time transcript not used (%s heard: Gusan Cloud's engines write it better): the "
+                        "pieces' text instead", poor[0])
+            return None
+        logger.info("Real-time transcript (%s): %d characters, final %d ms after Stop", engine, len(text),
                     int((time.monotonic() - started) * 1000))
-        AudioRecorder._note_cloud_ran(self, "solaria-1")
+        AudioRecorder._note_cloud_ran(self, "gpt-live-transcribe" if engine == "openai" else "solaria-1")
         return text, session.language
 
     def transcribe(self):

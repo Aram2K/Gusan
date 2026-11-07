@@ -13,8 +13,15 @@
 // "auto" detects (no switching over 100+ languages: Gladia warns it misdetects). The vocabulary is custom_vocabulary
 // (intensity 0.5); refused (400/422), the session is opened again without it.
 //
-// Secrets: Gladia_STT (or GLADIA_API_KEY / GLADIA_KEY / GLADIA_TOKEN / GLADIA_API_TOKEN). Optional GLADIA_REGION
-// ("eu-west" / "us-west": the region closest to most users). Deploy with verify_jwt=false (auth.getUser() here).
+// engine "openai" (Armenian on Fast - Gladia writes Armenian poorly; the founder's test 2026-11-07): a short-lived
+// OpenAI realtime key (ek_..., 10 minutes, ONE transcription session: gpt-live-transcribe, the named language,
+// 24 kHz PCM, no turn detection) instead of a Gladia session; the app connects to OpenAI with it. Only for a named
+// language. OPENAI_LIVE_STT_MODEL can change the model.
+// action "end" {id}: deletes a finished Gladia live session at Gladia (Gladia keeps its audio and text otherwise).
+//
+// Secrets: Gladia_STT (or GLADIA_API_KEY / GLADIA_KEY / GLADIA_TOKEN / GLADIA_API_TOKEN), OPENAI_TOKEN (or
+// OPENAI_API_KEY / OPENAI_KEY). Optional GLADIA_REGION ("eu-west" / "us-west": the region closest to most users).
+// Deploy with verify_jwt=false (auth.getUser() here).
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
@@ -30,6 +37,21 @@ function env(name: string): string {
 }
 function gladiaKey(): string {
   return env("Gladia_STT") || env("GLADIA_API_KEY") || env("GLADIA_KEY") || env("GLADIA_TOKEN") || env("GLADIA_API_TOKEN");
+}
+function openaiKey(): string {
+  return env("OPENAI_TOKEN") || env("OPENAI_API_KEY") || env("OPENAI_KEY");
+}
+const OPENAI_WSS = "wss://api.openai.com/v1/realtime?intent=transcription";
+const GLADIA_ID = /^[0-9a-f-]{8,64}$/i;
+
+export function openaiSession(language: string, model: string) {
+  return {
+    expires_after: { anchor: "created_at", seconds: 600 },
+    session: {
+      type: "transcription",
+      audio: { input: { format: { type: "audio/pcm", rate: 24000 }, transcription: { model, language }, turn_detection: null } },
+    },
+  };
 }
 
 const cors = {
@@ -104,18 +126,68 @@ Deno.serve(async (req) => {
   } catch { return json({ error: "bad_request" }, 400); }
 
   const supa = createClient(SUPABASE_URL, ANON_KEY, { global: { headers: { Authorization: authHeader } } });
+  if (body?.action === "end") {
+    // A finished Gladia session: deleted at Gladia (its audio and text). Signed in is enough (nothing is billed).
+    const who = await supa.auth.getUser();
+    if (who.error || !who.data?.user) return json({ error: "unauthorized" }, 401);
+    const id = typeof body?.id === "string" ? body.id : "";
+    const key = gladiaKey();
+    if (!GLADIA_ID.test(id) || !key) return json({ error: "bad_request" }, 400);
+    try {
+      const r = await fetch(`https://api.gladia.io/v2/live/${id}`, {
+        method: "DELETE", headers: { "x-gladia-key": key }, signal: AbortSignal.timeout(8000), redirect: "error",
+      });
+      if (!r.ok && r.status !== 404) {
+        console.error(JSON.stringify({ live_end_failed: r.status }));
+        return json({ error: "not_deleted", detail: publicDetail(r.status) }, 502);
+      }
+      return json({ ok: true });
+    } catch {
+      return json({ error: "not_deleted", detail: "network_error" }, 502);
+    }
+  }
   const [userRes, proRes] = await Promise.all([supa.auth.getUser(), supa.rpc("is_pro")]);
   if (userRes.error || !userRes.data?.user) return json({ error: "unauthorized" }, 401);
   if (proRes.error) return json({ error: "entitlement_check_failed" }, 500);
   if (proRes.data !== true) return json({ error: "pro_required" }, 403);
 
-  const key = gladiaKey();
+  const engine = body?.engine === "openai" ? "openai" : "gladia";
+  const key = engine === "openai" ? openaiKey() : gladiaKey();
   if (!key) return json({ error: "live_not_configured" }, 503);
+  const language = typeof body?.language === "string" && body.language ? body.language.trim().toLowerCase() : "auto";
+  if (engine === "openai" && (!LANG_CODE.test(language) || language === "auto")) return json({ error: "bad_request" }, 400);
   const { data: underCap, error: qErr } = await supa.rpc("use_cloud_quota", { max_per_day: DAILY_CAP });
   if (qErr) return json({ error: "quota_check_failed" }, 500);
   if (underCap !== true) return json({ error: "quota_exceeded" }, 429);
 
-  const language = typeof body?.language === "string" && body.language ? body.language.trim().toLowerCase() : "auto";
+  if (engine === "openai") {
+    const model = env("OPENAI_LIVE_STT_MODEL") || "gpt-live-transcribe";
+    const t0 = Date.now();
+    let r: Response;
+    try {
+      r = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+        body: JSON.stringify(openaiSession(language, model)),
+        signal: AbortSignal.timeout(8000),
+        redirect: "error",
+      });
+    } catch (e) {
+      const timeout = (e as any)?.name === "TimeoutError";
+      console.error(JSON.stringify({ live_fail: timeout ? "timeout" : "network_error", engine }));
+      return json({ error: "live_unavailable", detail: timeout ? "timeout" : "network_error" }, 502);
+    }
+    if (!r.ok) {
+      console.error(JSON.stringify({ live_fail: r.status, engine }));
+      return json({ error: "live_unavailable", detail: publicDetail(r.status) }, 502);
+    }
+    const d = await r.json().catch(() => ({}));
+    const token = typeof d?.value === "string" ? d.value : "";
+    if (!token.startsWith("ek_")) return json({ error: "live_unavailable", detail: "bad_answer" }, 502);
+    console.log(JSON.stringify({ live_ok: Date.now() - t0, engine, model, language: language.slice(0, 5) }));
+    return json({ url: OPENAI_WSS, token, id: "", engine });
+  }
+
   const languages = Array.isArray(body?.languages)
     ? body.languages.filter((c: unknown) => typeof c === "string").map((c: string) => c.trim().toLowerCase())
     : [];

@@ -71,6 +71,10 @@ def saved_mix(cfg):
 
 # Real-time Gladia (live_stt.py) on Auto-detect: at most this many candidate languages (Gladia: "a small set").
 LIVE_MAX_LANGUAGES = 5
+# Languages real-time Gladia (Solaria-1) writes poorly (the founder's test, 2026-11-07): a take where Gladia heard
+# one uses the pieces' text (Gusan Cloud's own engines: ElevenLabs Scribe first); a dictation set to one streams to
+# OpenAI gpt-live-transcribe on Fast and does not stream on Best accuracy (main.AudioRecorder._live_engine).
+LIVE_POOR = {"hy": "Armenian"}
 
 
 @functools.lru_cache(maxsize=1)

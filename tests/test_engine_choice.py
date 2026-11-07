@@ -962,6 +962,13 @@ class TestRealtimeInTheRows(unittest.TestCase):
             for value, profile in ec.DICTATION_CLOUD_PROFILES.items():
                 self.assertEqual(rows[value], ec.CLOUD_PROFILE_NOTES[profile])
 
+    def test_armenian_names_openai_live_on_fast_and_scribe_on_best(self):
+        rows = {r["value"]: r["note"] for r in ec.dictation_speech_rows({"language": "hy"}, source="cloud")}
+        self.assertEqual(rows[ec.DICTATION_CLOUD],
+                         "OpenAI GPT Live Transcribe \u00b7 ElevenLabs Scribe v2 \u00b7 OpenAI GPT Transcribe")
+        self.assertEqual(rows[ec.DICTATION_CLOUD_BEST], ec.CLOUD_PROFILE_NOTES[ec.CLOUD_BEST])
+        self.assertTrue(rows[ec.DICTATION_CLOUD_BEST].startswith("ElevenLabs Scribe v2"))
+
     def test_files_and_live_assistant_do_not_claim_it(self):
         for row in ec.file_rows({}, pro=True, signed_in=True) + ec.live_speech_rows({}, pro=True, signed_in=True):
             self.assertNotIn("live", (row.get("note") or "").split(" \u00b7 ")[0].lower().replace("live assist", ""))

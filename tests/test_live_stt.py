@@ -19,6 +19,7 @@ import numpy as np  # noqa: E402
 import live_stt  # noqa: E402
 
 _PCM16 = live_stt.pcm16          # the real one (setUp patches the module's for the line tests)
+_PCM24 = live_stt.pcm24k
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
@@ -303,6 +304,154 @@ class TestLiveSession(unittest.TestCase):
         self.assertTrue(s.dropped_audio)
 
 
+class FakeOpenAI:
+    """OpenAI realtime transcription, as far as the app uses it: the Authorization header, input_audio_buffer.append
+    JSON frames, deltas back, input_audio_buffer.commit -> ...transcription.completed."""
+
+    def __init__(self, final_delay=0.05):
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(2)
+        self.port = self.sock.getsockname()[1]
+        self.auth = []
+        self.audio = bytearray()
+        self.kinds = []
+        self.final_delay = final_delay
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    @property
+    def url(self):
+        return "ws://127.0.0.1:%d/v1/realtime?intent=transcription" % self.port
+
+    def _serve(self):
+        try:
+            conn, _ = self.sock.accept()
+        except OSError:
+            return
+        try:
+            head = b""
+            while b"\r\n\r\n" not in head:
+                head += conn.recv(1024)
+            lines = head.decode().split("\r\n")
+            key = [ln.split(":", 1)[1].strip() for ln in lines if ln.lower().startswith("sec-websocket-key")][0]
+            self.auth = [ln.split(":", 1)[1].strip() for ln in lines if ln.lower().startswith("authorization")]
+            accept = base64.b64encode(hashlib.sha1((key + GUID).encode()).digest()).decode()
+            conn.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                          "Sec-WebSocket-Accept: %s\r\n\r\n" % accept).encode())
+            _send(conn, 0x1, json.dumps({"type": "session.created"}).encode())
+            while True:
+                op, payload = _read_frame(conn)
+                if op != 0x1:
+                    return
+                msg = json.loads(payload)
+                self.kinds.append(msg["type"])
+                if msg["type"] == "input_audio_buffer.append":
+                    self.audio += base64.b64decode(msg["audio"])
+                    if len(self.kinds) == 1:
+                        _send(conn, 0x1, json.dumps({"type": "conversation.item.input_audio_transcription.delta",
+                                                     "item_id": "i1", "delta": "Ուրեմն"}).encode())
+                if msg["type"] == "input_audio_buffer.commit":
+                    time.sleep(self.final_delay)
+                    _send(conn, 0x1, json.dumps({"type": "conversation.item.input_audio_transcription.completed",
+                                                 "item_id": "i1", "transcript": "Ուրեմն վաղը պետք է գնամ։"}).encode())
+        except (OSError, ConnectionError, IndexError, ValueError):
+            pass
+
+    def close(self):
+        self.sock.close()
+
+
+class TestOpenAISession(unittest.TestCase):
+    """Armenian on Fast: OpenAI gpt-live-transcribe with a short-lived key (the founder's pick, 2026-11-07)."""
+
+    def setUp(self):
+        patcher = mock.patch.object(live_stt, "pcm24k", lambda samples: bytes(samples))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_key_goes_in_the_header_the_audio_as_json_and_commit_gives_the_text(self):
+        server = FakeOpenAI(final_delay=0.2)
+        self.addCleanup(server.close)
+        partials, finals = [], []
+        s = live_stt.LiveSession(lambda: "tok", "hy", engine="openai", on_partial=partials.append,
+                                 on_final=lambda t, l: finals.append((t, l)),
+                                 opener=lambda *a, **k: (server.url, "", {"Authorization": "Bearer ek_test"}))
+        s.start()
+        for _ in range(3):
+            s.feed(bytes(4800))                                    # 100 ms of 24 kHz 16-bit audio each
+        self.assertTrue(live_stt.wait_until(lambda: partials, 3))
+        started = time.monotonic()
+        self.assertEqual(s.stop(timeout=3), "Ուրեմն վաղը պետք է գնամ։")
+        self.assertLess(time.monotonic() - started, 1.5)            # the completed turn ends the wait
+        self.assertEqual(server.auth, ["Bearer ek_test"])
+        self.assertEqual(server.kinds[-1], "input_audio_buffer.commit")
+        self.assertGreaterEqual(len(server.audio), 4800 * 3)
+        self.assertEqual(finals, [("Ուրեմն վաղը պետք է գնամ։", "hy")])
+        self.assertEqual((s.language, s.failed), ("hy", ""))
+
+    def test_no_reconnect_at_openai(self):
+        s = live_stt.LiveSession(lambda: "tok", "hy", engine="openai", opener=lambda *a, **k: ("ws://x", "", {}))
+        s._ws = mock.Mock()
+        s._ws.recv.side_effect = live_stt.WebSocketError("the connection dropped")
+        s._reader()
+        self.assertEqual(s.failed, "dropped")
+
+    def test_24_khz_is_one_and_a_half_times_the_samples(self):
+        if not _real_numpy():
+            self.skipTest("real numpy not importable (stubbed)")
+        self.assertEqual(len(_PCM24(np.zeros(1600, dtype=np.float32))), 4800)   # 100 ms: 2400 samples x 2 bytes
+
+    def test_open_session_for_openai_only_accepts_openais_address_and_a_short_lived_key(self):
+        class Resp:
+            def __init__(self, data):
+                self.status_code, self._data = 200, data
+
+            def json(self):
+                return self._data
+        calls = []
+
+        def post(url, json=None, headers=None, timeout=None):
+            calls.append(json)
+            return Resp({"url": live_stt.OPENAI_WSS, "token": "ek_abc"})
+        got = live_stt.open_session("tok", "hy", post=post, engine="openai")
+        self.assertEqual(got, (live_stt.OPENAI_WSS, "", {"Authorization": "Bearer ek_abc"}))
+        self.assertEqual((calls[0]["engine"], calls[0]["language"]), ("openai", "hy"))
+        for bad in ({"url": "wss://evil.example/v1/realtime", "token": "ek_abc"},
+                    {"url": live_stt.OPENAI_WSS, "token": "sk-proj-123"},           # never a project key
+                    {"url": live_stt.OPENAI_WSS, "token": "ek_a\r\nX-Evil: 1"}):
+            with self.assertRaises(live_stt.LiveUnavailable):
+                live_stt.open_session("tok", "hy", post=lambda *a, b=bad, **k: Resp(b), engine="openai")
+
+
+class TestGladiaCleanup(unittest.TestCase):
+    def test_a_finished_gladia_session_is_deleted_at_gladia(self):
+        ended = []
+        s = live_stt.LiveSession(lambda: "tok", ender=lambda token, sid: ended.append((token, sid)) or True)
+        s.session_id, s._token = "0b7d2c1e-1234-4abc-9def-001122334455", "tok"
+        s._done.set()
+        with mock.patch.object(live_stt.time, "sleep", lambda _s: None):
+            s._end_later()
+            self.assertTrue(live_stt.wait_until(lambda: ended, 3))
+        self.assertEqual(ended, [("tok", "0b7d2c1e-1234-4abc-9def-001122334455")])
+
+    def test_openai_sessions_are_not_sent_to_gladia(self):
+        ended = []
+        s = live_stt.LiveSession(lambda: "tok", engine="openai", ender=lambda *a: ended.append(a))
+        s.session_id = "x"
+        s._end_later()
+        self.assertEqual(ended, [])
+
+    def test_end_session_asks_the_server(self):
+        calls = []
+
+        class Resp:
+            status_code = 200
+        self.assertTrue(live_stt.end_session("tok", "abc", post=lambda url, json=None, headers=None, timeout=None:
+                                             calls.append((url, json, headers)) or Resp()))
+        self.assertEqual(calls[0][1], {"action": "end", "id": "abc"})
+        self.assertFalse(live_stt.end_session("", "abc", post=lambda *a, **k: Resp()))
+
+
 class TestServerFunction(unittest.TestCase):
     SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "supabase", "functions",
                        "live-stt", "index.ts")
@@ -325,6 +474,22 @@ class TestServerFunction(unittest.TestCase):
         self.assertIn('wss.startsWith("wss://")', src)
         self.assertIn('if (proRes.data !== true) return json({ error: "pro_required" }, 403);', src)
         self.assertIn("use_cloud_quota", src)
+
+    def test_openai_gets_a_short_lived_key_for_one_transcription_session(self):
+        src = open(self.SRC, encoding="utf-8").read()
+        self.assertIn("https://api.openai.com/v1/realtime/client_secrets", src)
+        self.assertIn('expires_after: { anchor: "created_at", seconds: 600 }', src)
+        self.assertIn('type: "transcription"', src)
+        self.assertIn("transcription: { model, language }, turn_detection: null", src)
+        self.assertIn('if (!token.startsWith("ek_"))', src)
+        self.assertIn('env("OPENAI_LIVE_STT_MODEL") || "gpt-live-transcribe"', src)
+        self.assertIn('if (engine === "openai" && (!LANG_CODE.test(language) || language === "auto"))', src)
+
+    def test_a_gladia_session_is_deleted_by_id_only(self):
+        src = open(self.SRC, encoding="utf-8").read()
+        self.assertIn('if (body?.action === "end")', src)
+        self.assertIn("const GLADIA_ID = /^[0-9a-f-]{8,64}$/i;", src)
+        self.assertIn('method: "DELETE"', src)
 
 
 if __name__ == "__main__":
