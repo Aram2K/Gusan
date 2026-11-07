@@ -886,7 +886,8 @@ class TestCloudRowsMatchTheServer(unittest.TestCase):
 
     ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     SPEECH = {"scribe_v2": "ElevenLabs Scribe v2", "voxtral-mini-latest": "Mistral Voxtral",
-              "gpt-transcribe": "OpenAI GPT Transcribe", "gpt-4o-transcribe": "GPT-4o Transcribe"}
+              "gpt-transcribe": "OpenAI GPT Transcribe", "gpt-4o-transcribe": "GPT-4o Transcribe",
+              "solaria-3": "Gladia Solaria 3", "solaria-1": "Gladia Solaria 1", "solaria-fusion": "Gladia Solaria Fusion"}
 
     def _source(self, function):
         path = os.path.join(self.ROOT, "supabase", "functions", function, "index.ts")
@@ -902,6 +903,14 @@ class TestCloudRowsMatchTheServer(unittest.TestCase):
         for profile, order in ((ec.CLOUD_FAST, "FAST_ORDER"), (ec.CLOUD_BEST, "BEST_ORDER")):
             ids = self._order(order)[:3]
             self.assertEqual(ec.CLOUD_PROFILE_NOTES[profile], " \u00b7 ".join(self.SPEECH[i] for i in ids), profile)
+
+    def test_the_gladia_profiles_name_their_gladia_models_then_the_best_order(self):
+        source = self._source("transcribe-proxy")
+        for profile, env in ((ec.CLOUD_GLADIA, "STT_GLADIA_ORDER"), (ec.CLOUD_GLADIA_FUSION, "STT_GLADIA_FUSION_ORDER")):
+            found = re.search(r'orderFor\("%s", \[([^\]]*)\]\)' % env, source)
+            self.assertTrue(found, env)
+            ids = (re.findall(r'"([^"]+)"', found.group(1)) + self._order("BEST_ORDER"))[:3]
+            self.assertEqual(ec.CLOUD_PROFILE_NOTES[profile], " · ".join(self.SPEECH[i] for i in ids), profile)
 
     def test_every_engine_in_a_profile_note_is_one_the_server_knows(self):
         for note in ec.CLOUD_PROFILE_NOTES.values():
