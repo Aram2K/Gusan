@@ -248,6 +248,7 @@ def writer_line(ctx):
 
 ON_SELECTION = "On your selection"
 SEARCHING_WEB = "Searching the web"
+RESEARCHING_WEB = "Researching the web"          # a deep search ("do a deep search on...")
 
 
 def web_sources_line(n):
@@ -267,7 +268,8 @@ def _writing(kind, detail, ctx, elapsed):
         return title, _STILL[kind]
     line = writer_line(ctx)
     if ctx.get("web"):                                # Gusan Cloud looks the facts up first (Linkup)
-        line = SEARCHING_WEB + (" \u00b7 " + line if line else "")
+        what = RESEARCHING_WEB if ctx.get("web") == "deep" else SEARCHING_WEB
+        line = what + (" \u00b7 " + line if line else "")
     elif ctx.get("on_selection"):                     # the take works on the text selected on screen: say so
         line = ON_SELECTION + (" \u00b7 " + line if line else "")
     return title, line

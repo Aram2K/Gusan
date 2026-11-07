@@ -92,8 +92,8 @@ const LINKUP_TIMEOUT_MS = (() => {
   return Number.isFinite(n) ? Math.max(250, Math.min(8000, Math.floor(n))) : 2500;
 })();
 const LINKUP_DECIDE_TIMEOUT_MS = (() => {
-  const n = Number(Deno.env.get("LINKUP_DECIDE_TIMEOUT_MS") || "1200");
-  return Number.isFinite(n) ? Math.max(300, Math.min(3000, Math.floor(n))) : 1200;
+  const n = Number(Deno.env.get("LINKUP_DECIDE_TIMEOUT_MS") || "700");
+  return Number.isFinite(n) ? Math.max(300, Math.min(3000, Math.floor(n))) : 700;
 })();
 
 export function webSearchQuery(question: string): string {
@@ -110,8 +110,36 @@ const SMART_LIVE_DATA = /\b(?:exchange rate|interest rate|inflation|forecast|mar
 export function smartWebQuery(request: string): string {
   const q = request.trim();
   if (q.length < 8) return "";
-  return explicitWebQuery(q) || (SMART_LIVE_DATA.test(q) ? q.slice(0, 400) : "");
+  return doSearchQuery(q) || explicitWebQuery(q) || (SMART_LIVE_DATA.test(q) ? q.slice(0, 400) : "");
 }
+
+// "Do a deep search on X", "run a quick web search about X", "research X online": a search request whatever its
+// depth word; the query is what follows. (Meeting chat needs "web" / "online" in it: a search of the meeting is not one.)
+const DO_SEARCH = /^(?:(?:please|(?:can|could|would)\s+you)\s+)*(?:do|run|make)\s+(?:an?\s+)?(?:(?:deep|quick|fast|thorough|full|proper|detailed|web|online|internet)\s+)*(?:web\s+|online\s+|internet\s+)?(?:search|research|lookup)\s+(?:on|about|for|into|of)\s+/i;
+export function doSearchQuery(request: string, mode = "smart_auto"): string {
+  const m = DO_SEARCH.exec(request.trim());
+  if (!m) return "";
+  if (mode === "meeting_chat" && !/\b(?:web|online|internet)\b/i.test(m[0])) return "";
+  return request.trim().slice(m[0].length).trim().slice(0, 400);
+}
+
+// How deep Linkup looks: the person's own word decides ("deep search", "research", "in depth" -> deep; "quick search"
+// -> fast); else the Live Assistant and meeting chat look fast (an answer during a call) and Smart Actions look
+// broader (standard). The app's web_sources.DEEP_SEARCH / QUICK_SEARCH are these same patterns.
+const DEEP_SEARCH = /\b(?:deep(?:ly)?\s+(?:web\s+)?(?:search|research|dive|look)|research(?:ing)?|in[- ]depth|thorough(?:ly)?|comprehensive(?:ly)?|recherche\s+approfondie|investigaci[oó]n\s+(?:a\s+fondo|profunda)|gr[uü]ndliche?\s+(?:suche|recherche))\b/i;
+const QUICK_SEARCH = /\b(?:quick(?:ly)?\s+(?:web\s+)?(?:search|look|check)|just\s+(?:check|google|look\s+up)|recherche\s+rapide|b[uú]squeda\s+r[aá]pida|schnelle\s+suche)\b/i;
+export function searchDepth(request: string, mode: string): string {
+  if (DEEP_SEARCH.test(request)) return "deep";
+  if (QUICK_SEARCH.test(request)) return "fast";
+  return mode === "smart_auto" ? "standard" : LINKUP_DEPTH;
+}
+// Per depth: how long the search may take, how many pages, how much of each page the AI reads.
+const DEPTH_LIMITS: Record<string, { ms: number; results: number; chars: number }> = {
+  flash: { ms: LINKUP_TIMEOUT_MS, results: 5, chars: 600 },
+  fast: { ms: LINKUP_TIMEOUT_MS, results: 5, chars: 600 },
+  standard: { ms: 6000, results: 6, chars: 1500 },
+  deep: { ms: 60000, results: 8, chars: 1500 },
+};
 
 export function explicitWebQuery(question: string, mode = "live_assist"): string {
   const q = question.trim();
@@ -154,11 +182,12 @@ export async function classifyWebSearch(question: string, context: string): Prom
   const hasBackup = OPENAI_KEY || claude || MISTRAL_KEY || GEMINI_KEY;
   const discoverySignal = hasBackup
     ? AbortSignal.any([signal, AbortSignal.timeout(Math.min(400, Math.floor(ms / 2)))]) : signal;
-  const knownLiveModel = LIVE_URL && LIVE_TOKEN ? await liveModel(false, discoverySignal) : "";
+  const knownLiveModel = !OPENAI_KEY && LIVE_URL && LIVE_TOKEN ? await liveModel(false, discoverySignal) : "";   // (nano first: no wait)
   if (signal.aborted) return null;
-  const route = LIVE_URL && LIVE_TOKEN && knownLiveModel
+  // The fastest model that answers a short yes/no: GPT-5.4 nano when there is an OpenAI key, else the live model.
+  const route = OPENAI_KEY ? openaiRoute(OPENAI_LIVE_MODEL, messages, 60, false, ms, ms, 0)
+    : LIVE_URL && LIVE_TOKEN && knownLiveModel
     ? liveRoute(knownLiveModel, messages, 60, false, { temperature: 0 })
-    : OPENAI_KEY ? openaiRoute(OPENAI_LIVE_MODEL, messages, 60, false, ms, ms, 0)
     : claudeRoute(CLAUDE_FAST_MODEL, messages, 60, ms, ms)
       ?? (MISTRAL_KEY ? mistralRoute(messages, 60, false, ms)
         : GEMINI_KEY ? geminiRoutes(messages, 60, false, ms)[0] : null);
@@ -204,9 +233,13 @@ async function webSearch(messages: unknown[], mode: string, webQuery: unknown): 
   const question = explicit || (mode === "live_assist"
     ? (content.includes("User's question: ") ? content.split("User's question: ").pop()! : "")
     : content.match(/<question>\s*([\s\S]*?)\s*<\/question>/)?.[1] ?? "");
-  const decision = mode === "smart_auto"
+  const asked = doSearchQuery(question, mode);
+  const decision = asked ? { query: asked, source: "explicit", classifier_ms: 0 }
+    : mode === "smart_auto"
     ? { query: smartWebQuery(question), source: "smart", classifier_ms: 0 }
     : await decideWebSearch(question, content, classifyWebSearch, mode);
+  const depth = searchDepth(question, mode);
+  const limits = DEPTH_LIMITS[depth] ?? DEPTH_LIMITS.fast;
   const query = decision.query;
   if (!query) {
     console.log("Linkup decision", JSON.stringify({ source: decision.source, classifier_ms: decision.classifier_ms, search_ms: 0, results: 0 }));
@@ -218,8 +251,8 @@ async function webSearch(messages: unknown[], mode: string, webQuery: unknown): 
     if (!LINKUP_KEY) throw new Error("missing key");
     const resp = await fetch("https://api.linkup.so/v1/search", {
       method: "POST", headers: { Authorization: `Bearer ${LINKUP_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ q: query, depth: LINKUP_DEPTH, outputType: "searchResults", maxResults: 5 }),
-      signal: AbortSignal.timeout(LINKUP_TIMEOUT_MS),
+      body: JSON.stringify({ q: query, depth, outputType: "searchResults", maxResults: limits.results }),
+      signal: AbortSignal.timeout(limits.ms),
     });
     if (resp.status !== 200) throw new Error("search unavailable");
     const data = await resp.json();
@@ -227,8 +260,8 @@ async function webSearch(messages: unknown[], mode: string, webQuery: unknown): 
       results = data.results.filter((r: any) => {
         try { return r.type === "text" && ["http:", "https:"].includes(new URL(r.url).protocol); }
         catch { return false; }
-      }).slice(0, 5).map((r: any) => ({ title: String(r.name ?? "").trim().slice(0, 200),
-        url: String(r.url), snippet: String(r.content ?? "").slice(0, 600) }));
+      }).slice(0, limits.results).map((r: any) => ({ title: String(r.name ?? "").trim().slice(0, 200),
+        url: String(r.url), snippet: String(r.content ?? "").slice(0, limits.chars) }));
     }
   } catch { results = []; }
   console.log("Linkup decision", JSON.stringify({ source: decision.source, classifier_ms: decision.classifier_ms,
@@ -1040,11 +1073,11 @@ Deno.serve(async (req) => {
   const messages = onlyDataImages(body.messages);
   if (messages.length === 0) return json({ error: "no_messages" }, 400);
 
-  const startedAt = Date.now();
   const web = body.web_search === true && LINKUP_KEY
     && (body.mode === "live_assist" || body.mode === "meeting_chat" || body.mode === "smart_auto")
     ? await webSearch(messages, body.mode, body.web_query) : { query: "", results: [] };
   const sources = web.results.map(({ title, url }) => ({ title, url }));
+  const startedAt = Date.now();          // the answer's own budget starts after the search (a deep one takes long)
   const webHeaders = { "X-Web-Sources": encodeURIComponent(JSON.stringify(sources)) };
   if (sources.length) {
     if (body.mode === "meeting_chat") {

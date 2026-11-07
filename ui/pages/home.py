@@ -67,7 +67,7 @@ import logging
 import os
 from datetime import datetime
 
-from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QFontMetricsF, QGuiApplication, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractButton, QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout, QLabel,
                                QLayout, QLineEdit, QSizePolicy, QVBoxLayout, QWidget)
@@ -777,11 +777,16 @@ class Runs(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.set_runs(runs)
 
+    # A row shows one line: past this many characters a run's width only says "wider than any window". Measuring a
+    # whole translated letter on every layout pass froze the window at startup (6.6 s, 2026-11-07).
+    MEASURE_CHARS = 400
+
     def set_runs(self, runs):
         self._runs = [(str(t), f, c) for t, f, c in runs if t]
         full = "".join(t for t, _, _ in self._runs)
         self.setAccessibleName(full)
         self.setToolTip(theme.plain_tip(full) if len(full) > 60 else "")
+        self._hint_w = None
         self.updateGeometry()
         self.update()
 
@@ -789,8 +794,15 @@ class Runs(QWidget):
         return "".join(t for t, _, _ in self._runs)
 
     def sizeHint(self):
-        w = sum(QFontMetricsF(f).horizontalAdvance(t) for t, f, _ in self._runs)
-        return QSize(int(w) + 2, self.height())
+        if getattr(self, "_hint_w", None) is None:
+            self._hint_w = int(sum(QFontMetricsF(f).horizontalAdvance(t[:self.MEASURE_CHARS])
+                                   for t, f, _ in self._runs))
+        return QSize(self._hint_w + 2, self.height())
+
+    def changeEvent(self, e):
+        super().changeEvent(e)
+        if e.type() == QEvent.FontChange:
+            self._hint_w = None
 
     def minimumSizeHint(self):
         return QSize(0, self.height())
@@ -802,6 +814,7 @@ class Runs(QWidget):
         avail = float(self.width())
         for i, (t, f, c) in enumerate(self._runs):
             fm = QFontMetricsF(f)
+            t = t[:self.MEASURE_CHARS]                  # (one line: the rest is never seen)
             w = fm.horizontalAdvance(t)
             p.setFont(f)
             p.setPen(theme.qcolor(c))

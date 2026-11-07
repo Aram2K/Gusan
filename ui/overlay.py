@@ -540,7 +540,8 @@ class Overlay(QWidget):
             self._ctx.update(info)
         # "On your selection" and "Searching the web" are this take's own (the context outlives a take)
         self._ctx["on_selection"] = bool(isinstance(info, dict) and info.get("on_selection"))
-        self._ctx["web"] = bool(isinstance(info, dict) and info.get("web"))
+        web = info.get("web") if isinstance(info, dict) else None
+        self._ctx["web"] = web if web == "deep" else bool(web)
         self._kick()
 
     def set_speech(self, info):

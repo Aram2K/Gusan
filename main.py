@@ -7395,8 +7395,9 @@ class AppController(QObject):
             # request asks for it or needs live figures (web_sources.smart_search_wanted - the pill says so ahead).
             action_config, web_info = AppController._smart_web(self, text, action_mode, action_model, action_config)
             if web_info is not None and web_sources.smart_search_wanted(text):
+                depth = web_sources.search_depth(text, action_mode)
                 self.overlay.call_soon(self.overlay.set_task, pill_kind, pill_detail,
-                                       dict(pill_info or {}, on_selection=bool(sel), web=True))
+                                       dict(pill_info or {}, on_selection=bool(sel), web="deep" if depth == "deep" else True))
             try:
                 output_text = actions.process(
                     action_input,
