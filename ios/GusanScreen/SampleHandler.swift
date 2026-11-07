@@ -26,7 +26,8 @@ final class SampleHandler: RPBroadcastSampleHandler {
         let settings = ScreenSettings(group: resolution.chosen)
         idle = ScreenIdleTimer(timeout: TimeInterval(settings.idleMinutes * 60))
         startedAt = Date(); requests = 0; finished = false
-        let channel = ScreenChannel(container: resolution.container)
+        let keyboardSettings = SettingsStore(group: resolution.chosen)
+        let channel = ScreenChannel(container: resolution.container, pasteboardAllowed: { keyboardSettings.refresh(); return keyboardSettings.pasteboardFallback })
         self.channel = channel
         channel.clear()
         publishStatus()

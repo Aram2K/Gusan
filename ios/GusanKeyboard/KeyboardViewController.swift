@@ -83,6 +83,7 @@ final class KeyboardViewController: UIInputViewController {
         toolbar.accessory.addTarget(self, action: #selector(accessoryPressed), for: .touchUpInside)
         toolbar.addSubview(screen.chip)
         screen.onChange = { [weak self] in self?.screenChanged() }
+        screen.onLost = { [weak self] in self?.screenLost() }
         toolbar.message.addTarget(self, action: #selector(expandMessage), for: .touchUpInside)
         toolbar.context.addTarget(self, action: #selector(expandContext), for: .touchUpInside)
         panel.onClose = { [weak self] in self?.showTyping() }
@@ -139,6 +140,7 @@ final class KeyboardViewController: UIInputViewController {
         guard connected else { return }
         updateTypography()
         instructionHeader.compact = compactLayout
+        panel.compact = compactLayout
         let compactInstruction = compactLayout && surface == .instruction
         [toolbar.logo, toolbar.mic, toolbar.message, toolbar.accessory].forEach { $0.isHidden = compactInstruction }
         toolbar.spinner.isHidden = compactInstruction || !toolbar.spinner.isAnimating
@@ -183,6 +185,12 @@ final class KeyboardViewController: UIInputViewController {
         } else if surface == .instruction, instruction.isEmpty, instructionContext != nil, !busy { cancelInstruction() }
         updateContext()
     }
+    /// The broadcast ended mid-instruction: never let the question fall through to a plain text action.
+    private func screenLost() {
+        guard surface == .instruction, !busy else { return }
+        cancelInstruction()
+        showMessage("Gusan Screen ended. Start it again to ask about your screen.")
+    }
     private func applyTheme(_ theme: KeyboardTheme) {
         view.backgroundColor = theme.background
         keyArea.applyTheme(theme)
@@ -198,7 +206,10 @@ final class KeyboardViewController: UIInputViewController {
         height.constant = keyboardHeight
         updateContext(); view.setNeedsLayout()
     }
-    private func showTyping() { snapshotReturnSurface = nil; instructionContext = nil; surface = .typing; updateSurface() }
+    private func showTyping(cancelPending: Bool = true) {
+        if cancelPending { task?.cancel() }
+        snapshotReturnSurface = nil; instructionContext = nil; surface = .typing; updateSurface()
+    }
     private var compactLayout: Bool {
         traitCollection.verticalSizeClass == .compact || view.window?.windowScene?.interfaceOrientation.isLandscape == true
     }
@@ -291,7 +302,7 @@ final class KeyboardViewController: UIInputViewController {
     private func run(_ action: SmartAction, context: Context, useScreen: Bool = false) {
         voice.dismiss()
         guard !busy else { return }
-        let access = store.sessionState(fullAccess: hasFullAccess)
+        let access = previewActions ? SessionState(signedIn: true, fullAccess: true, shareable: true) : store.sessionState(fullAccess: hasFullAccess)
         accessState = access
         if access.actionError == .fullAccessRequired {
             if surface != .instruction { showTyping() }
@@ -303,7 +314,7 @@ final class KeyboardViewController: UIInputViewController {
             showMessage(error == .notSignedIn ? "Sign in to use Gusan" : "Gusan can't read shared sign-in", detail: store.diagnostics().summary, accessory: error == .notSignedIn ? "Sign in" : "Details"); return
         }
         #if DEBUG
-        if store.read()?.accessToken == "gusan-debug-no-network" {
+        if !previewActions, store.read()?.accessToken == "gusan-debug-no-network" {
             showMessage("DEBUG session available", detail: store.diagnostics().summary, accessory: "Details"); return
         }
         #endif
@@ -318,19 +329,7 @@ final class KeyboardViewController: UIInputViewController {
         task = Task { @MainActor in
             defer { busy = false; toolbar.spinner.stopAnimating(); keyArea.inputEnabled = true; updateContext() }
             do {
-                guard let session = try await auth.refresh() else { throw GusanError.unauthorized }
-                let outcome: JobResult
-                let textKind: JobResult.Kind = context.selected.isEmpty ? (context.text.isEmpty ? .insert : .replaceContext) : .replaceSelection
-                // Screen answers go in at the cursor (or replace the selection); they never rewrite the surrounding text.
-                func job(_ token: String) throws -> GusanJob {
-                    guard useScreen, case .custom(let instruction) = action else { return SmartActionJob(text: context.text, action: action, accessToken: token, target: settings.translateTarget, kind: textKind) }
-                    return try screen.job(instruction: instruction, text: context.text, accessToken: token, kind: textKind)
-                }
-                do { outcome = try await JobRunner().result(of: try job(session.accessToken), progress: { [weak self] message in await MainActor.run { self?.showMessage(message, accessory: "Cancel") } }) }
-                catch GusanError.unauthorized {
-                    guard let refreshed = try await auth.refresh(force: true) else { throw GusanError.unauthorized }
-                    outcome = try await JobRunner().result(of: try job(refreshed.accessToken))
-                }
+                let outcome = try await actionResult(action, context: context, useScreen: useScreen)
                 let result = outcome.text
                 try Task.checkCancellation()
                 guard currentContext == context else { showMessage("Text changed. Select it and try again."); return }
@@ -342,7 +341,7 @@ final class KeyboardViewController: UIInputViewController {
                 undoSnapshot = currentContext.voiceContext
                 textDocumentProxy.insertText(result)
                 original = outcome.kind == .insert ? "" : context.text; replacement = result; captureUndo(restoreUTF16: outcome.kind == .replaceContext ? context.paragraph.after.utf16.count : 0)
-                instructionContext = nil; instruction = ""; showTyping(); screen.armed = false
+                instructionContext = nil; instruction = ""; showTyping(cancelPending: false); screen.armed = false
                 showMessage("Replaced", accessory: "Undo")
                 UIAccessibility.post(notification: .announcement, argument: "Replaced. Undo available.")
             } catch is CancellationError { showMessage("Cancelled") }
@@ -358,6 +357,31 @@ final class KeyboardViewController: UIInputViewController {
                 let title = error as? GusanError == .network ? "You're offline. Tap for details." : "Action failed. Tap for details."
                 showMessage(title, detail: error.localizedDescription, accessory: retry ? "Retry" : nil)
             }
+        }
+    }
+    private var previewActions: Bool {
+        #if DEBUG
+        UserDefaults(suiteName: store.resolution.chosen)?.bool(forKey: "debugActionPreview") == true
+        #else
+        false
+        #endif
+    }
+    /// Screen answers go in at the cursor (or replace the selection); they never rewrite the surrounding text.
+    private func actionResult(_ action: SmartAction, context: Context, useScreen: Bool = false) async throws -> JobResult {
+        #if DEBUG
+        if previewActions { return try await InstructionPreviewJob().result() }
+        #endif
+        guard let session = try await auth.refresh() else { throw GusanError.unauthorized }
+        let kind: JobResult.Kind = context.selected.isEmpty ? (context.text.isEmpty ? .insert : .replaceContext) : .replaceSelection
+        func job(_ token: String) throws -> GusanJob {
+            guard useScreen, case .custom(let instruction) = action else { return SmartActionJob(text: context.text, action: action, accessToken: token, target: settings.translateTarget, kind: kind) }
+            return try screen.job(instruction: instruction, text: context.text, accessToken: token, kind: kind)
+        }
+        let progress: @Sendable (String) async -> Void = { [weak self] message in await MainActor.run { self?.showMessage(message, accessory: "Cancel") } }
+        do { return try await JobRunner().result(of: try job(session.accessToken), progress: progress) }
+        catch GusanError.unauthorized {
+            guard let refreshed = try await auth.refresh(force: true) else { throw GusanError.unauthorized }
+            return try await JobRunner().result(of: try job(refreshed.accessToken), progress: progress)
         }
     }
     private func undo() {
@@ -434,3 +458,20 @@ final class KeyboardViewController: UIInputViewController {
         showMessage("Open the Gusan app to sign in.")
     }
 }
+
+#if DEBUG
+private struct InstructionPreviewJob: GusanJob {
+    func run() -> AsyncThrowingStream<JobEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    try await Task.sleep(nanoseconds: 10_000_000_000)
+                    continuation.yield(.result(JobResult(text: "DEBUG action completed", kind: .replaceContext)))
+                    continuation.finish()
+                } catch { continuation.finish(throwing: error) }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}
+#endif

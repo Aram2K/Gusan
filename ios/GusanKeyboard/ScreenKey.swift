@@ -35,6 +35,8 @@ final class ScreenChip: ToolbarButton {
 final class ScreenKeyboardController {
     let chip = ScreenChip(frame: .zero)
     var onChange: (() -> Void)?
+    /// Called when the broadcast ends (or the chip otherwise becomes unavailable) while the chip was armed.
+    var onLost: (() -> Void)?
     private(set) var live = false
     private(set) var explained = false
     var armed = false { didSet { if armed != oldValue { onChange?() } } }
@@ -80,8 +82,10 @@ final class ScreenKeyboardController {
     private func setLive(_ value: Bool) {
         let wasAvailable = available
         live = value
+        let lost = armed && !available
         if !available { armed = false }
         if available != wasAvailable { onChange?() }
+        if lost { onLost?() }
     }
     func update(theme: KeyboardTheme, busy: Bool) {
         chip.isHidden = !available
