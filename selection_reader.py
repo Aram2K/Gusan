@@ -368,9 +368,10 @@ def read_selection(platform=None):
             text, has_pattern, read_only, password = _uia_selection()
             if password:
                 return Selection()
-            if has_pattern:
-                # The app answered: trust it (an empty answer means nothing is selected - no copy chord then).
+            if text.strip():
                 return _finish(text, "uia", None if read_only is None else not read_only)
+            # Nothing from UI Automation: nothing is selected, or the app can't say (Google Docs draws its own text,
+            # so Chrome reports an empty selection there). The copy keys ask the app itself - never in a terminal.
             if _foreground_is_terminal() or not _keys_up():
                 return Selection()
             return _finish(_copy_selection(), "copy", None if read_only is None else not read_only)
