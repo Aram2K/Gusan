@@ -309,3 +309,17 @@ def test_expiry_survives_h_outage_but_cancel_does_not(run):
     assert expired["calls"][0]["method"] == "DELETE"
     assert cancelled["replies"][0] == {"status": 502, "body": {"error": "upstream_error"}}
     assert cancelled["row"]["status"] == "running"
+
+
+def test_confirmation_window_is_capped_by_deadline(run):
+    out, = run({"row": {"mode": "do", "status": "awaiting_confirmation",
+                        "confirmation": CALL["args"],
+                        "confirmation_at": "2099-01-01T00:00:00Z",
+                        "deadline_at": "2000-01-01T00:00:00Z"},
+                "run": {"tool_req": CALL},
+                "body": {"action": "confirm", "task_id": ID}})
+    assert out["replies"][0] == {"status": 409, "body": {"error": "not_awaiting_confirmation"}}
+    assert out["row"]["status"] == "cancelled"
+    assert out["row"]["error_code"] == "confirmation_expired"
+    assert out["calls"][0]["method"] == "DELETE"
+    assert not any(c["url"].endswith("/tool_results") for c in out["calls"])

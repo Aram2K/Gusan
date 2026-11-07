@@ -12,7 +12,8 @@
 // Statuses: queued, running, awaiting_confirmation, completed, failed,
 // cancelled, timed_out. Limits: 2 active, 40 starts/24h, 8 MiB request body;
 // research: 300s/60 steps, do: 600s/120 steps, deadline adds 180s grace.
-// Confirmation expires after 15 minutes; progress retains 25 short steps.
+// Confirmation expires after 15 minutes or at the task deadline, whichever
+// comes first; progress retains 25 short steps.
 // Errors: bad_request (400, field), unauthorized (401), privacy_mode and
 // pro_required (403), not_found (404), not_awaiting_confirmation (409),
 // body_too_large (413), too_many_active / quota_exceeded (429),
@@ -326,7 +327,10 @@ async function expire(db: any, row: Obj, run: Obj) {
   if (terminal(row)) return row;
   const expired = row.status === "awaiting_confirmation" &&
     row.confirmation_at &&
-    Date.now() - Date.parse(row.confirmation_at) > 900000;
+    Date.now() >= Math.min(
+        Date.parse(row.confirmation_at) + 900000,
+        Date.parse(row.deadline_at),
+      );
   if (expired || Date.now() > Date.parse(row.deadline_at)) {
     if (run.h_session_id) {
       // The local deadline is authoritative even if H is unavailable.
