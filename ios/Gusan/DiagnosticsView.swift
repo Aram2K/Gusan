@@ -18,6 +18,10 @@ struct DiagnosticsView: View {
                 Button { copyReport() } label: { Label(copied ? "Report copied" : "Copy report", systemImage: copied ? "checkmark" : "doc.on.doc") }.frame(minHeight: 44).disabled(model.diagnostics == nil)
             }
             if let diagnostics = model.diagnostics {
+                AppCard {
+                    Text("Pasteboard fallback: " + diagnostics.pasteboardFallback).font(.headline)
+                    if diagnostics.peer == nil { Text("Waiting for a keyboard report before enabling fallback.").font(.body).foregroundStyle(.secondary) }
+                }
                 groupCard("App", report: diagnostics.local)
                 if let peer = diagnostics.peer { groupCard("Keyboard", report: peer) }
                 else { AppCard { Text("Keyboard: no heartbeat yet").font(.headline); Text("Open the Gusan keyboard, then refresh this report.").font(.body).foregroundStyle(.secondary) } }

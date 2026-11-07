@@ -10,6 +10,7 @@ struct KeyboardSettingsView: View {
     @State private var autoCapitalization = true
     @State private var doubleSpacePeriod = true
     @State private var haptics = true
+    @State private var pasteboardFallback = true
     private let languages = [("en", "English"), ("hy", "Հայերեն"), ("ru", "Русский"), ("fr", "Français"), ("de", "Deutsch"), ("es", "Español"), ("it", "Italiano"), ("pt", "Português"), ("ar", "العربية")]
     var body: some View {
         Form {
@@ -18,6 +19,9 @@ struct KeyboardSettingsView: View {
                 Picker("Translate to", selection: $target) { ForEach(languages, id: \.0) { Text($0.1).tag($0.0) } }.frame(minHeight: 44)
             } header: { Text("Gusan actions") } footer: { Text("Hold the Gusan button to run your default action.") }
             VoiceSettingsSection(voice: voice)
+            Section {
+                Toggle("Share sign-in via pasteboard fallback", isOn: $pasteboardFallback).frame(minHeight: 44)
+            } footer: { Text("Only used if the keyboard can't see your sign-in after sideloading. Other apps signed with the same Apple ID could read it.") }
             Section("Typing") {
                 Toggle("Key clicks", isOn: $keyClicks).frame(minHeight: 44)
                 Toggle("Auto-capitalization", isOn: $autoCapitalization).frame(minHeight: 44)
@@ -40,5 +44,7 @@ struct KeyboardSettingsView: View {
             .onChange(of: autoCapitalization) { model.settings.autoCapitalization = $0 }
             .onChange(of: doubleSpacePeriod) { model.settings.doubleSpacePeriod = $0 }
             .onChange(of: haptics) { model.settings.haptics = $0 }
+            .onAppear { pasteboardFallback = model.settings.pasteboardFallback }
+            .onChange(of: pasteboardFallback) { model.settings.pasteboardFallback = $0; _ = model.store.read(); model.refreshDiagnostics() }
     }
 }

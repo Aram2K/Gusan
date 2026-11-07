@@ -16,6 +16,9 @@ final class SettingsTests: XCTestCase {
         defer { appDefaults.removePersistentDomain(forName: appName); keyboardDefaults.removePersistentDomain(forName: keyboardName) }
         let shared = Shared(), app = SettingsStore(defaults: appDefaults, shared: shared), keyboard = SettingsStore(defaults: keyboardDefaults, shared: shared)
         XCTAssertTrue(keyboard.keyClicks)
+        XCTAssertTrue(keyboard.pasteboardFallback)
+        app.pasteboardFallback = false
+        keyboard.refresh(); XCTAssertFalse(keyboard.pasteboardFallback)
         app.keyboardAction = .rephrase; app.keyClicks = false; app.autoCapitalization = false
         keyboard.refresh()
         XCTAssertEqual(keyboard.keyboardAction, .rephrase); XCTAssertFalse(keyboard.keyClicks); XCTAssertFalse(keyboard.autoCapitalization)

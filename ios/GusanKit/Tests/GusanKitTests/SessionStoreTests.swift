@@ -20,6 +20,10 @@ final class SessionStoreTests: XCTestCase {
     func session(_ age: TimeInterval, expiry: TimeInterval = 500) -> Session {
         Session(accessToken: "fake-\(age)", expiresAt: Date(timeIntervalSince1970: expiry), refreshToken: "fake", updatedAt: Date(timeIntervalSince1970: age))
     }
+    func peer(_ backend: Backend, role: SessionRole = .keyboard, group: String? = nil, keychain: String? = nil, stores: [StoreHealth] = []) {
+        let report = SessionReport(role: role, timestamp: Date(), groupID: group, keychainGroupID: keychain, stores: stores, fullAccess: true)
+        backend.values["report." + role.rawValue] = try! JSONEncoder().encode(report)
+    }
     func testNewestWinsAndExpiryBreaksTies() {
         let keychain = Backend("Keychain"), file = Backend("App-group file"), pasteboard = Backend("Team pasteboard")
         let store = SessionStore(resolution: resolution, backends: [keychain, file, pasteboard], privateBackend: Backend("private"))
@@ -33,6 +37,7 @@ final class SessionStoreTests: XCTestCase {
     }
     func testWritesRotatedSessionToAllAndClearsAll() throws {
         let stores = [Backend("Keychain"), Backend("App-group file"), Backend("Team pasteboard")]
+        peer(stores[2])
         let privateStore = Backend("private"); privateStore.session(session(1))
         let store = SessionStore(resolution: resolution, backends: stores, privateBackend: privateStore)
         store.write(session(10)); store.write(session(20))
@@ -44,6 +49,7 @@ final class SessionStoreTests: XCTestCase {
     }
     func testPrivateCopySurvivesFailedMigrationAndMovesOnlyAfterSuccess() {
         let shared = Backend("Team pasteboard"), privateStore = Backend("private")
+        peer(shared)
         shared.writable = false; privateStore.session(session(1))
         let store = SessionStore(resolution: resolution, backends: [shared], privateBackend: privateStore)
         XCTAssertEqual(store.read(), session(1)); XCTAssertNotNil(privateStore.values["session"])
@@ -60,16 +66,85 @@ final class SessionStoreTests: XCTestCase {
         denied.readable = false; denied.writable = false
         let app = SessionStore(resolution: resolution, backends: [denied, shared], privateBackend: Backend("private"))
         app.write(session(1))
+        XCTAssertNil(shared.values["session"])
+        _ = app.diagnostics()
+        let keyboard = SessionStore(resolution: resolution, backends: [denied, shared], privateBackend: Backend("private"), role: .keyboard)
+        _ = keyboard.diagnostics()
         let diagnostics = app.diagnostics()
         XCTAssertTrue(diagnostics.isShared); XCTAssertTrue(diagnostics.pasteboardOK); XCTAssertFalse(diagnostics.keychainOK)
         XCTAssertTrue(diagnostics.local.stores[1].hasSession)
         let encoded = try XCTUnwrap(shared.values["report.app"])
         XCTAssertFalse(String(decoding: encoded, as: UTF8.self).contains("fake"))
-        let keyboard = SessionStore(resolution: resolution, backends: [denied, shared], privateBackend: Backend("private"), role: .keyboard)
         XCTAssertEqual(keyboard.read(), session(1))
         XCTAssertEqual(keyboard.diagnostics().peer?.role, .app)
         XCTAssertEqual(app.diagnostics().peer?.role, .keyboard)
         XCTAssertNotNil(shared.values["session"], "Reports must not overwrite credentials")
+    }
+    func testSameNormalGroupDeletesPasteboardAndPreservesItsSession() {
+        for name in ["Keychain", "App-group file"] {
+            let normal = Backend(name), board = Backend("Team pasteboard")
+            let local = AppGroupResolution(candidatesTried: [], chosen: "same", container: nil)
+            peer(board, group: name == "App-group file" ? "same" : "other", keychain: name == "Keychain" ? "same" : "other", stores: [.init(name: name, readable: true, writable: true, hasSession: false)])
+            board.session(session(3))
+            let store = SessionStore(resolution: local, backends: [normal, board], privateBackend: Backend("private"))
+            XCTAssertEqual(store.read(), session(3))
+            XCTAssertNil(board.values["session"])
+            XCTAssertNotNil(normal.values["session"])
+            store.write(session(4))
+            XCTAssertNil(board.values["session"])
+            XCTAssertEqual(store.diagnostics().pasteboardFallback, "not needed")
+        }
+    }
+    func testDifferentGroupsUseFallbackSymmetricallyDespiteReadableStores() {
+        for role in [SessionRole.app, .keyboard] {
+            let board = Backend("Team pasteboard")
+            let local = AppGroupResolution(candidatesTried: [], chosen: "ours", container: nil)
+            peer(board, role: role == .app ? .keyboard : .app, group: "theirs", keychain: "theirs", stores: ["Keychain", "App-group file"].map { .init(name: $0, readable: true, writable: true, hasSession: false) })
+            let store = SessionStore(resolution: local, backends: [board], privateBackend: Backend("private"), role: role)
+            store.write(session(5))
+            XCTAssertNotNil(board.values["session"])
+            XCTAssertEqual(store.diagnostics().pasteboardFallback, "in use")
+            store.clear()
+            XCTAssertNil(board.values["session"])
+        }
+    }
+    func testNoPeerDefersFallbackAndRetainsPrivateCopyUntilReportArrives() {
+        let board = Backend("Team pasteboard"), privateStore = Backend("private")
+        let store = SessionStore(resolution: resolution, backends: [board], privateBackend: privateStore)
+        store.write(session(5))
+        XCTAssertNil(board.values["session"])
+        XCTAssertEqual(store.read(), session(5))
+        XCTAssertNotNil(privateStore.values["session"])
+        XCTAssertNotNil(store.diagnostics().local)
+        XCTAssertNotNil(board.values["report.app"])
+        XCTAssertNil(board.values["session"])
+        peer(board)
+        XCTAssertEqual(store.read(), session(5))
+        XCTAssertNotNil(board.values["session"])
+        XCTAssertNil(privateStore.values["session"])
+    }
+    func testDisablingFallbackDeletesCopyAndKeepsHeartbeatReports() {
+        var enabled = true
+        let board = Backend("Team pasteboard"), privateStore = Backend("private")
+        peer(board)
+        let store = SessionStore(resolution: resolution, backends: [board], privateBackend: privateStore, pasteboardFallbackAllowed: { enabled })
+        store.write(session(1)); XCTAssertNotNil(board.values["session"])
+        enabled = false
+        XCTAssertEqual(store.read(), session(1))
+        XCTAssertNil(board.values["session"])
+        store.write(session(2))
+        XCTAssertNil(board.values["session"])
+        XCTAssertEqual(store.diagnostics().pasteboardFallback, "off")
+        XCTAssertNotNil(board.values["report.app"])
+    }
+    func testNewestPeerReportControlsNormalSharing() {
+        let normal = Backend("App-group file"), board = Backend("Team pasteboard")
+        let local = AppGroupResolution(candidatesTried: [], chosen: "same", container: nil)
+        peer(normal, group: "other")
+        peer(board, group: "same", stores: [.init(name: normal.name, readable: true, writable: true, hasSession: false)])
+        let store = SessionStore(resolution: local, backends: [normal, board], privateBackend: Backend("private"))
+        store.write(session(1))
+        XCTAssertNil(board.values["session"])
     }
     func testUnavailablePasteboardOnMacDoesNotReportSharing() {
         #if !canImport(UIKit)

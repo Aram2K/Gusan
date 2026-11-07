@@ -112,6 +112,7 @@ final class AppModel: NSObject, ObservableObject, ASWebAuthenticationPresentatio
         guard url.scheme == "gusan" else { return }
         switch url.host {
         case "signin":
+            session = store.read(); refreshDiagnostics()
             cancelGoogle(); authError = nil; fromKeyboard = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.contains { $0.name == "from" && $0.value == "keyboard" } == true
             if showingOnboarding { pendingSignIn = true; showingOnboarding = false }
             else { showingSignIn = true }

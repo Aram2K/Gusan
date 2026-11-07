@@ -75,6 +75,7 @@ public struct SessionReport: Codable {
 public struct SessionDiagnostics {
     public let local: SessionReport
     public let peer: SessionReport?
+    public let pasteboardFallback: String
     public var groupID: String? { local.groupID }
     public var keychainOK: Bool { local.stores.contains { $0.name == "Keychain" && $0.readable && $0.writable } }
     public var fileOK: Bool { local.stores.contains { $0.name == "App-group file" && $0.readable && $0.writable } }
@@ -91,6 +92,7 @@ public final class SessionStore: SessionStorage {
     private let privateBackend: SessionBackend
     private let keychainGroup: String?
     private let fullAccess: () -> Bool?
+    private let fallbackAllowed: () -> Bool
     private let lock = NSLock()
     public init(resolution: AppGroupResolution = AppGroupResolver.resolve(), role: SessionRole = .app, pasteboardAccessAllowed: @escaping () -> Bool = { true }) {
         self.role = role
@@ -112,12 +114,23 @@ public final class SessionStore: SessionStorage {
         self.resolution = isolated ? AppGroupResolution(candidatesTried: [], chosen: nil, container: nil) : resolution
         keychainGroup = isolated ? nil : resolution.chosen
         backends = [KeychainSessionBackend(group: keychainGroup, enabled: keychainGroup != nil), FileSessionBackend(container: self.resolution.container), NamedSessionPasteboard(namespace: isolated ? "com.aram2k.gusan.debug.session" : "com.aram2k.gusan.session", accessAllowed: pasteboardAccessAllowed)]
-        privateBackend = KeychainSessionBackend(group: nil, enabled: !isolated)
+        #if DEBUG
+        let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?.appendingPathComponent("GusanStorageTest", isDirectory: true)
+        if let directory { try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
+        let debugPrivate = FileSessionBackend(container: directory)
+        if !isolated { debugPrivate.clear("session") }
+        privateBackend = isolated ? debugPrivate : KeychainSessionBackend(group: nil, enabled: true)
+        #else
+        privateBackend = KeychainSessionBackend(group: nil, enabled: true)
+        #endif
+        let settings = SettingsStore(group: self.resolution.chosen, pasteboardAccessAllowed: pasteboardAccessAllowed)
+        fallbackAllowed = { settings.refresh(); return settings.pasteboardFallback }
     }
-    init(resolution: AppGroupResolution, backends: [SessionBackend], privateBackend: SessionBackend, role: SessionRole = .app) {
+    init(resolution: AppGroupResolution, backends: [SessionBackend], privateBackend: SessionBackend, role: SessionRole = .app, pasteboardFallbackAllowed: @escaping () -> Bool = { true }) {
         self.resolution = resolution; self.backends = backends; self.privateBackend = privateBackend; self.role = role
         keychainGroup = resolution.chosen
         fullAccess = { nil }
+        fallbackAllowed = pasteboardFallbackAllowed
     }
     private func synchronized<T>(_ body: () -> T) -> T {
         #if canImport(UIKit)
@@ -127,20 +140,48 @@ public final class SessionStore: SessionStorage {
     }
     private func decode(_ data: Data?) -> Session? { data.flatMap { try? JSONDecoder().decode(Session.self, from: $0) } }
     public func read() -> Session? {
-        synchronized {
-            let sessions = backends.compactMap { decode($0.read("session").data) }
-            if let newest = sessions.max(by: { $0.updatedAt == $1.updatedAt ? $0.expiresAt < $1.expiresAt : $0.updatedAt < $1.updatedAt }) { return newest }
-            guard let session = decode(privateBackend.read("session").data) else { return nil }
-            if let data = try? JSONEncoder().encode(session), writeShared(data) { privateBackend.clear("session") }
-            return session
-        }
+        synchronized { reconcile() }
     }
     static func sharedBackendAvailable(group: String?, keychainOK: Bool, fileOK: Bool) -> Bool {
         group != nil && (keychainOK || fileOK)
     }
+    private func peerReport() -> SessionReport? {
+        let key = "report." + (role == .app ? "keyboard" : "app")
+        return backends.compactMap { $0.read(key).data.flatMap { try? JSONDecoder().decode(SessionReport.self, from: $0) } }.max { $0.timestamp < $1.timestamp }
+    }
+    private func normalSharing(_ peer: SessionReport?) -> Bool {
+        guard let peer else { return false }
+        return peer.stores.contains { store in
+            guard store.readable && store.writable else { return false }
+            switch store.name {
+            case "Keychain": return keychainGroup != nil && keychainGroup == peer.keychainGroupID
+            case "App-group file": return resolution.chosen != nil && resolution.chosen == peer.groupID
+            default: return false
+            }
+        }
+    }
+    private func usePasteboard() -> Bool {
+        let peer = peerReport()
+        return fallbackAllowed() && peer != nil && !normalSharing(peer)
+    }
+    private func reconcile() -> Session? {
+        let sessions = backends.compactMap { decode($0.read("session").data) }
+        let newest = sessions.max { $0.updatedAt == $1.updatedAt ? $0.expiresAt < $1.expiresAt : $0.updatedAt < $1.updatedAt } ?? decode(privateBackend.read("session").data)
+        if let newest, let data = try? JSONEncoder().encode(newest) {
+            if writeShared(data) { privateBackend.clear("session") }
+            else { _ = privateBackend.write(data, key: "session") }
+        } else if !usePasteboard() {
+            for backend in backends where backend.name == "Team pasteboard" { backend.clear("session") }
+        }
+        return newest
+    }
     private func writeShared(_ data: Data) -> Bool {
+        let allowed = usePasteboard()
         var saved = false
-        for backend in backends { if backend.write(data, key: "session") { saved = true } }
+        for backend in backends {
+            if backend.name == "Team pasteboard" && !allowed { backend.clear("session") }
+            else if backend.write(data, key: "session") { saved = true }
+        }
         return saved
     }
     public func write(_ session: Session) {
@@ -158,6 +199,7 @@ public final class SessionStore: SessionStorage {
     }
     public func diagnostics() -> SessionDiagnostics {
         synchronized {
+            _ = reconcile()
             let reportKey = "report." + role.rawValue
             let stores = backends.map { backend -> StoreHealth in
                 let value = backend.read("session")
@@ -167,9 +209,9 @@ public final class SessionStore: SessionStorage {
             }
             let report = SessionReport(role: role, timestamp: Date(), groupID: resolution.chosen, keychainGroupID: keychainGroup, stores: stores, fullAccess: fullAccess())
             if let data = try? JSONEncoder().encode(report) { for backend in backends { _ = backend.write(data, key: reportKey) } }
-            let peerKey = "report." + (role == .app ? "keyboard" : "app")
-            let peer = backends.compactMap { $0.read(peerKey).data.flatMap { try? JSONDecoder().decode(SessionReport.self, from: $0) } }.max { $0.timestamp < $1.timestamp }
-            return SessionDiagnostics(local: report, peer: peer)
+            let peer = peerReport()
+            let fallback = !fallbackAllowed() ? "off" : (usePasteboard() && stores.contains { $0.name == "Team pasteboard" && $0.hasSession } ? "in use" : "not needed")
+            return SessionDiagnostics(local: report, peer: peer, pasteboardFallback: fallback)
         }
     }
 }
@@ -180,7 +222,7 @@ public final class SettingsStore {
     private let lock = NSLock()
     private var cached: [String: Any] = [:]
     private var lastRead = Date.distantPast
-    private let keys = ["defaultAction", "translateTarget", "keyClicks", "autoCapitalization", "doubleSpacePeriod", "haptics"]
+    private let keys = ["defaultAction", "translateTarget", "keyClicks", "autoCapitalization", "doubleSpacePeriod", "haptics", "pasteboardFallback"]
     public init(group: String?, pasteboardAccessAllowed: @escaping () -> Bool = { true }) {
         defaults = group.flatMap(UserDefaults.init(suiteName:)) ?? .standard
         shared = NamedSessionPasteboard(namespace: "com.aram2k.gusan.settings", accessAllowed: pasteboardAccessAllowed)
@@ -251,6 +293,10 @@ public final class SettingsStore {
     public var haptics: Bool {
         get { preference("haptics") as? Bool ?? true }
         set { setPreference(newValue, key: "haptics") }
+    }
+    public var pasteboardFallback: Bool {
+        get { preference("pasteboardFallback") as? Bool ?? true }
+        set { setPreference(newValue, key: "pasteboardFallback") }
     }
 }
 
