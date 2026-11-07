@@ -142,12 +142,16 @@ public struct SmartActionClient {
     public func run(text: String, action: SmartAction, accessToken: String, target: String = "en") async throws -> String {
         let req = try request(text: text, action: action, accessToken: accessToken, target: target)
         do {
+            try Task.checkCancellation()
             let (data, response) = try await transport.data(for: req)
+            try Task.checkCancellation()
             guard let response = response as? HTTPURLResponse else { throw GusanError.invalidResponse }
             return try Self.parse(data, response: response)
-        } catch let error as GusanError { throw error }
-        catch let error as URLError { throw error.code == .timedOut ? GusanError.timeout : GusanError.network }
-        catch { throw GusanError.network }
+        } catch {
+            if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled { throw CancellationError() }
+            if let error = error as? GusanError { throw error }
+            throw (error as? URLError)?.code == .timedOut ? GusanError.timeout : GusanError.network
+        }
     }
     public static func parse(_ data: Data, response: HTTPURLResponse) throws -> String {
         switch response.statusCode {
