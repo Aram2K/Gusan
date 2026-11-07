@@ -116,28 +116,32 @@ def clean_title(raw):
     return s
 
 
+_NOTHING = {"none", "n/a", "na", "nothing", "no notes", "-", "tbd"}
+
+
 def derived_title(preview, words=DERIVED_WORDS):
     """A name for a meeting nobody named, taken from the first sentence of its notes ("The team discussed the
-    candidate's background in…"). Only for showing: it is never saved."""
+    candidate's background in…"). Only for showing: it is never saved. "None." (an empty section) is no name."""
     s = " ".join(str(preview or "").split())
-    if not s:
+    if not s or s.lower().strip("._*() ") in _NOTHING:
         return ""
     first = re.split(r"(?<=[.!?])\s", s, maxsplit=1)[0].rstrip(".!?:;, ")
     parts = first.split()
-    if not parts:
-        return ""
+    if len(parts) < 2 or len(first) < 8:
+        return ""                                   # "x", "OK": too little to name a meeting by
     if len(parts) > words:
         return " ".join(parts[:words]).rstrip(",;:- ") + "…"
     return " ".join(parts)
 
 
-def display_title(m):
+def display_title(m, fallback=None):
     """The name a list shows for a meeting (a dict of meeting_store.list_meetings): its title, or - for a placeholder -
-    a short name from its notes (``preview``), or "Untitled Meeting"."""
+    a short name from its notes (``preview``), or ``fallback`` ("Untitled Meeting" when not given: a list row says
+    the time on its own line; the notes page passes the stored "Live session 15:34")."""
     title = " ".join(str((m or {}).get("title") or "").split())
     if title and not is_placeholder(title):
         return title
-    return derived_title((m or {}).get("preview")) or UNTITLED
+    return derived_title((m or {}).get("preview")) or (" ".join(str(fallback or "").split()) or UNTITLED)
 
 
 def is_named(m):
