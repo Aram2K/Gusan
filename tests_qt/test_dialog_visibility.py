@@ -544,7 +544,7 @@ def _meeting_page(window, meetings_root):
 def test_the_delete_question_of_the_open_meeting(qapp, scheme, window, meetings_root, cards):
     page, _folder = _meeting_page(window, meetings_root)
     page.notes_view.delete()
-    assert len(cards) == 1 and cards[0].windowTitle() == "Delete “Live session 01:44”?"
+    assert len(cards) == 1 and cards[0].windowTitle() == "Delete “Meeting with Anna”?"     # the name the list shows
     readable(cards[0], "the founder's Delete question", minimum=4)
 
 

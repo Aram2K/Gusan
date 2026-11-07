@@ -1,5 +1,6 @@
-"""The Meetings list shows meetings by name, in sections by day: a real title as it is, a placeholder as a short name
-from its notes (never "Meeting · Tue 14:30" with the time shown a second time), the notes' first line under a named one."""
+"""The Meetings list shows meetings by name, in sections by day: a real title as it is, a placeholder as who it was
+with ("Meeting with Anna and David" - never "Meeting · Tue 14:30" with the time twice, never a sentence from the
+notes), and the notes' first line on the date line."""
 import json
 from datetime import datetime, timedelta
 
@@ -46,17 +47,18 @@ def test_the_list_has_a_header_per_stretch_of_time(shell, library):
     assert len(heads) == 3 and heads[2] not in ("Today", "Yesterday")          # one more for the old meeting
 
 
-def test_a_placeholder_is_shown_as_a_name_from_its_notes_and_never_the_time_twice(shell, library):
+def test_a_placeholder_is_shown_as_who_it_was_with_never_the_time_twice_nor_a_sentence(shell, library):
     win, _app = shell("pro")
     page = _open(win)
     ml = page.list_view.meetings
     assert _wait_for(lambda: len(ml.rows) == 4)
     first = ml.rows[0]
-    assert first.title_label.full_text() == "The team planned the launch of the new…"
+    assert first.title_label.full_text() == "Meeting with Anna and David"
     assert "Meeting ·" not in first.title_label.full_text()
-    assert first.when_label.full_text() == (datetime.now().replace(hour=11, minute=0).strftime("%H:%M"))
-    # nothing to go on (no notes): "Untitled Meeting", the date line says when
-    assert ml.rows[2].title_label.full_text() == "Untitled Meeting"
+    assert first.when_label.full_text() == "11:00 · The team planned the launch of the new website and agreed who writes the announcement."
+    # no notes either: who it was with, the date line says when
+    assert ml.rows[2].title_label.full_text() == "Meeting with Anna and David"
+    assert ml.rows[2].when_label.full_text() == "12:00"
 
 
 def test_a_named_meeting_keeps_its_name_and_gets_the_notes_first_line_under_it(shell, library):
@@ -99,7 +101,7 @@ def test_the_notes_page_shows_the_same_name_as_the_list(shell, library):
     ml = page.list_view.meetings
     assert _wait_for(lambda: len(ml.rows) == 4)
     ml.rows[0].click()
-    assert page.notes_view.title_label.text() == "The team planned the launch of the new…"
+    assert page.notes_view.title_label.text() == "Meeting with Anna and David"
 
 
 def test_a_name_the_ai_gave_shows_in_the_list_as_a_real_title(shell, meetings_root):
@@ -127,4 +129,4 @@ def test_past_sessions_show_a_real_title_before_the_first_question(meetings_root
     out = {s["dir"]: s["text"] for s in la.load_sessions()}
     assert out[str(named)] == "Pricing call with Acme"
     assert out[str(asked)] == "“Who owns it?”"
-    assert out[str(plain)].startswith("Interview with a backend candidate")
+    assert out[str(plain)] == "Meeting with Anna and David"

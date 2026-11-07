@@ -66,20 +66,29 @@ class TestCleanTitle(unittest.TestCase):
 
 class TestDisplay(unittest.TestCase):
     def test_a_real_title_is_shown_as_it_is(self):
-        self.assertEqual(mt.display_title({"title": "Weekly sync", "preview": "Whatever the notes say."}), "Weekly sync")
+        self.assertEqual(mt.display_title({"title": "Interview with BearingPoint", "attendees_list": ["Anna"]}),
+                         "Interview with BearingPoint")
 
-    def test_a_placeholder_is_shown_as_a_name_from_the_notes(self):
-        m = {"title": "Meeting · Tue 14:30",
-             "preview": "The team discussed the candidate's background in detail and agreed on next steps."}
-        self.assertEqual(mt.display_title(m), "The team discussed the candidate's background in detail\u2026")
+    def test_a_placeholder_is_shown_as_who_it_was_with_never_a_sentence_from_the_notes(self):
+        m = {"title": "Meeting · Tue 14:30", "preview": "The team discussed the candidate's background in detail."}
+        self.assertEqual(mt.display_title(dict(m, attendees_list=["Anna"])), "Meeting with Anna")
+        self.assertEqual(mt.display_title(dict(m, attendees_list=["Anna", "Marc"])), "Meeting with Anna and Marc")
+        self.assertEqual(mt.display_title(dict(m, attendees_list=["Anna", "Marc", "Li", "Sam"])),
+                         "Meeting with Anna, Marc +2")
+        self.assertEqual(mt.display_title(m), "Untitled Meeting")
 
-    def test_a_short_first_sentence_is_taken_whole(self):
-        self.assertEqual(mt.display_title({"title": "Untitled Meeting", "preview": "Demo moves to Thursday. More."}),
-                         "Demo moves to Thursday")
+    def test_a_live_assistant_session_says_so(self):
+        self.assertEqual(mt.display_title({"title": "Live session 15:34"}), "Live Assistant session")
+        self.assertEqual(mt.display_title({"title": "Untitled Meeting", "source": "live_assist"}), "Live Assistant session")
 
-    def test_nothing_to_go_on_is_untitled(self):
-        self.assertEqual(mt.display_title({"title": "Meeting · Tue 14:30"}), "Untitled Meeting")
+    def test_nothing_to_go_on_is_untitled_or_the_callers_fallback(self):
         self.assertEqual(mt.display_title({}), "Untitled Meeting")
+        self.assertEqual(mt.display_title({"title": "Meeting · Tue 14:30"}, fallback="Recording"), "Recording")
+
+    def test_the_prompt_asks_for_a_calendar_style_name(self):
+        self.assertIn("Interview with BearingPoint", mt.TITLE_INSTRUCTION)
+        self.assertIn("not a sentence", mt.TITLE_INSTRUCTION)
+        self.assertIn("not a sentence", mt.LOCAL_TITLE_INSTRUCTION)
 
 
 NOW = datetime(2026, 11, 7, 18, 0)          # a Saturday

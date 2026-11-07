@@ -1955,9 +1955,9 @@ class MeetingRow(QAbstractButton):
         top.setSpacing(8)
         if new:
             top.addWidget(dot_label("blue", 7, self), 0, Qt.AlignVCenter)
-        # The name: the title (the person's, the calendar's, or the AI's from the notes); for a meeting still called
-        # "Meeting · Tue 14:30" a short name from its notes - never the time twice.
-        title = meeting_titles.display_title(m)
+        # The name: the title (the person's, the calendar's, or the AI's from the notes); while a meeting still has
+        # the app's "Meeting · Tue 14:30", who it was with ("Meeting with Anna") - never the time twice, never a sentence.
+        title = meeting_titles.display_title(m, me=page.me())
         self.title_label = ElidedLabel(title, self)
         self.title_label.setFont(theme.font(14.5, 700 if new else 600))
         self.title_label.setProperty("mtone", "ink")
@@ -1969,7 +1969,7 @@ class MeetingRow(QAbstractButton):
         when = (meeting_titles.when_text(dt, now, grouped) if dt is not None
                 else fmt_when(m.get("started") or m.get("timestamp")))
         full_when = (meeting_titles.when_text(dt, now, False) if dt is not None else when)
-        about = (m.get("preview") or "") if meeting_titles.is_named(m) else ""
+        about = m.get("preview") or ""
         self.when_label = ElidedLabel(" · ".join(x for x in (when, about) if x), self)
         self.when_label.setFont(theme.font(12.5, 400))
         self.when_label.setProperty("mtone", "muted")

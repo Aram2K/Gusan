@@ -226,7 +226,7 @@ def test_opening_a_45_minute_meeting_keeps_the_window_alive(qapp, meetings_root,
             pump(0.6)
         pump(0.5)
     view = page.notes_view
-    assert view.title_label.text() == "We ship Friday"     # "Live session 10:31" is named from its notes (meeting_titles)
+    assert view.title_label.text() == "Meeting with Anna and David"   # until the AI names it (meeting_titles)
     assert "Speaker 1" in view.transcript.toPlainText()
     assert len(view.my_notes.toPlainText()) > 500
     assert abs(view.audio_player.duration_ms - 45 * 60 * 1000) < 2000

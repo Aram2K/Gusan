@@ -57,7 +57,7 @@ DETAIL_MANY = "Their notes, transcripts, recordings and speaker names are remove
 def meeting_title(m):
     """The name the question uses: the one the list row and the notes page show (meeting_titles.display_title)."""
     m = m or {}
-    shown = m.get("display_title") or meeting_titles.display_title(m, fallback=m.get("title"))
+    shown = m.get("display_title") or meeting_titles.display_title(m)
     return " ".join(str(shown or "").split()) or "Untitled meeting"
 
 
