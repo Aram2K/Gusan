@@ -1994,14 +1994,21 @@ class MeetingRow(QAbstractButton):
         self.deleting_label.hide()                    # takes the chip's place while the folder goes
         chip_box.addWidget(self.deleting_label)
         lay.addWidget(holder)
+        # A row with no status chip or no people gives that room to its title and notes line (empty columns used to
+        # cut the title short beside blank space).
+        self.chip_holder = holder
+        self._has_chip = bool(chip_text)
+        holder.setVisible(self._has_chip)
         faces_box = QWidget(self)
         faces_box.setFixedWidth(64)
         fb = QHBoxLayout(faces_box)
         fb.setContentsMargins(0, 0, 0, 0)
         fb.addStretch(1)
-        people = m.get("attendees_list") or []
+        people = [p for p in (m.get("attendees_list") or []) if str(p or "").strip()]
         fb.addWidget(Faces(people, 24, me=page.me(), parent=faces_box), 0, Qt.AlignVCenter)
         lay.addWidget(faces_box)
+        self.faces_box = faces_box
+        faces_box.setVisible(bool(people))
         length = fmt_duration(m.get("duration_sec")) if m.get("duration_sec") else ""
         self.length_label = tlabel(length, 13, 400, "text2", parent=self, tabular=True)
         self.length_label.setFixedWidth(72)               # "1 h 05 min" fits (it was cut to "h 05 min")
@@ -2112,6 +2119,7 @@ class MeetingRow(QAbstractButton):
             self.check.setChecked(False)
         for chip in self.findChildren(Chip):
             chip.setVisible(not on)
+        self.chip_holder.setVisible(on or self._has_chip)       # "Deleting…" takes the chip's place
         self.deleting_label.setVisible(on)
         self.setEnabled(not on)
         self.trash.setEnabled(not on and not self._blocked)

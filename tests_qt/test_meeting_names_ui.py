@@ -130,3 +130,16 @@ def test_past_sessions_show_a_real_title_before_the_first_question(meetings_root
     assert out[str(named)] == "Pricing call with Acme"
     assert out[str(asked)] == "“Who owns it?”"
     assert out[str(plain)] == "Meeting with Anna and David"
+
+
+def test_a_row_with_no_chip_and_no_people_gives_that_room_to_its_title(shell, meetings_root):
+    _meeting(meetings_root, _name(datetime.now() - timedelta(hours=1)), "Data Analyst Opportunity Call with Ònova Life",
+             notes=NOTES_PLAN, attendees="", seen=True)
+    win, _app = shell("pro")
+    page = _open(win)
+    ml = page.list_view.meetings
+    assert _wait_for(lambda: len(ml.rows) == 1)
+    row = ml.rows[0]
+    assert not row.chip_holder.isVisibleTo(row) and not row.faces_box.isVisibleTo(row)
+    row.set_deleting(True)
+    assert row.chip_holder.isVisibleTo(row) and row.deleting_label.isVisibleTo(row)   # "Deleting…" still shows
