@@ -25,6 +25,8 @@ final class VoiceKeyController: NSObject {
     private let waveform = VoiceWaveform()
     private let label = UILabel()
     private let undoButton = UIButton(type: .system)
+    private let copyButton = UIButton(type: .system)
+    private let reviewButton = UIButton(type: .system)
     private var observer: DarwinObserver?
     private var timer: Timer?
     private var visible = false
@@ -36,6 +38,7 @@ final class VoiceKeyController: NSObject {
     private var original = ""
     private var undoContext: VoiceContext?
     private var localMessage: String?
+    private var reviewResult: String?
     init(host: UIInputViewController, store: SessionStore) {
         self.host = host; self.store = store
         channel = VoiceChannel(container: store.resolution.container, group: store.resolution.chosen ?? "group.com.aram2k.gusan")
@@ -47,10 +50,19 @@ final class VoiceKeyController: NSObject {
         micButton.addTarget(self, action: #selector(tap), for: .touchUpInside)
         label.font = .systemFont(ofSize: 12); label.numberOfLines = 2
         undoButton.setTitle("Undo", for: .normal); undoButton.addTarget(self, action: #selector(undo), for: .touchUpInside); undoButton.isHidden = true
+        copyButton.setTitle("Copy", for: .normal); copyButton.accessibilityLabel = "Copy voice result"
+        copyButton.addTarget(self, action: #selector(copyResult), for: .touchUpInside)
+        reviewButton.setTitle("View", for: .normal); reviewButton.accessibilityLabel = "Review voice result"
+        reviewButton.addTarget(self, action: #selector(viewResult), for: .touchUpInside)
+        for button in [copyButton, reviewButton] {
+            button.isHidden = true
+            button.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+            button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        }
         waveform.setContentHuggingPriority(.required, for: .horizontal)
         undoButton.setContentHuggingPriority(.required, for: .horizontal)
         bar.spacing = 8; bar.alignment = .center
-        [waveform, label, undoButton].forEach { bar.addArrangedSubview($0) }
+        [waveform, label, undoButton, reviewButton, copyButton].forEach { bar.addArrangedSubview($0) }
         bar.isHidden = true
     }
     func appear() {
@@ -60,7 +72,7 @@ final class VoiceKeyController: NSObject {
         refresh()
     }
     func toggle() { tap() }
-    func dismiss() { inserted = nil; localMessage = nil; undoButton.isHidden = true; refresh() }
+    func dismiss() { inserted = nil; localMessage = nil; clearReview(); undoButton.isHidden = true; refresh() }
     func disappear() { visible = false; observer = nil; timer?.invalidate(); timer = nil }
     private func currentContext() -> VoiceContext? {
         guard let proxy = host?.textDocumentProxy else { return nil }
@@ -90,7 +102,7 @@ final class VoiceKeyController: NSObject {
         pending = KeyboardVoiceState(requestID: UUID(), context: currentContext())
         do { try channel.write(keyboard: pending) }
         catch { show(error.localizedDescription); return false }
-        inserted = nil; undoButton.isHidden = true
+        inserted = nil; clearReview(); undoButton.isHidden = true
         return send(.start, id: requestID, context: context)
     }
     private func restorePending() { if let saved = channel.readKeyboardState() { pending = saved } }
@@ -127,7 +139,7 @@ final class VoiceKeyController: NSObject {
         default: message = nil
         }
         label.text = localMessage ?? message
-        bar.isHidden = label.text == nil && inserted == nil
+        bar.isHidden = label.text == nil && inserted == nil && reviewResult == nil
     }
     private func deliver(_ status: VoiceStatus) {
         guard let id = requestID else { return }
@@ -136,13 +148,41 @@ final class VoiceKeyController: NSObject {
         catch { pending.insertedID = nil; show(error.localizedDescription); return }
         guard !pending.isStale(status: status) else { return }
         guard let result = status.result, !result.isEmpty, let context, let current = currentContext(), let proxy = host?.textDocumentProxy else {
-            if let result = status.result { UIPasteboard.general.string = result; show("Text changed — result copied, paste it") }; return
+            if let result = status.result { offerResult(result) }; return
         }
         if !pending.canInsert(context: current) {
-            UIPasteboard.general.string = result; show("Text changed — result copied, paste it"); return
+            offerResult(result); return
         }
         proxy.insertText(result)
         inserted = result; original = context.selected; undoContext = currentContext(); undoButton.isHidden = false
+    }
+    private func clearReview() { reviewResult = nil; copyButton.isHidden = true; reviewButton.isHidden = true }
+    private func offerResult(_ result: String) {
+        guard !result.isEmpty else { return }
+        reviewResult = result; copyButton.isHidden = false; reviewButton.isHidden = false
+        show("Text changed. Review result.")
+    }
+    @objc private func copyResult() {
+        guard let reviewResult else { return }
+        UIPasteboard.general.string = reviewResult
+        show("Result copied")
+    }
+    @objc private func viewResult() {
+        guard let result = reviewResult, let host else { return }
+        let alert = UIAlertController(title: "Voice result", message: result, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Copy", style: .default) { [weak self] _ in self?.copyResult() })
+        if let expected = currentContext(), let documentID = context?.documentID, !documentID.isEmpty, expected.documentID == documentID, expected.selected.isEmpty {
+            alert.addAction(UIAlertAction(title: "Insert at cursor", style: .default) { [weak self] _ in
+                guard let self, self.currentContext() == expected, let proxy = self.host?.textDocumentProxy else {
+                    self?.show("Text changed. Review result."); return
+                }
+                proxy.insertText(result)
+                self.inserted = result; self.original = ""; self.undoContext = self.currentContext()
+                self.clearReview(); self.undoButton.isHidden = false; self.show("Done")
+            })
+        }
+        alert.addAction(UIAlertAction(title: "Close", style: .cancel))
+        host.present(alert, animated: true)
     }
     @objc private func undo() {
         guard let inserted, let expected = undoContext, currentContext() == expected, expected.selected.isEmpty, let proxy = host?.textDocumentProxy else {

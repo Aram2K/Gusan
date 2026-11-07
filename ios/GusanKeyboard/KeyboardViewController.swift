@@ -83,7 +83,7 @@ final class KeyboardViewController: UIInputViewController {
         super.viewWillLayoutSubviews()
         let width = view.bounds.width
         toolbar.frame = CGRect(x: 0, y: 0, width: width, height: 44)
-        voice.bar.frame = CGRect(x: 50, y: 5, width: max(0, width - 100), height: 34)
+        voice.bar.frame = CGRect(x: 50, y: 0, width: max(0, width - 100), height: 44)
         let extra: CGFloat = surface == .instruction ? 74 : 0
         instructionHeader.frame = CGRect(x: 0, y: 44, width: width, height: extra)
         keyArea.frame = CGRect(x: 0, y: 44 + extra, width: width, height: max(0, view.bounds.height - 44 - extra))
