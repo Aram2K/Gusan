@@ -95,7 +95,7 @@ def test_server_contract():
         assert name in src
     assert '["Linkup_web", "LINKUP_API_KEY", "LINKUP_KEY", "LINKUP_TOKEN"]' in src
     assert 'body.web_search === true' in src
-    assert 'AbortSignal.timeout(LINKUP_TIMEOUT_MS)' in src
+    assert 'AbortSignal.timeout(limits.ms)' in src and 'fast: { ms: LINKUP_TIMEOUT_MS' in src   # per depth (fast: the setting)
     assert 'catch { results = []; }' in src
     assert 'AbortSignal.timeout(ms)' in src
     assert '"Access-Control-Expose-Headers": "X-Web-Sources, X-Answer-Family"' in src
@@ -541,3 +541,53 @@ def test_classifier_live_discovery_deno(tmp_path):
     assert classifier[0]["body"]["model"] == "gpt-5.4-nano"
     assert next(c for c in backup["calls"] if "linkup.so" in c["url"])["body"]["q"] == "Acme size"
     assert any('"source":"model"' in line for line in backup["logs"])
+
+
+# ── how deep: the person's words decide (2026-11-07) ─────────────────────────────────────────
+@pytest.mark.parametrize("text,mode,depth", [
+    ("do a deep search on the EU AI act fines", "smart_auto", "deep"),
+    ("research the best CRM for a 10 person team", "smart_auto", "deep"),
+    ("look up the euro dollar rate in depth", "live_assist", "deep"),
+    ("quick search the weather in Paris", "smart_auto", "fast"),
+    ("just check online if the store is open", "smart_auto", "fast"),
+    ("look up the euro dollar rate", "smart_auto", "standard"),
+    ("look up the euro dollar rate", "live_assist", "fast"),
+])
+def test_the_depth_follows_what_the_person_says(text, mode, depth):
+    assert web_sources.search_depth(text, mode) == depth
+
+
+def test_do_a_search_on_is_a_search_request():
+    assert web_sources.smart_search_wanted("do a deep search on the EU AI act fines")
+    assert web_sources.smart_search_wanted("please run a quick web search about train strikes")
+    assert not web_sources.smart_search_wanted("do the research part of the report")      # dictation, not a command
+
+
+def test_the_depth_patterns_are_the_servers():
+    source = SERVER.read_text(encoding="utf-8")
+    assert re.search(r"const DO_SEARCH = /(.+?)/i;", source).group(1) == web_sources.SMART_DO_SEARCH
+    assert re.search(r"const DEEP_SEARCH = /(.+?)/i;", source).group(1) == web_sources.DEEP_SEARCH
+    assert re.search(r"const QUICK_SEARCH = /(.+?)/i;", source).group(1) == web_sources.QUICK_SEARCH
+
+
+def test_the_server_gives_each_depth_its_time_pages_and_reading_and_the_answer_its_own_budget():
+    source = SERVER.read_text(encoding="utf-8")
+    assert "standard: { ms: 6000, results: 6, chars: 1500 }" in source
+    assert "deep: { ms: 60000, results: 8, chars: 1500 }" in source
+    assert "body: JSON.stringify({ q: query, depth, outputType: \"searchResults\", maxResults: limits.results })" in source
+    assert "signal: AbortSignal.timeout(limits.ms)" in source
+    sources_at = source.index("const sources = web.results.map(")
+    assert source.index("const startedAt = Date.now();", sources_at) > sources_at   # the answer's clock starts after
+    # the AI check: GPT-5.4 nano first, no wait for the self-hosted model's discovery, 0.7 s
+    assert "const route = OPENAI_KEY ? openaiRoute(OPENAI_LIVE_MODEL" in source
+    assert "const knownLiveModel = !OPENAI_KEY && LIVE_URL" in source
+    assert 'Deno.env.get("LINKUP_DECIDE_TIMEOUT_MS") || "700"' in source
+
+
+def test_a_deep_search_waits_up_to_two_minutes_and_the_pill_says_researching():
+    import pill_copy
+    assert action_api._web_timeout(True, "do a deep search on X", "smart_auto", 45) == 120
+    assert action_api._web_timeout(True, "look up X", "smart_auto", 45) == 45
+    assert action_api._web_timeout(False, "do a deep search on X", "smart_auto", 45) == 45
+    _t, sub = pill_copy._writing(None, "", {"writer": "Gusan Cloud", "web": "deep"}, 0.3)
+    assert sub == "Researching the web · Gusan Cloud"

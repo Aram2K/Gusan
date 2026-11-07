@@ -712,6 +712,22 @@ def sanitize_web_sources(rows):
     return sources
 
 
+DEEP_SEARCH_TIMEOUT_S = 120      # an answer after a deep web search (the server gives the search 60 s)
+
+
+def _web_timeout(web_search, web_query, mode, default):
+    """How long to wait for Gusan Cloud: longer when this request will do a deep web search."""
+    if not web_search:
+        return default
+    try:
+        import web_sources
+        if web_sources.search_depth(web_query, mode) == "deep":
+            return max(default, DEEP_SEARCH_TIMEOUT_S)
+    except Exception:
+        pass
+    return default
+
+
 # The modes Gusan Cloud may search the web for (Linkup, on the server): Live Assistant answers, "Ask about this meeting",
 # and Smart Actions (with or without a selection) - each only when the person turned it on.
 WEB_SEARCH_MODES = ("live_assist", "meeting_chat", "smart_auto", "smart_selection")
@@ -746,7 +762,7 @@ def run_managed_action(text, mode, token, source_lang="auto", target_lang="en",
             SMART_ACTION_URL,
             json=body,
             headers={"Authorization": f"Bearer {token}"},
-            timeout=45,
+            timeout=_web_timeout(web_search, web_query, mode, 45),
         )
     try:
         resp = _post(openai_messages_with_image(messages, image_b64))

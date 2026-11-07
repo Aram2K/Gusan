@@ -34,6 +34,24 @@ _TRAILING_RE = re.compile(SMART_TRAILING_WEB, re.I)
 _ASK_TRAILING_RE = re.compile(SMART_ASK_TRAILING, re.I)
 _POLITE_RE = re.compile(SMART_POLITE, re.I)
 _LIVE_RE = re.compile(SMART_LIVE, re.I)
+# "Do a deep search on X": a search request whatever its depth word; how deep follows the person's own words
+# (the server's DO_SEARCH / DEEP_SEARCH / QUICK_SEARCH).
+SMART_DO_SEARCH = '^(?:(?:please|(?:can|could|would)\\s+you)\\s+)*(?:do|run|make)\\s+(?:an?\\s+)?(?:(?:deep|quick|fast|thorough|full|proper|detailed|web|online|internet)\\s+)*(?:web\\s+|online\\s+|internet\\s+)?(?:search|research|lookup)\\s+(?:on|about|for|into|of)\\s+'
+DEEP_SEARCH = '\\b(?:deep(?:ly)?\\s+(?:web\\s+)?(?:search|research|dive|look)|research(?:ing)?|in[- ]depth|thorough(?:ly)?|comprehensive(?:ly)?|recherche\\s+approfondie|investigaci[oó]n\\s+(?:a\\s+fondo|profunda)|gr[uü]ndliche?\\s+(?:suche|recherche))\\b'
+QUICK_SEARCH = '\\b(?:quick(?:ly)?\\s+(?:web\\s+)?(?:search|look|check)|just\\s+(?:check|google|look\\s+up)|recherche\\s+rapide|b[uú]squeda\\s+r[aá]pida|schnelle\\s+suche)\\b'
+_DO_RE = re.compile(SMART_DO_SEARCH, re.I)
+_DEEP_RE = re.compile(DEEP_SEARCH, re.I)
+_QUICK_RE = re.compile(QUICK_SEARCH, re.I)
+
+
+def search_depth(text, mode="smart_auto"):
+    """"deep" / "fast" / "standard": how deep the server will look for this request (Live answers default to fast)."""
+    q = str(text or "")
+    if _DEEP_RE.search(q):
+        return "deep"
+    if _QUICK_RE.search(q):
+        return "fast"
+    return "standard" if mode in ("smart_auto", "smart_selection") else "fast"
 
 
 def smart_search_wanted(text):
@@ -42,6 +60,6 @@ def smart_search_wanted(text):
     if len(q) < 8:
         return False
     command = _POLITE_RE.sub("", q).strip()
-    if _ASK_RE.search(command) or (_TRAILING_RE.search(command) and _ASK_TRAILING_RE.search(command)):
+    if _DO_RE.search(q) or _ASK_RE.search(command) or (_TRAILING_RE.search(command) and _ASK_TRAILING_RE.search(command)):
         return True
     return bool(_LIVE_RE.search(q))
