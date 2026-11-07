@@ -235,9 +235,12 @@ final class KeyboardViewController: UIInputViewController {
             if surface != .instruction { showTyping() }
             showMessage("Sign in to use Gusan", detail: store.diagnostics().summary, accessory: "Sign in"); return
         }
-        if !settings.privacyMode, let request = action.agentRequest(contextText: context.text), let intent = AgentIntent.detect(request) {
+        if !agent.consumeSkip(), !settings.privacyMode, let request = action.agentRequest(contextText: context.text), let intent = AgentIntent.detect(request) {
             instructionContext = nil; instruction = ""; showTyping()
-            agent.start(intent, context: AgentIntent.referencesDraft(intent.instruction) ? context.text : ""); return
+            agent.propose(intent, context: AgentIntent.referencesDraft(intent.instruction) ? context.text : "", fallback: { [weak self] in
+                self?.agent.skipDetectionOnce = true; self?.run(action, context: context)
+            })
+            return
         }
         #if DEBUG
         if store.read()?.accessToken == "gusan-debug-no-network" {

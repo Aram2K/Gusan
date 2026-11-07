@@ -50,12 +50,27 @@ final class AgentKeyboardController {
         card.onDismiss = { [weak self] in self?.dismiss() }
         card.onMinimise = { [weak self] in self?.hide() }
         card.onRetry = { [weak self] in self?.retry() }
+        card.onRun = { [weak self] in guard let self, let proposal = self.proposal else { return }; self.proposal = nil; self.start(proposal.intent, context: proposal.context) }
+        card.onEditInstead = { [weak self] in guard let self, let proposal = self.proposal else { return }; self.proposal = nil; self.dismiss(); proposal.fallback() }
         card.isHidden = true
     }
 
-    var isActive: Bool { task != nil || error != nil }
+    var isActive: Bool { task != nil || error != nil || proposal != nil }
+    private var proposal: (intent: AgentIntent, context: String, fallback: () -> Void)?
+    /// Set by the "Edit text instead" fallback so the host runs the instruction as a plain Smart action once.
+    var skipDetectionOnce = false
+    func consumeSkip() -> Bool { defer { skipDetectionOnce = false }; return skipDetectionOnce }
+
+    /// Shows what was decided before anything starts: "Run as an agent task?" with Run / Edit text instead.
+    func propose(_ intent: AgentIntent, context: String, fallback: @escaping () -> Void) {
+        job?.cancel(); pending = nil; task = nil; error = nil
+        proposal = (intent, context, fallback)
+        show()
+        card.render(.proposal(intent))
+    }
     /// One line for the toolbar while the card replaces the keys.
     var toolbarStatus: String {
+        if proposal != nil { return "Run as an agent task?" }
         if error != nil { return "Agent task didn't start" }
         guard let task else { return "Agent task" }
         switch task.status {
@@ -163,7 +178,7 @@ final class AgentKeyboardController {
     }
 
     private func dismiss() {
-        job?.cancel(); job = nil; pending = nil
+        job?.cancel(); job = nil; pending = nil; proposal = nil
         if let service, let task, task.status.isTerminal, task.seenAt == nil { Task { try? await service.markSeen(task.id) } }
         task = nil; error = nil
         tracker.activeTaskID = nil
@@ -260,7 +275,9 @@ final class AgentKeyboardController {
 /// Compact card that replaces the keys: progress, confirmation, result or error. Every control is
 /// at least 44pt tall; VoiceOver gets labels, hints and announcements.
 final class AgentCardView: UIView {
-    enum State { case empty, task(AgentTask), failed(message: String, retryable: Bool) }
+    enum State { case empty, proposal(AgentIntent), task(AgentTask), failed(message: String, retryable: Bool) }
+    var onRun: (() -> Void)?
+    var onEditInstead: (() -> Void)?
     /// Height the card really gets in the keyboard: the 260pt keyboard minus the 44pt toolbar.
     static let keyboardHeight: CGFloat = 216
 
@@ -363,6 +380,16 @@ final class AgentCardView: UIView {
         switch state {
         case .empty:
             title.text = nil; status.text = nil; body.text = nil; icon.image = nil; spinner.stopAnimating()
+        case .proposal(let intent):
+            icon.image = UIImage(systemName: "sparkles"); icon.tintColor = KeyboardTheme.blue; icon.isHidden = false
+            spinner.stopAnimating()
+            title.text = intent.title
+            status.text = intent.mode == .research ? "Run as an agent task? Research · read-only" : "Run as an agent task? Do-it · asks before acting"
+            body.text = intent.mode == .research
+                ? "A Gusan agent would browse the web and report back. It never submits, buys or sends anything. Your text is not sent unless the request refers to it."
+                : "A Gusan agent would carry this out on the web, but it stops and asks you before anything is submitted, bought or sent."
+            buttons = [(secondary, "Edit text instead", false), (primary, "Run", true)]
+            announce = "Run as an agent task? " + intent.title
         case .failed(let message, let retryable):
             icon.image = UIImage(systemName: "exclamationmark.triangle.fill"); icon.tintColor = theme.danger
             icon.isHidden = false
@@ -436,6 +463,8 @@ final class AgentCardView: UIView {
         case "Confirm", "Confirm again": return "Lets the agent take exactly the action described"
         case "Cancel", "Cancel task": return "Stops the task; nothing is submitted"
         case "Retry", "Run again": return "Starts the same request again"
+        case "Run": return "Starts the agent task"
+        case "Edit text instead": return "Treats the instruction as a text edit of the shown text"
         case "Insert": return "Pastes the first paragraph of the result at the cursor; Undo appears in the status bar"
         case "Open in app": return "Shows the full result in the Gusan app"
         default: return "Closes this card"
@@ -474,6 +503,8 @@ final class AgentCardView: UIView {
         switch sender.currentTitle {
         case "Confirm", "Confirm again": if Date() >= confirmArmedAt { onConfirm?() }
         case "Retry", "Run again": onRetry?()
+        case "Run": onRun?()
+        case "Edit text instead": onEditInstead?()
         case "Cancel", "Cancel task": onCancel?()
         case "Insert": onInsert?()
         case "Open in app": onOpenApp?()
