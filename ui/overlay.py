@@ -1631,20 +1631,24 @@ class Overlay(QWidget):
     _WAVE_ENV = (0.62, 0.85, 1.0, 0.85, 0.62)     # the middle bars reach highest
 
     def _icon_web(self, p, cx, cy, pal, col, t):
-        """Searching the web: a small globe turning - two meridians a quarter turn apart sweep across. Neither ever
-        gets as wide as the outline or as thin as a line, so it always reads as a globe (one meridian alone, at the
-        outline, left a circle and a bar: a "no entry" sign)."""
+        """Searching the web: a small globe spinning - its meridians (every 60 degrees of longitude) travel across the
+        front from the left edge to the right one, like a real globe turning; the outline and the equator stay."""
         r = 7.0
         p.setBrush(Qt.NoBrush)
         p.setPen(self._pen(col, 1.5))
         p.drawEllipse(QPointF(cx, cy), r, r)
         p.drawLine(QPointF(cx - r, cy), QPointF(cx + r, cy))
-        if t is None:
-            p.drawEllipse(QPointF(cx, cy), r * 0.45, r)
-            return
-        phase = t * 2.0 * math.pi / 2.4                 # one turn in 2.4 s
-        for k in (0.0, math.pi / 2.0):
-            p.drawEllipse(QPointF(cx, cy), r * (0.2 + 0.6 * abs(math.sin(phase + k))), r)
+        spin = 0.0 if t is None else math.radians((t * 60.0) % 60.0)     # 60 degrees a second
+        for k in range(-1, 3):
+            lon = math.radians(-90.0 + 30.0 + 60.0 * k) + spin           # the front half: -90 .. 90 degrees
+            if not -math.pi / 2.0 < lon < math.pi / 2.0:
+                continue
+            w = r * math.sin(lon)                                       # a meridian seen from the front: half an ellipse
+            if abs(w) < 0.35:
+                p.drawLine(QPointF(cx + w, cy - r), QPointF(cx + w, cy + r))
+                continue
+            box = QRectF(cx - abs(w), cy - r, 2.0 * abs(w), 2.0 * r)
+            p.drawArc(box, (-90 if w > 0 else 90) * 16, 180 * 16)
 
     def _icon_wave(self, p, cx, cy, pal, col, t):
         """Transcribing: five small voice bars - the same upright bars as the
