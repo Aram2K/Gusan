@@ -11,6 +11,7 @@ struct PlaygroundCard: View {
             Text("Try Gusan").font(.title2).bold()
             Text("Select text → tap the Gusan button → pick an action, or type an instruction.").font(.subheadline).foregroundStyle(.secondary)
             TextEditor(text: $text).font(.body).frame(minHeight: 120).focused($focused)
+                .onAppear { if ProcessInfo.processInfo.arguments.contains("--gusan-focus-playground") { focused = true } }
                 .padding(8).background(Theme.surface, in: RoundedRectangle(cornerRadius: 14)).scrollContentBackground(.hidden)
                 .accessibilityLabel("Try the Gusan keyboard").accessibilityHint("Select some text, then open Gusan actions in the keyboard")
             Text(model.diagnostics?.peer.map { $0.timestamp >= focusedAt } == true ? "Gusan is connected." : "Use the globe key to switch to Gusan.").font(.footnote).foregroundStyle(.secondary)

@@ -44,6 +44,7 @@ final class AppModel: NSObject, ObservableObject, ASWebAuthenticationPresentatio
         showingOnboarding = !UserDefaults.standard.bool(forKey: "onboardingComplete")
         #if DEBUG
         if args.contains("--gusan-skip-onboarding") { showingOnboarding = false }
+        if let index = args.firstIndex(of: "--gusan-keyboard-agent-demo"), args.indices.contains(index + 1) { UIPasteboard(name: UIPasteboard.Name("gusan.debug.agentDemo"), create: true)?.string = args[index + 1] }
         if let index = args.firstIndex(of: "--gusan-open-task"), args.indices.contains(index + 1) { selectedTab = .activity; pendingTaskID = UUID(uuidString: args[index + 1]) }
         if let index = args.firstIndex(of: "--gusan-onboarding-step"), args.indices.contains(index + 1), let number = Int(args[index + 1]), let step = OnboardingStep(rawValue: number) {
             onboardingStep = step; showingOnboarding = true

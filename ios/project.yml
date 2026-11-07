@@ -16,7 +16,7 @@ targets:
   Gusan:
     type: application
     platform: iOS
-    sources: [Gusan]
+    sources: [Gusan, GusanKeyboard/AgentKeyboard.swift, GusanKeyboard/KeyboardTheme.swift]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.aram2k.gusan

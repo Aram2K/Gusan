@@ -22,6 +22,8 @@ final class AgentKeyboardController {
     /// Toolbar status while the card is minimised: (message, accessory title). nil clears it.
     var onStatus: ((String?, String?) -> Void)?
     var onSurfaceChange: (() -> Void)?
+    /// Set by the host: opens the containing app (keyboard extensions cannot call UIApplication).
+    var onOpenApp: ((URL) -> Void)?
     private(set) var showingCard = false
 
     private let store: SessionStore
@@ -54,8 +56,9 @@ final class AgentKeyboardController {
     func appear() {
         visible = true
         #if DEBUG
-        if task == nil, let demo = (UserDefaults(suiteName: store.resolution.chosen) ?? .standard).string(forKey: "gusan.debug.agentDemo"), let intent = AgentIntent.detect(demo) {
-            (UserDefaults(suiteName: store.resolution.chosen) ?? .standard).removeObject(forKey: "gusan.debug.agentDemo")
+        // Simulator screenshots: the app seeds a demo instruction on a named pasteboard (`--gusan-keyboard-agent-demo`).
+        if task == nil, let board = UIPasteboard(name: UIPasteboard.Name("gusan.debug.agentDemo"), create: false), let demo = board.string, let intent = AgentIntent.detect(demo) {
+            board.string = ""
             start(intent, context: ""); return
         }
         #endif
@@ -114,7 +117,7 @@ final class AgentKeyboardController {
 
     private func openApp() {
         guard let id = task?.id else { return }
-        (host as? KeyboardViewController)?.openContainingApp(URL(string: "gusan://task?id=\(id.uuidString.lowercased())")!)
+        onOpenApp?(URL(string: "gusan://task?id=\(id.uuidString.lowercased())")!)
     }
 
     private func dismiss() {

@@ -69,6 +69,7 @@ final class KeyboardViewController: UIInputViewController {
         }
         view.addSubview(agent.card)
         agent.onSurfaceChange = { [weak self] in self?.updateSurface() }
+        agent.onOpenApp = { [weak self] in self?.openContainingApp($0) }
         agent.onStatus = { [weak self] text, accessory in
             guard let self else { return }
             if let text { self.showMessage(text, accessory: accessory) } else if self.accessory == "View" || self.message == nil { self.message = nil; self.accessory = nil; self.updateContext() }
