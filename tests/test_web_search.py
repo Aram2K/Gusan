@@ -99,6 +99,9 @@ def test_server_contract():
     assert '"Access-Control-Expose-Headers": "X-Web-Sources, X-Answer-Family"' in src
     assert 'encodeURIComponent(JSON.stringify(sources))' in src
     assert 'JSON.stringify({ text, sources })' in src
+    for cue in ("exchange rate", "interest rate", "inflation", "forecast", "market cap"):
+        assert cue in src
+    assert 'liveData.test(q)' in src
 
 
 def test_heuristic_runtime(tmp_path):
@@ -113,7 +116,13 @@ def test_heuristic_runtime(tmp_path):
              "What happened in 2024?": True, "look up the weather today": True,
              "What should I say now?": False, "Can you summarize the current discussion?": False,
              "Please search our discussion": False, "What's the latest iPhone price?": True,
-             "Who is the CEO of Linkup?": True, "Search the web for Acme": True}
+             "Who is the CEO of Linkup?": True, "Search the web for Acme": True,
+             "What's the current USD/EUR exchange rate?": True,
+             "What is the interest rate?": True, "Tell me about inflation": True,
+             "What is the forecast?": True, "What is Apple's market cap?": True,
+             "What is the current server status?": True,
+             "Who is the current US president?": True,
+             "Can you summarize the current project discussion?": False}
     script = tmp_path / "heuristic.mts"
     script.write_text(fn + "\nconsole.log(JSON.stringify(" + json.dumps(list(cases)) + ".map(webSearchQuery)));")
     out = subprocess.run([deno, "run", str(script)], capture_output=True, text=True)

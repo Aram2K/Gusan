@@ -95,7 +95,8 @@ export function webSearchQuery(question: string): string {
   const q = question.trim();
   if (q.length < 8) return "";
   const cues = /\b(latest|today|news|recent|price|cost|stock|weather|score|release|version|CEO|founder|google)\b|\bwho is\b|\blook up\b|\bsearch (?:the web|online|internet)\b|\b(?:on the web|internet|online)\b|\b(?:202[4-9]|20[3-9]\d|2[1-9]\d{2})\b|https?:\/\/|\b[a-z0-9-]+\.(?:com|org|net|io|ai|dev|co)\b/i;
-  return cues.test(q) || /\b[Ww]hat [Ii]s\s+[A-Z][\w-]+/.test(q) ? q.slice(0, 400) : "";
+  const liveData = /\b(?:exchange rate|interest rate|inflation|forecast|market cap)\b|\bcurrent\s+(?:[\w/-]+\s+){0,4}(?:rate|price|version|status|CEO|president|weather|score)\b/i;
+  return cues.test(q) || liveData.test(q) || /\b[Ww]hat [Ii]s\s+[A-Z][\w-]+/.test(q) ? q.slice(0, 400) : "";
 }
 
 type WebResult = { title: string; url: string; snippet: string };
