@@ -19,6 +19,8 @@ final class AgentTests: XCTestCase {
                      "check grammar and spelling", "Find a nicer way to say no", "list the pros and cons", "which is better here, A or B?", "order the paragraphs by date", "Sort these alphabetically"] {
             XCTAssertNil(AgentIntent.detect(text), text)
         }
+        XCTAssertEqual(AgentIntent.detect("order the groceries from Rewe")?.mode, .do)
+        XCTAssertEqual(AgentIntent.detect("check my flight status for LH123")?.mode, .research)
         XCTAssertEqual(AgentIntent.detect("Send Mary the notes from today")?.mode, .do, "sending to a person is a do-it task; the card asks before anything is sent")
         XCTAssertTrue(AgentIntent.referencesDraft("Find flights matching the dates in this text"))
         XCTAssertFalse(AgentIntent.referencesDraft("Find the cheapest flights to Rome"))
