@@ -491,7 +491,7 @@ async function transcribeGladia(bytes: Uint8Array, language: string, languages: 
       if (data.status === "error") return failed("gladia", model, Number(data.error_code) || 500, "job_error");
       if (data.status === "done") {
         const text = data.result?.transcription?.full_transcript;
-        if (typeof text !== "string" || !text.trim()) return failed("gladia", model, 500, "no_text");
+        if (typeof text !== "string") return failed("gladia", model, 500, "no_text");
         return { ok: true, text: text.trim(), model };
       }
       await new Promise<void>((resolve, reject) => {

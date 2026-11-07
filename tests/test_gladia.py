@@ -76,3 +76,6 @@ def test_gladia_proxy_source():
         assert text in body
     assert body.count('redirect: "error"') == 4
     assert body.count('AbortSignal.timeout(timeoutMs)') == 1
+    assert 'if (typeof text !== "string") return failed("gladia", model, 500, "no_text");' in body
+    assert 'return { ok: true, text: text.trim(), model };' in body
+    assert '!text.trim()' not in body
