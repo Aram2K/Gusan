@@ -110,8 +110,8 @@ final class KeyboardViewController: UIInputViewController {
         toolbar.frame = CGRect(x: 0, y: 0, width: width, height: barHeight)
         voice.bar.frame = CGRect(x: 50, y: toolbar.contextHeight, width: max(0, width - 100), height: toolbar.controlsHeight)
         voice.panel.frame = view.bounds
-        let extra: CGFloat = surface == .instruction ? instructionHeader.preferredHeight : 0
-        instructionHeader.frame = CGRect(x: 0, y: barHeight, width: width, height: extra)
+        let extra: CGFloat = surface == .instruction && !compactLayout ? instructionHeader.preferredHeight : 0
+        instructionHeader.frame = CGRect(x: 0, y: compactLayout ? toolbar.contextHeight : barHeight, width: width, height: instructionHeader.preferredHeight)
         keyArea.frame = CGRect(x: 0, y: barHeight + extra, width: width, height: max(0, view.bounds.height - barHeight - extra))
         panel.frame = CGRect(x: 0, y: barHeight, width: width, height: max(0, view.bounds.height - barHeight))
         explanationScroll.frame = panel.frame
@@ -132,6 +132,12 @@ final class KeyboardViewController: UIInputViewController {
     private func updateContext() {
         guard connected else { return }
         updateTypography()
+        instructionHeader.compact = compactLayout
+        let compactInstruction = compactLayout && surface == .instruction
+        [toolbar.logo, toolbar.mic, toolbar.message, toolbar.accessory].forEach { $0.isHidden = compactInstruction }
+        toolbar.spinner.isHidden = compactInstruction || !toolbar.spinner.isAnimating
+        voice.bar.alpha = compactInstruction || !voice.panel.isHidden ? 0 : 1
+        height.constant = keyboardHeight
         let editing = surface == .instruction
         keyArea.returnTitle = editing ? "Run" : nil
         keyArea.keyClicks = settings.keyClicks; keyArea.doubleSpacePeriod = settings.doubleSpacePeriod
@@ -147,6 +153,7 @@ final class KeyboardViewController: UIInputViewController {
         toolbar.message.setTitle(snapshotReturnSurface != nil ? "Text snapshot" : message ?? "", for: .normal)
         let statusAction = snapshotReturnSurface != nil ? "Back" : accessory ?? (undoRecord == nil ? nil : undoIsRedo ? "Redo" : "Undo")
         toolbar.accessory.setTitle(statusAction, for: .normal); toolbar.accessory.isHidden = statusAction == nil
+        if compactInstruction { toolbar.accessory.isHidden = true }
         toolbar.accessory.isEnabled = (statusAction != "Undo" && statusAction != "Redo") || undoRecord?.step(context: currentContext.voiceContext) != nil
         toolbar.accessory.accessibilityHint = accessory == "Sign in" ? "Opens the Gusan app" : "Activates the status action"
         toolbar.mic.isEnabled = !busy; toolbar.logo.isEnabled = !busy
@@ -169,7 +176,14 @@ final class KeyboardViewController: UIInputViewController {
         updateContext(); view.setNeedsLayout()
     }
     private func showTyping() { snapshotReturnSurface = nil; instructionContext = nil; surface = .typing; updateSurface() }
-    private var keyboardHeight: CGFloat { toolbar.preferredHeight + panel.preferredHeight + (surface == .instruction ? instructionHeader.preferredHeight : 0) }
+    private var compactLayout: Bool {
+        traitCollection.verticalSizeClass == .compact || view.window?.windowScene?.interfaceOrientation.isLandscape == true
+    }
+    private var keyboardHeight: CGFloat {
+        let requested = toolbar.preferredHeight + panel.preferredHeight + (surface == .instruction && !compactLayout ? instructionHeader.preferredHeight : 0)
+        let screen = view.window?.windowScene?.screen.bounds ?? UIScreen.main.bounds
+        return compactLayout ? min(requested, floor(min(screen.width, screen.height) * 0.55)) : requested
+    }
     private func updateTypography() {
         guard fontCategory != traitCollection.preferredContentSizeCategory else { return }
         fontCategory = traitCollection.preferredContentSizeCategory

@@ -191,7 +191,8 @@ final class GusanPanel: UIView {
 }
 
 final class InstructionHeader: UIView {
-    let preferredHeight: CGFloat = 88
+    var compact = false { didSet { if compact != oldValue { scroll.isHidden = compact; setNeedsLayout() } } }
+    var preferredHeight: CGFloat { compact ? 44 : 88 }
     var onSuggestion: ((String) -> Void)?
     var onRun: (() -> Void)?
     var onCancel: (() -> Void)?
