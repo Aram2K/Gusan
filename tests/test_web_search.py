@@ -157,6 +157,8 @@ const explicit = [
   ["Can you please google Acme?", "Acme?"], ["look up Acme please", "Acme"],
   ["check online Acme", "Acme"], ["find online Acme", "Acme"],
   ["can you search Acme", "Acme"], ["search for Acme", "Acme"],
+  ["can you google Acme", "Acme"], ["please google it", "it"],
+  ["can you please search Acme", "Acme"],
   ["browse Acme", "Acme"], ["what does the internet say about Acme", "Acme"],
   ["cherche sur internet Acme", "Acme"], ["busca en internet Acme", "Acme"],
   ["such im Internet Acme bitte", "Acme"], ["search the web", "search the web"],
@@ -167,6 +169,14 @@ for (const [question, query] of explicit) {
   equal([d.source, d.query, d.classifier_ms], ["explicit", query, 0]);
 }
 equal(explicitWebQuery("Summarize the discussion"), "");
+for (const question of ["What is Google stock price?", "Who is Google's CEO?", "How do we look up the budget?"]) {
+  equal(explicitWebQuery(question), "");
+  let classified = false;
+  const d = await decideWebSearch(question, "", async () => { classified = true; return null; });
+  equal(classified, true);
+  equal(d.query, webSearchQuery(question));
+  if (question.includes("Google")) equal(d.query, question);
+}
 equal(explicitWebQuery("google " + "x".repeat(500)).length, 400);
 equal(parseWebDecision('```json\n{"search":true,"query":"Acme facts"}\n```'), {search:true, query:"Acme facts"});
 for (const raw of ["garbage", "{}", "null", '{"search":"true","query":"x"}', '{"search":true}']) equal(parseWebDecision(raw), null);

@@ -106,7 +106,7 @@ export function webSearchQuery(question: string): string {
 
 export function explicitWebQuery(question: string): string {
   const q = question.trim();
-  const trigger = /\b(?:search\s+(?:the\s+)?(?:web|online|internet)(?:\s+for)?|google|look\s+up|(?:check|find)\s+online|can\s+you\s+search(?:\s+for)?|search\s+for|browse|what\s+does\s+the\s+internet\s+say\s+about|cherche(?:r|z)?\s+sur\s+internet|busca(?:r)?\s+en\s+internet|such(?:e)?\s+im\s+internet)\b/i.exec(q);
+  const trigger = /^(?:(?:please|(?:can|could|would)\s+you)\s+)*(?:search\s+(?:the\s+)?(?:web|online|internet)(?:\s+for)?|google|look\s+up|(?:check|find)\s+online|(?:can|could|would)\s+you\s+(?:please\s+)?search(?:\s+for)?|search\s+for|browse|what\s+does\s+the\s+internet\s+say\s+about|cherche(?:r|z)?\s+sur\s+internet|busca(?:r)?\s+en\s+internet|such(?:e)?\s+im\s+internet)\b/i.exec(q);
   if (!trigger) return "";
   const rest = q.slice(trigger.index + trigger[0].length)
     .replace(/^[\s:,-]*(?:(?:please|for|about|pour|por|bitte)\b[\s:,-]*)*/i, "")
