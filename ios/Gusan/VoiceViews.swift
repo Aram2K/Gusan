@@ -35,7 +35,7 @@ struct VoiceReadyView: View {
         NavigationStack {
             ScreenContent {
                 AppCard {
-                    Image("VoiceMark").resizable().scaledToFit().frame(width: 96, height: 96).accessibilityLabel("Gusan")
+                    BrandMark(large: true)
                     Text("Voice dictation").font(.largeTitle).bold().accessibilityAddTraits(.isHeader)
                     if voice.keyboardActivation {
                         Text("Gusan needs to start the mic once — swipe back to your app.").font(.headline)
