@@ -18,6 +18,8 @@
 // Do/prepare never completes: invalid/missing plans get one read-only
 // same-session restart, then fail with plan_missing. Restart failures fail
 // with agent_busy (429) or upstream_error. No automatic second retry.
+// Restart completion waits for a new answer_event at/after its event cursor;
+// stale terminal status stays running until that answer or the deadline.
 // Plans contain 1–30 steps of at most 2000 characters; oversized steps fail.
 // Errors: bad_request (400, field), unauthorized (401), privacy_mode and
 // pro_required (403), not_found (404), not_awaiting_confirmation (409),
@@ -398,7 +400,11 @@ async function saveRun(db: any, row: Obj, patch: Obj) {
   if (error) throw new Failure("storage_error", 500);
 }
 async function retryPrepare(db: any, row: Obj, run: Obj, patch: Obj) {
-  const plan = { ...run.plan, prepare_retry: "creating" };
+  const plan = {
+    ...run.plan,
+    prepare_retry: "creating",
+    prepare_retry_from_index: patch.event_index,
+  };
   // Compare the entire private plan and session: only one sync owns the retry.
   const claim = await db.from("agent_task_runs").update({ plan })
     .eq("task_id", row.id).eq("h_session_id", run.h_session_id)
@@ -535,6 +541,31 @@ async function sync(db: any, row: Obj, wait = 0) {
   patch.status = statuses[change.status] ?? "running";
   patch.confirmation = null;
   patch.confirmation_at = null;
+  let retryAnswer = run.plan?.prepare_retry_answer;
+  if (
+    row.mode === "do" && run.phase === "prepare" &&
+    run.plan?.prepare_retry === "running"
+  ) {
+    const answerEvent = events.findLast((event: Obj, offset: number) =>
+      row.event_index + offset >= run.plan.prepare_retry_from_index &&
+      event.type === "AgentEvent" && event.data?.kind === "answer_event"
+    );
+    if (answerEvent) {
+      retryAnswer = answerEvent.data;
+      await saveRun(db, row, {
+        plan: { ...run.plan, prepare_retry_answer: retryAnswer },
+      });
+    }
+    if (
+      ["completed", "failed", "cancelled", "timed_out"].includes(
+        patch.status,
+      ) &&
+      !retryAnswer
+    ) {
+      patch.status = "running";
+      return save(db, row, patch, true);
+    }
+  }
   if (change.status === "awaiting_tool_results") {
     for (const call of change.pending_tool_calls ?? []) {
       // No phase supports custom tools; approval is a new session, not a tool.
@@ -550,7 +581,12 @@ async function sync(db: any, row: Obj, wait = 0) {
     ["completed", "failed", "cancelled", "timed_out"].includes(patch.status)
   ) {
     // /changes may report completion before the page containing the answer.
-    const final = patch.status === "completed" && change.answer == null
+    const final = patch.status === "completed" && retryAnswer
+      ? {
+        ...retryAnswer,
+        answer: retryAnswer.answer ?? (await h(path)).latest_answer,
+      }
+      : patch.status === "completed" && change.answer == null
       ? await h(path)
       : change;
     patch.result = patch.status === "completed"

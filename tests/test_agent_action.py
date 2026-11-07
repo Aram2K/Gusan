@@ -288,6 +288,11 @@ PLAN = {"summary": "Send $10 to Alice", "action_kind": "send",
         "start_url": "https://example.com/send", "steps": ["Recipient Alice", "Amount $10", "Click Send"]}
 
 
+def answered(answer, status="completed"):
+    return {"status": status, "answer": answer, "new_events": [
+        {"type": "AgentEvent", "data": {"kind": "answer_event", "answer": answer}}]}
+
+
 def waiting(**extra):
     return {"row": {"mode": "do", "status": "awaiting_confirmation",
                     "confirmation": PLAN,
@@ -328,9 +333,11 @@ def test_prepare_waits_with_private_plan(run):
 
 
 def test_prepare_no_action_retries_then_fails(run):
+    answer = {"markdown": "Nothing to do", "needs_action": False}
     out, = run({"row": {"mode": "do"}, "change": {"status": "completed", "answer": {
         "markdown": "Nothing to do", "needs_action": False}},
-        "requests": [{"body": {"action": "status", "task_id": ID}}] * 2})
+        "requests": [{"body": {"action": "status", "task_id": ID}},
+                     {"body": {"action": "status", "task_id": ID}, "change": answered(answer)}]})
     assert [r["body"]["status"] for r in out["replies"]] == ["running", "failed"]
     assert out["row"]["error_code"] == "plan_missing"
     assert out["row"]["result"] is None
@@ -345,7 +352,8 @@ def test_prepare_no_action_retries_then_fails(run):
     {"needs_action": True, "plan": {**PLAN, "action_kind": "bad"}}])
 def test_invalid_prepare_fails(run, answer):
     out, = run({"row": {"mode": "do"}, "change": {"status": "completed", "answer": answer},
-                "requests": [{"body": {"action": "status", "task_id": ID}}] * 2})
+                "requests": [{"body": {"action": "status", "task_id": ID}},
+                             {"body": {"action": "status", "task_id": ID}, "change": answered(answer)}]})
     assert out["row"]["status"] == "failed" and out["row"]["error_code"] == "plan_missing"
 
 
@@ -478,7 +486,9 @@ def test_step_length_boundary_never_truncates(run, length, expected):
     step = " " + "x" * (length - 2) + " "
     out, = run({"row": {"mode": "do"}, "change": {"status": "completed", "answer": {
         "markdown": "Plan", "needs_action": True, "plan": {**PLAN, "steps": [step]}}},
-        "requests": [{"body": {"action": "status", "task_id": ID}}] * 2})
+        "requests": [{"body": {"action": "status", "task_id": ID}},
+                     {"body": {"action": "status", "task_id": ID}, "change": answered({
+                         "markdown": "Plan", "needs_action": True, "plan": {**PLAN, "steps": [step]}})}]})
     assert out["row"]["status"] == expected
     if expected == "failed":
         assert out["row"]["error_code"] == "plan_missing"
@@ -512,7 +522,8 @@ def test_timezone_survives_start_prepare_and_execute(run, timezone):
 @pytest.mark.parametrize("answer", ["I cannot submit; fill it manually.", "{invalid json"])
 def test_prose_prepare_retries_once_then_fails(run, answer):
     out, = run({"row": {"mode": "do"}, "change": {"status": "completed", "answer": answer},
-                "requests": [{"body": {"action": "status", "task_id": ID}}] * 2})
+                "requests": [{"body": {"action": "status", "task_id": ID}},
+                             {"body": {"action": "status", "task_id": ID}, "change": answered(answer)}]})
     assert [r["body"]["status"] for r in out["replies"]] == ["running", "failed"]
     assert out["row"]["error_code"] == "plan_missing" and out["row"]["result"] is None
     retries = [c for c in out["calls"] if c["method"] == "POST"]
@@ -532,8 +543,8 @@ def test_prose_prepare_retries_once_then_fails(run, answer):
 def test_prose_then_valid_plan_awaits_approval(run):
     out, = run({"row": {"mode": "do"}, "requests": [
         {"body": {"action": "status", "task_id": ID}, "change": {"status": "completed", "answer": "Do it manually."}},
-        {"body": {"action": "status", "task_id": ID}, "change": {
-            "status": "completed", "answer": {"markdown": "Plan", "needs_action": True, "plan": PLAN}}}]})
+        {"body": {"action": "status", "task_id": ID}, "change": answered({
+            "markdown": "Plan", "needs_action": True, "plan": PLAN})}]})
     assert [r["body"]["status"] for r in out["replies"]] == ["running", "awaiting_confirmation"]
     assert out["row"]["confirmation"] == PLAN
 
@@ -608,3 +619,39 @@ def test_cancel_repeats_delete_after_terminal_write_for_a_restart(run):
     assert out["row"]["status"] == "cancelled"
     assert len(out["calls"]) == 2 and all(c["method"] == "DELETE" for c in out["calls"])
     assert out["calls"][0]["url"] == out["calls"][1]["url"]
+
+
+def test_restart_ignores_old_terminal_answer_until_new_answer_event(run):
+    old = answered("Cannot act")
+    valid = {"markdown": "Plan", "needs_action": True, "plan": PLAN}
+    out, = run({"row": {"mode": "do"}, "requests": [
+        {"body": {"action": "status", "task_id": ID}, "change": old},
+        {"body": {"action": "status", "task_id": ID}, "change": {
+            "status": "completed", "answer": "Cannot act", "new_events": []}},
+        {"body": {"action": "status", "task_id": ID}, "change": {
+            **answered(valid), "answer": "Stale top-level answer"}}]})
+    assert [r["body"]["status"] for r in out["replies"]] == [
+        "running", "running", "awaiting_confirmation"]
+    assert out["snapshots"][0]["run"]["plan"]["prepare_retry_from_index"] == 1
+    assert out["row"]["confirmation"] == PLAN and out["row"]["error_code"] is None
+    assert "from_index=1" in out["calls"][-1]["url"]
+    assert len([c for c in out["calls"] if c["method"] == "POST"]) == 1
+
+
+def test_retry_answer_seen_while_running_is_retained_for_terminal_poll(run):
+    valid = {"markdown": "Plan", "needs_action": True, "plan": PLAN}
+    out, = run({"row": {"mode": "do"}, "requests": [
+        {"body": {"action": "status", "task_id": ID}, "change": answered("Cannot act")},
+        {"body": {"action": "status", "task_id": ID}, "change": answered(valid, "running")},
+        {"body": {"action": "status", "task_id": ID}, "change": {
+            "status": "completed", "answer": "Stale answer", "new_events": []}}]})
+    assert [r["body"]["status"] for r in out["replies"]] == [
+        "running", "running", "awaiting_confirmation"]
+    assert out["row"]["confirmation"] == PLAN
+
+
+def test_retry_without_new_answer_is_bounded_by_deadline(run):
+    out, = run({"row": {"mode": "do"}, "requests": [
+        {"body": {"action": "status", "task_id": ID}, "change": answered("Cannot act")},
+        {"body": {"action": "status", "task_id": ID}, "advanceMs": 481000}]})
+    assert out["row"]["status"] == "timed_out" and out["row"]["error_code"] == "timeout"
