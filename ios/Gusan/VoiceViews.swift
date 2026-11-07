@@ -19,6 +19,7 @@ struct VoiceReadyView: View {
     @ObservedObject var voice: VoiceSession
     let onSignIn: () -> Void
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     private var statusText: String? {
         switch voice.status.phase {
         case .off: return nil
@@ -81,6 +82,9 @@ struct VoiceReadyView: View {
                     }
                 }
                 .onAppear { voice.refreshPermission() }
+                .onChange(of: scenePhase) { phase in
+                    if phase == .active { voice.refreshPermission() }
+                }
         }
     }
 }
