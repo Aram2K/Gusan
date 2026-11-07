@@ -73,9 +73,13 @@ final class VoiceKeyController: NSObject {
         switch KeyboardVoice.tap(status: status, hasFullAccess: host.hasFullAccess, shared: channel.available && store.diagnostics().isShared, signedIn: signedIn) {
         case .error(let error): show(error.localizedDescription)
         case .openApp:
-            guard sendStart() else { return }
+            guard sendStart(), let requestID else { return }
+            let launch = VoiceLaunch(requestID: requestID)
+            do { try channel.write(launch: launch) }
+            catch { show(error.localizedDescription); return }
             var url = URLComponents(string: "gusan://voice")!
-            if let bundleID = hostBundleID() { url.queryItems = [URLQueryItem(name: "return", value: bundleID)] }
+            url.queryItems = [URLQueryItem(name: "nonce", value: launch.nonce.uuidString)]
+            if let bundleID = hostBundleID() { url.queryItems?.append(URLQueryItem(name: "return", value: bundleID)) }
             open(url.url!)
         case .start: _ = sendStart()
         case .stop: send(.stop, id: status?.requestID)

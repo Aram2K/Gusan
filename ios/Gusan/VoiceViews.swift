@@ -9,12 +9,17 @@ struct VoiceReadyView: View {
         NavigationStack {
             VStack(spacing: 24) {
                 Image(systemName: "mic.fill").font(.system(size: 64)).foregroundStyle(.tint)
-                Text("Recording ready — swipe back").font(.title2).bold()
-                Text("Tap ‹ at the top-left, or swipe right along the bottom edge, to go back to your app").multilineTextAlignment(.center)
+                Text(voice.alive ? "Recording ready — swipe back" : "Voice dictation").font(.title2).bold()
+                if voice.alive {
+                    Text("Tap ‹ at the top-left, or swipe right along the bottom edge, to go back to your app").multilineTextAlignment(.center)
+                } else {
+                    Text("Tap Record to prepare a voice session.").multilineTextAlignment(.center)
+                    Button("Record") { voice.start() }.frame(minHeight: 44)
+                }
                 Text(voice.status.phase.rawValue.capitalized).foregroundStyle(.secondary)
                 if let end = voice.status.sessionEndsAt, voice.alive { Text("Session until \(end.formatted(date: .omitted, time: .shortened))") }
                 if !voice.error.isEmpty { Text(voice.error).foregroundStyle(.red) }
-                Button("Stop voice session", role: .destructive) { voice.stop() }
+                if voice.alive { Button("Stop voice session", role: .destructive) { voice.stop() }.frame(minHeight: 44) }
             }.padding().toolbar { Button("Close") { dismiss() } }
         }
     }

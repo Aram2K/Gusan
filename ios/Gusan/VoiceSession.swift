@@ -59,8 +59,12 @@ final class VoiceSession: ObservableObject {
     }
     func handleURL(_ url: URL) {
         guard url.scheme == "gusan", url.host == "voice" else { return }
-        hostBundleID = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "return" }?.value
-        presented = true; start()
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
+        presented = true
+        if channel.consumeLaunch(nonce: items?.first { $0.name == "nonce" }?.value) {
+            hostBundleID = items?.first { $0.name == "return" }?.value
+            start(pendingWithin: 60)
+        } else { hostBundleID = nil }
     }
     func refreshPermission() { permission = AVAudioSession.sharedInstance().recordPermission }
     func start(pendingWithin: TimeInterval = 15) {

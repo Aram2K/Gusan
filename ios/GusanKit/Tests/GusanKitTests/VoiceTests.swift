@@ -106,6 +106,26 @@ final class VoiceTests: XCTestCase {
         XCTAssertFalse(VoiceStatus(phase: .off, heartbeat: now).isAlive(now: now))
         XCTAssertThrowsError(try VoiceChannel(container: nil).write(status: status)) { XCTAssertEqual($0 as? VoiceError, .notShared) }
     }
+    func testVoiceLaunchRequiresFreshMatchingOneTimeKeyboardRequest() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let channel = VoiceChannel(container: directory)
+        let id = UUID(), launch = VoiceLaunch(requestID: id, issuedAt: now)
+        XCTAssertFalse(channel.consumeLaunch(nonce: nil, now: now))
+        try channel.write(launch: launch)
+        XCTAssertFalse(channel.consumeLaunch(nonce: launch.nonce.uuidString, now: now))
+        try channel.write(command: VoiceCommand(kind: .start, requestID: UUID(), sentAt: now))
+        XCTAssertFalse(channel.consumeLaunch(nonce: launch.nonce.uuidString, now: now))
+        try channel.write(command: VoiceCommand(kind: .start, requestID: id, sentAt: now))
+        XCTAssertFalse(channel.consumeLaunch(nonce: UUID().uuidString, now: now))
+        XCTAssertFalse(channel.consumeLaunch(nonce: launch.nonce.uuidString, now: now.addingTimeInterval(-1)))
+        XCTAssertFalse(channel.consumeLaunch(nonce: launch.nonce.uuidString, now: now.addingTimeInterval(60)))
+        XCTAssertTrue(channel.consumeLaunch(nonce: launch.nonce.uuidString, now: now.addingTimeInterval(59)))
+        XCTAssertFalse(channel.consumeLaunch(nonce: launch.nonce.uuidString, now: now.addingTimeInterval(59)))
+        try channel.write(launch: launch)
+        try channel.write(command: VoiceCommand(kind: .stop, requestID: id, sentAt: now))
+        XCTAssertFalse(channel.consumeLaunch(nonce: launch.nonce.uuidString, now: now))
+    }
     func testKeyboardStateRoundTrip() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

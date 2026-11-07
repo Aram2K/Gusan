@@ -67,6 +67,15 @@ public struct VoiceStatus: Codable, Equatable {
     public func isAlive(now: Date = Date()) -> Bool { phase != .off && now.timeIntervalSince(heartbeat) < 3 }
 }
 
+public struct VoiceLaunch: Codable {
+    public let nonce: UUID
+    public let requestID: UUID
+    public let issuedAt: Date
+    public init(requestID: UUID, nonce: UUID = UUID(), issuedAt: Date = Date()) {
+        self.requestID = requestID; self.nonce = nonce; self.issuedAt = issuedAt
+    }
+}
+
 public struct VoiceChannel {
     public enum Notification: String { case command, status }
     public let container: URL?
@@ -88,6 +97,15 @@ public struct VoiceChannel {
     public func readStatus() -> VoiceStatus? { read("status", as: VoiceStatus.self) }
     public func readCommand() -> VoiceCommand? { read("command", as: VoiceCommand.self) }
     public func readKeyboardState() -> KeyboardVoiceState? { read("keyboard", as: KeyboardVoiceState.self) }
+    public func write(launch: VoiceLaunch) throws { try write(launch, name: "launch") }
+    public func consumeLaunch(nonce: String?, now: Date = Date()) -> Bool {
+        guard let nonce, let launch = read("launch", as: VoiceLaunch.self), UUID(uuidString: nonce) == launch.nonce,
+              now.timeIntervalSince(launch.issuedAt) >= 0, now.timeIntervalSince(launch.issuedAt) < 60,
+              let command = readCommand(), command.kind == .start, command.requestID == launch.requestID,
+              now.timeIntervalSince(command.sentAt) >= 0, now.timeIntervalSince(command.sentAt) < 60,
+              let url = file("launch"), (try? FileManager.default.removeItem(at: url)) != nil else { return false }
+        return true
+    }
     public func write(status: VoiceStatus) throws { try write(status, name: "status") }
     public func write(command: VoiceCommand) throws { try write(command, name: "command") }
     public func write(keyboard: KeyboardVoiceState) throws { try write(keyboard, name: "keyboard") }
