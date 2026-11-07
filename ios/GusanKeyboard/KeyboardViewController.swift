@@ -162,7 +162,7 @@ final class KeyboardViewController: UIInputViewController {
     }
     private func beginInstruction() {
         guard !busy else { return }
-        instructionContext = currentContext; instruction = ""
+        if instructionContext != currentContext { instructionContext = currentContext; instruction = "" }
         message = nil; accessory = nil; detail = nil
         surface = .instruction; updateSurface()
     }
@@ -177,14 +177,15 @@ final class KeyboardViewController: UIInputViewController {
     private func run(_ action: SmartAction, context: Context) {
         guard !busy else { return }
         guard hasFullAccess else {
-            showTyping()
+            if surface != .instruction { showTyping() }
             UINotificationFeedbackGenerator().notificationOccurred(.error)
             showMessage("Gusan needs Full Access to reach Gusan Cloud", detail: "Allow Full Access for Gusan in Settings › General › Keyboard › Keyboards › Gusan › Allow Full Access. Text is sent to Gusan Cloud only when you run an action.", accessory: "How to enable")
             return
         }
         guard store.read() != nil, store.diagnostics().isShared else {
             UINotificationFeedbackGenerator().notificationOccurred(.error)
-            showTyping(); showMessage("Sign in to use Gusan", accessory: "Sign in"); return
+            if surface != .instruction { showTyping() }
+            showMessage("Sign in to use Gusan", accessory: "Sign in"); return
         }
         do { _ = try Prompts.messages(text: context.text, action: action, target: settings.translateTarget) }
         catch { showMessage(error.localizedDescription, detail: error.localizedDescription); return }
