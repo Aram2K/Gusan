@@ -22,7 +22,7 @@ final class VoiceKey: ToolbarButton {
         update(phase: .off)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    func apply(_ theme: KeyboardTheme) { gradient.colors = [theme.brandRed.cgColor, theme.brandBlue.cgColor] }
+    func apply(_ theme: KeyboardTheme) { gradient.colors = [theme.brandBlue.cgColor, KeyboardTheme.blue.cgColor] }
     func update(phase: VoicePhase) {
         let recording = phase == .recording
         let busy = phase == .transcribing || phase == .thinking

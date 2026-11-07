@@ -13,9 +13,9 @@ extension SmartAction {
     var isCustomInstruction: Bool { if case .custom = self { return true } else { return false } }
 }
 
-/// Runs one agent task from the keyboard: starts it, polls Gusan Cloud, and drives `AgentCardView`
-/// through progress → (confirmation) → result. The task survives the card being minimised and the
-/// keyboard being dismissed; the app's Activity tab shows the same task.
+/// Runs one agent task from the keyboard through the shared job pipeline (`AgentJob`), and drives
+/// `AgentCardView` through progress → (confirmation) → result. The server-side task survives the
+/// card being minimised and the keyboard being dismissed; the app's Activity tab shows the same task.
 @MainActor
 final class AgentKeyboardController {
     let card = AgentCardView()
@@ -30,8 +30,9 @@ final class AgentKeyboardController {
     private let tracker: AgentTaskTracker
     private var service: AgentService?
     private(set) var task: AgentTask?
+    private var pending: JobConfirmation?
     private var error: String?
-    private var poll: Task<Void, Never>?
+    private var job: Task<Void, Never>?
     private var visible = false
 
     init(store: SessionStore, auth: AuthClient, host: UIInputViewController) {
@@ -52,73 +53,49 @@ final class AgentKeyboardController {
 
     func appear() {
         visible = true
-        if task == nil, error == nil, let id = tracker.activeTaskID { restore(id) }
-        else if let task, !task.status.isTerminal { startPolling() }
+        if let task, !task.status.isTerminal { if job == nil { run(.resume(task.id), announce: false) } }
+        else if task == nil, error == nil, let id = tracker.activeTaskID { run(.resume(id), announce: false) }
     }
 
-    func disappear() { visible = false; poll?.cancel(); poll = nil }
+    /// Stops polling only; the task keeps running on Gusan Cloud and is picked up again on appear.
+    func disappear() { visible = false; job?.cancel(); job = nil; pending = nil }
 
     func apply(_ theme: KeyboardTheme) { card.apply(theme) }
 
     // MARK: Actions
 
     func start(_ intent: AgentIntent, context: String) {
-        poll?.cancel()
+        job?.cancel(); pending = nil
         error = nil
         task = AgentTask(mode: intent.mode, status: .queued, title: intent.title)
         show()
         render()
-        let service = makeService()
-        self.service = service
-        poll = Task { @MainActor [weak self] in
-            do {
-                let started = try await service.start(intent, context: context.isEmpty ? nil : context)
-                guard let self, !Task.isCancelled else { return }
-                self.task = started
-                self.tracker.activeTaskID = started.id
-                self.tracker.markNotified(started)
-                self.render()
-                await self.pollLoop(service)
-            } catch is CancellationError {
-            } catch {
-                guard let self else { return }
-                self.task = nil; self.error = (error as? AgentError)?.errorDescription ?? error.localizedDescription
-                UIAccessibility.post(notification: .announcement, argument: self.error)
-                self.render()
-            }
-        }
+        run(.new(intent, context: context.isEmpty ? nil : context), announce: true)
     }
 
     func show() { guard isActive else { return }; showingCard = true; card.isHidden = false; onSurfaceChange?(); onStatus?(nil, nil) }
 
     func hide() {
         showingCard = false; card.isHidden = true; onSurfaceChange?()
-        if let task, !task.status.isTerminal || task.status == .awaitingConfirmation { onStatus?(toolbarLine(task), "View") }
-        else { onStatus?(nil, nil) }
+        if let task, !task.status.isTerminal || task.seenAt == nil { onStatus?(toolbarLine(task), "View") } else { onStatus?(nil, nil) }
     }
 
     private func confirm() {
-        guard let service, let id = task?.id else { return }
+        guard let pending else { return }
+        self.pending = nil
         card.setBusy(true)
-        poll?.cancel()
-        poll = Task { @MainActor [weak self] in
-            do {
-                let updated = try await service.confirm(id)
-                guard let self else { return }
-                self.task = updated; self.card.setBusy(false); self.render()
-                await self.pollLoop(service)
-            } catch { self?.card.setBusy(false); self?.card.flash((error as? AgentError)?.errorDescription ?? error.localizedDescription) }
-        }
+        Task { await pending.resolve(true) }
     }
 
     private func cancel() {
-        guard let service, let id = task?.id else { dismiss(); return }
         card.setBusy(true)
-        poll?.cancel()
-        poll = Task { @MainActor [weak self] in
-            do { let updated = try await service.cancel(id); self?.task = updated }
+        if let pending { self.pending = nil; Task { await pending.resolve(false) }; return }
+        guard let service, let id = task?.id else { dismiss(); return }
+        job?.cancel(); job = nil
+        Task { @MainActor [weak self] in
+            do { let updated = try await service.cancel(id); self?.update(updated) }
             catch { self?.card.flash((error as? AgentError)?.errorDescription ?? error.localizedDescription) }
-            self?.card.setBusy(false); self?.render()
+            self?.card.setBusy(false)
         }
     }
 
@@ -126,7 +103,6 @@ final class AgentKeyboardController {
         guard let text = task?.result?.plainText, !text.isEmpty, let proxy = host?.textDocumentProxy else { return }
         proxy.insertText(text)
         UIAccessibility.post(notification: .announcement, argument: "Inserted")
-        markSeen()
         dismiss()
     }
 
@@ -136,64 +112,66 @@ final class AgentKeyboardController {
     }
 
     private func dismiss() {
-        poll?.cancel(); poll = nil
-        markSeen()
+        job?.cancel(); job = nil; pending = nil
+        if let service, let task, task.status.isTerminal, task.seenAt == nil { Task { try? await service.markSeen(task.id) } }
         task = nil; error = nil
         tracker.activeTaskID = nil
         showingCard = false; card.isHidden = true
         onStatus?(nil, nil); onSurfaceChange?()
     }
 
-    private func markSeen() {
-        guard let service, let task, task.status.isTerminal, task.seenAt == nil else { return }
-        Task { try? await service.markSeen(task.id) }
-    }
+    // MARK: Job pipeline
 
-    // MARK: Polling
-
-    private func restore(_ id: UUID) {
+    private func run(_ start: AgentJob.Start, announce: Bool) {
         let service = makeService()
         self.service = service
-        poll = Task { @MainActor [weak self] in
-            guard let fetched = try? await service.status(id, waitSeconds: 0), let self else { return }
-            if fetched.status.isTerminal, fetched.seenAt != nil { self.tracker.activeTaskID = nil; return }
-            self.task = fetched
-            self.tracker.markNotified(fetched)
-            self.render()
-            self.hide()
-            await self.pollLoop(service)
+        let agentJob = AgentJob(service: service, start: start, interval: service is StubAgentService ? 1_200_000_000 : 1_500_000_000) { [weak self] task in
+            Task { @MainActor in self?.update(task) }
         }
-    }
-
-    private func startPolling() {
-        guard poll == nil, let service else { return }
-        poll = Task { @MainActor [weak self] in await self?.pollLoop(service) }
-    }
-
-    private func pollLoop(_ service: AgentService) async {
-        while let current = task, !current.status.isTerminal, visible, !Task.isCancelled {
-            let waiting = current.status == .awaitingConfirmation
+        job = Task { @MainActor [weak self] in
             do {
-                if service is StubAgentService || waiting { try await Task.sleep(nanoseconds: waiting ? 8_000_000_000 : 1_500_000_000) }
-                let updated = try await service.status(current.id, waitSeconds: waiting ? 0 : 10)
-                guard !Task.isCancelled else { return }
-                if updated.status != current.status || updated.steps.count != current.steps.count {
-                    if updated.status == .awaitingConfirmation || updated.status.isTerminal {
-                        if settingsHaptics { UINotificationFeedbackGenerator().notificationOccurred(updated.status == .completed || updated.status == .awaitingConfirmation ? .success : .error) }
-                        if !showingCard { onStatus?(toolbarLine(updated), "View") }
-                        UIAccessibility.post(notification: .announcement, argument: updated.summaryLine)
+                for try await event in agentJob.run() {
+                    guard let self else { return }
+                    switch event {
+                    case .progress(let text):
+                        if self.task?.status == .queued || self.task?.status == .running { self.card.showStep(text) }
+                    case .needsConfirmation(let request):
+                        self.pending = request
+                        self.card.setBusy(false)
+                        self.render()
+                    case .result:
+                        self.card.setBusy(false)
+                        self.render()
                     }
-                    task = updated
-                    tracker.markNotified(updated)
-                    render()
                 }
-            } catch is CancellationError { return }
-            catch {
-                if let agentError = error as? AgentError, agentError == .notFound { task = nil; self.error = agentError.errorDescription; render(); return }
-                try? await Task.sleep(nanoseconds: 4_000_000_000)
+            } catch is CancellationError {
+                self?.card.setBusy(false); self?.render()
+            } catch {
+                guard let self else { return }
+                self.card.setBusy(false)
+                if self.task?.status.isTerminal == true { self.render(); return }
+                if case .resume = start, (error as? AgentError) == .notFound { self.tracker.activeTaskID = nil; self.task = nil; self.render(); return }
+                self.task = nil; self.error = (error as? AgentError)?.errorDescription ?? error.localizedDescription
+                UIAccessibility.post(notification: .announcement, argument: self.error)
+                self.render()
             }
+            self?.job = nil
         }
-        poll = nil
+    }
+
+    private func update(_ fresh: AgentTask) {
+        let previous = task?.status
+        task = fresh
+        tracker.activeTaskID = fresh.status.isTerminal ? nil : fresh.id
+        tracker.markNotified(fresh)
+        if previous != fresh.status, previous != nil, fresh.status == .awaitingConfirmation || fresh.status.isTerminal {
+            if settingsHaptics { UINotificationFeedbackGenerator().notificationOccurred(fresh.status == .completed || fresh.status == .awaitingConfirmation ? .success : .error) }
+            if !showingCard { onStatus?(toolbarLine(fresh), "View") }
+            UIAccessibility.post(notification: .announcement, argument: fresh.summaryLine)
+        }
+        if fresh.status != .awaitingConfirmation { pending = nil }
+        if previous == nil, !showingCard { onStatus?(toolbarLine(fresh), "View") }
+        render()
     }
 
     private var settingsHaptics: Bool { (UserDefaults(suiteName: store.resolution.chosen) ?? .standard).object(forKey: "haptics") as? Bool ?? true }
@@ -215,6 +193,7 @@ final class AgentKeyboardController {
     }
 
     private func makeService() -> AgentService {
+        if let service { return service }
         #if DEBUG
         if store.read()?.accessToken == "gusan-debug-no-network" {
             let stub = StubAgentService(); stub.delay = 600_000_000; return stub
@@ -288,6 +267,9 @@ final class AgentCardView: UIView {
     }
 
     func render(_ state: State) { self.state = state; restyle(); setNeedsLayout() }
+
+    /// Live progress line while a task runs, without re-rendering the whole card.
+    func showStep(_ text: String) { body.text = "Latest: " + text; body.accessibilityLabel = body.text }
 
     private var buttons: [(UIButton, String, Bool)] = []
 

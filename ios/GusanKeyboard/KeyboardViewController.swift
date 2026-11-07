@@ -56,6 +56,17 @@ final class KeyboardViewController: UIInputViewController {
         toolbar.mic.addTarget(self, action: #selector(startVoice), for: .touchUpInside)
         onVoice = { [weak self] in self?.voice.toggle() }
         view.addSubview(voice.bar)
+        view.addSubview(voice.panel)
+        voice.onPanelVisibility = { [weak self] visible in
+            guard let self else { return }
+            self.keyArea.cancelTouches()
+            let changes = {
+                [self.toolbar, self.voice.bar, self.panel, self.instructionHeader, self.keyArea, self.explanationScroll].forEach { $0.alpha = visible ? 0 : 1 }
+                self.voice.panel.isHidden = !visible
+            }
+            if UIAccessibility.isReduceMotionEnabled { changes() }
+            else { UIView.transition(with: self.view, duration: 0.2, options: [.transitionCrossDissolve, .allowAnimatedContent], animations: changes) }
+        }
         view.addSubview(agent.card)
         agent.onSurfaceChange = { [weak self] in self?.updateSurface() }
         agent.onStatus = { [weak self] text, accessory in
@@ -91,6 +102,7 @@ final class KeyboardViewController: UIInputViewController {
         let width = view.bounds.width
         toolbar.frame = CGRect(x: 0, y: 0, width: width, height: 44)
         voice.bar.frame = CGRect(x: 50, y: 0, width: max(0, width - 100), height: 44)
+        voice.panel.frame = view.bounds
         let extra: CGFloat = surface == .instruction ? 74 : 0
         instructionHeader.frame = CGRect(x: 0, y: 44, width: width, height: extra)
         keyArea.frame = CGRect(x: 0, y: 44 + extra, width: width, height: max(0, view.bounds.height - 44 - extra))
@@ -105,7 +117,7 @@ final class KeyboardViewController: UIInputViewController {
     override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
         super.traitCollectionDidChange(previousTraitCollection); updateContext()
     }
-    override func textDidChange(_ textInput: UITextInput?) { super.textDidChange(textInput); updateContext() }
+    override func textDidChange(_ textInput: UITextInput?) { super.textDidChange(textInput); voice.documentDidChange(); updateContext() }
     override func selectionDidChange(_ textInput: UITextInput?) { super.selectionDidChange(textInput); updateContext() }
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated); task?.cancel(); keyArea.cancelTouches()
@@ -236,12 +248,12 @@ final class KeyboardViewController: UIInputViewController {
             defer { busy = false; toolbar.spinner.stopAnimating(); keyArea.inputEnabled = true; updateContext() }
             do {
                 guard let session = try await auth.refresh() else { throw GusanError.unauthorized }
-                let client = SmartActionClient()
                 let result: String
-                do { result = try await client.run(text: context.text, action: action, accessToken: session.accessToken, target: settings.translateTarget) }
+                let kind: JobResult.Kind = context.selected.isEmpty ? (context.text.isEmpty ? .insert : .replaceContext) : .replaceSelection
+                do { result = try await SmartActionJob(text: context.text, action: action, accessToken: session.accessToken, target: settings.translateTarget, kind: kind).result().text }
                 catch GusanError.unauthorized {
                     guard let refreshed = try await auth.refresh(force: true) else { throw GusanError.unauthorized }
-                    result = try await client.run(text: context.text, action: action, accessToken: refreshed.accessToken, target: settings.translateTarget)
+                    result = try await SmartActionJob(text: context.text, action: action, accessToken: refreshed.accessToken, target: settings.translateTarget, kind: kind).result().text
                 }
                 try Task.checkCancellation()
                 guard currentContext == context else { showMessage("Text changed. Select it and try again."); return }

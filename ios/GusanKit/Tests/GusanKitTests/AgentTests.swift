@@ -175,3 +175,55 @@ final class AgentTests: XCTestCase {
         XCTAssertEqual(MarkdownBlocks.firstLine("- a\n- b"), "• a")
     }
 }
+
+final class AgentJobTests: XCTestCase {
+    func testResearchJobEmitsProgressThenCard() async throws {
+        let stub = StubAgentService()
+        var seen: [AgentTask] = []
+        let lock = NSLock()
+        let job = AgentJob(service: stub, start: .new(AgentIntent(mode: .research, instruction: "Find flights"), context: nil), interval: 1_000) { task in lock.lock(); seen.append(task); lock.unlock() }
+        var progress: [String] = []
+        var card: JobCard?
+        for try await event in job.run() {
+            switch event {
+            case .progress(let text): progress.append(text)
+            case .result(let result): card = result.card
+            case .needsConfirmation: XCTFail("research never asks")
+            }
+        }
+        XCTAssertEqual(progress.first, "Starting research…")
+        XCTAssertTrue(progress.count >= 2)
+        XCTAssertEqual(card?.title, "Find flights")
+        XCTAssertTrue(card?.insertableText?.contains("€89") == true)
+        XCTAssertEqual(seen.last?.status, .completed)
+    }
+
+    func testDoJobWaitsForConfirmationAndRunnerConfirms() async throws {
+        let stub = StubAgentService()
+        let job = AgentJob(service: stub, start: .new(AgentIntent(mode: .do, instruction: "Book a table"), context: nil), interval: 1_000)
+        var prompt: String?
+        let result = try await JobRunner().result(of: job, confirmation: { request in prompt = request.prompt; return true })
+        XCTAssertNotNil(prompt)
+        XCTAssertEqual(result.kind, .cardOnly)
+        XCTAssertTrue(result.text.contains("submitted"))
+    }
+
+    func testDecliningConfirmationCancelsOnServer() async throws {
+        let stub = StubAgentService()
+        var id: UUID?
+        let job = AgentJob(service: stub, start: .new(AgentIntent(mode: .do, instruction: "Book a table"), context: nil), interval: 1_000) { id = $0.id }
+        do {
+            _ = try await JobRunner().result(of: job, confirmation: { _ in false })
+            XCTFail("declined jobs end as cancelled")
+        } catch is CancellationError {}
+        let task = try await stub.status(try XCTUnwrap(id), waitSeconds: 0)
+        XCTAssertEqual(task.status, .cancelled)
+    }
+
+    func testResumeFinishedTaskYieldsCardImmediately() async throws {
+        let done = StubAgentService.demoTasks().first { $0.status == .completed }!
+        let stub = StubAgentService(seeded: [done])
+        let result = try await AgentJob(service: stub, start: .resume(done.id), interval: 1_000).result()
+        XCTAssertEqual(result.card?.title, done.title)
+    }
+}

@@ -250,7 +250,7 @@ final class VoiceTests: XCTestCase {
         let suite = "VoiceTests.\(UUID())"
         defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
         let settings = VoiceSettings(group: suite)
-        XCTAssertEqual(settings.language, "auto"); XCTAssertEqual(settings.defaultAction, .transcribeOnly)
+        XCTAssertEqual(settings.language, "auto"); XCTAssertEqual(settings.defaultAction, .automatic)
         XCTAssertEqual(settings.idleMinutes, 5); XCTAssertTrue(settings.autoReturn)
         settings.language = "hy"; settings.defaultAction = .smart(.translate); settings.idleMinutes = 30; settings.autoReturn = false
         let read = VoiceSettings(group: suite)
@@ -339,7 +339,8 @@ final class VoiceTests: XCTestCase {
         XCTAssertEqual(machine.handle(.transcribed(UUID(), "stale")), [])
         XCTAssertEqual(machine.handle(.failed(UUID(), "stale")), [])
         XCTAssertEqual(machine.handle(.finished(UUID(), "stale", false)), [])
-        XCTAssertEqual(machine.handle(.transcribed(id, "hello")), [.deliver("hello"), .publish])
+        XCTAssertEqual(machine.handle(.transcribed(id, "hello")), [.runAction(id, "hello", nil), .publish])
+        XCTAssertEqual(machine.handle(.completed(id, JobResult(text: "hello", kind: .insert))), [.deliver("hello"), .publish])
         XCTAssertEqual(machine.phase, .done); XCTAssertEqual(machine.result, "hello")
     }
     func testPlansAndSmartMachine() {
