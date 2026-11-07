@@ -538,8 +538,9 @@ class Overlay(QWidget):
         self._writing = True
         if isinstance(info, dict):
             self._ctx.update(info)
-        # "On your selection" is this take's own (the context outlives a take)
+        # "On your selection" and "Searching the web" are this take's own (the context outlives a take)
         self._ctx["on_selection"] = bool(isinstance(info, dict) and info.get("on_selection"))
+        self._ctx["web"] = bool(isinstance(info, dict) and info.get("web"))
         self._kick()
 
     def set_speech(self, info):
@@ -589,14 +590,16 @@ class Overlay(QWidget):
         n, inv = len(self.levels), 1.0 / (peak + 1e-6)
         self._tex = [self.levels[min(n - 1, i * n // N_BARS)] * inv for i in range(N_BARS)]
 
-    def show_done(self, pasted: bool, kind=None):
+    def show_done(self, pasted: bool, kind=None, web_sources=0):
         """Done: "Pasted" / "Copied · press Ctrl+V"; for a Smart Action
-        (``kind``: what it wrote, pill_copy.KINDS) "Email pasted"."""
+        (``kind``: what it wrote, pill_copy.KINDS) "Email pasted" - "Email pasted · 3 web sources" when it used the web."""
         self._done_pasted = pasted
         self._done_error = False
         self._done_kind = kind if kind in pill_copy.KINDS else None
         self._done_msg = pill_copy.done(self._done_kind, pasted,
                                         smart=self._writing or self._done_kind is not None)
+        if web_sources:
+            self._done_msg += " \u00b7 " + pill_copy.web_sources_line(int(web_sources))
         self._set_overlay_state(DONE)
         self._hide_at = time.monotonic() + (DONE_S if pasted else COPIED_S)
         self._appear()
@@ -1608,6 +1611,8 @@ class Overlay(QWidget):
 
     def _busy_icon(self, vis):
         if vis == "processing":
+            if self._ctx.get("web"):
+                return "web"                          # a globe turning while it looks the facts up
             return self._task_kind or "think"
         if vis == "ready":
             return "ready"
@@ -1623,6 +1628,16 @@ class Overlay(QWidget):
     _WAVE_X = (-7.0, -4.0, -1.0, 2.0, 5.0)        # bar left edges: 2 px bars, 3 px pitch
     _WAVE_STILL = (4.0, 7.0, 10.0, 7.0, 4.0)
     _WAVE_ENV = (0.62, 0.85, 1.0, 0.85, 0.62)     # the middle bars reach highest
+
+    def _icon_web(self, p, cx, cy, pal, col, t):
+        """Searching the web: a small globe turning - its meridian sweeps across."""
+        r = 7.0
+        p.setBrush(Qt.NoBrush)
+        p.setPen(self._pen(col, 1.5))
+        p.drawEllipse(QPointF(cx, cy), r, r)
+        p.drawLine(QPointF(cx - r, cy), QPointF(cx + r, cy))
+        w = r * 0.45 if t is None else max(0.6, r * abs(math.cos(t * 2.0 * math.pi / 1.6)))
+        p.drawEllipse(QPointF(cx, cy), w, r)
 
     def _icon_wave(self, p, cx, cy, pal, col, t):
         """Transcribing: five small voice bars - the same upright bars as the

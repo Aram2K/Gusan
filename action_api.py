@@ -712,6 +712,11 @@ def sanitize_web_sources(rows):
     return sources
 
 
+# The modes Gusan Cloud may search the web for (Linkup, on the server): Live Assistant answers, "Ask about this meeting",
+# and Smart Actions (with or without a selection) - each only when the person turned it on.
+WEB_SEARCH_MODES = ("live_assist", "meeting_chat", "smart_auto", "smart_selection")
+
+
 def run_managed_action(text, mode, token, source_lang="auto", target_lang="en",
                        vocab_block="", image_b64=None, image_status=None,
                        session_id="", note_ref="", prefer="", web_search=False, config=None, info=None,
@@ -733,7 +738,7 @@ def run_managed_action(text, mode, token, source_lang="auto", target_lang="en",
     def _post(msgs):
         body = {"messages": msgs, "max_tokens": _max_tokens_for(mode, text), "mode": server_mode(mode)}
         body.update(_managed_extra(session_id, note_ref, prefer))
-        if web_search and not (config or {}).get("privacy_mode") and mode in ("live_assist", "meeting_chat"):
+        if web_search and not (config or {}).get("privacy_mode") and mode in WEB_SEARCH_MODES:
             body["web_search"] = True
             if isinstance(web_query, str) and web_query.strip():
                 body["web_query"] = web_query.strip()[:400]
@@ -819,7 +824,7 @@ def run_managed_action_stream(text, mode, token, on_token, source_lang="auto",
         body = {"messages": msgs, "max_tokens": _max_tokens_for(mode, text),
                 "mode": server_mode(mode), "stream": True}
         body.update(_managed_extra(session_id, note_ref, prefer))
-        if web_search and not (config or {}).get("privacy_mode") and mode in ("live_assist", "meeting_chat"):
+        if web_search and not (config or {}).get("privacy_mode") and mode in WEB_SEARCH_MODES:
             body["web_search"] = True
             if isinstance(web_query, str) and web_query.strip():
                 body["web_query"] = web_query.strip()[:400]

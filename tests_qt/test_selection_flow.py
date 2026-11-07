@@ -59,7 +59,7 @@ def test_an_on_computer_model_reads_the_start_of_a_long_selection(controller, mo
 def _stub(controller):
     calls = []
     overlay = SimpleNamespace(call_soon=lambda fn, *a, **k: fn(*a, **k),
-                              show_done=lambda pasted, kind=None: calls.append(("done", pasted, kind)))
+                              show_done=lambda pasted, kind=None, web_sources=0: calls.append(("done", pasted, kind)))
     app = SimpleNamespace(overlay=overlay, calls=calls,
                           _run_on_gui=lambda fn, *a: fn(*a),
                           _paste_via_clipboard=lambda text, restore=True, rich=False:
@@ -71,7 +71,7 @@ def _stub(controller):
 def routed(controller, monkeypatch):
     copied, cards = [], []
     monkeypatch.setattr(controller, "_rich_copy", staticmethod(lambda text: copied.append(text) or text))
-    monkeypatch.setattr(controller, "_show_answer_card", lambda self, text, kind="answer": cards.append((kind, text)))
+    monkeypatch.setattr(controller, "_show_answer_card", lambda self, text, kind="answer", sources=(): cards.append((kind, text)))
     return copied, cards
 
 
@@ -167,6 +167,37 @@ def test_the_pill_forgets_on_your_selection_at_the_next_take(qapp):
         assert ov._ctx["on_selection"] is True
         ov.set_task("translate", "English", {"writer": "Gusan Cloud"})
         assert ov._ctx["on_selection"] is False
+    finally:
+        ov.hide()
+        ov.deleteLater()
+
+
+def test_the_card_lists_the_web_sources_as_links(qapp):
+    from ui.answer_card import AnswerCard
+    card = AnswerCard()
+    try:
+        card.show_text("1 EUR = 1.08 USD today.", "answer",
+                       sources=[{"title": "ECB euro reference rates", "url": "https://www.ecb.europa.eu/rates"},
+                                {"title": "", "url": "javascript:alert(1)"}])
+        assert card.sources.isVisibleTo(card)
+        html = card.sources.text()
+        assert html.startswith("Sources · 1 ") and 'href="https://www.ecb.europa.eu/rates"' in html
+        assert "javascript" not in html                                   # only http(s) addresses
+        card.show_text("No web here.", "answer")
+        assert not card.sources.isVisibleTo(card)
+    finally:
+        card.hide()
+        card.deleteLater()
+
+
+def test_the_pill_shows_a_globe_while_it_searches(qapp):
+    from ui.overlay import Overlay
+    ov = Overlay()
+    try:
+        ov.set_task(None, "", {"writer": "Gusan Cloud", "web": True})
+        assert ov._busy_icon("processing") == "web"
+        ov.set_task("email", "", {"writer": "Gusan Cloud"})
+        assert ov._busy_icon("processing") == "email"
     finally:
         ov.hide()
         ov.deleteLater()

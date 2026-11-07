@@ -351,3 +351,71 @@ def test_web_search_is_off_until_the_person_turns_it_on():
     for rel in ("main.py", "meeting_chat.py", "ui/live_assist.py", "ui/pages/live_assistant.py", "ui/settings.py"):
         text = (ROOT / rel).read_text(encoding="utf-8")
         assert 'get("live_assist_web_search", True)' not in text, rel
+
+
+# ── Smart Actions (2026-11-07) ────────────────────────────────────────────────────────────────
+import web_sources
+
+
+@pytest.mark.parametrize("text,wanted", [
+    ("search the web for the population of Lyon", True),
+    ("look up the opening hours of the Louvre", True),
+    ("what's the current EUR to USD rate", True),
+    ("write an email with the exchange rate of the dollar", True),
+    ("cherche sur internet le prix du gaz", True),
+    ("write an email to John saying the release is today", False),      # dictation: "release", "today" never search
+    ("make it shorter and in English", False),
+    ("the latest version is ready", False),
+    ("hi", False),
+])
+def test_smart_actions_search_only_when_asked_or_for_live_figures(text, wanted):
+    assert web_sources.smart_search_wanted(text) is wanted
+
+
+def test_the_app_and_the_server_use_the_same_smart_rule():
+    source = SERVER.read_text(encoding="utf-8")
+    live = re.search(r"const SMART_LIVE_DATA = /(.+?)/i;", source).group(1)
+    assert live == web_sources.SMART_LIVE
+    ask = re.search(r"const trigger = /(.+?)/i\.exec\(q\);", source).group(1)
+    assert ask == web_sources.SMART_ASK
+
+
+def test_the_server_searches_for_smart_actions_without_an_ai_check_and_keeps_pasted_text_clean():
+    source = SERVER.read_text(encoding="utf-8")
+    assert 'body.mode === "smart_auto")' in source
+    assert 'mode === "smart_auto"\n    ? { query: smartWebQuery(question), source: "smart", classifier_ms: 0 }' in source
+    assert "with no [1]-style marks and no list of sources" in source
+    assert action_api.server_mode("smart_selection") == "smart_auto"
+    assert set(action_api.WEB_SEARCH_MODES) == {"live_assist", "meeting_chat", "smart_auto", "smart_selection"}
+
+
+@pytest.mark.parametrize("mode", [actions.ACTION_SMART_AUTO, actions.ACTION_SMART_SELECTION])
+def test_a_smart_action_sends_the_search_and_gets_the_sources_back(mode):
+    source = [{"title": "ECB", "url": "https://www.ecb.europa.eu/rates"}]
+    resp = Mock(status_code=200, headers={"Content-Type": "application/json", "X-Web-Sources": quote(json.dumps(source))})
+    resp.json.return_value = {"text": "1 EUR = 1.08 USD"}
+    info = {}
+    cfg = {"_managed_token": "tok", "_web_search": True, "_web_query": "look up the euro dollar rate", "_answer_info": info}
+    with patch.object(action_api.requests, "post", return_value=resp) as post:
+        out = actions.process("look up the euro dollar rate", mode, model=actions.API_MANAGED_ID, config=cfg)
+    body = post.call_args.kwargs["json"]
+    assert out.endswith("1 EUR = 1.08 USD")
+    assert body["web_search"] is True and body["web_query"] == "look up the euro dollar rate"
+    assert body["mode"] == "smart_auto"
+    assert info["sources"] == [{"title": "ECB", "url": "https://www.ecb.europa.eu/rates"}]
+
+
+def test_a_smart_action_without_the_setting_never_asks_to_search():
+    resp = Mock(status_code=200, headers={"Content-Type": "application/json"})
+    resp.json.return_value = {"text": "ok"}
+    with patch.object(action_api.requests, "post", return_value=resp) as post:
+        actions.process("look up the euro dollar rate", actions.ACTION_SMART_AUTO, model=actions.API_MANAGED_ID,
+                        config={"_managed_token": "tok"})
+    assert "web_search" not in post.call_args.kwargs["json"]
+
+
+def test_the_pill_says_searching_the_web_and_counts_the_sources():
+    import pill_copy
+    title, sub = pill_copy._writing(None, "", {"writer": "Gusan Cloud", "web": True}, 0.3)
+    assert sub == "Searching the web · Gusan Cloud"
+    assert pill_copy.web_sources_line(1) == "1 web source" and pill_copy.web_sources_line(3) == "3 web sources"

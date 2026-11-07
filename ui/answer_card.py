@@ -29,6 +29,28 @@ BODY_W = WIDTH - 18 - 10 - 8      # the text's width inside the card (its margin
 KIND_ANSWER, KIND_COPIED = "answer", "copied"
 
 
+def sources_line(sources):
+    """ "Sources · 1 Reuters · 2 ecb.europa.eu" as rich text, each name a link (only http(s) addresses); "" for none."""
+    import html
+    from urllib.parse import urlsplit
+    try:
+        from action_api import sanitize_web_sources
+        rows = sanitize_web_sources(list(sources or ()))
+    except Exception:
+        rows = []
+    if not rows:
+        return ""
+    links = []
+    for n, row in enumerate(rows, 1):
+        url = row["url"]
+        name = (row.get("title") or urlsplit(url).hostname or url).strip()
+        if len(name) > 40:
+            name = name[:39].rstrip() + "\u2026"
+        links.append('%d <a href="%s" style="color:%s; text-decoration:none">%s</a>'
+                     % (n, html.escape(url, quote=True), theme.qss_color("blue-tx"), html.escape(name)))
+    return "Sources \u00b7 " + " \u00b7 ".join(links)
+
+
 def heading(kind):
     """The card's one line: what happened, in plain words."""
     if kind == KIND_COPIED:
@@ -101,6 +123,18 @@ class AnswerCard(QWidget):
         body_row.setContentsMargins(0, 0, 8, 0)
         body_row.addWidget(self.scroll)
         lay.addLayout(body_row)
+        # The web pages a Smart Action's answer used (Linkup): "Sources · 1 Reuters · 2 ECB", each a link.
+        self.sources = QLabel(self.card)
+        self.sources.setWordWrap(True)
+        self.sources.setTextFormat(Qt.RichText)
+        self.sources.setOpenExternalLinks(True)
+        self.sources.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self.sources.setFocusPolicy(Qt.NoFocus)
+        self.sources.setFont(theme.font(12))
+        self.sources.setAccessibleName("Web sources")
+        self.sources.setStyleSheet("QLabel { color: %s; background: transparent; }" % theme.qss_color("muted"))
+        self.sources.hide()
+        lay.addWidget(self.sources)
 
         foot = QHBoxLayout()
         foot.setContentsMargins(0, 2, 8, 0)
@@ -126,7 +160,7 @@ class AnswerCard(QWidget):
     def text(self):
         return self._text
 
-    def show_text(self, text, kind=KIND_ANSWER, near=None):
+    def show_text(self, text, kind=KIND_ANSWER, near=None, sources=()):
         """Show ``text`` (Markdown, rendered); ``kind``: KIND_ANSWER or KIND_COPIED; ``near``: the pill, to sit above."""
         self._text = str(text or "")
         self._kind = kind if kind in (KIND_ANSWER, KIND_COPIED) else KIND_ANSWER
@@ -144,6 +178,9 @@ class AnswerCard(QWidget):
             text_h = MAX_TEXT_H
         self.scroll.setFixedHeight(max(20, text_h))
         self.scroll.verticalScrollBar().setValue(0)
+        links = sources_line(sources)
+        self.sources.setText(links)
+        self.sources.setVisible(bool(links))
         self.setMinimumHeight(0)                                # forget the last text's height before measuring
         self.setMaximumHeight(16777215)
         for lay in (self.card.layout(), self.layout()):

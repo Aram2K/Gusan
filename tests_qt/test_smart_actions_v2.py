@@ -479,3 +479,15 @@ def test_greying_a_choice_out_leaves_no_wrapper_behind(qapp):
     assert box.choice_enabled(0) and box.choice_enabled(7)    # out of range: not greyed
     box.set_choice_enabled(7, False)                          # out of range: nothing happens
     box.deleteLater()
+
+
+def test_search_the_web_is_a_switch_on_the_page_off_by_default(page_for):
+    app = live_app("pro")
+    page = page_for(app)
+    assert page.web_row.isVisibleTo(page)
+    assert not page.web_toggle.isChecked()
+    page.web_toggle.click()
+    assert settings(app, "smart_actions_web_search") == [("set_setting", "smart_actions_web_search", True)]
+    app.cfg["privacy_mode"] = True
+    page.refresh()
+    assert not page.web_toggle.isEnabled() and not page.web_toggle.isChecked()   # Privacy mode: never the web
