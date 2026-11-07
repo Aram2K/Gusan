@@ -31,6 +31,10 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>GusanAppGroup</key>
 	<string>group.com.aram2k.gusan</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Gusan records your voice only while you dictate, to transcribe it with Gusan Cloud.</string>
+	<key>UIBackgroundModes</key>
+	<array><string>audio</string></array>
 	<key>UILaunchScreen</key>
 	<dict/>
 </dict>

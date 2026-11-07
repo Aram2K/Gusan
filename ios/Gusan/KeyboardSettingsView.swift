@@ -3,6 +3,7 @@ import GusanKit
 
 struct KeyboardSettingsView: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var voice: VoiceSession
     @State private var action = KeyboardDefaultAction.smartAuto
     @State private var target = "en"
     @State private var keyClicks = true
@@ -16,6 +17,7 @@ struct KeyboardSettingsView: View {
                 Picker("Default action", selection: $action) { ForEach(KeyboardDefaultAction.allCases) { Text($0.label).tag($0) } }.frame(minHeight: 44)
                 Picker("Translate to", selection: $target) { ForEach(languages, id: \.0) { Text($0.1).tag($0.0) } }.frame(minHeight: 44)
             } header: { Text("Gusan actions") } footer: { Text("Hold the Gusan button to run your default action.") }
+            VoiceSettingsSection(voice: voice)
             Section("Typing") {
                 Toggle("Key clicks", isOn: $keyClicks).frame(minHeight: 44)
                 Toggle("Auto-capitalization", isOn: $autoCapitalization).frame(minHeight: 44)

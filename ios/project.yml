@@ -29,6 +29,8 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         GusanAppGroup: group.com.aram2k.gusan
+        NSMicrophoneUsageDescription: Gusan records your voice only while you dictate, to transcribe it with Gusan Cloud.
+        UIBackgroundModes: [audio]
         UILaunchScreen: {}
         CFBundleURLTypes:
           - CFBundleURLSchemes: [gusan]

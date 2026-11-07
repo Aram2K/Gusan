@@ -1,0 +1,44 @@
+import SwiftUI
+import AVFoundation
+import GusanKit
+
+struct VoiceReadyView: View {
+    @ObservedObject var voice: VoiceSession
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 24) {
+                Image(systemName: "mic.fill").font(.system(size: 64)).foregroundStyle(.tint)
+                Text("Recording ready — swipe back").font(.title2).bold()
+                Text("Tap ‹ at the top-left, or swipe right along the bottom edge, to go back to your app").multilineTextAlignment(.center)
+                Text(voice.status.phase.rawValue.capitalized).foregroundStyle(.secondary)
+                if let end = voice.status.sessionEndsAt, voice.alive { Text("Session until \(end.formatted(date: .omitted, time: .shortened))") }
+                if !voice.error.isEmpty { Text(voice.error).foregroundStyle(.red) }
+                Button("Stop voice session", role: .destructive) { voice.stop() }
+            }.padding().toolbar { Button("Close") { dismiss() } }
+        }
+    }
+}
+
+struct VoiceSettingsSection: View {
+    @ObservedObject var voice: VoiceSession
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var language = "auto"
+    @State private var action = VoiceAction.transcribeOnly
+    @State private var minutes = 5
+    @State private var autoReturn = true
+    var body: some View {
+        Section("Voice") {
+            LabeledContent("Session", value: voice.status.phase.rawValue.capitalized)
+            Button(voice.alive ? "Stop voice session" : "Start voice session") { if voice.alive { voice.stop() } else { voice.start() } }
+            LabeledContent("Microphone", value: voice.permission == .granted ? "Allowed" : voice.permission == .denied ? "Denied" : "Not requested")
+            if voice.permission == .denied { Button("Open Settings") { UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!) } }
+            if !voice.error.isEmpty { Text(voice.error).foregroundStyle(.red) }
+            Picker("Spoken language", selection: $language) { ForEach(VoiceSettings.languages, id: \.code) { Text($0.name).tag($0.code) } }.onChange(of: language) { voice.settings.language = $0 }
+            Picker("Default voice action", selection: $action) { ForEach(VoiceAction.all, id: \.self) { Text($0.label).tag($0) } }.onChange(of: action) { voice.settings.defaultAction = $0 }
+            Picker("Keep session alive", selection: $minutes) { ForEach(VoiceSettings.idleOptions, id: \.self) { Text("\($0) min").tag($0) } }.onChange(of: minutes) { voice.settings.idleMinutes = $0 }
+            Toggle("Return to the previous app automatically (experimental)", isOn: $autoReturn).onChange(of: autoReturn) { voice.settings.autoReturn = $0 }
+        }.onAppear { language = voice.settings.language; action = voice.settings.defaultAction; minutes = voice.settings.idleMinutes; autoReturn = voice.settings.autoReturn; voice.refreshPermission() }
+            .onChange(of: scenePhase) { if $0 == .active { voice.refreshPermission() } }
+    }
+}

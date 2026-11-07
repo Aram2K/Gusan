@@ -17,6 +17,7 @@ final class KeyboardViewController: UIInputViewController {
     }
     private enum Surface { case typing, panel, instruction, explanation }
     private lazy var store = SessionStore(role: .keyboard, pasteboardAccessAllowed: { [weak self] in self?.hasFullAccess == true })
+    private lazy var voice = VoiceKeyController(host: self, store: store)
     private lazy var auth = AuthClient(store: store)
     private lazy var settings = SettingsStore(group: store.resolution.chosen, pasteboardAccessAllowed: { [weak self] in self?.hasFullAccess == true })
     private let toolbar = GusanToolbar()
@@ -52,6 +53,9 @@ final class KeyboardViewController: UIInputViewController {
         toolbar.logo.addTarget(self, action: #selector(togglePanel), for: .touchUpInside)
         toolbar.logo.addGestureRecognizer(UILongPressGestureRecognizer(target: self, action: #selector(defaultAction(_:))))
         toolbar.mic.addTarget(self, action: #selector(startVoice), for: .touchUpInside)
+        onVoice = { [weak self] in self?.voice.toggle() }
+        view.addSubview(voice.bar)
+        voice.bar.backgroundColor = .secondarySystemBackground; voice.bar.layer.cornerRadius = 8
         toolbar.accessory.addTarget(self, action: #selector(accessoryPressed), for: .touchUpInside)
         toolbar.message.addTarget(self, action: #selector(expandMessage), for: .touchUpInside)
         panel.onClose = { [weak self] in self?.showTyping() }
@@ -70,7 +74,7 @@ final class KeyboardViewController: UIInputViewController {
     private var currentContext: Context {
         Context(document: textDocumentProxy.documentIdentifier, selected: textDocumentProxy.selectedText ?? "", before: textDocumentProxy.documentContextBeforeInput ?? "", after: textDocumentProxy.documentContextAfterInput ?? "")
     }
-    override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); updateSurface() }
+    override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); updateSurface(); voice.appear() }
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated); connected = true
         _ = store.read(); _ = store.diagnostics(); settings.refresh(); updateContext()
@@ -79,6 +83,7 @@ final class KeyboardViewController: UIInputViewController {
         super.viewWillLayoutSubviews()
         let width = view.bounds.width
         toolbar.frame = CGRect(x: 0, y: 0, width: width, height: 44)
+        voice.bar.frame = CGRect(x: 50, y: 5, width: max(0, width - 100), height: 34)
         let extra: CGFloat = surface == .instruction ? 74 : 0
         instructionHeader.frame = CGRect(x: 0, y: 44, width: width, height: extra)
         keyArea.frame = CGRect(x: 0, y: 44 + extra, width: width, height: max(0, view.bounds.height - 44 - extra))
@@ -96,6 +101,7 @@ final class KeyboardViewController: UIInputViewController {
     override func selectionDidChange(_ textInput: UITextInput?) { super.selectionDidChange(textInput); updateContext() }
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated); task?.cancel(); keyArea.cancelTouches()
+        voice.disappear()
     }
     private func updateContext() {
         guard connected else { return }
@@ -151,6 +157,7 @@ final class KeyboardViewController: UIInputViewController {
         if let onVoice { onVoice() } else { showMessage("Voice is coming soon") }
     }
     private func showMessage(_ text: String, detail: String? = nil, accessory: String? = nil) {
+        voice.dismiss()
         message = text; self.detail = detail; self.accessory = accessory; updateContext()
     }
     @objc private func expandMessage() {
@@ -185,6 +192,7 @@ final class KeyboardViewController: UIInputViewController {
         run(.custom(instruction: instruction), context: context)
     }
     private func run(_ action: SmartAction, context: Context) {
+        voice.dismiss()
         guard !busy else { return }
         guard hasFullAccess else {
             if surface != .instruction { showTyping() }
