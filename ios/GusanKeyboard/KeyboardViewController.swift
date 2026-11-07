@@ -44,6 +44,7 @@ final class KeyboardViewController: UIInputViewController {
     private var retryAction: SmartAction?
     private var retryContext: Context?
     private var connected = false
+    private var accessState = SessionState(signedIn: false, fullAccess: false, shareable: false)
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -95,7 +96,8 @@ final class KeyboardViewController: UIInputViewController {
     override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); updateSurface(); voice.appear() }
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated); connected = true
-        _ = store.read(); _ = store.diagnostics(); settings.refresh(); updateContext()
+        accessState = store.sessionState(fullAccess: hasFullAccess)
+        settings.refresh(); updateContext()
     }
     override func viewWillLayoutSubviews() {
         super.viewWillLayoutSubviews()
@@ -140,6 +142,7 @@ final class KeyboardViewController: UIInputViewController {
         toolbar.accessory.isEnabled = (statusAction != "Undo" && statusAction != "Redo") || undoRecord?.step(context: currentContext.voiceContext) != nil
         toolbar.accessory.accessibilityHint = accessory == "Sign in" ? "Opens the Gusan app" : "Activates the status action"
         toolbar.mic.isEnabled = !busy; toolbar.logo.isEnabled = !busy
+        toolbar.logo.accessibilityValue = accessState.actionError?.localizedDescription
         toolbar.setNeedsLayout()
     }
     private func applyTheme(_ theme: KeyboardTheme) {
@@ -167,6 +170,7 @@ final class KeyboardViewController: UIInputViewController {
     }
     @objc private func togglePanel() {
         guard !busy else { return }
+        accessState = store.sessionState(fullAccess: hasFullAccess)
         impact()
         if surface == .instruction { cancelInstruction(); return }
         surface = surface == .panel ? .typing : .panel
@@ -222,16 +226,18 @@ final class KeyboardViewController: UIInputViewController {
     private func run(_ action: SmartAction, context: Context) {
         voice.dismiss()
         guard !busy else { return }
-        guard hasFullAccess else {
+        let access = store.sessionState(fullAccess: hasFullAccess)
+        accessState = access
+        if access.actionError == .fullAccessRequired {
             if surface != .instruction { showTyping() }
             notify(.error)
             showMessage("Gusan needs Full Access to reach Gusan Cloud", detail: "Allow Full Access for Gusan in Settings › General › Keyboard › Keyboards › Gusan › Allow Full Access. Text is sent to Gusan Cloud only when you run an action.\n\n" + store.diagnostics().summary, accessory: "How to enable")
             return
         }
-        guard store.read() != nil, store.diagnostics().isShared else {
+        if let error = access.actionError {
             notify(.error)
             if surface != .instruction { showTyping() }
-            showMessage("Sign in to use Gusan", detail: store.diagnostics().summary, accessory: "Sign in"); return
+            showMessage(error == .notSignedIn ? "Sign in to use Gusan" : "Gusan can't read shared sign-in", detail: store.diagnostics().summary, accessory: error == .notSignedIn ? "Sign in" : "Details"); return
         }
         #if DEBUG
         if store.read()?.accessToken == "gusan-debug-no-network" {
