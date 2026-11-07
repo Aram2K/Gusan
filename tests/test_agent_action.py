@@ -297,3 +297,15 @@ def test_overdue_tasks_do_not_consume_active_slots():
     assert "user_id = p_user_id" in active_count
     assert "deadline_at > now()" in active_count
     assert "status in ('queued', 'running', 'awaiting_confirmation')" in active_count
+
+
+def test_expiry_survives_h_outage_but_cancel_does_not(run):
+    expired, cancelled = run(
+        {"upstream": 500, "row": {"deadline_at": "2000-01-01T00:00:00Z"}},
+        {"upstream": 500, "body": {"action": "cancel", "task_id": ID}})
+    assert expired["replies"][0]["status"] == 200
+    assert expired["row"]["status"] == "timed_out"
+    assert expired["row"]["error_code"] == "timeout"
+    assert expired["calls"][0]["method"] == "DELETE"
+    assert cancelled["replies"][0] == {"status": 502, "body": {"error": "upstream_error"}}
+    assert cancelled["row"]["status"] == "running"

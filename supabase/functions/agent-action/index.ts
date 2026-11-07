@@ -329,7 +329,12 @@ async function expire(db: any, row: Obj, run: Obj) {
     Date.now() - Date.parse(row.confirmation_at) > 900000;
   if (expired || Date.now() > Date.parse(row.deadline_at)) {
     if (run.h_session_id) {
-      await h(`/sessions/${encodeURIComponent(run.h_session_id)}`, "DELETE");
+      // The local deadline is authoritative even if H is unavailable.
+      try {
+        await h(`/sessions/${encodeURIComponent(run.h_session_id)}`, "DELETE");
+      } catch {
+        console.log("agent-action", row.id, "expiry_cancel_failed");
+      }
     }
     return save(db, row, {
       status: expired ? "cancelled" : "timed_out",
