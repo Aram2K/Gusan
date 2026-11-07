@@ -60,7 +60,7 @@ final class KeyboardViewController: UIInputViewController {
             guard let self else { return }
             self.keyArea.cancelTouches()
             let changes = {
-                [self.toolbar, self.panel, self.instructionHeader, self.keyArea, self.explanationScroll].forEach { $0.alpha = visible ? 0 : 1 }
+                [self.toolbar, self.voice.bar, self.panel, self.instructionHeader, self.keyArea, self.explanationScroll].forEach { $0.alpha = visible ? 0 : 1 }
                 self.voice.panel.isHidden = !visible
             }
             if UIAccessibility.isReduceMotionEnabled { changes() }
