@@ -75,6 +75,16 @@ class Failure extends Error {
     this.status = status;
   }
 }
+class HFailure extends Failure {
+  httpStatus: number;
+  constructor(httpStatus: number) {
+    super(
+      httpStatus === 429 ? "agent_busy" : "upstream_error",
+      httpStatus === 429 ? 503 : 502,
+    );
+    this.httpStatus = httpStatus;
+  }
+}
 function task(row: Obj) {
   const out: Obj = {};
   for (
@@ -121,10 +131,7 @@ async function h(
   });
   console.log("agent-action", res.status);
   if (!res.ok && !(method === "DELETE" && res.status === 404)) {
-    throw new Failure(
-      res.status === 429 ? "agent_busy" : "upstream_error",
-      res.status === 429 ? 503 : 502,
-    );
+    throw new HFailure(res.status);
   }
   if (
     res.status === 204 || method === "DELETE" || path.endsWith("/tool_results")
@@ -292,15 +299,29 @@ async function settle(db: any, row: Obj, call: Obj, body: Obj) {
     .maybeSingle();
   if (error) throw new Failure("storage_error", 500);
   if (!data) return;
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(`${row.id}:${id}`),
+  );
+  const idempotency = Array.from(
+    new Uint8Array(digest),
+    (b) => b.toString(16).padStart(2, "0"),
+  ).join("");
   try {
     await h(
       `/sessions/${encodeURIComponent(run.h_session_id)}/tool_results`,
       "POST",
       body,
+      idempotency,
     );
-  } catch {
-    // Release only this claim, preserving calls settled by other requests.
-    // The public confirmation remains untouched until H accepts the result.
+  } catch (error) {
+    // H documents idempotency only for session creation, not tool results.
+    // A lost response may already have executed the action: never repost it.
+    const rejected = error instanceof HFailure &&
+      ((error.httpStatus >= 400 && error.httpStatus < 500 &&
+        ![409, 429].includes(error.httpStatus)) || error.httpStatus >= 500);
+    if (!rejected) throw new Failure("upstream_error");
+    // A definite rejection releases only this claim, preserving other calls.
     while (true) {
       const current = await loadRun(db, row);
       if (!current.confirmed_call_ids.includes(id)) break;

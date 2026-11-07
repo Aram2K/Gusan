@@ -44,7 +44,7 @@ for (let i=0; i<scenarios.length; i++) {
  globalThis.fetch=async(url,init)=>{
   calls.push({url,method:init.method,headers:init.headers,body:init.body?JSON.parse(init.body):null});
   if(s.upstream) return new Response('untrusted error text',{status:s.upstream});
-  if(url.includes('/tool_results') && toolFailure){const failure=toolFailure;toolFailure=null;if(failure==='timeout')throw new DOMException('Timed out','TimeoutError');return new Response('failed',{status:502});}
+  if(url.includes('/tool_results') && toolFailure){const failure=toolFailure;toolFailure=null;if(failure==='timeout')throw new DOMException('Timed out','TimeoutError');if(failure==='network')throw new TypeError('Network failed');return new Response('failed',{status:Number(failure)||502});}
   if(init.method==='DELETE')return new Response(null,{status:204});
   if(url.includes('/tool_results'))return new Response(null,{status:202});
   if(url.includes('/changes'))return s.empty?new Response(null,{status:204}):new Response(JSON.stringify(s.change??{status:'running',new_events:[]}));
@@ -277,7 +277,7 @@ def test_deleting_tasks_cannot_reset_limits():
     assert "insert into public.agent_task_starts (user_id) values (p_user_id)" in sql
 
 
-@pytest.mark.parametrize("failure", ["http", "timeout"])
+@pytest.mark.parametrize("failure", ["http", "400"])
 def test_failed_confirmation_can_retry(run, failure):
     out, = run({"row": {"mode": "do", "status": "awaiting_confirmation", "confirmation": CALL["args"]},
                 "run": {"tool_req": CALL}, "toolFailure": failure,
@@ -289,6 +289,7 @@ def test_failed_confirmation_can_retry(run, failure):
     assert out["replies"][1]["body"]["status"] == "running"
     assert out["run"]["confirmed_call_ids"] == [CALL["id"]]
     assert len(out["calls"]) == 2
+    assert out["calls"][0]["headers"]["Idempotency-Key"] == out["calls"][1]["headers"]["Idempotency-Key"]
 
 
 def test_overdue_tasks_do_not_consume_active_slots():
@@ -323,3 +324,21 @@ def test_confirmation_window_is_capped_by_deadline(run):
     assert out["row"]["error_code"] == "confirmation_expired"
     assert out["calls"][0]["method"] == "DELETE"
     assert not any(c["url"].endswith("/tool_results") for c in out["calls"])
+
+
+@pytest.mark.parametrize("failure", ["timeout", "network", "409", "429"])
+def test_ambiguous_confirmation_is_not_reposted(run, failure):
+    out, = run({"row": {"mode": "do", "status": "awaiting_confirmation", "confirmation": CALL["args"]},
+                "run": {"tool_req": CALL}, "toolFailure": failure,
+                "change": {"status": "awaiting_tool_results", "pending_tool_calls": [CALL]},
+                "requests": [{"body": {"action": a, "task_id": ID}}
+                             for a in ["confirm", "status", "status"]]})
+    assert out["replies"][0] == {"status": 502, "body": {"error": "upstream_error"}}
+    assert out["snapshots"][0]["run"]["confirmed_call_ids"] == [CALL["id"]]
+    assert out["replies"][1]["body"]["status"] == "running"
+    assert out["replies"][1]["body"]["confirmation"] is None
+    posts = [c for c in out["calls"] if c["url"].endswith("/tool_results")]
+    assert len(posts) == 1
+    import hashlib
+    expected = hashlib.sha256(f"{ID}:{CALL['id']}".encode()).hexdigest()
+    assert posts[0]["headers"]["Idempotency-Key"] == expected
