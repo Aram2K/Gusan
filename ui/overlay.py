@@ -1631,14 +1631,20 @@ class Overlay(QWidget):
     _WAVE_ENV = (0.62, 0.85, 1.0, 0.85, 0.62)     # the middle bars reach highest
 
     def _icon_web(self, p, cx, cy, pal, col, t):
-        """Searching the web: a small globe turning - its meridian sweeps across."""
+        """Searching the web: a small globe turning - two meridians a quarter turn apart sweep across. Neither ever
+        gets as wide as the outline or as thin as a line, so it always reads as a globe (one meridian alone, at the
+        outline, left a circle and a bar: a "no entry" sign)."""
         r = 7.0
         p.setBrush(Qt.NoBrush)
         p.setPen(self._pen(col, 1.5))
         p.drawEllipse(QPointF(cx, cy), r, r)
         p.drawLine(QPointF(cx - r, cy), QPointF(cx + r, cy))
-        w = r * 0.45 if t is None else max(0.6, r * abs(math.cos(t * 2.0 * math.pi / 1.6)))
-        p.drawEllipse(QPointF(cx, cy), w, r)
+        if t is None:
+            p.drawEllipse(QPointF(cx, cy), r * 0.45, r)
+            return
+        phase = t * 2.0 * math.pi / 2.4                 # one turn in 2.4 s
+        for k in (0.0, math.pi / 2.0):
+            p.drawEllipse(QPointF(cx, cy), r * (0.2 + 0.6 * abs(math.sin(phase + k))), r)
 
     def _icon_wave(self, p, cx, cy, pal, col, t):
         """Transcribing: five small voice bars - the same upright bars as the

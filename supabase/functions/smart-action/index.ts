@@ -111,6 +111,16 @@ const SMART_LIVE_DATA = /\b(?:exchange rate|interest rate|inflation|forecast|mar
 // "Search the web" on, the fast AI check decides whether it needs the web (events, places, current facts). A
 // rewrite ("make it shorter", "translate this", "summarize") is not one: it never waits for the check.
 export const SMART_ASKS = /^(?:(?:please|hey|ok(?:ay)?|so|and)[,\s]+)*(?:(?:can|could|would)\s+you\s+(?:please\s+)?)?(?:what|what's|who|who's|when|where|which|how|why|is\s+there|are\s+there|any|find|list|show\s+me|give\s+me|tell\s+me|recommend|suggest|search|look\s+(?:for|up)|check|quel(?:le)?s?|qui|quand|où|comment|pourquoi|est-ce\s+qu|y\s+a-t-il|trouve|cherche|donne-moi|liste)(?=[\s,?!.:']|$)|\?\s*$/i;
+// A search asked for anywhere in the request ("okay, I want you to search Gusan on the web", "look it up", "google
+// it"): it always searches - the AI check only writes the query (else the request itself is the query).
+export const SMART_WANTS_WEB = /\b(?:search(?:es|ing)?|research|look\s+(?:it\s+|that\s+|this\s+)?up|google|browse|on\s+the\s+(?:web|internet)|online|internet|web)\b/i;
+async function smartDecision(question: string, content: string) {
+  const d = await decideWebSearch(question, content, classifyWebSearch, "smart_auto");
+  if (!d.query && SMART_WANTS_WEB.test(question)) {
+    return { query: question.trim().slice(0, 400), source: "asked", classifier_ms: d.classifier_ms };
+  }
+  return d;
+}
 export function smartWebQuery(request: string): string {
   const q = request.trim();
   if (q.length < 8) return "";
@@ -242,14 +252,14 @@ async function webSearch(messages: unknown[], mode: string, webQuery: unknown): 
   const decision = asked ? { query: asked, source: "explicit", classifier_ms: 0 }
     : smart ? { query: smart, source: "smart", classifier_ms: 0 }
     // A Smart Action that ASKS ("what AI events are in Paris next week?", "find ..."): the fast AI check decides.
-    : mode !== "smart_auto" || SMART_ASKS.test(question.trim())
-    ? await decideWebSearch(question, content, classifyWebSearch, mode)
+    : mode !== "smart_auto" ? await decideWebSearch(question, content, classifyWebSearch, mode)
+    : SMART_ASKS.test(question.trim()) || SMART_WANTS_WEB.test(question) ? await smartDecision(question, content)
     : { query: "", source: "smart", classifier_ms: 0 };
   const depth = searchDepth(question, mode);
   const limits = DEPTH_LIMITS[depth] ?? DEPTH_LIMITS.fast;
   const query = decision.query;
   if (!query) {
-    console.log("Linkup decision", JSON.stringify({ source: decision.source, classifier_ms: decision.classifier_ms, search_ms: 0, results: 0 }));
+    console.log("Linkup decision", JSON.stringify({ source: decision.source, classifier_ms: decision.classifier_ms, search_ms: 0, results: 0, chars: question.length }));
     return { query, results: [] };
   }
   const start = Date.now();
@@ -1133,6 +1143,18 @@ Deno.serve(async (req) => {
       messages[lastUser] = { ...last, content: Array.isArray(last.content)
         ? [{ type: "text", text: block }, ...last.content]
         : block + "\n\n" + String(last.content ?? "") };
+    }
+  }
+  if (!sources.length && body.web_search === true && body.mode === "smart_auto") {
+    // Web search is on but nothing was attached (not needed, or nothing found): never "I can't search the web".
+    const note = "Web search is available for these requests. No web results are attached to this one (none were " +
+      "needed or none were found): answer from what you know, and never say you cannot search the web or browse.";
+    const systemIndex = messages.findLastIndex((m: any) => m?.role === "system" && typeof m.content === "string");
+    if (systemIndex >= 0) {
+      const system = messages[systemIndex] as { content: string };
+      messages[systemIndex] = { ...system, content: system.content + "\n\n" + note };
+    } else {
+      messages.unshift({ role: "system", content: note });
     }
   }
   // The person's pick leads Smart Actions and Live Assistant answers; meeting notes keep their own

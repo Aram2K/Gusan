@@ -435,7 +435,14 @@ def test_the_server_searches_for_smart_actions_and_keeps_pasted_text_clean():
     source = SERVER.read_text(encoding="utf-8")
     assert 'body.mode === "smart_auto")' in source
     assert ': smart ? { query: smart, source: "smart", classifier_ms: 0 }' in source
-    assert ': mode !== "smart_auto" || SMART_ASKS.test(question.trim())' in source
+    assert ': SMART_ASKS.test(question.trim()) || SMART_WANTS_WEB.test(question) ? await smartDecision(question, content)' in source
+    # A search asked for anywhere in the request always searches (the founder's "search Gusan" did not, 2026-11-08).
+    wants = re.compile(re.search(r"export const SMART_WANTS_WEB = /(.+?)/i;", source).group(1), re.I)
+    for text in ("Okay, I want you to search Gusan and tell me what comes up", "look it up", "google it please"):
+        assert wants.search(text), text
+    for text in ("make it shorter and in English", "translate this to French", "summarize the email"):
+        assert not wants.search(text), text
+    assert "never say you cannot search the web or browse" in source
     asks = re.compile(re.search(r"export const SMART_ASKS = /(.+?)/i;", source).group(1)
                       .replace("(?=[\\s,?!.:']|$)", r"(?=[\s,?!.:']|$)"), re.I)
     for text in ("What are the AI events in Paris next week on Luma", "find AI events in Paris next week",
