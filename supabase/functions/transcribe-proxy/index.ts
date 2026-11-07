@@ -414,7 +414,7 @@ async function transcribeGemini(audioB64: string, language: string, languages: s
 async function transcribeMistral(bytes: Uint8Array, language: string, model: string, timeoutMs: number) {
   const form = new FormData();
   form.append("model", model);
-  form.append("file", new Blob([bytes], { type: "audio/wav" }), "audio.wav");
+  form.append("file", new Blob([bytes as Uint8Array<ArrayBuffer>], { type: "audio/wav" }), "audio.wav");
   if (MISTRAL_LANGS.has(language)) form.append("language", language);
   const r = await fetch("https://api.mistral.ai/v1/audio/transcriptions", {
     method: "POST",
@@ -437,7 +437,7 @@ async function transcribeOpenAI(bytes: Uint8Array, language: string, model: stri
     const form = new FormData();
     form.append("model", model);
     form.append("response_format", "json");
-    form.append("file", new Blob([bytes], { type: "audio/wav" }), "audio.wav");
+    form.append("file", new Blob([bytes as Uint8Array<ArrayBuffer>], { type: "audio/wav" }), "audio.wav");
     if (withLanguage) form.append("language", language);
     return fetch(OPENAI_URL, {
       method: "POST",
@@ -465,7 +465,7 @@ async function transcribeGladia(bytes: Uint8Array, language: string, languages: 
   const headers = { "x-gladia-key": engineKey("gladia") };
   const base = "https://api.gladia.io/v2";
   const form = new FormData();
-  form.append("audio", new Blob([bytes], { type: "audio/wav" }), "audio.wav");
+  form.append("audio", new Blob([bytes as Uint8Array<ArrayBuffer>], { type: "audio/wav" }), "audio.wav");
   const upload = await fetch(`${base}/upload`, {
     method: "POST", headers, body: form, signal, redirect: "error",
   });
@@ -523,7 +523,7 @@ async function transcribeElevenLabs(bytes: Uint8Array, language: string, model: 
   const once = (withLanguage: boolean) => {
     const form = new FormData();
     form.append("model_id", model);
-    form.append("file", new Blob([bytes], { type: "audio/wav" }), "audio.wav");
+    form.append("file", new Blob([bytes as Uint8Array<ArrayBuffer>], { type: "audio/wav" }), "audio.wav");
     form.append("tag_audio_events", "false");
     if (withLanguage) form.append("language_code", language);
     return fetch(ELEVEN_URL, {
