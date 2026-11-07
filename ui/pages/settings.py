@@ -106,7 +106,7 @@ import history_actions
 import hotkeys
 import speech_hy
 import updater
-from app_info import APP_NAME, APP_VERSION
+from app_info import APP_NAME, APP_VERSION, is_store_package
 from ui import hy_model, theme
 from ui.components import (Avatar, Button, Card, Chip, Divider, IconTile, Keycap, NavItem,
                            PageHeader, Segmented, SettingRow, Toggle, icons, label, mini_prompt)
@@ -1875,6 +1875,11 @@ class SettingsPage(QWidget):
         self.t_login.clicked.connect(self._on_login_clicked)
         self.row_login = self._row(start_text, self.t_login,
                                    hint=None if supported else "Works in the installed app.")
+        if is_store_package():
+            self.t_login.hide()
+            startup = Button("Open Startup apps", "secondary", "s")
+            startup.clicked.connect(lambda _=False: open_url("ms-settings:startupapps"))
+            self.row_login = self._row("Start at login", startup, hint="Managed in Windows Settings.")
         values = [k for k, _t in APP_LOOKS]
         cur = self.cfg.get("app_theme", "system")
         self.seg_look = Segmented([t for _k, t in APP_LOOKS], values.index(cur) if cur in values else 0,
@@ -2923,7 +2928,10 @@ class SettingsPage(QWidget):
         self.version_row = ver
         rows.append(ver)
         self.t_install = self._toggle("install_updates_on_quit", "Install updates when I quit", True)
-        rows.append(self._row("Install updates when I quit", self.t_install))
+        if is_store_package():
+            self.t_install.hide()
+        else:
+            rows.append(self._row("Install updates when I quit", self.t_install))
         chips = QWidget()
         cl = QHBoxLayout(chips)
         cl.setContentsMargins(0, 0, 0, 0)
@@ -2988,6 +2996,11 @@ class SettingsPage(QWidget):
         return updater.LATEST, ""
 
     def _show_update(self, status, tag=""):
+        if is_store_package():
+            self._update = (updater.STORE, "")
+            self.update_status.setText(updater.STORE_MESSAGE)
+            self.update_button.hide()
+            return
         self._update = (status, tag)
         _title, text = updater.status_line(status, tag)
         self.update_status.setText(text or "")
@@ -3026,6 +3039,9 @@ class SettingsPage(QWidget):
             self._check_updates()
 
     def _check_updates(self):
+        if is_store_package():
+            self._show_update(updater.STORE)
+            return
         self._show_update("checking")
         run_bg(updater.check_latest, dict(self.cfg), manual=True, then=self._checked,
                error=lambda e: self._checked((updater.ERROR, "")), owner=self)
@@ -3038,6 +3054,9 @@ class SettingsPage(QWidget):
         self._show_update(status, tag)
 
     def _install_update(self, tag):
+        if is_store_package():
+            self._show_update(updater.STORE)
+            return
         track(self.app, "update_install_started", {"manual": True, "to": tag})
         if callable(getattr(self.app, "install_update", None)):
             # The controller installs, tracks and quits; it calls back only

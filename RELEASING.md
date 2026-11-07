@@ -43,6 +43,34 @@ The version lives in one place: `APP_VERSION` in `app_info.py` (with `APP_NAME =
 
 ## Release Steps
 
+### Microsoft Store (Windows)
+
+Reserve the app name in Microsoft Partner Center. From the product's identity
+page, copy Package/Identity/Name, Package/Identity/Publisher and
+Package/Properties/PublisherDisplayName into the repository variables
+`MSIX_IDENTITY_NAME`, `MSIX_PUBLISHER` and `MSIX_PUBLISHER_DISPLAY_NAME`.
+The defaults are placeholders for build testing, not a publishable identity.
+
+After a tagged build, download the `windows-msix` Actions artifact and upload
+`Gusan-Windows-Store.msix` in Partner Center. The Microsoft Store signs the
+package; no signing certificate is needed in CI. Complete the listing,
+including the privacy policy URL, screenshots, age rating and declarations
+for microphone access and the restricted `runFullTrust` capability.
+The MSIX is an Actions artifact only, not a GitHub release asset.
+
+For a local Windows build, run `python installer/make_msix.py --version X.Y.Z`
+after building `dist/TranscribeApp`. The Windows 10/11 SDK supplies `makeappx`.
+Use `--layout-only` to generate the layout on another platform. Each run needs
+a fresh `--layout` directory. Package versions use `X.Y.Z.0`.
+
+Store copies use Microsoft Store updates and Windows Startup apps settings;
+the installer and portable downloads keep their existing behavior. Validate
+installation, launch, microphone, browser sign-in, startup and shared-data
+behavior on Windows before submission. Loose-layout registration in CI is a
+best-effort smoke check (developer mode may not be enabled), not certification.
+
+### GitHub release
+
 1. Set `APP_VERSION` in `app_info.py` to the tag version without the `v` prefix, and write `docs/release-notes/v<version>.md`.
 2. Run tests locally:
 

@@ -28,6 +28,8 @@ import logging
 import os
 import sys
 
+from app_info import is_store_package
+
 logger = logging.getLogger(__name__)
 
 IS_WINDOWS = sys.platform == "win32"
@@ -66,6 +68,8 @@ def _norm(path):
 
 def supported():
     """Only a packaged app registers itself (see module docstring)."""
+    if is_store_package():
+        return False
     if not getattr(sys, "frozen", False):
         return False
     exe = sys.executable
@@ -365,6 +369,8 @@ def set_enabled(on):
     """The Settings checkbox: register (clearing a Task Manager switch-off -
     the user just asked for it in our UI) or unregister. Returns True when
     the OS now matches ``on``."""
+    if is_store_package():
+        return False
     if not supported():
         return False
     try:
@@ -407,6 +413,8 @@ def _initial_choice(cfg):
 def reconcile(cfg):
     """Apply ``cfg[CFG_KEY]`` to the OS, deciding it first if unset. Returns
     True when ``cfg`` changed and should be saved."""
+    if is_store_package():
+        return False
     if not supported():
         return False
     changed = False
