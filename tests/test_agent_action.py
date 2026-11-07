@@ -21,18 +21,21 @@ for (let i=0; i<scenarios.length; i++) {
  const s=scenarios[i], calls=[], logs=[], dbCalls=[];
  console.log=(...args)=>logs.push(args.join(' '));
  const id='11111111-1111-1111-1111-111111111111';
- let row={id,user_id:'u1',mode:'research',status:'running',title:'task',h_session_id:'session1',event_index:0,steps:[],confirmation:null,result:null,created_at:new Date().toISOString(),updated_at:new Date().toISOString(),deadline_at:new Date(Date.now()+600000).toISOString(),...s.row};
+ let row={id,user_id:'u1',mode:'research',status:'running',title:'task',event_index:0,steps:[],confirmation:null,result:null,created_at:new Date().toISOString(),updated_at:new Date().toISOString(),deadline_at:new Date(Date.now()+600000).toISOString(),...s.row};
+ let run={task_id:id,h_session_id:'session1',tool_req:null,confirmed_call_ids:[],...s.run};
+ let conflict=s.conflict;
  globalThis.__db={
   auth:{getUser:async()=>({data:{user:s.noUser?null:{id:'u1'}},error:null})},
-  rpc:async(name,args)=>{dbCalls.push({name,args});return name==='is_pro'?{data:s.pro??true,error:s.proError?{}:null}:{data:{...row,status:'queued',h_session_id:null,mode:args.p_mode,title:args.p_title},error:s.quota?{code:s.quota}:null}},
-  from:()=>{
+  rpc:async(name,args)=>{dbCalls.push({name,args});return name==='is_pro'?{data:s.pro??true,error:s.proError?{}:null}:{data:{...row,status:'queued',mode:args.p_mode,title:args.p_title},error:s.quota?{code:s.quota}:null}},
+  from:(table)=>{
    let patch=null, filters=[];
    const q={select:()=>q,update:p=>{patch=p;return q},eq:(k,v)=>{filters.push([k,v]);return q},maybeSingle:async()=>{
-    dbCalls.push({patch,filters});
+    dbCalls.push({table,patch,filters});
     if(s.notFound)return {data:null,error:null};
-    if(patch)row={...row,...patch};
-    return {data:structuredClone(row),error:null};
-   }};return q;
+    if(table==='agent_tasks' && patch && conflict){conflict=false;row={...row,status:'completed',updated_at:'concurrent-write'};return {data:null,error:null};}
+    if(patch){if(table==='agent_tasks')row={...row,...patch};else run={...run,...patch};}
+    return {data:structuredClone(table==='agent_tasks'?row:run),error:null};
+   },then:(resolve,reject)=>q.maybeSingle().then(resolve,reject)};return q;
   }
  };
  const env={SUPABASE_URL:'https://supa.test',SUPABASE_ANON_KEY:'anon',SUPABASE_SERVICE_ROLE_KEY:'service',H_company_computer_agents:'H-SECRET-TEST',H_AGENTS_WEBHOOK_SECRET:'hook-secret',...s.env};
@@ -58,7 +61,7 @@ for (let i=0; i<scenarios.length; i++) {
   const res=await handler(new Request('https://edge.test/'+(r.webhook?'?action=webhook':''),{method:'POST',headers,body:raw}));
   replies.push({status:res.status,body:await res.json()});
  }
- results.push({replies,calls,logs,dbCalls,row});
+ results.push({replies,calls,logs,dbCalls,row,run});
 }
 console.log=log;log(JSON.stringify(results));
 '''
@@ -175,6 +178,7 @@ def test_cancel_deadline_and_empty(run):
         assert out["calls"][0]["method"] == "DELETE"
         assert out["replies"][0]["body"]["status"] == status
     assert expired["row"]["error_code"] == "confirmation_expired"
+    assert deadline["row"]["error_code"] == "timeout"
     assert empty["replies"][0]["body"]["status"] == "running"
 
 
@@ -203,6 +207,54 @@ def test_migration():
     assert not re.search(r"grant execute on function public.begin_agent_task[^;]+to authenticated", sql)
     assert "pg_advisory_xact_lock" in sql
     assert "revoke all on public.agent_tasks from anon, authenticated" in sql
-    grant = re.search(r"grant select \((.*?)\)", sql).group(1)
-    assert "h_session_id" not in grant and "confirmation," not in grant
+    assert "grant select, delete on public.agent_tasks to authenticated" in sql
+    assert "alter table public.agent_task_runs enable row level security" in sql
+    assert "revoke all on public.agent_task_runs from public, anon, authenticated" in sql
+    public_table = sql.split("create table public.agent_tasks (")[1].split("\n);")[0]
+    assert "h_session_id" not in public_table and "tool_req" not in public_table
+    assert "confirmed_call_ids text[] not null default '{}'" in sql
+    assert not re.search(r"create policy .*? on public.agent_task_runs", sql)
     assert "supabase_realtime" in sql
+
+
+def test_confirmed_call_does_not_reopen(run):
+    out, = run({"row": {"mode": "do"},
+               "change": {"status": "awaiting_tool_results", "pending_tool_calls": [CALL]},
+               "requests": [{"body": {"action": a, "task_id": ID}}
+                            for a in ["status", "confirm", "status", "status"]]})
+    assert [r["body"]["status"] for r in out["replies"]] == [
+        "awaiting_confirmation", "running", "running", "running"]
+    assert len([c for c in out["calls"] if c["url"].endswith("/tool_results")]) == 1
+    assert out["run"]["confirmed_call_ids"] == [CALL["id"]]
+    public_patches = [c["patch"] for c in out["dbCalls"]
+                      if c.get("table") == "agent_tasks" and c["patch"]]
+    assert all("tool_req" not in json.dumps(p) and "call_id" not in json.dumps(p)
+               and "h_session_id" not in p for p in public_patches)
+    confirmation = public_patches[0]["confirmation"]
+    assert set(confirmation) == {"summary", "action_kind"}
+
+
+@pytest.mark.parametrize("tool", ["request_confirmation", "unknown_tool"])
+def test_auto_denial_only_once(run, tool):
+    call = {**CALL, "tool_name": tool}
+    out, = run({"change": {"status": "awaiting_tool_results", "pending_tool_calls": [call]},
+                "requests": [{"body": {"action": "status", "task_id": ID}}] * 3})
+    posts = [c for c in out["calls"] if c["url"].endswith("/tool_results")]
+    assert len(posts) == 1 and posts[0]["body"]["kind"] == "error_event"
+    assert all(r["body"]["status"] == "running" for r in out["replies"])
+
+
+@pytest.mark.parametrize("action", ["status", "cancel", "confirm"])
+def test_conflict_returns_authoritative_row(run, action):
+    row = {"status": "awaiting_confirmation", "confirmation": CALL["args"]} if action == "confirm" else {}
+    out, = run({"conflict": True, "row": row, "run": {"tool_req": CALL},
+                "body": {"action": action, "task_id": ID}})
+    assert out["replies"][0]["status"] == 200
+    assert out["replies"][0]["body"]["status"] == "completed"
+
+
+def test_webhook_uses_private_run_lookup(run):
+    out, = run({"requests": [{"webhook": True}]})
+    lookup = next(c for c in out["dbCalls"] if c.get("table"))
+    assert lookup["table"] == "agent_task_runs"
+    assert lookup["filters"] == [["h_session_id", "session1"]]

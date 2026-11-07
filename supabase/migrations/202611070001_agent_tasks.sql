@@ -5,7 +5,6 @@ create table public.agent_tasks (
   mode text not null check (mode in ('research', 'do')),
   status text not null default 'queued' check (status in ('queued', 'running', 'awaiting_confirmation', 'completed', 'failed', 'cancelled', 'timed_out')),
   title text not null,
-  h_session_id text unique,
   event_index integer not null default 0,
   steps jsonb not null default '[]',
   confirmation jsonb,
@@ -20,12 +19,21 @@ create table public.agent_tasks (
   seen_at timestamptz
 );
 create index agent_tasks_user_created on public.agent_tasks (user_id, created_at desc);
+-- Never publish run credentials or tool requests to client subscriptions.
+create table public.agent_task_runs (
+  task_id uuid primary key references public.agent_tasks on delete cascade,
+  h_session_id text unique,
+  tool_req jsonb,
+  confirmed_call_ids text[] not null default '{}'
+);
+alter table public.agent_task_runs enable row level security;
+revoke all on public.agent_task_runs from public, anon, authenticated;
+grant all on public.agent_task_runs to service_role;
 alter table public.agent_tasks enable row level security;
 create policy agent_tasks_owner_select on public.agent_tasks for select to authenticated using ((select auth.uid()) = user_id);
 create policy agent_tasks_owner_delete on public.agent_tasks for delete to authenticated using ((select auth.uid()) = user_id);
 revoke all on public.agent_tasks from anon, authenticated;
-grant select (id, user_id, mode, status, title, event_index, steps, confirmation_at, result, outcome, error_code, created_at, updated_at, finished_at, deadline_at, seen_at) on public.agent_tasks to authenticated;
-grant delete on public.agent_tasks to authenticated;
+grant select, delete on public.agent_tasks to authenticated;
 grant all on public.agent_tasks to service_role;
 
 create or replace function public.begin_agent_task(p_user_id uuid, p_mode text, p_title text, p_max_active integer, p_max_per_day integer, p_deadline_s integer)
@@ -43,6 +51,7 @@ begin
   end if;
   insert into public.agent_tasks (user_id, mode, title, deadline_at)
     values (p_user_id, p_mode, left(p_title, 120), now() + make_interval(secs => p_deadline_s)) returning * into task;
+  insert into public.agent_task_runs (task_id) values (task.id);
   return task;
 end;
 $$;
