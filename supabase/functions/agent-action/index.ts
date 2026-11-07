@@ -15,8 +15,8 @@
 // Do/execute: new visual session, 600s/120 steps, only after plan approval.
 // Deadlines add 180s grace. A prepared plan waits up to 15 minutes for approval;
 // expiration cancels locally. Progress retains 25 short steps, saved per sync.
-// Do/prepare never completes: invalid/missing plans get one new read-only
-// session retry, then fail with plan_missing. Retry creation failures fail
+// Do/prepare never completes: invalid/missing plans get one read-only
+// same-session restart, then fail with plan_missing. Restart failures fail
 // with agent_busy (429) or upstream_error. No automatic second retry.
 // Plans contain 1–30 steps of at most 2000 characters; oversized steps fail.
 // Errors: bad_request (400, field), unauthorized (401), privacy_mode and
@@ -406,29 +406,18 @@ async function retryPrepare(db: any, row: Obj, run: Obj, patch: Obj) {
     outcome: null,
     error_code: null,
     finished_at: null,
-    event_index: 0,
     deadline_at: new Date(Date.now() + (300 + 180) * 1000).toISOString(),
   });
   try {
-    const request = sessionRequest(
-      { timezone: plan.timezone },
-      "do",
-      plan.instruction,
-    );
-    request.messages[0].message =
+    const message =
       "Your previous preparation failed to return a valid plan. This is a mandatory correction: return ONLY the structured planning answer, never prose-only refusal or needs_action false.\n\n" +
-      request.messages[0].message;
-    const session = await h(
-      "/sessions",
+      PLANNING_ONLY;
+    await h(
+      `/sessions/${encodeURIComponent(run.h_session_id)}/messages`,
       "POST",
-      request,
-      `${row.id}:prepare-retry`,
+      { type: "user_message", message },
     );
-    if (typeof session?.id !== "string" || !session.id) {
-      throw new Failure("upstream_error");
-    }
     await saveRun(db, row, {
-      h_session_id: session.id,
       plan: { ...plan, prepare_retry: "running" },
     });
     return row;

@@ -52,7 +52,8 @@ for (let i=0; i<scenarios.length; i++) {
  globalThis.fetch=async(url,init)=>{
   calls.push({url,method:init.method,headers:init.headers,body:init.body?JSON.parse(init.body):null});
   if(s.upstream) return new Response('untrusted error text',{status:s.upstream});
-  if(url.endsWith('/sessions') && createFailure){const code=createFailure;createFailure=null;return new Response('failure',{status:code});}
+  if((url.endsWith('/sessions') || url.endsWith('/messages')) && createFailure){const code=createFailure;createFailure=null;return new Response('failure',{status:code});}
+  if(url.endsWith('/messages'))return new Response(null,{status:202});
   if(init.method==='DELETE')return new Response(null,{status:204});
   if(url.includes('/tool_results'))return new Response(null,{status:202});
   if(url.includes('/changes'))return s.empty?new Response(null,{status:204}):new Response(JSON.stringify(s.change??{status:'running',new_events:[]}));
@@ -505,14 +506,12 @@ def test_prose_prepare_retries_once_then_fails(run, answer):
     retries = [c for c in out["calls"] if c["method"] == "POST"]
     assert len(retries) == 1
     retry = retries[0]
-    assert retry["headers"]["Idempotency-Key"] == f"{ID}:prepare-retry"
-    assert retry["body"]["max_time_s"] == 300 and retry["body"]["max_steps"] == 60
-    assert retry["body"]["overrides"]["agent.environments[kind=web].mode"]["type"] == "text"
-    assert "agent.tools" not in retry["body"]["overrides"]
-    assert "mandatory correction" in retry["body"]["messages"][0]["message"]
-    assert "SECRET instruction" in retry["body"]["messages"][0]["message"]
-    assert out["run"]["h_session_id"] == "retry-session"
-    assert "/sessions/retry-session/changes" in out["calls"][-1]["url"]
+    assert retry["url"].endswith("/sessions/session1/messages")
+    assert retry["body"]["type"] == "user_message"
+    assert "mandatory correction" in retry["body"]["message"]
+    assert "PLANNING-ONLY" in retry["body"]["message"]
+    assert out["run"]["h_session_id"] == "session1"
+    assert "/sessions/session1/changes" in out["calls"][-1]["url"]
     retry_row = out["snapshots"][0]["row"]
     assert (datetime.fromisoformat(retry_row["deadline_at"]) -
             datetime.fromisoformat(retry_row["updated_at"])).total_seconds() == pytest.approx(480, abs=1)
@@ -544,3 +543,22 @@ def test_prepare_retry_creation_failure_is_terminal(run, code, error):
                 "change": {"status": "completed", "answer": "Do it manually."}})
     assert out["row"]["status"] == "failed" and out["row"]["error_code"] == error
     assert out["row"]["result"] is None
+
+
+def test_retry_restarts_same_session_without_persisting_screen_data(run):
+    out, = run({"row": {"mode": "do"}, "requests": [
+        {"body": {"action": "start", "mode": "do", "instruction": "Send it",
+                  "context": "PRIVATE SCREEN", "images": ["data:image/png;base64,YQ=="]}},
+        {"body": {"action": "status", "task_id": ID}, "change": {
+            "status": "completed", "answer": "Cannot act", "new_events": [
+                {"type": "AgentEvent", "data": {"kind": "policy_event", "content": "Inspected"}}]}},
+        {"body": {"action": "status", "task_id": ID}, "change": {"status": "running", "new_events": []}}]})
+    posts = [c for c in out["calls"] if c["method"] == "POST"]
+    assert len(posts) == 2
+    assert posts[0]["url"].endswith("/sessions")
+    assert "PRIVATE SCREEN" in posts[0]["body"]["messages"][0]["message"]
+    assert posts[1]["url"].endswith("/sessions/session1/messages")
+    assert "images" not in posts[1]["body"]
+    assert "PRIVATE SCREEN" not in json.dumps(out["run"])
+    assert "data:image" not in json.dumps(out["run"])
+    assert "from_index=1" in out["calls"][-1]["url"]
