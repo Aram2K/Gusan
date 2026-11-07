@@ -428,10 +428,23 @@ def test_the_app_and_the_server_use_the_same_smart_rule():
     assert re.search(r"const command = q\.replace\(/(.+?)/i, \"\"\)", source).group(1) == web_sources.SMART_POLITE
 
 
-def test_the_server_searches_for_smart_actions_without_an_ai_check_and_keeps_pasted_text_clean():
+def test_the_server_searches_for_smart_actions_and_keeps_pasted_text_clean():
+    """A Smart Action searches when the person says so or needs live figures (no AI check), and - the founder's
+    test 2026-11-07, "AI events in Paris next week" did not search - when it ASKS something the fast AI check
+    decides. A rewrite never waits for the check."""
     source = SERVER.read_text(encoding="utf-8")
     assert 'body.mode === "smart_auto")' in source
-    assert 'mode === "smart_auto"\n    ? { query: smartWebQuery(question), source: "smart", classifier_ms: 0 }' in source
+    assert ': smart ? { query: smart, source: "smart", classifier_ms: 0 }' in source
+    assert ': mode !== "smart_auto" || SMART_ASKS.test(question.trim())' in source
+    asks = re.compile(re.search(r"export const SMART_ASKS = /(.+?)/i;", source).group(1)
+                      .replace("(?=[\\s,?!.:']|$)", r"(?=[\s,?!.:']|$)"), re.I)
+    for text in ("What are the AI events in Paris next week on Luma", "find AI events in Paris next week",
+                 "Can you find me a restaurant near Bastille", "are there any AI meetups this weekend",
+                 "quels sont les événements IA à Paris", "is this correct?"):
+        assert asks.search(text), text
+    for text in ("make it shorter and in English", "Can you make this shorter", "translate it to French",
+                 "summarize this", "Could you rephrase it more politely", "write a reply saying yes"):
+        assert not asks.search(text), text
     assert "with no [1]-style marks and no list of sources" in source
     assert action_api.server_mode("smart_selection") == "smart_auto"
     assert set(action_api.WEB_SEARCH_MODES) == {"live_assist", "meeting_chat", "smart_auto", "smart_selection"}

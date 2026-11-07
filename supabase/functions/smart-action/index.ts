@@ -107,6 +107,10 @@ export function webSearchQuery(question: string): string {
 // Smart Actions (mostly dictation: "the release is today") search only when the person asks, or the request needs
 // live figures - no AI check, no added wait. The app's web_sources.SMART_ASK / SMART_LIVE are these same patterns.
 const SMART_LIVE_DATA = /\b(?:exchange rate|interest rate|inflation|forecast|market cap)\b|\bcurrent\s+(?:[\w/-]+\s+){0,4}(?:rate|price|version|status|CEO|president|weather|score)\b/i;
+// A Smart Action that asks something - a question, or "find / list / show / recommend ..." (English, French): with
+// "Search the web" on, the fast AI check decides whether it needs the web (events, places, current facts). A
+// rewrite ("make it shorter", "translate this", "summarize") is not one: it never waits for the check.
+export const SMART_ASKS = /^(?:(?:please|hey|ok(?:ay)?|so|and)[,\s]+)*(?:(?:can|could|would)\s+you\s+(?:please\s+)?)?(?:what|what's|who|who's|when|where|which|how|why|is\s+there|are\s+there|any|find|list|show\s+me|give\s+me|tell\s+me|recommend|suggest|search|look\s+(?:for|up)|check|quel(?:le)?s?|qui|quand|où|comment|pourquoi|est-ce\s+qu|y\s+a-t-il|trouve|cherche|donne-moi|liste)(?=[\s,?!.:']|$)|\?\s*$/i;
 export function smartWebQuery(request: string): string {
   const q = request.trim();
   if (q.length < 8) return "";
@@ -234,10 +238,13 @@ async function webSearch(messages: unknown[], mode: string, webQuery: unknown): 
     ? (content.includes("User's question: ") ? content.split("User's question: ").pop()! : "")
     : content.match(/<question>\s*([\s\S]*?)\s*<\/question>/)?.[1] ?? "");
   const asked = doSearchQuery(question, mode);
+  const smart = mode === "smart_auto" ? smartWebQuery(question) : "";
   const decision = asked ? { query: asked, source: "explicit", classifier_ms: 0 }
-    : mode === "smart_auto"
-    ? { query: smartWebQuery(question), source: "smart", classifier_ms: 0 }
-    : await decideWebSearch(question, content, classifyWebSearch, mode);
+    : smart ? { query: smart, source: "smart", classifier_ms: 0 }
+    // A Smart Action that ASKS ("what AI events are in Paris next week?", "find ..."): the fast AI check decides.
+    : mode !== "smart_auto" || SMART_ASKS.test(question.trim())
+    ? await decideWebSearch(question, content, classifyWebSearch, mode)
+    : { query: "", source: "smart", classifier_ms: 0 };
   const depth = searchDepth(question, mode);
   const limits = DEPTH_LIMITS[depth] ?? DEPTH_LIMITS.fast;
   const query = decision.query;

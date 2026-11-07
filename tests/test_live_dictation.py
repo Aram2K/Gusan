@@ -111,6 +111,39 @@ class TestLanguages(unittest.TestCase):
         self.assertTrue(all(isinstance(c, str) for c in got))
 
 
+class TestAnotherLanguageThanTheOneSet(unittest.TestCase):
+    """Armenian set, English spoken: the backup (detecting by itself) wrote Latin letters - its text is used, as
+    spoken, not the real-time text forced into Armenian. Only pieces already back count: Stop never waits."""
+
+    def _rec(self, pieces, detects=True, language="hy"):
+        import threading
+        r = _rec(_backup_detects=detects, _chunk_results=dict(enumerate(pieces)), _chunk_lock=threading.Lock())
+        self._cfg = mock.patch.dict(main.cfg, {"language": language})
+        self._cfg.start()
+        self.addCleanup(self._cfg.stop)
+        return r
+
+    def test_english_pieces_with_armenian_set_mean_another_language(self):
+        r = self._rec(["Okay so tomorrow I have to go to basketball practice."])
+        self.assertTrue(AR._spoke_other_language(r))
+        s = FakeSession("Լավ, ուրեմն վաղը պետք է գնամ բասկետբոլի։", language="hy", languages=("hy",))
+        s.engine = "openai"
+        r._live_session = s
+        self.assertIsNone(AR._finish_live(r))                      # the pieces' text, as spoken
+
+    def test_armenian_pieces_or_a_few_english_words_are_fine(self):
+        self.assertFalse(AR._spoke_other_language(self._rec(["Ուրեմն վաղը պետք է գնամ բասկետբոլի"])))
+        self.assertFalse(AR._spoke_other_language(self._rec(["Ուրեմն վաղը Gusan-ով պետք է գնամ"])))
+
+    def test_nothing_back_yet_or_too_short_never_judges(self):
+        self.assertFalse(AR._spoke_other_language(self._rec([])))
+        self.assertFalse(AR._spoke_other_language(self._rec(["Okay"])))
+
+    def test_only_when_the_backup_detected_by_itself(self):
+        self.assertFalse(AR._spoke_other_language(self._rec(["Okay so tomorrow I have to go."], detects=False)))
+        self.assertFalse(AR._spoke_other_language(self._rec(["Okay so tomorrow I have to go."], language="fr")))
+
+
 class TestAtStop(unittest.TestCase):
     def test_a_clean_session_gives_the_text_at_once(self):
         s = FakeSession("Hello everyone.")

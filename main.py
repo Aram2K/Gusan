@@ -2694,10 +2694,15 @@ class AudioRecorder:
         """Open this take's live session on its own thread (the audio waits in its queue meanwhile). Never raises:
         no session means the pieces carry the take, as before."""
         self._live_session = None
+        self._backup_detects = False
         try:
             engine = AudioRecorder._live_engine(self, capture_mode)
             if engine is None:
                 return
+            # A set language with an alphabet of its own (Armenian): real-time writes the take in it, the backup
+            # pieces detect the language themselves - so a take spoken in another language shows at Stop
+            # (_spoke_other_language) and comes out as spoken, not forced into the set language (founder, 2026-11-07).
+            self._backup_detects = speech_langs.has_distinct_script(AudioRecorder._lang_setting(self))
             import live_stt
             terms = ()
             try:
@@ -2754,10 +2759,29 @@ class AudioRecorder:
             logger.info("Real-time transcript not used (%s heard: Gusan Cloud's engines write it better): the "
                         "pieces' text instead", poor[0])
             return None
+        if AudioRecorder._spoke_other_language(self):
+            logger.info("Real-time transcript not used (another language than the one set was spoken): the "
+                        "pieces' text instead, as spoken")
+            return None
         logger.info("Real-time transcript (%s): %d characters, final %d ms after Stop", engine, len(text),
                     int((time.monotonic() - started) * 1000))
         AudioRecorder._note_cloud_ran(self, "gpt-live-transcribe" if engine == "openai" else "solaria-1")
         return text, session.language
+
+    def _spoke_other_language(self):
+        """The backup pieces already back (never waited for) were written clearly in another alphabet than the set
+        language's: the person spoke another language. Only when the backup detected the language itself
+        (_backup_detects); a few foreign words inside the language's own text are not that."""
+        if not getattr(self, "_backup_detects", False):
+            return False
+        try:
+            with self._chunk_lock:
+                done = " ".join(t for t in self._chunk_results.values() if isinstance(t, str) and t.strip())
+        except Exception:
+            return False
+        letters = sum(1 for ch in done if ch.isalpha())
+        return (letters >= speech_langs.SCRIPT_MIN_LETTERS
+                and not speech_langs.script_matches(done, AudioRecorder._lang_setting(self)))
 
     def transcribe(self):
         pipe = getattr(self, "_chunk_pipeline", None)
@@ -3744,6 +3768,10 @@ class AudioRecorder:
             # proxy deployments ignore unknown fields, so this is a no-op until
             # the server side ships - never an error.
             lang_setting = self._lang_setting()
+            if getattr(self, "_backup_detects", False) and live_model is None:
+                # Real-time carries this dictation in the set language: the backup detects the language itself,
+                # so a take spoken in another one is noticed at Stop (_spoke_other_language).
+                lang_setting = "auto"
             mix = speech_langs.mix_languages(cfg)
             body = {
                 "audio": b64_data,
