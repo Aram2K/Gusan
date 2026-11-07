@@ -39,6 +39,11 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
     private var showGlobe = false
     private var theme = KeyboardTheme(appearance: nil, traits: UITraitCollection())
     private var slots: [KeySlot] = []
+    private var caps: [KeyCap] = []
+    private var renderedShift: Shift?
+    private var renderedDark: Bool?
+    private var renderedReturnType: UIReturnKeyType?
+    private var renderedReturnTitle: String?
     private var active: [UITouch: Int] = [:]
     private var previews: [UITouch: UILabel] = [:]
     private var deleteTimer: Timer?
@@ -100,7 +105,10 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
     }
     override func layoutSubviews() {
         super.layoutSubviews()
-        slots.forEach { $0.cap.removeFromSuperview() }; slots.removeAll()
+        var nextSlots: [KeySlot] = []
+        let appearanceChanged = renderedDark != theme.dark
+        let shiftChanged = renderedShift != shift
+        let returnChanged = renderedReturnType != returnType || renderedReturnTitle != returnTitle
         backgroundColor = theme.background
         let pitch = bounds.height / 4
         let unit = bounds.width / 10
@@ -118,45 +126,63 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
             var x = inset
             for (index, key) in keys.enumerated() {
                 let area = CGRect(x: x, y: CGFloat(rowIndex) * pitch, width: widths[index], height: pitch)
-                let cap = KeyCap(frame: area.insetBy(dx: 3, dy: 6))
-                cap.textAlignment = .center; cap.layer.cornerRadius = 5
-                cap.layer.shadowColor = theme.shadow.cgColor; cap.layer.shadowOffset = CGSize(width: 0, height: 1)
-                cap.layer.shadowOpacity = 1; cap.layer.shadowRadius = 0
-                cap.layer.backgroundColor = (isSpecial(key) ? theme.special : theme.letter).cgColor
-                cap.textColor = theme.foreground
-                cap.font = .systemFont(ofSize: isSpecial(key) ? 16 : 22)
-                cap.text = title(key)
-                cap.isAccessibilityElement = key != .globe
-                cap.accessibilityLabel = accessibilityTitle(key)
-                cap.accessibilityTraits = .keyboardKey
-                if key == .shift {
-                    cap.accessibilityHint = "Double tap quickly to lock capitals"
-                    if shift != .off { cap.accessibilityTraits.insert(.selected) }
+                let slotIndex = nextSlots.count
+                if slotIndex == caps.count {
+                    let cap = KeyCap()
+                    cap.textAlignment = .center; cap.layer.cornerRadius = 5
+                    cap.layer.shadowOffset = CGSize(width: 0, height: 1)
+                    cap.layer.shadowOpacity = 1; cap.layer.shadowRadius = 0
+                    cap.onActivate = { [weak self] in
+                        guard let self, self.inputEnabled, self.slots.indices.contains(slotIndex) else { return }
+                        let current = self.slots[slotIndex].key
+                        if self.keyClicks { UIDevice.current.playInputClick() }
+                        if current == .delete { self.onDelete?() } else { self.press(current) }
+                    }
+                    caps.append(cap); addSubview(cap)
                 }
-                cap.onActivate = { [weak self] in
-                    guard let self, self.inputEnabled else { return }
-                    if self.keyClicks { UIDevice.current.playInputClick() }
-                    if key == .delete { self.onDelete?() } else { self.press(key) }
+                let cap = caps[slotIndex]
+                let keyChanged = !slots.indices.contains(slotIndex) || slots[slotIndex].key != key
+                let shifted = key == .shift || (layerMode == .letters && !isSpecial(key) && key != .space)
+                if keyChanged || appearanceChanged || (shiftChanged && shifted) || (returnChanged && key == .enter) {
+                    updateCap(cap, key: key)
                 }
-                if key == .shift && shift != .off { cap.layer.backgroundColor = UIColor.white.cgColor; cap.textColor = .black }
-                if key == .enter && returnType != .default { cap.layer.backgroundColor = KeyboardTheme.blue.cgColor; cap.textColor = .white }
-                if key == .shift || key == .delete {
-                    let symbol = key == .delete ? "delete.left" : shift == .locked ? "capslock.fill" : shift == .once ? "shift.fill" : "shift"
-                    let attachment = NSTextAttachment()
-                    attachment.image = UIImage(systemName: symbol)?.withTintColor(cap.textColor, renderingMode: .alwaysOriginal)
-                    attachment.bounds = CGRect(x: 0, y: -3, width: 23, height: 20)
-                    cap.attributedText = NSAttributedString(attachment: attachment)
-                }
-                if key == .space { cap.font = .systemFont(ofSize: 16) }
-                addSubview(cap); slots.append(KeySlot(key: key, area: area, cap: cap))
+                cap.isHidden = false; cap.frame = area.insetBy(dx: 3, dy: 6)
+                nextSlots.append(KeySlot(key: key, area: area, cap: cap))
                 if key == .globe { globeButton.frame = area; globeButton.tintColor = theme.foreground }
                 x += widths[index]
             }
         }
+        caps.dropFirst(nextSlots.count).forEach { $0.isHidden = true }
+        slots = nextSlots
+        renderedShift = shift; renderedDark = theme.dark
+        renderedReturnType = returnType; renderedReturnTitle = returnTitle
         globeButton.isHidden = !showGlobe
         bringSubviewToFront(globeButton)
         for preview in previews.values { bringSubviewToFront(preview) }
         updateHighlights()
+    }
+    private func updateCap(_ cap: KeyCap, key: Key) {
+        cap.layer.shadowColor = theme.shadow.cgColor
+        cap.layer.backgroundColor = (isSpecial(key) ? theme.special : theme.letter).cgColor
+        cap.textColor = theme.foreground
+        cap.font = .systemFont(ofSize: isSpecial(key) || key == .space ? 16 : 22)
+        cap.attributedText = nil; cap.text = title(key)
+        cap.isAccessibilityElement = key != .globe
+        cap.accessibilityLabel = accessibilityTitle(key)
+        cap.accessibilityTraits = .keyboardKey
+        cap.accessibilityHint = key == .shift ? "Double tap quickly to lock capitals" : nil
+        if key == .shift && shift != .off {
+            cap.accessibilityTraits.insert(.selected)
+            cap.layer.backgroundColor = UIColor.white.cgColor; cap.textColor = .black
+        }
+        if key == .enter && returnType != .default { cap.layer.backgroundColor = KeyboardTheme.blue.cgColor; cap.textColor = .white }
+        if key == .shift || key == .delete {
+            let symbol = key == .delete ? "delete.left" : shift == .locked ? "capslock.fill" : shift == .once ? "shift.fill" : "shift"
+            let attachment = NSTextAttachment()
+            attachment.image = UIImage(systemName: symbol)?.withTintColor(cap.textColor, renderingMode: .alwaysOriginal)
+            attachment.bounds = CGRect(x: 0, y: -3, width: 23, height: 20)
+            cap.attributedText = NSAttributedString(attachment: attachment)
+        }
     }
     private func isSpecial(_ key: Key) -> Bool {
         switch key { case .text, .space: return false; default: return true }
