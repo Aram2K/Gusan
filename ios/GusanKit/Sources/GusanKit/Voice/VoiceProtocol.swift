@@ -159,6 +159,28 @@ public struct VoiceChannel {
         try JSONEncoder().encode(value).write(to: url, options: options)
     }
     public func readStatus() -> VoiceStatus? { read("status", as: VoiceStatus.self) }
+    public func readStatusSnapshot() async -> VoiceStatus? {
+        let source = await MainActor.run { () -> (URL?, Data?, Bool) in
+            switch storage() {
+            case .file: return (file("status"), nil, false)
+            case .pasteboard: return (nil, pasteboard?.read("status").data, true)
+            default: return (nil, nil, false)
+            }
+        }
+        let decoded = await Task.detached { () -> (VoiceStatus?, Bool) in
+            guard let data = source.1 ?? source.0.flatMap({ try? Data(contentsOf: $0) }) else { return (nil, false) }
+            if source.2 {
+                guard let packet = try? JSONDecoder().decode(Packet<VoiceStatus>.self, from: data) else { return (nil, false) }
+                guard (0..<600).contains(Date().timeIntervalSince(packet.issuedAt)) else { return (nil, true) }
+                return (packet.value, false)
+            }
+            return (try? JSONDecoder().decode(VoiceStatus.self, from: data), false)
+        }.value
+        if decoded.1 {
+            await MainActor.run { if pasteboard?.read("status").data == source.1 { pasteboard?.clear("status") } }
+        }
+        return decoded.0
+    }
     public func readCommand() -> VoiceCommand? { read("command", as: VoiceCommand.self) }
     public func failureStatus(message: String) -> VoiceStatus {
         VoiceStatus(phase: .failed, requestID: readCommand()?.requestID ?? readKeyboardState()?.requestID, heartbeat: .distantPast, message: message)

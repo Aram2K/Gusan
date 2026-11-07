@@ -15,7 +15,7 @@ private final class VoiceAudioBuffer {
         let count = Int(buffer.frameLength)
         let chunk = UnsafeBufferPointer(start: pointer, count: count)
         if samples.count < 16000 * 300 { samples.append(contentsOf: chunk.prefix(16000 * 300 - samples.count)) }
-        guard Date().timeIntervalSince(lastLevel) >= 1.0 / 15 else { return nil }
+        guard Date().timeIntervalSince(lastLevel) >= 1.0 / 4 else { return nil }
         lastLevel = Date()
         let energy = chunk.reduce(0.0) { $0 + pow(Double($1) / 32768, 2) }
         return Float(min(1, sqrt(energy / Double(max(1, count))) * 5))
@@ -30,6 +30,7 @@ final class VoiceSession: ObservableObject {
     @Published private(set) var error = ""
     @Published private(set) var permission = AVAudioSession.sharedInstance().recordPermission
     @Published var presented = false
+    @Published private(set) var keyboardActivation = false
     let store: SessionStore
     let settings: VoiceSettings
     private let auth: AuthClient
@@ -51,6 +52,9 @@ final class VoiceSession: ObservableObject {
         self.store = store; auth = AuthClient(store: store)
         settings = VoiceSettings(group: store.resolution.chosen)
         channel = store.makeVoiceChannel()
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--gusan-debug-activation-guide") { keyboardActivation = true; presented = true }
+        #endif
         observer = channel.observe(.command) { [weak self] in self?.receive() }
         audioObservers.append(NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] notification in
             Task { @MainActor in self?.interrupted(notification) }
@@ -63,7 +67,9 @@ final class VoiceSession: ObservableObject {
         guard url.scheme == "gusan", url.host == "voice" else { return }
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
         presented = true
+        if machine.phase == .off { error = ""; status = VoiceStatus() }
         if channel.consumeLaunch(nonce: items?.first { $0.name == "nonce" }?.value) {
+            keyboardActivation = true
             hostBundleID = items?.first { $0.name == "return" }?.value
             start(pendingWithin: 60)
         } else { hostBundleID = nil }
@@ -73,6 +79,7 @@ final class VoiceSession: ObservableObject {
         if machine.phase != .off { receive(); scheduleReturn(); return }
         guard startup == nil else { return }
         error = ""
+        status = VoiceStatus()
         startup = Task {
             defer { startup = nil }
             do {
@@ -146,11 +153,14 @@ final class VoiceSession: ObservableObject {
         try? channel.write(status: status); channel.post(.status)
     }
     private func receive() {
+        if let id = channel.consumeReceipt() {
+            if status.phase == .failed && status.requestID == id { error = ""; if machine.phase == .off { status = VoiceStatus() } }
+            execute(machine.handle(.acknowledged(id)))
+        }
         guard machine.phase != .off else { return }
-        if let id = channel.consumeReceipt() { execute(machine.handle(.acknowledged(id))) }
         guard let command = channel.consumeCommand(), command.id != consumed else { return }
         consumed = command.id
-        if command.kind == .start { machine.action = settings.defaultAction }
+        if command.kind == .start { error = ""; machine.action = settings.defaultAction }
         execute(machine.handle(.command(command, Date())))
         if command.kind == .cancel { channel.discardRequest(command.requestID) }
     }

@@ -35,10 +35,14 @@ struct VoiceReadyView: View {
         NavigationStack {
             ScreenContent {
                 AppCard {
-                    Image("VoiceMark").resizable().scaledToFit().frame(width: 96, height: 96).accessibilityLabel("Gusan")
+                    BrandMark(large: true)
                     Text("Voice dictation").font(.largeTitle).bold().accessibilityAddTraits(.isHeader)
+                    if voice.keyboardActivation {
+                        Text("Gusan needs to start the mic once — swipe back to your app.").font(.headline)
+                    }
                     Text(voice.alive ? "Your voice session is ready. Switch back to your app, keep Gusan selected, and tap the mic to dictate." : "Speak naturally, right from your Gusan keyboard. Tap Record to prepare a voice session, then return to your app.")
                         .font(.body).foregroundStyle(.secondary)
+                    Text("The microphone stays ready between dictations until you stop this session or the idle timeout ends it.").font(.footnote).foregroundStyle(.secondary)
                     if !voice.alive && voice.error.isEmpty {
                         PrimaryButton(title: "Record", icon: "mic.fill") { voice.start() }
                     }

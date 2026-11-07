@@ -9,6 +9,7 @@ final class KeyboardViewController: UIInputViewController {
         let before: String
         let after: String
         var text: String { selected.isEmpty ? before + after : selected }
+        var voiceContext: VoiceContext { VoiceContext(selected: selected, before: before, after: after, documentID: document.uuidString) }
         var summary: String {
             if text.isEmpty { return "No text: Ask Gusan writes it" }
             let count = text.split(whereSeparator: { $0.isWhitespace }).count
@@ -36,10 +37,11 @@ final class KeyboardViewController: UIInputViewController {
     private var busy = false
     private var original: String?
     private var replacement: String?
-    private var undoContext: Context?
+    private var undoSnapshot: VoiceContext?
+    private var undoRecord: ReplacementUndo?
+    private var undoIsRedo = false
     private var task: Task<Void, Never>?
     private var height: NSLayoutConstraint!
-    private var resultTimer: Timer?
     private var retryAction: SmartAction?
     private var retryContext: Context?
     private var connected = false
@@ -118,7 +120,7 @@ final class KeyboardViewController: UIInputViewController {
     override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
         super.traitCollectionDidChange(previousTraitCollection); updateContext()
     }
-    override func textDidChange(_ textInput: UITextInput?) { super.textDidChange(textInput); voice.documentDidChange(); updateContext() }
+    override func textDidChange(_ textInput: UITextInput?) { super.textDidChange(textInput); voice.documentDidChange(); captureUndo(); updateContext() }
     override func selectionDidChange(_ textInput: UITextInput?) { super.selectionDidChange(textInput); updateContext() }
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated); task?.cancel(); keyArea.cancelTouches()
@@ -137,7 +139,9 @@ final class KeyboardViewController: UIInputViewController {
         instructionHeader.update(text: instruction, theme: theme)
         explanation.textColor = theme.foreground
         toolbar.message.setTitle(message ?? context.summary, for: .normal)
-        toolbar.accessory.setTitle(accessory, for: .normal); toolbar.accessory.isHidden = accessory == nil
+        let statusAction = accessory ?? (undoRecord == nil ? nil : undoIsRedo ? "Redo" : "Undo")
+        toolbar.accessory.setTitle(statusAction, for: .normal); toolbar.accessory.isHidden = statusAction == nil
+        toolbar.accessory.isEnabled = (statusAction != "Undo" && statusAction != "Redo") || undoRecord?.step(context: currentContext.voiceContext) != nil
         toolbar.accessory.accessibilityHint = accessory == "Sign in" ? "Opens the Gusan app" : "Activates the status action"
         toolbar.mic.isEnabled = !busy; toolbar.logo.isEnabled = !busy
         toolbar.setNeedsLayout()
@@ -175,6 +179,7 @@ final class KeyboardViewController: UIInputViewController {
     }
     @objc func startVoice() {
         guard !busy else { return }
+        invalidateUndo()
         impact()
         if let onVoice { onVoice() } else { showMessage("Tap the mic to open the Gusan app and start a voice session the first time") }
     }
@@ -189,9 +194,9 @@ final class KeyboardViewController: UIInputViewController {
         surface = .explanation; updateSurface()
     }
     @objc private func accessoryPressed() {
-        switch accessory {
+        switch accessory ?? (undoRecord == nil ? nil : undoIsRedo ? "Redo" : "Undo") {
         case "Sign in": openContainingApp(URL(string: "gusan://signin?from=keyboard")!)
-        case "Undo": undo()
+        case "Undo", "Redo": undo()
         case "Cancel": task?.cancel()
         case "How to enable", "Details": expandMessage()
         case "See plans": openContainingApp(URL(string: "https://gusan.aibuben.xyz")!)
@@ -240,7 +245,7 @@ final class KeyboardViewController: UIInputViewController {
         do { _ = try Prompts.messages(text: context.text, action: action, target: settings.translateTarget) }
         catch { showMessage(error.localizedDescription, detail: error.localizedDescription); return }
         guard currentContext == context else { showMessage("Text changed. Select it and try again."); return }
-        busy = true; resultTimer?.invalidate(); invalidateUndo(); toolbar.spinner.startAnimating()
+        busy = true; invalidateUndo(); toolbar.spinner.startAnimating()
         retryAction = action; retryContext = context
         let progress: String
         switch action { case .rephrase: progress = "Rephrasing…"; case .fixGrammar: progress = "Fixing grammar…"; default: progress = "Working…" }
@@ -263,16 +268,13 @@ final class KeyboardViewController: UIInputViewController {
                     textDocumentProxy.adjustTextPosition(byCharacterOffset: context.after.utf16.count)
                     for _ in context.text { textDocumentProxy.deleteBackward() }
                 }
+                undoSnapshot = currentContext.voiceContext
                 textDocumentProxy.insertText(result)
-                original = context.text; replacement = result; undoContext = currentContext
+                original = context.text; replacement = result; captureUndo(restoreUTF16: context.selected.isEmpty ? context.after.utf16.count : 0)
                 instructionContext = nil; instruction = ""; showTyping()
                 showMessage("Replaced", accessory: "Undo")
                 notify(.success)
                 UIAccessibility.post(notification: .announcement, argument: "Replaced. Undo available.")
-                resultTimer = Timer.scheduledTimer(withTimeInterval: 8, repeats: false) { [weak self] _ in
-                    guard let self, self.message == "Replaced" else { return }
-                    self.message = nil; self.accessory = nil; self.updateContext()
-                }
             } catch is CancellationError { showMessage("Cancelled") }
             catch GusanError.unauthorized { showMessage("Sign in to use Gusan", accessory: "Sign in") }
             catch GusanError.proRequired {
@@ -288,15 +290,26 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
     private func undo() {
-        guard !busy, let original, let replacement else { return }
-        guard currentContext == undoContext, currentContext.selected.isEmpty else {
+        guard !busy, let record = undoRecord else { return }
+        guard let step = record.step(context: currentContext.voiceContext) else {
             invalidateUndo(); showMessage("Text changed. Undo is no longer available."); return
         }
-        for _ in replacement { textDocumentProxy.deleteBackward() }
-        textDocumentProxy.insertText(original)
-        invalidateUndo(); showMessage("Undone")
+        if step.advanceUTF16 != 0 { textDocumentProxy.adjustTextPosition(byCharacterOffset: step.advanceUTF16) }
+        for _ in 0..<step.deleteCount { textDocumentProxy.deleteBackward() }
+        if !step.text.isEmpty { textDocumentProxy.insertText(step.text) }
+        if step.restoreUTF16 != 0 { textDocumentProxy.adjustTextPosition(byCharacterOffset: step.restoreUTF16) }
+        undoRecord = record.inverted(); undoIsRedo.toggle(); accessory = nil
+        showMessage(undoIsRedo ? "Undone" : "Redone")
     }
-    private func invalidateUndo() { original = nil; replacement = nil; undoContext = nil; if accessory == "Undo" { accessory = nil } }
+    private var undoRestoreUTF16 = 0
+    private func captureUndo(restoreUTF16: Int? = nil) {
+        if let restoreUTF16 { undoRestoreUTF16 = restoreUTF16 }
+        guard undoRecord == nil, let original, let replacement, let snapshot = undoSnapshot,
+              VoiceEdit.containsInsertedResult(replacement, context: currentContext.voiceContext, snapshot: snapshot) else { return }
+        undoRecord = ReplacementUndo(original: original, replacement: replacement, snapshot: snapshot, restoreUTF16: undoRestoreUTF16)
+        undoSnapshot = nil
+    }
+    private func invalidateUndo() { original = nil; replacement = nil; undoSnapshot = nil; undoRecord = nil; undoIsRedo = false; if accessory == "Undo" || accessory == "Redo" { accessory = nil } }
     private func cancelForInput() -> Bool {
         guard busy else { return false }
         task?.cancel(); showMessage("Cancelled")
@@ -305,20 +318,30 @@ final class KeyboardViewController: UIInputViewController {
     private func insert(_ text: String) {
         let cancelled = cancelForInput()
         if surface == .instruction { instruction += text }
-        else { invalidateUndo(); if !cancelled { message = nil; detail = nil; accessory = nil }; textDocumentProxy.insertText(text) }
+        else {
+            captureUndo(); undoSnapshot = nil
+            if !currentContext.selected.isEmpty || undoRecord?.append(text) == false { invalidateUndo() }
+            voice.insertedText(text, hasSelection: !currentContext.selected.isEmpty)
+            if !cancelled { message = nil; detail = nil; accessory = nil }; textDocumentProxy.insertText(text)
+        }
         updateContext()
     }
     private func returnPressed() { if surface == .instruction { runInstruction() } else { insert("\n") } }
     private func deleteOnce() {
         let cancelled = cancelForInput()
         if surface == .instruction { if !instruction.isEmpty { instruction.removeLast() } }
-        else { invalidateUndo(); if !cancelled { message = nil; detail = nil; accessory = nil }; textDocumentProxy.deleteBackward() }
+        else {
+            captureUndo(); undoSnapshot = nil
+            if !currentContext.selected.isEmpty || undoRecord?.deleteBackward() == false { invalidateUndo() }
+            voice.deletedText(hasSelection: !currentContext.selected.isEmpty)
+            if !cancelled { message = nil; detail = nil; accessory = nil }; textDocumentProxy.deleteBackward()
+        }
         updateContext()
     }
     private func doubleSpace() {
         _ = cancelForInput()
         if surface == .instruction { if instruction.last == " " { instruction.removeLast() }; instruction += ". " }
-        else { invalidateUndo(); textDocumentProxy.deleteBackward(); textDocumentProxy.insertText(". ") }
+        else { deleteOnce(); insert(". ") }
         updateContext()
     }
     func openContainingApp(_ url: URL) {

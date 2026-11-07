@@ -2,6 +2,41 @@ import XCTest
 @testable import GusanKit
 
 final class VoiceTests: XCTestCase {
+    func testAsyncStatusSnapshotReadsFileAndPasteboardAndRejectsMissingOrMalformedData() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = VoiceChannel(container: directory)
+        let board = Board()
+        let pasteboard = VoiceChannel(container: nil, group: "test", pasteboard: board, route: { .pasteboard })
+        let missing = await file.readStatusSnapshot()
+        XCTAssertNil(missing)
+        let status = VoiceStatus(phase: .recording, requestID: UUID(), level: 0.5)
+        for channel in [file, pasteboard] {
+            try channel.write(status: status)
+            let read = await channel.readStatusSnapshot()
+            XCTAssertEqual(read, status)
+        }
+        try Data("invalid".utf8).write(to: directory.appendingPathComponent("voice/status.json"))
+        board.values["status"] = Data("invalid".utf8)
+        let malformedFile = await file.readStatusSnapshot(), malformedBoard = await pasteboard.readStatusSnapshot()
+        XCTAssertNil(malformedFile); XCTAssertNil(malformedBoard)
+    }
+    func testWarmSessionKeepsLaterMicTapsInPlaceUntilTimeout() {
+        let now = Date()
+        var machine = VoiceMachine(idleTimeout: 300)
+        var effects = machine.handle(.sessionStarted(now))
+        let id = UUID()
+        effects += machine.handle(.command(VoiceCommand(kind: .start, requestID: id, sentAt: now), now))
+        effects += machine.handle(.command(VoiceCommand(kind: .stop, requestID: id, sentAt: now), now))
+        effects += machine.handle(.transcribed(id, "Hello"))
+        effects += machine.handle(.completed(id, JobResult(text: "Hello", kind: .insert)))
+        effects += machine.handle(.acknowledged(id))
+        XCTAssertFalse(effects.contains(.stopSession))
+        XCTAssertEqual(machine.phase, .ready)
+        XCTAssertEqual(KeyboardVoice.tap(status: VoiceStatus(phase: machine.phase, heartbeat: now), now: now, hasFullAccess: true, shared: true, signedIn: true), .start)
+        XCTAssertTrue(machine.handle(.tick(now.addingTimeInterval(301))).contains(.stopSession))
+        XCTAssertEqual(KeyboardVoice.tap(status: VoiceStatus(phase: machine.phase), hasFullAccess: true, shared: true, signedIn: true), .openApp)
+    }
     final class Board: SessionBackend {
         let name: String
         var values: [String: Data] = [:]
