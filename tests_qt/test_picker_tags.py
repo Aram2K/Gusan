@@ -386,7 +386,7 @@ def test_settings_says_the_same_words(env):
     assert card.combo.currentText() == "Whisper Small · Local"                   # the pickers' words
     card.runs_on._on_clicked(card.sources.index("cloud"))
     titles = [card.combo.itemData(i, Qt.UserRole + 3) for i in card.combo.row_indexes()]
-    assert titles == ["Fast", "Best accuracy", "Gladia Solaria"]
+    assert titles == ["Fast", "Best accuracy"]
     assert card.combo.row_tags(card.combo.row_indexes()[0]) == ("cloud", "pro")
     app.cfg.update(backend="google", google_stt_model="gemini-2.5-pro", speech_key_id="g",
                    api_keys=[{"id": "g", "name": "My Google", "provider": "api_gemini", "model": "", "base_url": ""}],
