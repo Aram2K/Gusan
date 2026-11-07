@@ -175,6 +175,20 @@ _PROFILE_ALIASES = {"best": CLOUD_BEST, "gemini-2.5-pro": CLOUD_BEST, "fast": CL
                     "gladia": CLOUD_GLADIA, "gladia-fusion": CLOUD_GLADIA}
 
 
+def heal_speech_settings(cfg):
+    """Settings the 2.1.2 test builds could save (main.load_config, every load): "Gladia Fusion" (refused to our
+    account) for files becomes Gladia Solaria; Gladia for dictation (2-5 s a piece) becomes Fast. In place."""
+    if cfg.get(FILE_KEY_NAME) == "cloud:gladia-fusion":
+        cfg[FILE_KEY_NAME] = "cloud:gladia"
+    if str(cfg.get(SPEECH_PROFILE_KEY_NAME) or "").strip().lower() in ("gladia", "gladia-fusion"):
+        cfg[SPEECH_PROFILE_KEY_NAME] = CLOUD_FAST
+    return cfg
+
+
+FILE_KEY_NAME = "file_model"                       # = FILE_KEY (defined further down)
+SPEECH_PROFILE_KEY_NAME = "managed_speech_profile"  # = SPEECH_PROFILE_KEY
+
+
 def cloud_profile(value, default=CLOUD_FAST):
     """The Gusan Cloud profile a value means: "best" / "gemini-2.5-pro" -> "best", "fast" -> "fast",
     anything else ("", None, "gemini-2.5-flash", "gemini", "mistral", a model id) -> ``default``."""
