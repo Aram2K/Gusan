@@ -169,7 +169,7 @@ public final class SessionStore: SessionStorage {
         let newest = sessions.max { $0.updatedAt == $1.updatedAt ? $0.expiresAt < $1.expiresAt : $0.updatedAt < $1.updatedAt } ?? decode(privateBackend.read("session").data)
         if let newest, let data = try? JSONEncoder().encode(newest) {
             if writeShared(data) { privateBackend.clear("session") }
-            else { _ = privateBackend.write(data, key: "session") }
+            else { _ = persist(data, to: privateBackend) }
         } else if !usePasteboard() {
             for backend in backends where backend.name == "Team pasteboard" { backend.clear("session") }
         }
@@ -180,15 +180,21 @@ public final class SessionStore: SessionStorage {
         var saved = false
         for backend in backends {
             if backend.name == "Team pasteboard" && !allowed { backend.clear("session") }
-            else if backend.write(data, key: "session") { saved = true }
+            else if persist(data, to: backend) { saved = true }
         }
         return saved
+    }
+    private func persist(_ data: Data, to backend: SessionBackend) -> Bool {
+        guard let incoming = decode(data) else { return false }
+        if let current = decode(backend.read("session").data),
+           current.updatedAt > incoming.updatedAt || (current.updatedAt == incoming.updatedAt && current.expiresAt >= incoming.expiresAt) { return true }
+        return backend.write(data, key: "session")
     }
     public func write(_ session: Session) {
         synchronized {
             guard let data = try? JSONEncoder().encode(session) else { return }
             if writeShared(data) { privateBackend.clear("session") }
-            else { _ = privateBackend.write(data, key: "session") }
+            else { _ = persist(data, to: privateBackend) }
         }
     }
     public func clear() {

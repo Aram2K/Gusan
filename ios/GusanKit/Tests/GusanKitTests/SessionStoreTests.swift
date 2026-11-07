@@ -8,10 +8,12 @@ final class SessionStoreTests: XCTestCase {
         var readable = true
         var writable = true
         var cleared: [String] = []
+        var onRead: ((String) -> Void)?
+        var sessionWrites = 0
         init(_ name: String) { self.name = name }
-        func read(_ key: String) -> SessionBackendRead { SessionBackendRead(data: readable ? values[key] : nil, readable: readable) }
+        func read(_ key: String) -> SessionBackendRead { onRead?(key); return SessionBackendRead(data: readable ? values[key] : nil, readable: readable) }
         func write(_ data: Data, key: String) -> Bool {
-            guard writable else { return false }; values[key] = data; return true
+            guard writable else { return false }; if key == "session" { sessionWrites += 1 }; values[key] = data; return true
         }
         func clear(_ key: String) { cleared.append(key); if writable { values[key] = nil } }
         func session(_ session: Session) { values["session"] = try! JSONEncoder().encode(session) }
@@ -145,6 +147,51 @@ final class SessionStoreTests: XCTestCase {
         let store = SessionStore(resolution: local, backends: [normal, board], privateBackend: Backend("private"))
         store.write(session(1))
         XCTAssertNil(board.values["session"])
+    }
+    func testReconcileRereadsEachStoreBeforeWritingOverRotatedTokens() throws {
+        for name in ["Keychain", "App-group file", "Team pasteboard"] {
+            let backend = Backend(name)
+            peer(backend)
+            backend.session(session(1))
+            var reads = 0
+            backend.onRead = { [weak backend] key in
+                if key == "session" {
+                    reads += 1
+                    if reads == 2 { backend?.session(self.session(2)) }
+                }
+            }
+            let store = SessionStore(resolution: resolution, backends: [backend], privateBackend: Backend("private"))
+            _ = store.read()
+            XCTAssertEqual(try JSONDecoder().decode(Session.self, from: XCTUnwrap(backend.values["session"])), session(2))
+            XCTAssertEqual(backend.sessionWrites, 0)
+            backend.onRead = nil
+            XCTAssertEqual(store.read(), session(2))
+        }
+    }
+    func testRefreshWritesNeverReplaceNewerOrEqualStoreCopies() throws {
+        let backend = Backend("Team pasteboard")
+        peer(backend)
+        let current = session(20, expiry: 900)
+        backend.session(current)
+        let store = SessionStore(resolution: resolution, backends: [backend], privateBackend: Backend("private"))
+        store.write(session(10, expiry: 1000))
+        store.write(session(20, expiry: 500))
+        var equal = current; equal.accessToken = "different-but-not-newer"
+        store.write(equal)
+        XCTAssertEqual(backend.sessionWrites, 0)
+        XCTAssertEqual(try JSONDecoder().decode(Session.self, from: XCTUnwrap(backend.values["session"])), current)
+        store.write(session(20, expiry: 1000))
+        XCTAssertEqual(backend.sessionWrites, 1)
+        XCTAssertEqual(store.read(), session(20, expiry: 1000))
+    }
+    func testPrivateFallbackDoesNotDowngradeNewerCopy() {
+        let backend = Backend("Team pasteboard"), privateStore = Backend("private")
+        backend.writable = false
+        privateStore.session(session(20))
+        let store = SessionStore(resolution: resolution, backends: [backend], privateBackend: privateStore)
+        store.write(session(10))
+        XCTAssertEqual(store.read(), session(20))
+        XCTAssertEqual(privateStore.sessionWrites, 0)
     }
     func testUnavailablePasteboardOnMacDoesNotReportSharing() {
         #if !canImport(UIKit)
