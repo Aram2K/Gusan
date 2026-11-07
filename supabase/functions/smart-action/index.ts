@@ -104,10 +104,11 @@ export function webSearchQuery(question: string): string {
   return cues.test(q) || liveData.test(q) || /\b[Ww]hat [Ii]s\s+[A-Z][\w-]+/.test(q) ? q.slice(0, 400) : "";
 }
 
-export function explicitWebQuery(question: string): string {
+export function explicitWebQuery(question: string, mode = "live_assist"): string {
   const q = question.trim();
-  const trigger = /^(?:(?:please|(?:can|could|would)\s+you)\s+)*(?:search\s+(?:the\s+)?(?:web|online|internet)(?:\s+for)?|google|look\s+up|(?:check|find)\s+online|(?:can|could|would)\s+you\s+(?:please\s+)?search(?:\s+for)?|search\s+for|browse|what\s+does\s+the\s+internet\s+say\s+about|cherche(?:r|z)?\s+sur\s+internet|busca(?:r)?\s+en\s+internet|such(?:e)?\s+im\s+internet)\b/i.exec(q);
+  const trigger = /^(?:(?:please|(?:can|could|would)\s+you)\s+)*(?:search\s+(?:the\s+)?(?:web|online|internet)(?:\s+for)?|google|look\s+up(?:\s+(?:on\s+)?(?:the\s+)?(?:web|online|internet))?|(?:check|find)\s+online|(?:can|could|would)\s+you\s+(?:please\s+)?search(?:\s+for)?|search\s+for|browse(?:\s+(?:the\s+)?(?:web|online|internet))?|what\s+does\s+the\s+internet\s+say\s+about|cherche(?:r|z)?\s+sur\s+internet|busca(?:r)?\s+en\s+internet|such(?:e)?\s+im\s+internet)\b/i.exec(q);
   if (!trigger) return "";
+  if (mode === "meeting_chat" && !/\b(?:google|web|online|internet)\b/i.test(trigger[0])) return "";
   const rest = q.slice(trigger.index + trigger[0].length)
     .replace(/^[\s:,-]*(?:(?:please|for|about|pour|por|bitte)\b[\s:,-]*)*/i, "")
     .replace(/[,\s]*(?:please|thanks|thank you|s'il vous plaît|por favor|bitte)[.!?\s]*$/i, "").trim();
@@ -156,11 +157,12 @@ export async function classifyWebSearch(question: string, context: string): Prom
 }
 
 export async function decideWebSearch(question: string, context: string,
-  classify: (question: string, context: string) => Promise<WebDecision | null> = classifyWebSearch
+  classify: (question: string, context: string) => Promise<WebDecision | null> = classifyWebSearch,
+  mode = "live_assist"
 ): Promise<{ query: string; source: string; classifier_ms: number }> {
   const q = question.trim().slice(0, 400);
   if (q.length < 8) return { query: "", source: "none", classifier_ms: 0 };
-  const explicit = explicitWebQuery(q);
+  const explicit = explicitWebQuery(q, mode);
   if (explicit) return { query: explicit, source: "explicit", classifier_ms: 0 };
   const start = Date.now();
   try {
@@ -169,7 +171,8 @@ export async function decideWebSearch(question: string, context: string,
       return { query: d.search ? (d.query.trim() || q).slice(0, 400) : "", source: "model", classifier_ms: Date.now() - start };
     }
   } catch { /* Fall back to the heuristic. */ }
-  const query = webSearchQuery(q);
+  const meetingLookup = mode === "meeting_chat" && /^(?:(?:please|(?:can|could|would)\s+you)\s+)*(?:search|look\s+up|find|browse)\b/i.test(q);
+  const query = meetingLookup ? "" : webSearchQuery(q);
   return { query, source: query ? "heuristic" : "none", classifier_ms: Date.now() - start };
 }
 
@@ -182,7 +185,7 @@ async function webSearch(messages: unknown[], mode: string, webQuery: unknown): 
   const question = explicit || (mode === "live_assist"
     ? (content.includes("User's question: ") ? content.split("User's question: ").pop()! : "")
     : content.match(/<question>\s*([\s\S]*?)\s*<\/question>/)?.[1] ?? "");
-  const decision = await decideWebSearch(question, content);
+  const decision = await decideWebSearch(question, content, classifyWebSearch, mode);
   const query = decision.query;
   if (!query) {
     console.log("Linkup decision", JSON.stringify({ source: decision.source, classifier_ms: decision.classifier_ms, search_ms: 0, results: 0 }));

@@ -169,6 +169,24 @@ for (const [question, query] of explicit) {
   equal([d.source, d.query, d.classifier_ms], ["explicit", query, 0]);
 }
 equal(explicitWebQuery("Summarize the discussion"), "");
+for (const question of ["search for where John mentioned the budget", "look up John's latest budget", "find today's action items"]) {
+  equal(explicitWebQuery(question, "meeting_chat"), "");
+  let calls = 0;
+  const d = await decideWebSearch(question, "private notes", async () => {
+    calls++; return {search:false, query:""};
+  }, "meeting_chat");
+  equal([d.source, d.query, calls], ["model", "", 1]);
+  equal((await decideWebSearch(question, "", async () => null, "meeting_chat")).query, "");
+}
+for (const question of ["search for Acme", "look up Acme"]) {
+  equal((await decideWebSearch(question, "", () => { throw new Error("must not classify"); }, "live_assist")).source, "explicit");
+}
+for (const question of ["search the web for Acme", "google Acme", "look up online Acme", "check online Acme",
+                       "find online Acme", "browse the web Acme", "what does the internet say about Acme",
+                       "cherche sur internet Acme", "busca en internet Acme", "such im Internet Acme"]) {
+  equal(explicitWebQuery(question, "meeting_chat"), "Acme");
+  equal((await decideWebSearch(question, "", () => { throw new Error("must not classify"); }, "meeting_chat")).source, "explicit");
+}
 for (const question of ["What is Google stock price?", "Who is Google's CEO?", "How do we look up the budget?"]) {
   equal(explicitWebQuery(question), "");
   let classified = false;
