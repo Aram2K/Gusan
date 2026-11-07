@@ -63,9 +63,17 @@ final class JobTests: XCTestCase {
         let snapshot = VoiceContext(before: "Existing result", after: "Tail", documentID: "one")
         XCTAssertFalse(VoiceEdit.containsInsertedResult("result", context: snapshot, snapshot: snapshot))
         XCTAssertFalse(VoiceEdit.containsInsertedResult("result", context: VoiceContext(before: "Existing resultres", after: "Tail", documentID: "one"), snapshot: snapshot))
-        XCTAssertFalse(VoiceEdit.containsInsertedResult("result", context: VoiceContext(before: "result", after: "Tail", documentID: "one"), snapshot: snapshot))
+        XCTAssertTrue(VoiceEdit.containsInsertedResult("result", context: VoiceContext(before: "result", after: "Tail", documentID: "one"), snapshot: snapshot))
         XCTAssertFalse(VoiceEdit.containsInsertedResult("result", context: VoiceContext(before: "Existing resultresult", after: "Changed", documentID: "one"), snapshot: snapshot))
         XCTAssertTrue(VoiceEdit.containsInsertedResult("result", context: VoiceContext(before: "Existing resultresult", after: "Tail", documentID: "one"), snapshot: snapshot))
+    }
+    func testUndoAcceptsLongResultThroughATruncatedContextWindow() {
+        let snapshot = VoiceContext(before: "Old text", after: "Tail", documentID: "one")
+        let result = String(repeating: "New words ", count: 20)
+        let truncated = VoiceContext(before: String(result.suffix(snapshot.before.count)), after: "Tail", documentID: "one")
+        XCTAssertTrue(VoiceEdit.containsInsertedResult(result, context: truncated, snapshot: snapshot))
+        XCTAssertFalse(VoiceEdit.containsInsertedResult(result, context: VoiceContext(before: "s ", after: "Tail", documentID: "one"), snapshot: snapshot))
+        XCTAssertTrue(VoiceEdit.containsInsertedResult("Hello", context: VoiceContext(before: "Hello", documentID: "one"), snapshot: VoiceContext(documentID: "one")))
     }
     func testJobStreamNormalEmptyAndError() async throws {
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [StubProtocol.self]

@@ -134,7 +134,10 @@ public struct VoiceEdit: Equatable {
     public let restoreUTF16: Int
     public static func containsInsertedResult(_ text: String, context: VoiceContext, snapshot: VoiceContext) -> Bool {
         guard let documentID = snapshot.documentID, documentID == context.documentID, context.selected.isEmpty, !text.isEmpty, snapshot.selected != text else { return false }
-        return context.before == snapshot.before + text && context.after == snapshot.after
+        let observedWindow = max(snapshot.before.count, context.before.count)
+        return !context.before.isEmpty && context.before != snapshot.before
+            && context.before.count >= min(text.count, observedWindow)
+            && (snapshot.before + text).hasSuffix(context.before) && context.after == snapshot.after
     }
     public static func plan(result: JobResult, context: VoiceContext) -> VoiceEdit? {
         guard !result.text.isEmpty else { return nil }
