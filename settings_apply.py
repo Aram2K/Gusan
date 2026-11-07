@@ -68,7 +68,7 @@ SMART_SPEECH_CLOUD = "cloud"                   # engine_choice.SMART_SPEECH_CLOU
 LIVE_SPEECH = "live_assist_speech_model"       # engine_choice.LIVE_SPEECH_KEY
 FILE_MODEL = "file_model"                      # engine_choice.FILE_KEY
 FILE_AUTO = "auto"                             # engine_choice.FILE_AUTO
-FILE_CLOUD_VALUES = ("cloud", "own:google", "own:mistral")   # engine_choice.FILE_CLOUD_VALUES
+FILE_CLOUD_VALUES = ("cloud", "cloud:gladia", "cloud:gladia-fusion", "own:google", "own:mistral")   # engine_choice.FILE_CLOUD_VALUES
 # The spoken-language settings: "hye", "HY" and "hy-AM" are all Armenian - saved as "hy" (a value
 # no engine knows is refused). "" means "same as Dictation" for the other two.
 SPEECH_LANGUAGE_KEYS = ("language", "live_assist_language", "meeting_language")

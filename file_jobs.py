@@ -181,7 +181,7 @@ WHISPER_NAMES = {"tiny": "Whisper Tiny", "base": "Whisper Base", "small": "Whisp
                  "medium": "Whisper Medium", "large-v3-turbo": "Whisper Large v3 Turbo",
                  "large-v3": "Whisper Large v3"}
 # Cloud picks (engine_choice.FILE_CLOUD_VALUES): Gusan Cloud, then your own key.
-CLOUD_MODELS = ("cloud", "own:google", "own:mistral")
+CLOUD_MODELS = ("cloud", "cloud:gladia", "cloud:gladia-fusion", "own:google", "own:mistral")
 
 FILE_DEFAULTS = {
     "file_model": "auto",           # "auto" | a LOCAL_MODELS key | a CLOUD_MODELS value (rail: Accuracy)
