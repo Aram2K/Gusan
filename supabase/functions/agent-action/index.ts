@@ -284,6 +284,39 @@ async function saveRun(db: any, row: Obj, patch: Obj) {
 function callId(call: Obj) {
   return String(call.id ?? JSON.stringify(call));
 }
+async function updateClaim(
+  db: any,
+  row: Obj,
+  id: string,
+  release: boolean,
+  expiredOnly = false,
+) {
+  while (true) {
+    const current = await loadRun(db, row);
+    const claims = { ...current.call_claimed_at };
+    if (
+      expiredOnly &&
+      (!claims[id] || Date.now() - Date.parse(claims[id]) <= 60000)
+    ) return false;
+    if (!current.confirmed_call_ids.includes(id)) return true;
+    delete claims[id];
+    const expected = "{" + current.confirmed_call_ids.map((s: string) =>
+      JSON.stringify(s)
+    ).join(",") + "}";
+    const updated = await db.from("agent_task_runs").update({
+      confirmed_call_ids: release
+        ? current.confirmed_call_ids.filter((s: string) =>
+          s !== id
+        )
+        : current.confirmed_call_ids,
+      call_claimed_at: claims,
+    }).eq("task_id", row.id).eq("confirmed_call_ids", expected)
+      .eq("call_claimed_at", JSON.stringify(current.call_claimed_at)).select()
+      .maybeSingle();
+    if (updated.error) throw new Failure("storage_error", 500);
+    if (updated.data) return true;
+  }
+}
 async function settle(db: any, row: Obj, call: Obj, body: Obj) {
   // Claim the call before posting: overlapping webhook/poll requests cannot
   // approve or deny the same call twice. H can report settled calls briefly.
@@ -294,8 +327,15 @@ async function settle(db: any, row: Obj, call: Obj, body: Obj) {
     run.confirmed_call_ids.map((s: string) => JSON.stringify(s)).join(",")
   }}`;
   const { data, error } = await db.from("agent_task_runs")
-    .update({ confirmed_call_ids: [...run.confirmed_call_ids, id] })
-    .eq("task_id", row.id).eq("confirmed_call_ids", previous).select()
+    .update({
+      confirmed_call_ids: [...run.confirmed_call_ids, id],
+      call_claimed_at: {
+        ...run.call_claimed_at,
+        [id]: new Date().toISOString(),
+      },
+    })
+    .eq("task_id", row.id).eq("confirmed_call_ids", previous)
+    .eq("call_claimed_at", JSON.stringify(run.call_claimed_at)).select()
     .maybeSingle();
   if (error) throw new Failure("storage_error", 500);
   if (!data) return;
@@ -316,36 +356,19 @@ async function settle(db: any, row: Obj, call: Obj, body: Obj) {
     );
   } catch (error) {
     // H documents idempotency only for session creation, not tool results.
-    // A lost response may already have executed the action: never repost it.
+    // A lost response or server error may already have executed the action.
     const rejected = error instanceof HFailure &&
-      ((error.httpStatus >= 400 && error.httpStatus < 500 &&
-        ![409, 429].includes(error.httpStatus)) || error.httpStatus >= 500);
+      error.httpStatus >= 400 && error.httpStatus < 500;
     if (!rejected) {
-      if (error instanceof HFailure && error.code === "agent_busy") throw error;
       throw new Failure("upstream_error");
     }
     // A definite rejection releases only this claim, preserving other calls.
-    while (true) {
-      const current = await loadRun(db, row);
-      if (!current.confirmed_call_ids.includes(id)) break;
-      const expected = "{" + current.confirmed_call_ids.map((s: string) =>
-        JSON.stringify(s)
-      ).join(",") + "}";
-      const released = await db.from("agent_task_runs").update({
-        confirmed_call_ids: current.confirmed_call_ids.filter((s: string) =>
-          s !== id
-        ),
-      }).eq("task_id", row.id).eq("confirmed_call_ids", expected).select()
-        .maybeSingle();
-      if (released.error) {
-        throw new Failure("storage_error", 500);
-      }
-      if (released.data) {
-        break;
-      }
-    }
+    await updateClaim(db, row, id, true);
+    if (error instanceof HFailure && error.code === "agent_busy") throw error;
     throw new Failure("upstream_error");
   }
+  // Accepted results are permanently deduplicated, not uncertain claims.
+  await updateClaim(db, row, id, false);
 }
 async function expire(db: any, row: Obj, run: Obj) {
   if (terminal(row)) return row;
@@ -418,7 +441,15 @@ async function sync(db: any, row: Obj, wait = 0) {
   patch.confirmation_at = null;
   if (change.status === "awaiting_tool_results") {
     for (const call of change.pending_tool_calls ?? []) {
-      if (run.confirmed_call_ids.includes(callId(call))) continue;
+      const latestRun = await loadRun(db, row);
+      if (latestRun.confirmed_call_ids.includes(callId(call))) {
+        // Never resend an ambiguous result. After a minute of authoritative
+        // pending state, require a fresh user approval for this exact call.
+        if (
+          row.mode !== "do" || call.tool_name !== "request_confirmation" ||
+          !await updateClaim(db, row, callId(call), true, true)
+        ) continue;
+      }
       // Only this exact pending step is exposed for user approval. Full tool
       // arguments remain in the private run table, never the realtime row.
       if (
@@ -432,10 +463,10 @@ async function sync(db: any, row: Obj, wait = 0) {
             ? call.args.action_kind
             : "other",
         };
-        patch.confirmation_at =
-          run.tool_req && callId(run.tool_req) === callId(call)
-            ? row.confirmation_at
-            : new Date().toISOString();
+        patch.confirmation_at = row.confirmation_at && run.tool_req &&
+            callId(run.tool_req) === callId(call)
+          ? row.confirmation_at
+          : new Date().toISOString();
         await saveRun(db, row, { tool_req: call });
       } else if (
         call.tool_name !== "request_confirmation" || row.mode === "research"

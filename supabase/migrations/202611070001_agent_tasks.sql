@@ -24,7 +24,8 @@ create table public.agent_task_runs (
   task_id uuid primary key references public.agent_tasks on delete cascade,
   h_session_id text unique,
   tool_req jsonb,
-  confirmed_call_ids text[] not null default '{}'
+  confirmed_call_ids text[] not null default '{}',
+  call_claimed_at jsonb not null default '{}'
 );
 alter table public.agent_task_runs enable row level security;
 revoke all on public.agent_task_runs from public, anon, authenticated;

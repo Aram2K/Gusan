@@ -1,4 +1,5 @@
 """Run the real managed-agent edge function with isolated Supabase and H fakes."""
+import hashlib
 import json
 import pathlib
 import re
@@ -17,12 +18,15 @@ import {createHmac} from 'node:crypto';
 const scenarios = JSON.parse(readFileSync(process.argv[3], 'utf8'));
 const results = [];
 const log = console.log;
+const realNow = Date.now;
 for (let i=0; i<scenarios.length; i++) {
+ let clockOffset=0;
+ Date.now=()=>realNow()+clockOffset;
  const s=scenarios[i], calls=[], logs=[], dbCalls=[];
  console.log=(...args)=>logs.push(args.join(' '));
  const id='11111111-1111-1111-1111-111111111111';
  let row={id,user_id:'u1',mode:'research',status:'running',title:'task',event_index:0,steps:[],confirmation:null,result:null,created_at:new Date().toISOString(),updated_at:new Date().toISOString(),deadline_at:new Date(Date.now()+600000).toISOString(),...s.row};
- let run={task_id:id,h_session_id:'session1',tool_req:null,confirmed_call_ids:[],...s.run};
+ let run={task_id:id,h_session_id:'session1',tool_req:null,confirmed_call_ids:[],call_claimed_at:{},...s.run};
  let conflict=s.conflict;
  let toolFailure=s.toolFailure;
  globalThis.__db={
@@ -53,6 +57,8 @@ for (let i=0; i<scenarios.length; i++) {
  await import(`${process.argv[2]}/proxy.mts?${i}`);
  const replies=[], snapshots=[];
  for(const r of s.requests??[{body:s.body??{action:'status',task_id:id}}]) {
+  clockOffset+=r.advanceMs??0;
+  if(r.change)s.change=r.change;
   const raw=JSON.stringify(r.body??{data:{session_id:'session1'}});
   let headers={'Content-Type':'application/json',Authorization:r.auth??s.auth??'Bearer aaa.bbb.ccc',...r.headers};
   if(r.webhook){
@@ -66,7 +72,7 @@ for (let i=0; i<scenarios.length; i++) {
  }
  results.push({replies,calls,logs,dbCalls,row,run,snapshots});
 }
-console.log=log;log(JSON.stringify(results));
+Date.now=realNow;console.log=log;log(JSON.stringify(results));
 '''
 
 
@@ -277,12 +283,14 @@ def test_deleting_tasks_cannot_reset_limits():
     assert "insert into public.agent_task_starts (user_id) values (p_user_id)" in sql
 
 
-@pytest.mark.parametrize("failure", ["http", "400"])
+@pytest.mark.parametrize("failure", ["400", "409", "429"])
 def test_failed_confirmation_can_retry(run, failure):
     out, = run({"row": {"mode": "do", "status": "awaiting_confirmation", "confirmation": CALL["args"]},
                 "run": {"tool_req": CALL}, "toolFailure": failure,
                 "requests": [{"body": {"action": "confirm", "task_id": ID}}] * 2})
-    assert out["replies"][0] == {"status": 502, "body": {"error": "upstream_error"}}
+    expected_reply = {"status": 503, "body": {"error": "agent_busy"}} if failure == "429" else {
+        "status": 502, "body": {"error": "upstream_error"}}
+    assert out["replies"][0] == expected_reply
     assert out["snapshots"][0]["row"]["status"] == "awaiting_confirmation"
     assert out["snapshots"][0]["row"]["confirmation"] == CALL["args"]
     assert out["snapshots"][0]["run"]["confirmed_call_ids"] == []
@@ -326,21 +334,47 @@ def test_confirmation_window_is_capped_by_deadline(run):
     assert not any(c["url"].endswith("/tool_results") for c in out["calls"])
 
 
-@pytest.mark.parametrize("failure", ["timeout", "network", "409", "429"])
+@pytest.mark.parametrize("failure", ["timeout", "network", "500"])
 def test_ambiguous_confirmation_is_not_reposted(run, failure):
     out, = run({"row": {"mode": "do", "status": "awaiting_confirmation", "confirmation": CALL["args"]},
                 "run": {"tool_req": CALL}, "toolFailure": failure,
                 "change": {"status": "awaiting_tool_results", "pending_tool_calls": [CALL]},
                 "requests": [{"body": {"action": a, "task_id": ID}}
                              for a in ["confirm", "status", "status"]]})
-    expected_reply = {"status": 503, "body": {"error": "agent_busy"}} if failure == "429" else {
-        "status": 502, "body": {"error": "upstream_error"}}
-    assert out["replies"][0] == expected_reply
+    assert out["replies"][0] == {"status": 502, "body": {"error": "upstream_error"}}
     assert out["snapshots"][0]["run"]["confirmed_call_ids"] == [CALL["id"]]
     assert out["replies"][1]["body"]["status"] == "running"
     assert out["replies"][1]["body"]["confirmation"] is None
     posts = [c for c in out["calls"] if c["url"].endswith("/tool_results")]
     assert len(posts) == 1
-    import hashlib
     expected = hashlib.sha256(f"{ID}:{CALL['id']}".encode()).hexdigest()
     assert posts[0]["headers"]["Idempotency-Key"] == expected
+
+
+def test_ambiguous_result_resurfaces_only_after_pending_for_a_minute(run):
+    out, = run({"row": {"mode": "do", "status": "awaiting_confirmation", "confirmation": CALL["args"]},
+                "run": {"tool_req": CALL}, "toolFailure": "500",
+                "change": {"status": "awaiting_tool_results", "pending_tool_calls": [CALL]},
+                "requests": [{"body": {"action": "confirm", "task_id": ID}},
+                             {"body": {"action": "status", "task_id": ID}},
+                             {"body": {"action": "status", "task_id": ID}, "advanceMs": 61000}]})
+    assert out["replies"][0]["status"] == 502
+    assert CALL["id"] in out["snapshots"][0]["run"]["call_claimed_at"]
+    assert out["replies"][1]["body"]["status"] == "running"
+    assert out["replies"][2]["body"]["status"] == "awaiting_confirmation"
+    assert out["replies"][2]["body"]["confirmation"] == CALL["args"]
+    assert out["run"]["confirmed_call_ids"] == []
+    assert out["run"]["call_claimed_at"] == {}
+    assert len([c for c in out["calls"] if c["method"] == "POST"]) == 1
+
+
+def test_ambiguous_result_does_not_resurface_if_h_moves_on(run):
+    out, = run({"row": {"mode": "do", "status": "awaiting_confirmation", "confirmation": CALL["args"]},
+                "run": {"tool_req": CALL}, "toolFailure": "500",
+                "requests": [{"body": {"action": "confirm", "task_id": ID}},
+                             {"body": {"action": "status", "task_id": ID}, "advanceMs": 61000,
+                              "change": {"status": "running"}}]})
+    assert out["replies"][1]["body"]["status"] == "running"
+    assert out["replies"][1]["body"]["confirmation"] is None
+    assert out["run"]["confirmed_call_ids"] == [CALL["id"]]
+    assert len([c for c in out["calls"] if c["method"] == "POST"]) == 1
