@@ -2,6 +2,22 @@ import XCTest
 @testable import GusanKit
 
 final class VoiceTests: XCTestCase {
+    func testWarmSessionKeepsLaterMicTapsInPlaceUntilTimeout() {
+        let now = Date()
+        var machine = VoiceMachine(idleTimeout: 300)
+        var effects = machine.handle(.sessionStarted(now))
+        let id = UUID()
+        effects += machine.handle(.command(VoiceCommand(kind: .start, requestID: id, sentAt: now), now))
+        effects += machine.handle(.command(VoiceCommand(kind: .stop, requestID: id, sentAt: now), now))
+        effects += machine.handle(.transcribed(id, "Hello"))
+        effects += machine.handle(.completed(id, JobResult(text: "Hello", kind: .insert)))
+        effects += machine.handle(.acknowledged(id))
+        XCTAssertFalse(effects.contains(.stopSession))
+        XCTAssertEqual(machine.phase, .ready)
+        XCTAssertEqual(KeyboardVoice.tap(status: VoiceStatus(phase: machine.phase, heartbeat: now), now: now, hasFullAccess: true, shared: true, signedIn: true), .start)
+        XCTAssertTrue(machine.handle(.tick(now.addingTimeInterval(301))).contains(.stopSession))
+        XCTAssertEqual(KeyboardVoice.tap(status: VoiceStatus(phase: machine.phase), hasFullAccess: true, shared: true, signedIn: true), .openApp)
+    }
     final class Board: SessionBackend {
         let name: String
         var values: [String: Data] = [:]
