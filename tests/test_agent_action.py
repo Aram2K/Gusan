@@ -24,6 +24,7 @@ for (let i=0; i<scenarios.length; i++) {
  let row={id,user_id:'u1',mode:'research',status:'running',title:'task',event_index:0,steps:[],confirmation:null,result:null,created_at:new Date().toISOString(),updated_at:new Date().toISOString(),deadline_at:new Date(Date.now()+600000).toISOString(),...s.row};
  let run={task_id:id,h_session_id:'session1',tool_req:null,confirmed_call_ids:[],...s.run};
  let conflict=s.conflict;
+ let toolFailure=s.toolFailure;
  globalThis.__db={
   auth:{getUser:async()=>({data:{user:s.noUser?null:{id:'u1'}},error:null})},
   rpc:async(name,args)=>{dbCalls.push({name,args});return name==='is_pro'?{data:s.pro??true,error:s.proError?{}:null}:{data:{...row,status:'queued',mode:args.p_mode,title:args.p_title},error:s.quota?{code:s.quota}:null}},
@@ -43,13 +44,14 @@ for (let i=0; i<scenarios.length; i++) {
  globalThis.fetch=async(url,init)=>{
   calls.push({url,method:init.method,headers:init.headers,body:init.body?JSON.parse(init.body):null});
   if(s.upstream) return new Response('untrusted error text',{status:s.upstream});
+  if(url.includes('/tool_results') && toolFailure){const failure=toolFailure;toolFailure=null;if(failure==='timeout')throw new DOMException('Timed out','TimeoutError');return new Response('failed',{status:502});}
   if(init.method==='DELETE')return new Response(null,{status:204});
   if(url.includes('/tool_results'))return new Response(null,{status:202});
   if(url.includes('/changes'))return s.empty?new Response(null,{status:204}):new Response(JSON.stringify(s.change??{status:'running',new_events:[]}));
   return new Response(JSON.stringify({id:'session1',latest_answer:s.latest}));
  };
  await import(`${process.argv[2]}/proxy.mts?${i}`);
- const replies=[];
+ const replies=[], snapshots=[];
  for(const r of s.requests??[{body:s.body??{action:'status',task_id:id}}]) {
   const raw=JSON.stringify(r.body??{data:{session_id:'session1'}});
   let headers={'Content-Type':'application/json',Authorization:r.auth??s.auth??'Bearer aaa.bbb.ccc',...r.headers};
@@ -60,8 +62,9 @@ for (let i=0; i<scenarios.length; i++) {
   }
   const res=await handler(new Request('https://edge.test/'+(r.webhook?'?action=webhook':''),{method:'POST',headers,body:raw}));
   replies.push({status:res.status,body:await res.json()});
+  snapshots.push(structuredClone({row,run}));
  }
- results.push({replies,calls,logs,dbCalls,row,run});
+ results.push({replies,calls,logs,dbCalls,row,run,snapshots});
 }
 console.log=log;log(JSON.stringify(results));
 '''
@@ -272,3 +275,17 @@ def test_deleting_tasks_cannot_reset_limits():
     assert "grant select, insert on public.agent_task_starts to service_role" in sql
     assert "from public.agent_task_starts where user_id = p_user_id and started_at >= now() - interval '24 hours'" in sql
     assert "insert into public.agent_task_starts (user_id) values (p_user_id)" in sql
+
+
+@pytest.mark.parametrize("failure", ["http", "timeout"])
+def test_failed_confirmation_can_retry(run, failure):
+    out, = run({"row": {"mode": "do", "status": "awaiting_confirmation", "confirmation": CALL["args"]},
+                "run": {"tool_req": CALL}, "toolFailure": failure,
+                "requests": [{"body": {"action": "confirm", "task_id": ID}}] * 2})
+    assert out["replies"][0] == {"status": 502, "body": {"error": "upstream_error"}}
+    assert out["snapshots"][0]["row"]["status"] == "awaiting_confirmation"
+    assert out["snapshots"][0]["row"]["confirmation"] == CALL["args"]
+    assert out["snapshots"][0]["run"]["confirmed_call_ids"] == []
+    assert out["replies"][1]["body"]["status"] == "running"
+    assert out["run"]["confirmed_call_ids"] == [CALL["id"]]
+    assert len(out["calls"]) == 2

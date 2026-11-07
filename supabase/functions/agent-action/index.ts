@@ -291,11 +291,36 @@ async function settle(db: any, row: Obj, call: Obj, body: Obj) {
     .maybeSingle();
   if (error) throw new Failure("storage_error", 500);
   if (!data) return;
-  await h(
-    `/sessions/${encodeURIComponent(run.h_session_id)}/tool_results`,
-    "POST",
-    body,
-  );
+  try {
+    await h(
+      `/sessions/${encodeURIComponent(run.h_session_id)}/tool_results`,
+      "POST",
+      body,
+    );
+  } catch {
+    // Release only this claim, preserving calls settled by other requests.
+    // The public confirmation remains untouched until H accepts the result.
+    while (true) {
+      const current = await loadRun(db, row);
+      if (!current.confirmed_call_ids.includes(id)) break;
+      const expected = "{" + current.confirmed_call_ids.map((s: string) =>
+        JSON.stringify(s)
+      ).join(",") + "}";
+      const released = await db.from("agent_task_runs").update({
+        confirmed_call_ids: current.confirmed_call_ids.filter((s: string) =>
+          s !== id
+        ),
+      }).eq("task_id", row.id).eq("confirmed_call_ids", expected).select()
+        .maybeSingle();
+      if (released.error) {
+        throw new Failure("storage_error", 500);
+      }
+      if (released.data) {
+        break;
+      }
+    }
+    throw new Failure("upstream_error");
+  }
 }
 async function expire(db: any, row: Obj, run: Obj) {
   if (terminal(row)) return row;
