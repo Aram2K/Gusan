@@ -329,7 +329,7 @@ def test_notes_that_are_only_empty_sections_are_shown_like_no_notes(shell, meeti
     page = _open(win, folder=str(folder))
     nv = page.notes_view
     assert nv.doc.tasks == []
-    assert nv.title_label.text() == "Live session 15:34"
+    assert nv.title_label.text() == "Live Assistant session"       # (the person is never "who it was with")
     assert nv.banner.accessibleName() == "No notes yet"          # a calm line with Write notes, not a blank card
     assert "Bonjour." in _shown(nv.doc)                          # the transcript is right there
     assert not nv.copy_btn.isEnabled()

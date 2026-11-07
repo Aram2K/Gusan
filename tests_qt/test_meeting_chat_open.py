@@ -485,7 +485,7 @@ def test_open_with_writing_lands_on_the_notes_view_of_a_meeting_being_written(wi
     nv = page.notes_view
     assert nv.tabs.index() == 0 and nv.stack.currentIndex() == 0          # the Notes tab
     assert nv.folder == str(f)
-    assert nv.title_label.text() == "Live session 15:34"
+    assert nv.title_label.text() == "Live Assistant session"          # its name until the AI names it (meeting_titles)
     assert any("Writing notes" in t for t in _labels(nv))               # the page's own banner, until the notes come
     assert nv.chat.isVisibleTo(nv)
 
