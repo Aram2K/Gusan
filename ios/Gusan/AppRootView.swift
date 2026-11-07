@@ -2,11 +2,16 @@ import SwiftUI
 
 struct AppRootView: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var agent: AgentCenter
     @Environment(\.scenePhase) private var scenePhase
     var body: some View {
         TabView(selection: $model.selectedTab) {
             NavigationStack { HomeView() }.tabItem { Label("Home", systemImage: "house") }.tag(AppTab.home)
             NavigationStack { KeyboardSettingsView() }.tabItem { Label("Keyboard", systemImage: "keyboard") }.tag(AppTab.keyboard)
+            NavigationStack { ActivityView() }
+                .tabItem { Label("Activity", systemImage: "sparkles.rectangle.stack") }
+                .badge(agent.unseenCount)
+                .tag(AppTab.activity)
             NavigationStack { AccountView() }.tabItem { Label("Account", systemImage: "person.crop.circle") }.tag(AppTab.account)
         }
         .fullScreenCover(isPresented: $model.showingOnboarding, onDismiss: {

@@ -1,0 +1,223 @@
+import BackgroundTasks
+import Combine
+import GusanKit
+import SwiftUI
+import UserNotifications
+
+/// App-side owner of agent tasks: loads them from Gusan Cloud, polls while the app is active,
+/// refreshes in the background when iOS allows it, and posts local notifications for results and
+/// confirmations. There is no APNs push (free Apple ID), so everything here is polling.
+@MainActor
+final class AgentCenter: NSObject, ObservableObject {
+    static let refreshTaskID = "com.aram2k.gusan.agent-refresh"
+    static let confirmCategory = "GUSAN_AGENT_CONFIRM"
+    static let resultCategory = "GUSAN_AGENT_RESULT"
+
+    @Published private(set) var tasks: [AgentTask] = []
+    @Published private(set) var loading = false
+    @Published var error: String?
+    @Published private(set) var notificationStatus: UNAuthorizationStatus = .notDetermined
+    @Published var openTaskID: UUID?
+    @Published var lastRefresh: Date?
+
+    private unowned let model: AppModel
+    private var service: AgentService?
+    private var serviceToken: String?
+    private var poller: Task<Void, Never>?
+    private var active = false
+    private lazy var tracker = AgentTaskTracker(defaults: UserDefaults(suiteName: model.store.resolution.chosen) ?? .standard)
+
+    init(model: AppModel) {
+        self.model = model
+        super.init()
+        UNUserNotificationCenter.current().delegate = self
+        UNUserNotificationCenter.current().setNotificationCategories([
+            UNNotificationCategory(identifier: Self.confirmCategory, actions: [
+                UNNotificationAction(identifier: "confirm", title: "Confirm", options: [.authenticationRequired]),
+                UNNotificationAction(identifier: "cancel", title: "Cancel task", options: [.destructive]),
+            ], intentIdentifiers: []),
+            UNNotificationCategory(identifier: Self.resultCategory, actions: [], intentIdentifiers: []),
+        ])
+        Task { await refreshNotificationStatus() }
+    }
+
+    var signedIn: Bool { model.session != nil }
+    var unseenCount: Int { tasks.filter(\.needsAttention).count }
+    var hasLiveTasks: Bool { tasks.contains { !$0.status.isTerminal } }
+    var isDemo: Bool { model.session?.accessToken == "gusan-debug-no-network" }
+
+    func task(_ id: UUID) -> AgentTask? { tasks.first { $0.id == id } }
+
+    // MARK: Service
+
+    private func currentService() -> AgentService? {
+        guard let session = model.session else { service = nil; serviceToken = nil; return nil }
+        if let service, serviceToken == session.userID ?? session.accessToken { return service }
+        #if DEBUG
+        if session.accessToken == "gusan-debug-no-network" {
+            let stub = StubAgentService(seeded: ProcessInfo.processInfo.arguments.contains("--gusan-agent-demo") ? StubAgentService.demoTasks() : [])
+            stub.delay = 400_000_000
+            service = stub; serviceToken = session.userID ?? session.accessToken; return stub
+        }
+        #endif
+        let client = AgentClient(auth: model.auth)
+        service = client; serviceToken = session.userID ?? session.accessToken
+        return client
+    }
+
+    // MARK: Loading and polling
+
+    func refresh() async {
+        guard let service = currentService() else { tasks = []; return }
+        loading = tasks.isEmpty
+        defer { loading = false }
+        do {
+            var fetched = try await service.list(limit: 50)
+            // The table hides the pending confirmation text; ask the function for it.
+            for index in fetched.indices where fetched[index].status == .awaitingConfirmation && fetched[index].confirmation == nil {
+                if let full = try? await service.status(fetched[index].id, waitSeconds: 0) { fetched[index] = full }
+            }
+            tasks = fetched
+            lastRefresh = Date()
+            error = nil
+            await deliver(tracker.consumeEvents(from: fetched))
+        } catch {
+            self.error = (error as? AgentError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    /// Call from the scene phase: polls every few seconds while something is running, otherwise rarely.
+    func setActive(_ active: Bool) {
+        self.active = active
+        poller?.cancel(); poller = nil
+        guard active else { scheduleBackgroundRefresh(); return }
+        poller = Task { @MainActor [weak self] in
+            while let self, self.active, !Task.isCancelled {
+                await self.refresh()
+                let interval: UInt64 = self.hasLiveTasks ? 4_000_000_000 : 45_000_000_000
+                try? await Task.sleep(nanoseconds: interval)
+            }
+        }
+    }
+
+    func sessionChanged() { service = nil; Task { await refresh() } }
+
+    // MARK: Actions
+
+    @discardableResult
+    func start(_ intent: AgentIntent, context: String? = nil) async throws -> AgentTask {
+        guard let service = currentService() else { throw AgentError.code("unauthorized", status: 401) }
+        let task = try await service.start(intent, context: context)
+        tracker.markNotified(task)
+        tasks.insert(task, at: 0)
+        if notificationStatus == .notDetermined { await requestNotifications() }
+        return task
+    }
+
+    func confirm(_ id: UUID) async {
+        await mutate(id) { try await $0.confirm(id) }
+    }
+
+    func cancel(_ id: UUID) async {
+        await mutate(id) { try await $0.cancel(id) }
+    }
+
+    func markSeen(_ id: UUID) {
+        guard let index = tasks.firstIndex(where: { $0.id == id }), tasks[index].status.isTerminal, tasks[index].seenAt == nil, let service = currentService() else { return }
+        tasks[index].seenAt = Date()
+        Task { try? await service.markSeen(id) }
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id.uuidString])
+    }
+
+    private func mutate(_ id: UUID, _ operation: (AgentService) async throws -> AgentTask) async {
+        guard let service = currentService() else { return }
+        do {
+            let updated = try await operation(service)
+            tracker.markNotified(updated)
+            if let index = tasks.firstIndex(where: { $0.id == id }) { tasks[index] = updated } else { tasks.insert(updated, at: 0) }
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id.uuidString])
+        } catch {
+            self.error = (error as? AgentError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    // MARK: Notifications
+
+    func refreshNotificationStatus() async {
+        notificationStatus = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+    }
+
+    func requestNotifications() async {
+        _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
+        await refreshNotificationStatus()
+    }
+
+    private func deliver(_ events: [AgentTaskTracker.Event]) async {
+        guard !events.isEmpty else { return }
+        await refreshNotificationStatus()
+        guard notificationStatus == .authorized || notificationStatus == .provisional else { return }
+        let center = UNUserNotificationCenter.current()
+        for event in events {
+            let content = UNMutableNotificationContent()
+            let task: AgentTask
+            switch event {
+            case .needsConfirmation(let pending):
+                task = pending
+                content.title = "Gusan needs your OK"
+                content.body = pending.confirmation?.summary ?? pending.title
+                content.categoryIdentifier = Self.confirmCategory
+                content.interruptionLevel = .timeSensitive
+            case .finished(let done):
+                task = done
+                content.title = done.status == .completed ? (done.mode == .research ? "Research finished" : "Task done") : "Agent task \(done.status.label.lowercased())"
+                content.body = done.status == .completed ? MarkdownBlocks.firstLine(done.result?.markdown ?? done.title) : (done.title + " — " + done.summaryLine)
+                content.categoryIdentifier = Self.resultCategory
+            }
+            content.subtitle = task.title
+            content.sound = .default
+            content.threadIdentifier = "gusan-agent"
+            content.userInfo = ["taskID": task.id.uuidString]
+            try? await center.add(UNNotificationRequest(identifier: task.id.uuidString, content: content, trigger: nil))
+        }
+    }
+
+    // MARK: Background refresh (best effort; iOS decides when it runs)
+
+    static func registerBackgroundRefresh(_ center: AgentCenter) {
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: refreshTaskID, using: nil) { task in
+            guard let refresh = task as? BGAppRefreshTask else { task.setTaskCompleted(success: false); return }
+            Task { @MainActor in
+                center.scheduleBackgroundRefresh()
+                let work = Task { await center.refresh() }
+                refresh.expirationHandler = { work.cancel() }
+                await work.value
+                refresh.setTaskCompleted(success: center.error == nil)
+            }
+        }
+    }
+
+    func scheduleBackgroundRefresh() {
+        guard signedIn else { return }
+        let request = BGAppRefreshTaskRequest(identifier: Self.refreshTaskID)
+        request.earliestBeginDate = Date(timeIntervalSinceNow: hasLiveTasks ? 60 : 15 * 60)
+        try? BGTaskScheduler.shared.submit(request)
+    }
+}
+
+extension AgentCenter: UNUserNotificationCenterDelegate {
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        [.banner, .sound, .list]
+    }
+
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        guard let raw = response.notification.request.content.userInfo["taskID"] as? String, let id = UUID(uuidString: raw) else { return }
+        let action = response.actionIdentifier
+        await MainActor.run {
+            switch action {
+            case "confirm": Task { await self.confirm(id) }
+            case "cancel": Task { await self.cancel(id) }
+            default: self.openTaskID = id; self.model.selectedTab = .activity
+            }
+        }
+    }
+}

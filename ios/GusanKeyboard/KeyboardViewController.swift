@@ -19,6 +19,7 @@ final class KeyboardViewController: UIInputViewController {
     private lazy var store = SessionStore(role: .keyboard, pasteboardAccessAllowed: { [weak self] in self?.hasFullAccess == true })
     private lazy var voice = VoiceKeyController(host: self, store: store, micKey: toolbar.mic)
     private lazy var auth = AuthClient(store: store)
+    private lazy var agent = AgentKeyboardController(store: store, auth: auth, host: self)
     private lazy var settings = SettingsStore(group: store.resolution.chosen, pasteboardAccessAllowed: { [weak self] in self?.hasFullAccess == true })
     private let toolbar = GusanToolbar()
     private let panel = GusanPanel()
@@ -55,6 +56,12 @@ final class KeyboardViewController: UIInputViewController {
         toolbar.mic.addTarget(self, action: #selector(startVoice), for: .touchUpInside)
         onVoice = { [weak self] in self?.voice.toggle() }
         view.addSubview(voice.bar)
+        view.addSubview(agent.card)
+        agent.onSurfaceChange = { [weak self] in self?.updateSurface() }
+        agent.onStatus = { [weak self] text, accessory in
+            guard let self else { return }
+            if let text { self.showMessage(text, accessory: accessory) } else if self.accessory == "View" || self.message == nil { self.message = nil; self.accessory = nil; self.updateContext() }
+        }
         voice.bar.backgroundColor = .secondarySystemBackground; voice.bar.layer.cornerRadius = 8
         toolbar.accessory.addTarget(self, action: #selector(accessoryPressed), for: .touchUpInside)
         toolbar.message.addTarget(self, action: #selector(expandMessage), for: .touchUpInside)
@@ -74,7 +81,7 @@ final class KeyboardViewController: UIInputViewController {
     private var currentContext: Context {
         Context(document: textDocumentProxy.documentIdentifier, selected: textDocumentProxy.selectedText ?? "", before: textDocumentProxy.documentContextBeforeInput ?? "", after: textDocumentProxy.documentContextAfterInput ?? "")
     }
-    override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); updateSurface(); voice.appear() }
+    override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); updateSurface(); voice.appear(); agent.appear() }
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated); connected = true
         _ = store.read(); _ = store.diagnostics(); settings.refresh(); updateContext()
@@ -89,6 +96,7 @@ final class KeyboardViewController: UIInputViewController {
         keyArea.frame = CGRect(x: 0, y: 44 + extra, width: width, height: max(0, view.bounds.height - 44 - extra))
         panel.frame = CGRect(x: 0, y: 44, width: width, height: max(0, view.bounds.height - 44))
         explanationScroll.frame = panel.frame
+        agent.card.frame = panel.frame
         let explanationHeight = max(panel.bounds.height - 24, explanation.sizeThatFits(CGSize(width: width - 36, height: .greatestFiniteMagnitude)).height)
         explanation.frame = CGRect(x: 18, y: 12, width: width - 36, height: explanationHeight)
         explanationScroll.contentSize = CGSize(width: width, height: explanationHeight + 24)
@@ -101,7 +109,7 @@ final class KeyboardViewController: UIInputViewController {
     override func selectionDidChange(_ textInput: UITextInput?) { super.selectionDidChange(textInput); updateContext() }
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated); task?.cancel(); keyArea.cancelTouches()
-        voice.disappear()
+        voice.disappear(); agent.disappear()
     }
     private func updateContext() {
         guard connected else { return }
@@ -110,7 +118,7 @@ final class KeyboardViewController: UIInputViewController {
         keyArea.keyClicks = settings.keyClicks; keyArea.doubleSpacePeriod = settings.doubleSpacePeriod
         keyArea.updateContext(before: editing ? instruction : textDocumentProxy.documentContextBeforeInput, capitalization: settings.autoCapitalization ? (editing ? .sentences : textDocumentProxy.autocapitalizationType) : UITextAutocapitalizationType.none, returnType: editing ? .go : textDocumentProxy.returnKeyType, appearance: textDocumentProxy.keyboardAppearance, needsGlobe: needsInputModeSwitchKey)
         let theme = KeyboardTheme(appearance: textDocumentProxy.keyboardAppearance, traits: traitCollection)
-        view.backgroundColor = theme.background; toolbar.apply(theme)
+        view.backgroundColor = theme.background; toolbar.apply(theme); agent.apply(theme)
         let context = instructionContext ?? currentContext
         panel.update(theme: theme, target: settings.translateTarget, defaultAction: settings.keyboardAction.action, context: context.text)
         instructionHeader.update(text: instruction, theme: theme)
@@ -126,6 +134,7 @@ final class KeyboardViewController: UIInputViewController {
         panel.isHidden = surface != .panel; explanationScroll.isHidden = surface != .explanation
         instructionHeader.isHidden = surface != .instruction
         keyArea.isHidden = surface == .panel || surface == .explanation
+        if agent.showingCard { panel.isHidden = true; explanationScroll.isHidden = true; instructionHeader.isHidden = true; keyArea.isHidden = true }
         keyArea.inputEnabled = true
         height.constant = 260
         updateContext(); view.setNeedsLayout()
@@ -174,6 +183,7 @@ final class KeyboardViewController: UIInputViewController {
         case "How to enable", "Details": expandMessage()
         case "See plans": openContainingApp(URL(string: "https://gusan.aibuben.xyz")!)
         case "Retry": if let retryAction, let retryContext { run(retryAction, context: retryContext) }
+        case "View": agent.show()
         default: break
         }
     }
@@ -204,6 +214,10 @@ final class KeyboardViewController: UIInputViewController {
             notify(.error)
             if surface != .instruction { showTyping() }
             showMessage("Sign in to use Gusan", detail: store.diagnostics().summary, accessory: "Sign in"); return
+        }
+        if let request = action.agentRequest(contextText: context.text), let intent = AgentIntent.detect(request) {
+            instructionContext = nil; instruction = ""; showTyping()
+            agent.start(intent, context: action.isCustomInstruction ? context.text : ""); return
         }
         #if DEBUG
         if store.read()?.accessToken == "gusan-debug-no-network" {

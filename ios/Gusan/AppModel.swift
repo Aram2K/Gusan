@@ -2,7 +2,7 @@ import SwiftUI
 import AuthenticationServices
 import GusanKit
 
-enum AppTab: Hashable { case home, keyboard, account }
+enum AppTab: Hashable { case home, keyboard, activity, account }
 enum OnboardingStep: Int, CaseIterable { case welcome, signIn, addKeyboard, mainKeyboard, tryIt }
 
 @MainActor
@@ -19,6 +19,7 @@ final class AppModel: NSObject, ObservableObject, ASWebAuthenticationPresentatio
     @Published var usingGoogle = false
     @Published var diagnostics: SessionDiagnostics?
     @Published var selectedTab: AppTab = .home
+    @Published var pendingTaskID: UUID?
     @Published var showingOnboarding = false
     @Published var onboardingStep: OnboardingStep = .welcome
     @Published var showingSignIn = false
@@ -111,6 +112,9 @@ final class AppModel: NSObject, ObservableObject, ASWebAuthenticationPresentatio
     func handleURL(_ url: URL) {
         guard url.scheme == "gusan" else { return }
         switch url.host {
+        case "task":
+            pendingTaskID = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "id" }?.value.flatMap(UUID.init)
+            selectedTab = .activity
         case "signin":
             session = store.read(); refreshDiagnostics()
             cancelGoogle(); authError = nil; fromKeyboard = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.contains { $0.name == "from" && $0.value == "keyboard" } == true

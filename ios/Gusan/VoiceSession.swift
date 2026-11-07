@@ -24,6 +24,8 @@ private final class VoiceAudioBuffer {
 
 @MainActor
 final class VoiceSession: ObservableObject {
+    /// Set by the app: spoken requests that are agent tasks ("find…", "book…") go here instead of Smart Actions.
+    var agentHandoff: ((AgentIntent, String) -> Void)?
     @Published private(set) var status = VoiceStatus()
     @Published private(set) var error = ""
     @Published private(set) var permission = AVAudioSession.sharedInstance().recordPermission
@@ -169,6 +171,10 @@ final class VoiceSession: ObservableObject {
                     } catch is CancellationError {} catch { execute(machine.handle(.failed(id, error.localizedDescription))) }
                 }
             case .runAction(let id, let transcript, let context):
+                if let intent = AgentIntent.detect(transcript), let agentHandoff {
+                    agentHandoff(intent, context?.selected ?? "")
+                    execute(machine.handle(.failed(id, "Agent task started. See Activity in the Gusan app."))); continue
+                }
                 let plan = VoicePlan.plan(transcript: transcript, context: context, action: machine.action)
                 work = Task {
                     do {
