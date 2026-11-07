@@ -130,7 +130,10 @@ final class VoiceSession: ObservableObject {
         engine.prepare(); try engine.start()
     }
     private func audioFailure(_ message: String) {
+        let requestID = machine.requestID
         error = VoiceError.audioFailed(message).localizedDescription; stop()
+        status = VoiceStatus(phase: .failed, requestID: requestID, heartbeat: .distantPast, message: error)
+        try? channel.write(status: status); channel.post(.status)
     }
     private func receive() {
         guard machine.phase != .off, let command = channel.readCommand(), command.id != consumed else { return }
