@@ -5,10 +5,13 @@ import GusanKit
 @main
 struct GusanApp: App {
     @StateObject private var account = AccountModel()
+    @StateObject private var voice = VoiceSession()
     var body: some Scene {
         WindowGroup {
             ContentView(account: account)
-                .onOpenURL { account.handleURL($0) }
+                .environmentObject(voice)
+                .onOpenURL { if $0.host == "voice" { voice.handleURL($0) } else { account.handleURL($0) } }
+                .sheet(isPresented: $voice.presented) { VoiceReadyView(voice: voice) }
         }
     }
 }
@@ -99,6 +102,7 @@ final class AccountModel: NSObject, ObservableObject, ASWebAuthenticationPresent
 }
 
 struct ContentView: View {
+    @EnvironmentObject private var voice: VoiceSession
     @ObservedObject var account: AccountModel
     @Environment(\.scenePhase) private var scenePhase
     @State private var email = ""
@@ -110,6 +114,7 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             Form {
+                VoiceSettingsSection(voice: voice)
                 Section("Account") {
                     if let session = account.session {
                         Label(session.email ?? "Signed in", systemImage: "person.crop.circle")

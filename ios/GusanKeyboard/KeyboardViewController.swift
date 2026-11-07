@@ -3,6 +3,7 @@ import GusanKit
 
 final class KeyboardViewController: UIInputViewController {
     private let store = SessionStore()
+    private lazy var voice = VoiceKeyController(host: self, store: store)
     private lazy var auth = AuthClient(store: store)
     private lazy var settings = SettingsStore(group: store.resolution.chosen)
     private let status = UILabel()
@@ -53,11 +54,13 @@ final class KeyboardViewController: UIInputViewController {
         undoButton.isHidden = true
         undoButton.setContentHuggingPriority(.required, for: .horizontal)
         stack.addArrangedSubview(stateRow)
+        stack.addArrangedSubview(voice.bar)
         let bottom = row()
         globe.setImage(UIImage(systemName: "globe"), for: .normal)
         globe.addTarget(self, action: #selector(handleInputModeList(from:with:)), for: .allTouchEvents)
         globe.accessibilityLabel = "Next keyboard"
         bottom.addArrangedSubview(globe)
+        bottom.addArrangedSubview(voice.micButton)
         bottom.addArrangedSubview(button("space", action: #selector(space)))
         let delete = button("⌫", action: #selector(deleteOnce))
         delete.accessibilityLabel = "Delete"
@@ -67,10 +70,11 @@ final class KeyboardViewController: UIInputViewController {
         stack.addArrangedSubview(bottom)
         refreshLabels()
     }
-    override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); refreshLabels() }
+    override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); refreshLabels(); voice.appear() }
     override func viewWillLayoutSubviews() { super.viewWillLayoutSubviews(); globe.isHidden = !needsInputModeSwitchKey }
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated); task?.cancel(); deleteTimer?.invalidate()
+        voice.disappear()
     }
     private func row() -> UIStackView {
         let row = UIStackView(); row.distribution = .fillEqually; row.spacing = 8; return row
