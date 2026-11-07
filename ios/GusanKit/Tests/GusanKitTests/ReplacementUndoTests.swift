@@ -2,6 +2,16 @@ import XCTest
 import GusanKit
 
 final class ReplacementUndoTests: XCTestCase {
+    func testContextReplacementThenTypingKeepsUndoAndRedoCursorConsistent() throws {
+        var record = ReplacementUndo(original: "Hello world", replacement: "Hi", snapshot: VoiceContext(documentID: "one"), restoreUTF16: 5)
+        XCTAssertTrue(record.append(" 👋"))
+        let undo = try XCTUnwrap(record.step(context: VoiceContext(before: "Hi 👋", documentID: "one")))
+        XCTAssertEqual(undo.advanceUTF16, -3); XCTAssertEqual(undo.text, "Hello world")
+        XCTAssertEqual(undo.restoreUTF16, 3)
+        let redo = try XCTUnwrap(record.inverted().step(context: VoiceContext(before: "Hello world 👋", documentID: "one")))
+        XCTAssertEqual(redo.advanceUTF16, -3); XCTAssertEqual(redo.deleteCount, 11)
+        XCTAssertEqual(redo.text, "Hi"); XCTAssertEqual(redo.restoreUTF16, 3)
+    }
     func testTypingAndDeletingAfterTheResultKeepUndo() throws {
         var record = ReplacementUndo(original: "Old", replacement: "New", snapshot: VoiceContext(before: "Prefix ", after: "Tail", documentID: "one"))
         XCTAssertTrue(record.append(" 👋!")); XCTAssertTrue(record.deleteBackward())

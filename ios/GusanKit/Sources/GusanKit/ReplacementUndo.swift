@@ -38,9 +38,9 @@ public struct ReplacementUndo: Equatable {
         let expectedAfter = suffix + snapshot.after
         guard expectedBefore.hasSuffix(context.before), expectedAfter == context.after,
               context.before.isEmpty ? expectedBefore.isEmpty : (prefix.isEmpty || context.before.count > tail.count) else { return nil }
-        return Step(advanceUTF16: replacementCursorAfter - tail.utf16.count, deleteCount: replacement.count, text: original, restoreUTF16: tail.utf16.count - originalCursorAfter)
+        return Step(advanceUTF16: replacementCursorAfter - tail.utf16.count, deleteCount: replacement.count, text: original, restoreUTF16: tail.isEmpty ? -originalCursorAfter : tail.utf16.count)
     }
     public func inverted() -> ReplacementUndo {
-        ReplacementUndo(original: replacement, replacement: original, snapshot: snapshot, originalCursorAfter: replacementCursorAfter, replacementCursorAfter: originalCursorAfter, tail: tail)
+        ReplacementUndo(original: replacement, replacement: original, snapshot: snapshot, originalCursorAfter: replacementCursorAfter, replacementCursorAfter: tail.isEmpty ? originalCursorAfter : 0, tail: tail)
     }
 }
