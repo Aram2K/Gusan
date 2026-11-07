@@ -262,6 +262,20 @@ final class SessionStoreTests: XCTestCase {
         _ = store.read(); board.onRead = nil
         XCTAssertEqual(store.read()?.refreshToken, "rotated")
     }
+    func testRefreshChoosesOneNewestPeerRotationAcrossDivergentBackends() throws {
+        let file = Backend("App-group file"), board = Backend("Team pasteboard"); peer(board)
+        var before = session(100); before.refreshToken = "old"
+        var older = session(500); older.refreshToken = "peer-older"
+        older = older.refreshed(replacing: before)
+        var newest = session(10); newest.refreshToken = "peer-newest"
+        newest = newest.refreshed(replacing: older)
+        var ours = session(20); ours.refreshToken = "ours"
+        file.session(newest); board.session(older)
+        let store = SessionStore(resolution: resolution, backends: [file, board], privateBackend: Backend("private"))
+        XCTAssertEqual(store.writeRefreshed(ours, replacing: before), newest)
+        for backend in [file, board] { XCTAssertEqual(try JSONDecoder().decode(Session.self, from: XCTUnwrap(backend.values["session"])), newest) }
+        XCTAssertEqual(store.read(), newest)
+    }
     func testUnavailablePasteboardOnMacDoesNotReportSharing() {
         #if !canImport(UIKit)
         let backend = NamedSessionPasteboard()

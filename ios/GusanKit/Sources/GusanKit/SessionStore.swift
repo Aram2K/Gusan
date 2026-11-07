@@ -238,27 +238,31 @@ public final class SessionStore: SessionStorage {
             let targets = backends.filter { $0.name != "Team pasteboard" || allowed }
             if !allowed { backends.filter { $0.name == "Team pasteboard" }.forEach { $0.clear("session") } }
             var winner = session.refreshed(replacing: previous)
-            func isPeerRotation(_ current: Session) -> Bool {
-                current.refreshToken != previous.refreshToken && current.refreshToken != winner.refreshToken
-                    && !(current.lineage == previous.lineage && current.generation < previous.generation)
+            var copies = targets.compactMap { decode($0.read("session").data) }
+            if let privateCopy = decode(privateBackend.read("session").data), copies.isEmpty || (privateCopy.lineage == previous.lineage && privateCopy.generation >= previous.generation) { copies.append(privateCopy) }
+            let peers = copies.filter {
+                $0.refreshToken != previous.refreshToken && $0.refreshToken != session.refreshToken
+                    && !($0.lineage == previous.lineage && $0.generation < previous.generation)
             }
-            func adopt(_ current: Session) {
-                let generation = max(winner.generation, current.generation) + 1
-                winner = current
-                if current.userID == previous.userID { winner.refreshLineage = previous.lineage; winner.refreshGeneration = generation }
+            if let peer = peers.max(by: { $0.generation == $1.generation ? newer($1, than: $0) : $0.generation < $1.generation }) {
+                winner = peer
+                if peer.refreshLineage == nil && peer.userID == previous.userID {
+                    winner.refreshLineage = previous.lineage; winner.refreshGeneration = previous.generation + 1
+                }
             }
-            let copies = targets.compactMap { decode($0.read("session").data) }
-            if let peer = copies.filter(isPeerRotation).max(by: { newer($1, than: $0) }) { adopt(peer) }
+            func save(_ backend: SessionBackend) -> Bool {
+                if let current = decode(backend.read("session").data) {
+                    if current == winner { return true }
+                    if current.generation > winner.generation || (current.generation == winner.generation && newer(current, than: winner)) { return false }
+                }
+                guard let data = try? JSONEncoder().encode(winner) else { return false }
+                return backend.write(data, key: "session")
+            }
             var saved = false
-            for backend in targets {
-                if let current = decode(backend.read("session").data), isPeerRotation(current) { adopt(current); continue }
-                if let data = try? JSONEncoder().encode(winner), backend.write(data, key: "session") { saved = true }
-            }
-            if !saved {
-                if let current = decode(privateBackend.read("session").data), isPeerRotation(current), copies.isEmpty || (current.lineage == winner.lineage && current.generation > winner.generation) { adopt(current) }
-                if let data = try? JSONEncoder().encode(winner) { _ = privateBackend.write(data, key: "session") }
-            }
-            if let data = try? JSONEncoder().encode(winner), writeShared(data) || saved { privateBackend.clear("session") }
+            for backend in targets { if save(backend) { saved = true } }
+            if saved { privateBackend.clear("session") }
+            else { _ = save(privateBackend) }
+            if !usePasteboard() { backends.filter { $0.name == "Team pasteboard" }.forEach { $0.clear("session") } }
             return winner
         }
     }
