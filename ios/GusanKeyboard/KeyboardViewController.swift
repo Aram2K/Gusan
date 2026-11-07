@@ -8,12 +8,13 @@ final class KeyboardViewController: UIInputViewController {
         let selected: String
         let before: String
         let after: String
-        var text: String { selected.isEmpty ? before + after : selected }
+        var paragraph: VoiceContext { voiceContext.paragraph }
+        var text: String { selected.isEmpty ? paragraph.before + paragraph.after : selected }
         var voiceContext: VoiceContext { VoiceContext(selected: selected, before: before, after: after, documentID: document.uuidString) }
         var summary: String {
             if text.isEmpty { return "No text: Ask Gusan writes it" }
             let count = text.split(whereSeparator: { $0.isWhitespace }).count
-            return "\(selected.isEmpty ? "Around cursor" : "Selected") · \(count) \(count == 1 ? "word" : "words")"
+            return "\(selected.isEmpty ? "Near cursor" : "Selected") · \(count) \(count == 1 ? "word" : "words")"
         }
     }
     private enum Surface { case typing, panel, instruction, explanation }
@@ -87,7 +88,7 @@ final class KeyboardViewController: UIInputViewController {
         panel.onClose = { [weak self] in self?.showTyping() }
         panel.onSnapshot = { [weak self] in self?.expandContext() }
         panel.onAsk = { [weak self] in self?.beginInstruction() }
-        panel.onAction = { [weak self] in guard let self else { return }; self.impact(); self.run($0, context: self.currentContext) }
+        panel.onAction = { [weak self] in guard let self else { return }; self.run($0, context: self.currentContext) }
         instructionHeader.onSuggestion = { [weak self] in self?.setInstruction($0) }
         instructionHeader.onRun = { [weak self] in self?.runInstruction() }
         instructionHeader.onCancel = { [weak self] in self?.cancelInstruction() }
@@ -115,8 +116,8 @@ final class KeyboardViewController: UIInputViewController {
         toolbar.layoutIfNeeded(); layoutScreenChip()
         voice.bar.frame = CGRect(x: 50, y: toolbar.contextHeight, width: max(0, width - 100), height: toolbar.controlsHeight)
         voice.panel.frame = view.bounds
-        let extra: CGFloat = surface == .instruction ? instructionHeader.preferredHeight : 0
-        instructionHeader.frame = CGRect(x: 0, y: barHeight, width: width, height: extra)
+        let extra: CGFloat = surface == .instruction && !compactLayout ? instructionHeader.preferredHeight : 0
+        instructionHeader.frame = CGRect(x: 0, y: compactLayout ? toolbar.contextHeight : barHeight, width: width, height: instructionHeader.preferredHeight)
         keyArea.frame = CGRect(x: 0, y: barHeight + extra, width: width, height: max(0, view.bounds.height - barHeight - extra))
         panel.frame = CGRect(x: 0, y: barHeight, width: width, height: max(0, view.bounds.height - barHeight))
         explanationScroll.frame = panel.frame
@@ -137,6 +138,12 @@ final class KeyboardViewController: UIInputViewController {
     private func updateContext() {
         guard connected else { return }
         updateTypography()
+        instructionHeader.compact = compactLayout
+        let compactInstruction = compactLayout && surface == .instruction
+        [toolbar.logo, toolbar.mic, toolbar.message, toolbar.accessory].forEach { $0.isHidden = compactInstruction }
+        toolbar.spinner.isHidden = compactInstruction || !toolbar.spinner.isAnimating
+        voice.bar.alpha = compactInstruction || !voice.panel.isHidden ? 0 : 1
+        height.constant = keyboardHeight
         let editing = surface == .instruction
         keyArea.returnTitle = editing ? "Run" : nil
         keyArea.keyClicks = settings.keyClicks; keyArea.doubleSpacePeriod = settings.doubleSpacePeriod
@@ -153,6 +160,7 @@ final class KeyboardViewController: UIInputViewController {
         toolbar.message.setTitle(snapshotReturnSurface != nil ? "Text snapshot" : message ?? "", for: .normal)
         let statusAction = snapshotReturnSurface != nil ? "Back" : accessory ?? (undoRecord == nil ? nil : undoIsRedo ? "Redo" : "Undo")
         toolbar.accessory.setTitle(statusAction, for: .normal); toolbar.accessory.isHidden = statusAction == nil
+        if compactInstruction { toolbar.accessory.isHidden = true }
         toolbar.accessory.isEnabled = (statusAction != "Undo" && statusAction != "Redo") || undoRecord?.step(context: currentContext.voiceContext) != nil
         toolbar.accessory.accessibilityHint = accessory == "Sign in" ? "Opens the Gusan app" : "Activates the status action"
         toolbar.mic.isEnabled = !busy; toolbar.logo.isEnabled = !busy
@@ -191,7 +199,14 @@ final class KeyboardViewController: UIInputViewController {
         updateContext(); view.setNeedsLayout()
     }
     private func showTyping() { snapshotReturnSurface = nil; instructionContext = nil; surface = .typing; updateSurface() }
-    private var keyboardHeight: CGFloat { toolbar.preferredHeight + panel.preferredHeight + (surface == .instruction ? instructionHeader.preferredHeight : 0) }
+    private var compactLayout: Bool {
+        traitCollection.verticalSizeClass == .compact || view.window?.windowScene?.interfaceOrientation.isLandscape == true
+    }
+    private var keyboardHeight: CGFloat {
+        let requested = toolbar.preferredHeight + panel.preferredHeight + (surface == .instruction && !compactLayout ? instructionHeader.preferredHeight : 0)
+        let screen = view.window?.windowScene?.screen.bounds ?? UIScreen.main.bounds
+        return compactLayout ? min(requested, floor(min(screen.width, screen.height) * 0.55)) : requested
+    }
     private func updateTypography() {
         guard fontCategory != traitCollection.preferredContentSizeCategory else { return }
         fontCategory = traitCollection.preferredContentSizeCategory
@@ -203,17 +218,13 @@ final class KeyboardViewController: UIInputViewController {
         height.constant = keyboardHeight
         view.setNeedsLayout()
     }
-    private func impact() { if settings.haptics { UIImpactFeedbackGenerator(style: .light).impactOccurred() } }
-    private func notify(_ type: UINotificationFeedbackGenerator.FeedbackType) { if settings.haptics { UINotificationFeedbackGenerator().notificationOccurred(type) } }
     @objc private func defaultAction(_ gesture: UILongPressGestureRecognizer) {
         guard gesture.state == .began, !busy else { return }
-        impact()
         run(settings.keyboardAction.action, context: currentContext)
     }
     @objc private func togglePanel() {
         guard !busy else { return }
         accessState = store.sessionState(fullAccess: hasFullAccess)
-        impact()
         if surface == .instruction { cancelInstruction(); return }
         surface = surface == .panel ? .typing : .panel
         snapshotReturnSurface = nil
@@ -228,7 +239,6 @@ final class KeyboardViewController: UIInputViewController {
     @objc func startVoice() {
         guard !busy else { return }
         invalidateUndo()
-        impact()
         if let onVoice { onVoice() } else { showMessage("Tap the mic to open the Gusan app and start a voice session the first time") }
     }
     private func showMessage(_ text: String, detail: String? = nil, accessory: String? = nil) {
@@ -285,12 +295,10 @@ final class KeyboardViewController: UIInputViewController {
         accessState = access
         if access.actionError == .fullAccessRequired {
             if surface != .instruction { showTyping() }
-            notify(.error)
             showMessage("Gusan needs Full Access to reach Gusan Cloud", detail: "Allow Full Access for Gusan in Settings › General › Keyboard › Keyboards › Gusan › Allow Full Access. Text is sent to Gusan Cloud only when you run an action.\n\n" + store.diagnostics().summary, accessory: "How to enable")
             return
         }
         if let error = access.actionError {
-            notify(.error)
             if surface != .instruction { showTyping() }
             showMessage(error == .notSignedIn ? "Sign in to use Gusan" : "Gusan can't read shared sign-in", detail: store.diagnostics().summary, accessory: error == .notSignedIn ? "Sign in" : "Details"); return
         }
@@ -328,28 +336,24 @@ final class KeyboardViewController: UIInputViewController {
                 guard currentContext == context else { showMessage("Text changed. Select it and try again."); return }
                 guard !result.isEmpty else { throw GusanError.invalidResponse }
                 if outcome.kind == .replaceContext {
-                    textDocumentProxy.adjustTextPosition(byCharacterOffset: context.after.utf16.count)
+                    textDocumentProxy.adjustTextPosition(byCharacterOffset: context.paragraph.after.utf16.count)
                     for _ in context.text { textDocumentProxy.deleteBackward() }
                 }
                 undoSnapshot = currentContext.voiceContext
                 textDocumentProxy.insertText(result)
-                original = outcome.kind == .insert ? "" : context.text; replacement = result; captureUndo(restoreUTF16: outcome.kind == .replaceContext ? context.after.utf16.count : 0)
+                original = outcome.kind == .insert ? "" : context.text; replacement = result; captureUndo(restoreUTF16: outcome.kind == .replaceContext ? context.paragraph.after.utf16.count : 0)
                 instructionContext = nil; instruction = ""; showTyping(); screen.armed = false
                 showMessage("Replaced", accessory: "Undo")
-                notify(.success)
                 UIAccessibility.post(notification: .announcement, argument: "Replaced. Undo available.")
             } catch is CancellationError { showMessage("Cancelled") }
             catch GusanError.unauthorized { showMessage("Sign in to use Gusan", accessory: "Sign in") }
             catch GusanError.proRequired {
-                notify(.error)
                 showMessage("Gusan Pro is needed for AI actions", accessory: "See plans")
             }
             catch let error as ScreenError {
-                notify(.error)
                 showMessage(error == .noFrame ? "No picture from Gusan Screen. Tap for details." : "Gusan Screen isn't available. Tap for details.", detail: error.localizedDescription + "\n\n" + screen.diagnostics, accessory: error == .noFrame ? "Retry" : nil)
             }
             catch {
-                notify(.error)
                 let retry = [GusanError.network, .timeout, .failed, .serverNotConfigured, .invalidResponse].contains(error as? GusanError ?? .emptyInput)
                 let title = error as? GusanError == .network ? "You're offline. Tap for details." : "Action failed. Tap for details."
                 showMessage(title, detail: error.localizedDescription, accessory: retry ? "Retry" : nil)

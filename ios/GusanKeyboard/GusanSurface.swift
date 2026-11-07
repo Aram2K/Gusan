@@ -13,6 +13,8 @@ class ToolbarButton: UIButton {
 
 final class VoiceKey: ToolbarButton {
     private let gradient = CAGradientLayer()
+    private var phase = VoicePhase.off
+    private var theme: KeyboardTheme?
     override init(frame: CGRect) {
         super.init(frame: frame)
         apply(KeyboardTheme(appearance: nil, traits: traitCollection))
@@ -22,13 +24,20 @@ final class VoiceKey: ToolbarButton {
         update(phase: .off)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    func apply(_ theme: KeyboardTheme) { gradient.colors = [theme.brandBlue.cgColor, KeyboardTheme.blue.cgColor] }
+    func apply(_ theme: KeyboardTheme) {
+        self.theme = theme
+        let active = [.recording, .transcribing, .thinking].contains(phase)
+        gradient.colors = active ? [theme.brandBlue.cgColor, KeyboardTheme.blue.cgColor] : [theme.special.cgColor, theme.special.cgColor]
+        tintColor = active ? .white : theme.foreground
+    }
     func update(phase: VoicePhase) {
+        self.phase = phase
+        if let theme { apply(theme) }
         let recording = phase == .recording
         let busy = phase == .transcribing || phase == .thinking
         setImage(UIImage(systemName: recording ? "stop.circle.fill" : busy ? "xmark.circle" : "mic.fill"), for: .normal)
         accessibilityLabel = recording ? "Stop dictation" : busy ? "Cancel dictation" : "Start dictation"
-        accessibilityHint = recording ? "Stops recording and processes your voice" : busy ? "Cancels the voice request" : "Opens the Gusan app to start a voice session the first time"
+        accessibilityHint = recording ? "Stops recording and processes your voice" : busy ? "Cancels the voice request" : "Records in place while the voice session is ready. First activation opens Gusan."
     }
     override func layoutSubviews() {
         super.layoutSubviews(); gradient.frame = bounds; gradient.cornerRadius = bounds.height / 2
@@ -191,7 +200,8 @@ final class GusanPanel: UIView {
 }
 
 final class InstructionHeader: UIView {
-    let preferredHeight: CGFloat = 88
+    var compact = false { didSet { if compact != oldValue { scroll.isHidden = compact; setNeedsLayout() } } }
+    var preferredHeight: CGFloat { compact ? 44 : 88 }
     var onSuggestion: ((String) -> Void)?
     var onRun: (() -> Void)?
     var onCancel: (() -> Void)?

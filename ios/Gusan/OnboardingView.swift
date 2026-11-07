@@ -78,8 +78,8 @@ struct OnboardingView: View {
                 Text("You can always switch keyboards with the globe key.").font(.body).foregroundStyle(.secondary)
             }
             AppCard {
-                Label("Two mics, different jobs", systemImage: "mic").font(.headline)
-                Text("The mic below the keyboard is Apple's dictation. Tap Gusan's red-and-blue mic in the Gusan bar to start voice. If Gusan opens to prepare recording, switch back to your app.").font(.body)
+                Label("Speak with Gusan", systemImage: "mic").font(.headline)
+                Text("Tap Gusan's mic above the keys, speak, then tap Stop. Smart voice applies your words or edits the selected text; Undo restores the original. Gusan opens once to activate the microphone — follow the on-screen guidance. Later taps record in place while the voice session is ready. Apple's mic below the keyboard is system dictation.").font(.body)
             }
             PrimaryButton(title: "Continue", icon: "arrow.right") { advance() }
         }

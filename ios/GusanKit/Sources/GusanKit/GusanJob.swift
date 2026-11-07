@@ -147,7 +147,8 @@ public struct VoiceEdit: Equatable {
             return VoiceEdit(advanceUTF16: 0, deleteCount: 0, original: context.selected, restoreUTF16: 0)
         case .replaceContext:
             guard context.selected.isEmpty else { return nil }
-            return VoiceEdit(advanceUTF16: context.after.utf16.count, deleteCount: (context.before + context.after).count, original: context.before + context.after, restoreUTF16: context.after.utf16.count)
+            let paragraph = context.paragraph
+            return VoiceEdit(advanceUTF16: paragraph.after.utf16.count, deleteCount: (paragraph.before + paragraph.after).count, original: paragraph.before + paragraph.after, restoreUTF16: paragraph.after.utf16.count)
         case .insert:
             guard context.selected.isEmpty else { return nil }
             return VoiceEdit(advanceUTF16: 0, deleteCount: 0, original: "", restoreUTF16: 0)

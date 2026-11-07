@@ -2,6 +2,31 @@ import XCTest
 @testable import GusanKit
 
 final class JobTests: XCTestCase {
+    func testContextPromptAndReplacementUseOnlyTheParagraphAtCursor() throws {
+        let context = VoiceContext(before: "Earlier\nA family 👨‍👩‍👧‍👦 ", after: "here!\nLater", documentID: "one")
+        let text = "A family 👨‍👩‍👧‍👦 here!"
+        XCTAssertEqual(VoicePlan.plan(transcript: "Shorten it", context: context, action: .automatic), .automatic(.voiceSmart(transcript: "Shorten it"), text, .replaceContext))
+        let edit = try XCTUnwrap(VoiceEdit.plan(result: JobResult(text: "Family!", kind: .replaceContext), context: context))
+        XCTAssertEqual(edit.original, text)
+        XCTAssertEqual(edit.deleteCount, text.count)
+        XCTAssertEqual(edit.advanceUTF16, "here!".utf16.count)
+        XCTAssertEqual(edit.restoreUTF16, "here!".utf16.count)
+        XCTAssertEqual(context.paragraph.documentID, "one")
+    }
+    func testEmptyParagraphDictatesWithoutEditingNeighboringParagraphs() {
+        let context = VoiceContext(before: "Earlier\r\n", after: "\u{2029}Later")
+        XCTAssertEqual(context.paragraph.before, "")
+        XCTAssertEqual(context.paragraph.after, "")
+        guard case .automatic(_, let text, let kind) = VoicePlan.plan(transcript: "Hello", context: context, action: .automatic) else { return XCTFail("Expected dictation") }
+        XCTAssertEqual(text, "Hello")
+        XCTAssertEqual(kind, .insert)
+    }
+    func testSelectionRemainsExactAcrossParagraphBreaks() {
+        let context = VoiceContext(selected: "First\nSecond", before: "Earlier\n", after: "\nLater")
+        XCTAssertEqual(context.paragraph, context)
+        XCTAssertEqual(VoicePlan.plan(transcript: "Shorten", context: context, action: .automatic), .instruction(instruction: "Shorten", text: context.selected))
+        XCTAssertEqual(VoiceEdit.plan(result: JobResult(text: "Short", kind: .replaceSelection), context: context)?.original, context.selected)
+    }
     func testVoicePromptsAndWireModeForThreeContexts() throws {
         let contexts = [VoiceContext(selected: "Selected text"), VoiceContext(), VoiceContext(before: "Before ", after: "after")]
         for (index, context) in contexts.enumerated() {

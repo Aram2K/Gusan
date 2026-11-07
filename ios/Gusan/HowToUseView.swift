@@ -5,8 +5,8 @@ struct HowToUseView: View {
         ("1. Select text, or just type", "selection.pin.in.out", "Select the text you want to change. With nothing selected, Gusan uses the text around your cursor."),
         ("2. Tap the Gusan button", "keyboard", "Look for the round Gusan logo above the keys. Tap it to open actions; hold it to run your default action."),
         ("3. Pick an action, or ask", "sparkles", "Choose Rephrase, Fix grammar, Email and more. Or tap Ask Gusan… and type an instruction, such as ‘make it more formal’ or ‘translate to Armenian’. Tap Run."),
-        ("4. Your words, improved", "arrow.uturn.backward", "The result replaces your text. Tap Undo in the Gusan bar to restore it before you keep typing."),
-        ("5. Speak with Gusan", "mic.fill", "Tap Gusan's red-and-blue mic to start dictation. If Gusan opens, allow microphone access, then switch back to your app. Tap the mic again to stop and insert your words. Select text first to use your voice as an instruction. Apple's dictation mic stays below the keyboard.")
+        ("4. Your words, improved", "arrow.uturn.backward", "The result replaces your text. Undo stays in the Gusan bar while the replacement can still be verified, even after typing after it."),
+        ("5. Speak with Gusan", "mic.fill", "Tap Gusan's mic above the keys, speak, then tap Stop. Smart voice inserts dictation or follows your instruction about the text. Select text to edit just that selection. Undo restores the original. Gusan opens once to activate the microphone — follow the on-screen guidance. Later taps record in place while the session is ready. Apple's mic below the keyboard is system dictation.")
     ]
     var body: some View {
         ScreenContent {
