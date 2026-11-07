@@ -411,7 +411,8 @@ def test_tray_rows_free(tray):
     tr, _ = tray("free")
     assert tr.visible_texts() == [
         ("header", "Gusan  v" + APP_VERSION), ("open", "Open Gusan"), ("dictate", "Dictate"),
-        ("meeting", "Record a meeting…"), ("assist", "Live Assistant"), ("convert", "Convert audio to text…"),
+        ("meeting", "Record a meeting…"), ("assist", "Live Assistant"), ("screen_chat", "Ask about my screen"),
+        ("convert", "Convert audio to text…"),
         ("recent", "Recent"), ("privacy", "Privacy mode"),
         ("account", "aram@aibuben.xyz  ·  Free"), ("upgrade", "Upgrade to Pro…"),
         ("settings", "Settings…"), ("quit", "Quit Gusan")]

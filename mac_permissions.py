@@ -34,6 +34,7 @@ IS_MAC = sys.platform == "darwin"
 MICROPHONE = "microphone"
 ACCESSIBILITY = "accessibility"
 INPUT_MONITORING = "input_monitoring"
+SCREEN_RECORDING = "screen_recording"
 ALL = (MICROPHONE, ACCESSIBILITY, INPUT_MONITORING)
 
 _PANE = "x-apple.systempreferences:com.apple.preference.security?"
@@ -41,6 +42,7 @@ SETTINGS_URLS = {
     MICROPHONE: _PANE + "Privacy_Microphone",
     ACCESSIBILITY: _PANE + "Privacy_Accessibility",
     INPUT_MONITORING: _PANE + "Privacy_ListenEvent",
+    SCREEN_RECORDING: _PANE + "Privacy_ScreenCapture",
 }
 
 # IOHIDCheckAccess / IOHIDRequestAccess (IOKit/hid/IOHIDLib.h)
@@ -104,6 +106,25 @@ def input_monitoring_granted():
     if res == _HID_DENIED:
         return False
     return None
+
+
+def _screen_access(symbol):
+    cg = _lib("cg", "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+    fn = getattr(cg, symbol)
+    fn.restype = ctypes.c_bool
+    fn.argtypes = []
+    return bool(fn())
+
+
+def screen_recording_granted():
+    """Screen capture access, separate from the onboarding permission set."""
+    if not IS_MAC:
+        return None
+    try:
+        return _screen_access("CGPreflightScreenCaptureAccess")
+    except Exception as e:
+        logger.debug("Screen Recording status failed: %s", e)
+        return None
 
 
 def _objc():
@@ -232,6 +253,8 @@ def request(name):
     if not IS_MAC:
         return False
     try:
+        if name == SCREEN_RECORDING and _screen_access("CGRequestScreenCaptureAccess"):
+            return True
         if name == ACCESSIBILITY and _request_accessibility():
             return True
         if name == INPUT_MONITORING and _request_input_monitoring():

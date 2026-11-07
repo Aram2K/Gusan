@@ -87,6 +87,7 @@ def ctl(qapp):
         mock.patch.object(main.AppController, "_setup_hotkey", lambda self, hk, remove_old=None: True),
         mock.patch.object(main.AppController, "_setup_assist_hotkey", lambda self, hk: False),
         mock.patch.object(main.AppController, "_setup_smart_hotkey", lambda self, hk: False),
+        mock.patch.object(main.AppController, "_setup_screen_chat_hotkey", lambda self, hk: False),
         mock.patch.object(main.AppController, "_register_transient_keys", lambda self: None),
         mock.patch.object(main.AppController, "_preload_speech_model", lambda self: None),
         mock.patch.object(updater, "check_latest", lambda *a, **k: (updater.ERROR, "")),
@@ -117,7 +118,7 @@ def ctl(qapp):
     import shiboken6
     tray = getattr(c, "tray_menu", None)
     for obj in (getattr(c, "_reminder", None), getattr(tray, "menu", None),
-                c.live_assist, c.main_win,
+                c.live_assist, getattr(c, "screen_chat_window", None), c.main_win,
                 c.onboarding_win, c.overlay, c.tray_icon, c.mic_monitor, c.file_jobs,
                 getattr(c.meeting_session, "proc_signals", None), c.meeting_session,
                 c.downloads, c):
@@ -129,6 +130,31 @@ def ctl(qapp):
     gc.collect()
     for p in patches:
         p.stop()
+
+
+def test_screen_chat_remembers_before_capture_and_reuses_the_open_window(ctl, monkeypatch):
+    import foreground
+    from ui import screen_chat
+    from PySide6.QtGui import QImage
+    order = []
+    target = foreground.Target("win32", 12345, "Mail", 123)
+    monkeypatch.setitem(ctl.cfg, "privacy_mode", False)
+    monkeypatch.setattr(ctl, "_hotkeys_suspended", False)
+    monkeypatch.setattr(foreground, "remember", lambda: order.append("remember") or target)
+    image = QImage(80, 60, QImage.Format_RGB32)
+    image.fill(0xffdbeafe)
+    def capture(screen):
+        order.append("capture")
+        assert not ctl.screen_chat_window.isVisible()
+        return screen_chat.live_assist.jpeg_b64(image)
+    monkeypatch.setattr(screen_chat.live_assist, "capture_screen_b64", capture)
+    ctl.open_screen_chat()
+    window = ctl.screen_chat_window
+    assert order == ["remember", "capture"] and window.target == target
+    assert window.isVisible()
+    ctl.open_screen_chat()
+    assert ctl.screen_chat_window is window and order == ["remember", "capture"]
+    window.close()
 
 
 def test_the_controller_owns_the_services(ctl):

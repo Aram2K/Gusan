@@ -2205,6 +2205,8 @@ class LiveAssistantPage(QWidget):
             self.shortcut.set_error(SHORTCUT_IS_DICTATION % shown)
         elif _norm_hotkey(combo) and _norm_hotkey(combo) == _norm_hotkey(smart):
             self.shortcut.set_error(SHORTCUT_IS_SMART % shown)
+        elif _norm_hotkey(combo) and _norm_hotkey(combo) == _norm_hotkey(cfg.get("screen_chat_hotkey")):
+            self.shortcut.set_error("%s opens Screen chat. Pick another." % shown)
         else:
             self.shortcut.set_error(SHORTCUT_REFUSED % shown)
 

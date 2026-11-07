@@ -104,6 +104,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QProxyStyle, QStyle, QStyleFa
 
 import account_actions
 import hotkeys
+import foreground
 from app_info import APP_NAME, APP_VERSION
 from ui import theme
 from ui.components import icons
@@ -536,6 +537,7 @@ class TrayMenu(QObject):
         self._add("dictate", "Dictate", self.dictate)
         self._add("meeting", "Record a meeting…", self.record_meeting, **{P_PRO: True})
         self._add("assist", "Live Assistant", self.live_assistant, **{P_PRO: True})
+        self._add("screen_chat", "Ask about my screen", self.screen_chat)
         self._add("convert", "Convert audio to text…", self.convert_audio)
         ra = self.menu.addMenu(self.recent)
         ra.setProperty(P_KIND, "item")
@@ -639,6 +641,7 @@ class TrayMenu(QObject):
 
     def refresh_hotkeys(self):
         cfg = self._cfg()
+        self._set_hint("screen_chat", hotkey_hint(cfg.get("screen_chat_hotkey", "ctrl+alt+g")))
         self._set_hint("dictate", hotkey_hint(cfg.get("hotkey", hotkeys.DICTATION_DEFAULT)))
         if hasattr(self.app, "_registered_assist_hotkey"):
             hk = getattr(self.app, "_registered_assist_hotkey", None) or ""
@@ -713,7 +716,7 @@ class TrayMenu(QObject):
         self.refresh_next()
 
     def on_setting_changed(self, key):
-        if key in ("hotkey", "live_assist_hotkey"):
+        if key in ("hotkey", "live_assist_hotkey", "screen_chat_hotkey"):
             self.refresh_hotkeys()
         elif key == "privacy_mode":
             self.refresh_privacy()
@@ -791,6 +794,7 @@ class TrayMenu(QObject):
         self.actions["show_all"] = show_all
 
     def _on_about_to_show(self):
+        self._screen_chat_target = foreground.remember()
         if self.custom:
             self._follow_os(self.menu)                  # the OS may have switched light / dark since
             self._follow_os(self.recent)
@@ -824,6 +828,9 @@ class TrayMenu(QObject):
         # The card opens for everyone (Free and guests too); it asks for Pro
         # when Start is pressed, not here.
         _call(self.app, "toggle_live_assist")
+
+    def screen_chat(self):
+        _call(self.app, "open_screen_chat", target=getattr(self, "_screen_chat_target", None), from_tray=True)
 
     def convert_audio(self):
         _call(self.app, "show_main", "audio_to_text")

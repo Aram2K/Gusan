@@ -343,8 +343,9 @@ def test_general_controls_apply_at_once(env):
 def test_shortcut_rows_show_keys_and_open_their_pages(env):
     win, app = env.build("free")
     page = _settings(win)
-    dictate, smart, live = page.shortcut_rows                   # Dictate, Smart Actions, Live Assistant
-    assert [r.name for r in page.shortcut_rows] == ["Dictate", "Smart Actions", "Live Assistant"]
+    dictate, smart, live, screen = page.shortcut_rows
+    assert [r.name for r in page.shortcut_rows] == ["Dictate", "Smart Actions", "Live Assistant", "Screen chat"]
+    assert screen.capture.hotkey() == "ctrl+alt+g"
     assert "Alt + R" in dictate.keys.accessibleName()
     assert "Ctrl + Alt + A" in live.keys.accessibleName()
     assert smart.keys.accessibleName() == "Change the Smart Actions shortcut (Alt + S)"

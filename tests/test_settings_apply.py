@@ -240,6 +240,54 @@ class TestSmartActionsShortcut(unittest.TestCase):
                                      ("smart", "ctrl+shift+s")])
 
 
+class ScreenApp(SmartApp):
+    def __init__(self, screen_ok=True, **cfg):
+        super().__init__(**cfg)
+        self.cfg.setdefault("screen_chat_hotkey", "ctrl+alt+g")
+        self.screen_ok = screen_ok
+
+    def _setup_screen_chat_hotkey(self, hk):
+        self.calls.append(("screen", hk))
+        return self.screen_ok(hk) if callable(self.screen_ok) else self.screen_ok
+
+
+class TestScreenChatShortcut(unittest.TestCase):
+    def test_normalizes_registers_and_announces(self):
+        app = ScreenApp()
+        self.assertTrue(settings_apply.apply(app, {"screen_chat_hotkey": "Ctrl + Shift + G"})["screen_chat_hotkey"])
+        self.assertEqual(app.cfg["screen_chat_hotkey"], "ctrl+shift+g")
+        self.assertIn(("screen", "ctrl+shift+g"), app.calls)
+        self.assertEqual(app.sig_setting_changed.emitted, ["screen_chat_hotkey"])
+
+    def test_conflicts_in_every_direction(self):
+        keys = ("hotkey", "live_assist_hotkey", "smart_actions_hotkey", "screen_chat_hotkey")
+        for key in keys:
+            for other in keys:
+                if key == other:
+                    continue
+                app = ScreenApp(smart_actions_hotkey="alt+s")
+                before = app.cfg[key]
+                self.assertFalse(settings_apply.apply(app, {key: app.cfg[other]})[key], (key, other))
+                self.assertEqual(app.cfg[key], before)
+                self.assertEqual(app.calls, [])
+
+    def test_empty_unbind_invalid_and_missing_callback(self):
+        app = ScreenApp(screen_ok=False)
+        self.assertTrue(settings_apply.apply(app, {"screen_chat_hotkey": ""})["screen_chat_hotkey"])
+        self.assertEqual(app.cfg["screen_chat_hotkey"], "")
+        for combo in ("g", "mouse:middle"):
+            self.assertFalse(settings_apply.apply(app, {"screen_chat_hotkey": combo})["screen_chat_hotkey"])
+        app = FakeApp()
+        self.assertTrue(settings_apply.apply(app, {"screen_chat_hotkey": "ctrl+alt+g"})["screen_chat_hotkey"])
+
+    def test_failed_registration_rolls_back_without_announcement(self):
+        app = ScreenApp(screen_ok=lambda hk: hk == "ctrl+alt+g")
+        self.assertFalse(settings_apply.apply(app, {"screen_chat_hotkey": "ctrl+shift+g"})["screen_chat_hotkey"])
+        self.assertEqual(app.cfg["screen_chat_hotkey"], "ctrl+alt+g")
+        self.assertEqual(app.calls[-2:], [("screen", "ctrl+shift+g"), ("screen", "ctrl+alt+g")])
+        self.assertEqual(app.sig_setting_changed.emitted, [])
+
+
 class TestSmartActionsSpeechModel(unittest.TestCase):
     KEY = "smart_actions_speech_model"
 
