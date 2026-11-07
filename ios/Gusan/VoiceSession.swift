@@ -83,7 +83,7 @@ final class VoiceSession: ObservableObject {
         startup = Task {
             defer { startup = nil }
             do {
-                if let error = store.sessionState(fullAccess: store.diagnostics().peer?.fullAccess == true).voiceError { throw error }
+                if let error = store.sessionState(fullAccess: store.diagnostics().peer?.fullAccess).voiceError { throw error }
                 guard let session = store.read() else { throw VoiceError.notSignedIn }
                 let allowed = await withCheckedContinuation { continuation in
                     if #available(iOS 17.0, *) { AVAudioApplication.requestRecordPermission { continuation.resume(returning: $0) } }

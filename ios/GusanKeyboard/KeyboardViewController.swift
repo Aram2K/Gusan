@@ -34,6 +34,7 @@ final class KeyboardViewController: UIInputViewController {
     private var message: String?
     private var detail: String?
     private var accessory: String?
+    private var snapshotReturnSurface: Surface?
     private var busy = false
     private var original: String?
     private var replacement: String?
@@ -45,12 +46,13 @@ final class KeyboardViewController: UIInputViewController {
     private var retryAction: SmartAction?
     private var retryContext: Context?
     private var connected = false
+    private var fontCategory: UIContentSizeCategory?
     private var accessState = SessionState(signedIn: false, fullAccess: false, shareable: false)
 
     override func viewDidLoad() {
         super.viewDidLoad()
         if #available(iOS 17.0, *) {
-            registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (controller: KeyboardViewController, _: UITraitCollection) in
+            registerForTraitChanges([UITraitUserInterfaceStyle.self, UITraitPreferredContentSizeCategory.self]) { (controller: KeyboardViewController, _: UITraitCollection) in
                 controller.updateContext()
             }
         }
@@ -85,7 +87,9 @@ final class KeyboardViewController: UIInputViewController {
         voice.bar.backgroundColor = .secondarySystemBackground; voice.bar.layer.cornerRadius = 8
         toolbar.accessory.addTarget(self, action: #selector(accessoryPressed), for: .touchUpInside)
         toolbar.message.addTarget(self, action: #selector(expandMessage), for: .touchUpInside)
+        toolbar.context.addTarget(self, action: #selector(expandContext), for: .touchUpInside)
         panel.onClose = { [weak self] in self?.showTyping() }
+        panel.onSnapshot = { [weak self] in self?.expandContext() }
         panel.onAsk = { [weak self] in self?.beginInstruction() }
         panel.onAction = { [weak self] in guard let self else { return }; self.impact(); self.run($0, context: self.currentContext) }
         instructionHeader.onSuggestion = { [weak self] in self?.setInstruction($0) }
@@ -110,13 +114,14 @@ final class KeyboardViewController: UIInputViewController {
     override func viewWillLayoutSubviews() {
         super.viewWillLayoutSubviews()
         let width = view.bounds.width
-        toolbar.frame = CGRect(x: 0, y: 0, width: width, height: 44)
-        voice.bar.frame = CGRect(x: 50, y: 0, width: max(0, width - 100), height: 44)
+        let barHeight = toolbar.preferredHeight
+        toolbar.frame = CGRect(x: 0, y: 0, width: width, height: barHeight)
+        voice.bar.frame = CGRect(x: 50, y: toolbar.contextHeight, width: max(0, width - 100), height: toolbar.controlsHeight)
         voice.panel.frame = view.bounds
-        let extra: CGFloat = surface == .instruction ? 74 : 0
-        instructionHeader.frame = CGRect(x: 0, y: 44, width: width, height: extra)
-        keyArea.frame = CGRect(x: 0, y: 44 + extra, width: width, height: max(0, view.bounds.height - 44 - extra))
-        panel.frame = CGRect(x: 0, y: 44, width: width, height: max(0, view.bounds.height - 44))
+        let extra: CGFloat = surface == .instruction ? instructionHeader.preferredHeight : 0
+        instructionHeader.frame = CGRect(x: 0, y: barHeight, width: width, height: extra)
+        keyArea.frame = CGRect(x: 0, y: barHeight + extra, width: width, height: max(0, view.bounds.height - barHeight - extra))
+        panel.frame = CGRect(x: 0, y: barHeight, width: width, height: max(0, view.bounds.height - barHeight))
         explanationScroll.frame = panel.frame
         agent.card.frame = panel.frame
         let explanationHeight = max(panel.bounds.height - 24, explanation.sizeThatFits(CGSize(width: width - 36, height: .greatestFiniteMagnitude)).height)
@@ -135,6 +140,7 @@ final class KeyboardViewController: UIInputViewController {
     }
     private func updateContext() {
         guard connected else { return }
+        updateTypography()
         let editing = surface == .instruction
         keyArea.returnTitle = editing ? "Run" : nil
         keyArea.keyClicks = settings.keyClicks; keyArea.doubleSpacePeriod = settings.doubleSpacePeriod
@@ -145,9 +151,12 @@ final class KeyboardViewController: UIInputViewController {
         panel.update(theme: theme, target: settings.translateTarget, defaultAction: settings.keyboardAction.action, context: context.text)
         instructionHeader.update(text: instruction, theme: theme)
         explanation.textColor = theme.foreground
-        toolbar.message.setTitle(agent.showingCard ? agent.toolbarStatus : (message ?? context.summary), for: .normal)
+        toolbar.context.setTitle(context.summary, for: .normal)
+        toolbar.context.accessibilityValue = context.summary
+        toolbar.message.setTitle(agent.showingCard ? agent.toolbarStatus : (snapshotReturnSurface != nil ? "Text snapshot" : message ?? ""), for: .normal)
         toolbar.mic.isHidden = agent.showingCard
-        let statusAction = accessory ?? (undoRecord == nil ? nil : undoIsRedo ? "Redo" : "Undo")
+        toolbar.context.isHidden = agent.showingCard
+        let statusAction = snapshotReturnSurface != nil ? "Back" : accessory ?? (undoRecord == nil ? nil : undoIsRedo ? "Redo" : "Undo")
         toolbar.accessory.setTitle(statusAction, for: .normal); toolbar.accessory.isHidden = statusAction == nil
         toolbar.accessory.isEnabled = (statusAction != "Undo" && statusAction != "Redo") || undoRecord?.step(context: currentContext.voiceContext) != nil
         toolbar.accessory.accessibilityHint = accessory == "Sign in" ? "Opens the Gusan app" : "Activates the status action"
@@ -169,10 +178,22 @@ final class KeyboardViewController: UIInputViewController {
         keyArea.isHidden = surface == .panel || surface == .explanation
         if agent.showingCard { panel.isHidden = true; explanationScroll.isHidden = true; instructionHeader.isHidden = true; keyArea.isHidden = true }
         keyArea.inputEnabled = true
-        height.constant = 260
+        height.constant = keyboardHeight
         updateContext(); view.setNeedsLayout()
     }
-    private func showTyping() { instructionContext = nil; surface = .typing; updateSurface() }
+    private func showTyping() { snapshotReturnSurface = nil; instructionContext = nil; surface = .typing; updateSurface() }
+    private var keyboardHeight: CGFloat { toolbar.preferredHeight + panel.preferredHeight + (surface == .instruction ? instructionHeader.preferredHeight : 0) }
+    private func updateTypography() {
+        guard fontCategory != traitCollection.preferredContentSizeCategory else { return }
+        fontCategory = traitCollection.preferredContentSizeCategory
+        toolbar.updateTypography(traitCollection)
+        panel.updateTypography(traitCollection)
+        instructionHeader.updateTypography(traitCollection)
+        voice.updateTypography(traitCollection)
+        explanation.font = keyboardFont(15, style: .body, maximum: 22, traits: traitCollection)
+        height.constant = keyboardHeight
+        view.setNeedsLayout()
+    }
     private func impact() { if settings.haptics { UIImpactFeedbackGenerator(style: .light).impactOccurred() } }
     private func notify(_ type: UINotificationFeedbackGenerator.FeedbackType) { if settings.haptics { UINotificationFeedbackGenerator().notificationOccurred(type) } }
     @objc private func defaultAction(_ gesture: UILongPressGestureRecognizer) {
@@ -186,6 +207,7 @@ final class KeyboardViewController: UIInputViewController {
         impact()
         if surface == .instruction { cancelInstruction(); return }
         surface = surface == .panel ? .typing : .panel
+        snapshotReturnSurface = nil
         message = nil; detail = nil; accessory = nil; updateSurface()
         let destination: UIView = surface == .panel ? panel : keyArea
         destination.alpha = 0
@@ -210,7 +232,18 @@ final class KeyboardViewController: UIInputViewController {
         explanationScroll.setContentOffset(.zero, animated: false)
         surface = .explanation; updateSurface()
     }
+    @objc private func expandContext() {
+        let context = instructionContext ?? currentContext
+        if surface != .explanation { snapshotReturnSurface = surface }
+        explanation.text = context.summary + "\n\n" + (context.text.isEmpty ? "No existing text will be replaced." : context.text)
+        explanationScroll.setContentOffset(.zero, animated: false)
+        surface = .explanation
+        updateSurface()
+    }
     @objc private func accessoryPressed() {
+        if let previous = snapshotReturnSurface {
+            snapshotReturnSurface = nil; surface = previous; updateSurface(); return
+        }
         switch accessory ?? (undoRecord == nil ? nil : undoIsRedo ? "Redo" : "Undo") {
         case "Sign in": openContainingApp(URL(string: "gusan://signin?from=keyboard")!)
         case "Undo", "Redo": undo()

@@ -8,16 +8,16 @@ public struct SessionState: Equatable {
     public var canRunActions: Bool { actionError == nil }
     public var voiceReady: Bool { voiceError == nil }
 
-    public init(signedIn: Bool, fullAccess: Bool, shareable: Bool, voiceError: VoiceError? = nil) {
+    public init(signedIn: Bool, fullAccess: Bool?, shareable: Bool, voiceError: VoiceError? = nil) {
         self.signedIn = signedIn
         self.shareable = shareable
-        actionError = !fullAccess ? .fullAccessRequired : (!signedIn ? .notSignedIn : (!shareable ? .notShared : nil))
-        self.voiceError = actionError ?? voiceError
+        actionError = fullAccess == false ? .fullAccessRequired : (!signedIn ? .notSignedIn : (!shareable ? .notShared : nil))
+        self.voiceError = fullAccess == false ? .fullAccessRequired : (voiceError ?? actionError)
     }
 }
 
 public extension SessionStore {
-    func sessionState(fullAccess: Bool) -> SessionState {
+    func sessionState(fullAccess: Bool?) -> SessionState {
         let session = read()
         var signedIn = session != nil
         #if DEBUG
