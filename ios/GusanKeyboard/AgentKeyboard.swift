@@ -131,8 +131,8 @@ final class AgentKeyboardController {
     }
 
     private func openApp() {
-        guard let id = task?.id else { return }
-        onOpenApp?(URL(string: "gusan://task?id=\(id.uuidString.lowercased())")!)
+        let url = task.map { "gusan://task?id=\($0.id.uuidString.lowercased())" } ?? "gusan://task"
+        onOpenApp?(URL(string: url)!)
     }
 
     private func dismiss() {
