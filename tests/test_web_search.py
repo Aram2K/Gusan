@@ -369,3 +369,66 @@ def test_server_linkup_runtime(tmp_path, stream, parts, keys):
     assert "latest Acme news" not in "".join(good["logs"])
     if not stream:
         assert good["json"]["sources"] == sources
+
+
+def test_classifier_live_discovery_deno(tmp_path):
+    from tests.test_smart_action_routes import HARNESS, STUB_SUPABASE, STUB_ANTHROPIC, req
+    deno = shutil.which("deno")
+    if not deno:
+        pytest.skip("Deno unavailable")
+    src = SERVER.read_text()
+    src = re.sub(r'from "https://esm\.sh/@supabase/supabase-js@2"', 'from "./stub_supabase.mjs"', src)
+    src = re.sub(r'from "npm:@anthropic-ai/sdk@[\d.]+"', 'from "./stub_anthropic.mjs"', src)
+    (tmp_path / "proxy.mts").write_text(src.replace("Deno.", "globalThis.__testDeno."))
+    (tmp_path / "stub_supabase.mjs").write_text(STUB_SUPABASE)
+    (tmp_path / "stub_anthropic.mjs").write_text(STUB_ANTHROPIC)
+    harness = HARNESS.replace("globalThis.Deno =", "globalThis.__testDeno =")
+    harness = harness.replace("const out = {};", "const signals = new WeakMap(); let signalCount = 0; const out = {};")
+    harness = harness.replace("budget: active.size", "signal: init.signal ? (signals.get(init.signal) ?? (signals.set(init.signal, ++signalCount), signalCount)) : null, budget: active.size")
+    harness = harness.replace('const text = r.empty', '''if (u.endsWith("/models")) {
+      return new Response(JSON.stringify({data:[{id:"deepseek-ai/test"}]}));
+    }
+    if (host === "other") return new Response(JSON.stringify({results:[]}));
+    if (body?.max_tokens === 60) {
+      return new Response(JSON.stringify({choices:[{message:{content:'{"search":true,"query":"Acme size"}'}}]}));
+    }
+    const text = r.empty''')
+    (tmp_path / "harness.mjs").write_text('import process from "node:process";\n' + harness)
+    env = {"LIVE_LLM_URL": "https://live.test", "LIVE_LLM_TOKEN": "test-live", "Linkup_web": "test-linkup",
+           "LINKUP_DECIDE_TIMEOUT_MS": "300"}
+    question = req("live_assist", messages=[{"role": "user", "content": "Private notes"}])
+    question["body"].update(web_search=True, web_query="How big is Acme?")
+    latest = json.loads(json.dumps(question))
+    latest["body"]["web_query"] = "latest Acme news?"
+    scenarios = [
+        {"id": "cold", "env": env, "requests": [question, question]},
+        {"id": "timeout", "env": env, "requests": [latest], "behave": {"live": [{"stall": True}, {}]}},
+        {"id": "no_route", "env": {"Linkup_web": "test-linkup"}, "requests": [latest]},
+    ]
+    (tmp_path / "scenarios.json").write_text(json.dumps(scenarios))
+    out = subprocess.run([deno, "run", "--allow-all", str(tmp_path / "harness.mjs"),
+                          tmp_path.as_uri(), str(tmp_path / "scenarios.json")], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    results = json.loads(out.stdout)
+    first, cached = results["cold"]
+    for result in (first, cached):
+        assert result["status"] == 200
+        classifier = [c for c in result["calls"] if c["body"] and c["body"].get("max_tokens") == 60]
+        assert len(classifier) == 1
+        assert classifier[0]["host"] == "live"
+        assert classifier[0]["body"]["model"] == "deepseek-ai/test"
+        assert classifier[0]["body"]["temperature"] == 0
+        assert classifier[0]["body"]["stream"] is False
+        assert next(c for c in result["calls"] if "linkup.so" in c["url"])["body"]["q"] == "Acme size"
+    discovery = [c for c in first["calls"] if c["url"].endswith("/models")]
+    assert len(discovery) == 1
+    classifier = next(c for c in first["calls"] if c["body"] and c["body"].get("max_tokens") == 60)
+    assert discovery[0]["signal"] == classifier["signal"]
+    assert not any(c["url"].endswith("/models") for c in cached["calls"])
+    timeout = results["timeout"][0]
+    assert timeout["status"] == 200
+    assert len([c for c in timeout["calls"] if c["url"].endswith("/models")]) == 2
+    for result in (timeout, results["no_route"][0]):
+        assert next(c for c in result["calls"] if "linkup.so" in c["url"])["body"]["q"] == "latest Acme news?"
+        assert any('"source":"heuristic"' in line for line in result["logs"])
+    assert results["no_route"][0]["status"] == 503

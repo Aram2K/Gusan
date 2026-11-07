@@ -135,7 +135,9 @@ export async function classifyWebSearch(question: string, context: string): Prom
     { role: "user", content: JSON.stringify({ question: question.slice(0, 400), context: context.slice(-1200) }) },
   ];
   const ms = LINKUP_DECIDE_TIMEOUT_MS;
-  const knownLiveModel = LIVE_MODEL_SETTING || liveModelCache;
+  const signal = AbortSignal.timeout(ms);
+  const knownLiveModel = LIVE_URL && LIVE_TOKEN ? await liveModel(false, signal) : "";
+  if (signal.aborted) return null;
   const route = LIVE_URL && LIVE_TOKEN && knownLiveModel
     ? liveRoute(knownLiveModel, messages, 60, false, { temperature: 0 })
     : OPENAI_KEY ? openaiRoute(OPENAI_LIVE_MODEL, messages, 60, false, ms, ms, 0)
@@ -143,7 +145,6 @@ export async function classifyWebSearch(question: string, context: string): Prom
       ?? (MISTRAL_KEY ? mistralRoute(messages, 60, false, ms)
         : GEMINI_KEY ? geminiRoutes(messages, 60, false, ms)[0] : null);
   if (!route) return null;
-  const signal = AbortSignal.timeout(ms);
   if (route.claude) {
     const d: any = await claude!.messages.create(route.claude as any, { signal, maxRetries: 0 });
     return parseWebDecision((d.content ?? []).filter((p: any) => p.type === "text").map((p: any) => p.text).join(""));
@@ -437,14 +438,14 @@ function liveSampling(model: string): Record<string, unknown> {
 let liveModelFailedAt = 0;
 const LIVE_MODEL_RETRY_MS = 30_000;
 
-async function liveModel(force = false): Promise<string> {
+async function liveModel(force = false, signal?: AbortSignal): Promise<string> {
   if (LIVE_MODEL_SETTING) return LIVE_MODEL_SETTING;
   if (liveModelCache) return liveModelCache;
   if (!force && liveModelFailedAt && Date.now() - liveModelFailedAt < LIVE_MODEL_RETRY_MS) return "";
   try {
     const r = await fetch(`${LIVE_URL}/models`, {
       headers: { "Authorization": `Bearer ${LIVE_TOKEN}` },
-      signal: AbortSignal.timeout(force ? 10_000 : 2_000),
+      signal: signal ?? AbortSignal.timeout(force ? 10_000 : 2_000),
     });
     if (r.ok) {
       const d = await r.json();
@@ -453,6 +454,7 @@ async function liveModel(force = false): Promise<string> {
       console.error("live model lookup failed", r.status);
     }
   } catch (e) {
+    if (signal?.aborted) return "";
     console.error("live model lookup unreachable", scrub(String(e), LIVE_TOKEN).slice(0, 160));
   }
   if (!liveModelCache) liveModelFailedAt = Date.now();
