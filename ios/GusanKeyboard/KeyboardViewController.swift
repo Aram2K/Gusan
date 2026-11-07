@@ -148,7 +148,7 @@ final class KeyboardViewController: UIInputViewController {
         applyTheme(theme)
         let context = instructionContext ?? currentContext
         panel.update(theme: theme, target: settings.translateTarget, defaultAction: settings.keyboardAction.action, context: context.text)
-        instructionHeader.update(text: instruction, theme: theme)
+        instructionHeader.update(text: instruction, theme: theme, busy: busy)
         explanation.textColor = theme.foreground
         toolbar.context.setTitle(context.summary, for: .normal)
         toolbar.context.accessibilityValue = context.summary

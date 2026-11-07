@@ -252,12 +252,13 @@ final class InstructionHeader: UIView {
         [field, run, cancel, scroll].forEach { addSubview($0) }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    func update(text: String, theme: KeyboardTheme) {
-        field.text = text.isEmpty ? "Tell Gusan what to do… │" : text + "│"
-        field.accessibilityValue = text
+    func update(text: String, theme: KeyboardTheme, busy: Bool) {
+        field.text = busy ? "Working…" : text.isEmpty ? "Tell Gusan what to do… │" : text + "│"
+        field.accessibilityValue = busy ? "Working on: " + text : text
         field.textColor = text.isEmpty ? .secondaryLabel : theme.foreground
         run.tintColor = KeyboardTheme.blue; cancel.tintColor = theme.foreground
-        run.isEnabled = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        run.isEnabled = !busy && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        cancel.accessibilityLabel = busy ? "Cancel request" : "Cancel instruction"
     }
     override func layoutSubviews() {
         super.layoutSubviews()
