@@ -103,6 +103,11 @@ final class GusanToolbar: UIView {
 }
 
 final class GusanPanel: UIView {
+    var compact = false {
+        didSet {
+            if compact != oldValue { tileScroll.setContentOffset(.zero, animated: false); setNeedsLayout() }
+        }
+    }
     var onAction: ((SmartAction) -> Void)?
     var onAsk: (() -> Void)?
     var onClose: (() -> Void)?
@@ -111,11 +116,14 @@ final class GusanPanel: UIView {
     private let close = UIButton(type: .system)
     private let preview = UIButton(type: .system)
     private var tiles: [UIButton] = []
+    private let tileScroll = UIScrollView()
     private var actionFont = UIFont.systemFont(ofSize: 11, weight: .medium)
     var preferredHeight: CGFloat { max(216, 104 + 2 * ceil(actionFont.lineHeight * 2 + 28)) }
     private let actions: [SmartAction] = [.mode(.smartAuto), .rephrase, .fixGrammar, .mode(.writeEmail), .mode(.makeTodoList), .mode(.translate), .mode(.summarize)]
     override init(frame: CGRect) {
         super.init(frame: frame)
+        tileScroll.showsHorizontalScrollIndicator = false
+        addSubview(tileScroll)
         ask.setTitle("Ask Gusan…", for: .normal); ask.setImage(UIImage(systemName: "sparkles"), for: .normal)
         ask.contentHorizontalAlignment = .leading; ask.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
         ask.addTarget(self, action: #selector(askPressed), for: .touchUpInside)
@@ -139,7 +147,7 @@ final class GusanPanel: UIView {
             tile.titleLabel?.font = .systemFont(ofSize: 12, weight: .medium)
             tile.titleLabel?.adjustsFontSizeToFitWidth = true; tile.titleLabel?.minimumScaleFactor = 0.8
             tile.addTarget(self, action: #selector(tilePressed(_:)), for: .touchUpInside)
-            tiles.append(tile); addSubview(tile)
+            tiles.append(tile); tileScroll.addSubview(tile)
         }
         [ask, close, preview].forEach { addSubview($0) }
     }
@@ -181,10 +189,19 @@ final class GusanPanel: UIView {
         close.frame = CGRect(x: width - 48, y: 0, width: 44, height: 44)
         let tileWidth = (width - 40) / 4
         let tileHeight = max(44, (bounds.height - 104) / 2)
+        tileScroll.frame = CGRect(x: 0, y: 44, width: width, height: max(0, bounds.height - (compact ? 44 : 96)))
+        tileScroll.alwaysBounceHorizontal = compact
+        preview.isHidden = compact
         for (index, tile) in tiles.enumerated() {
-            tile.frame = CGRect(x: 8 + CGFloat(index % 4) * (tileWidth + 8), y: 44 + CGFloat(index / 4) * (tileHeight + 8), width: tileWidth, height: tileHeight)
-            if let dot = tile.viewWithTag(100) { dot.frame = CGRect(x: tileWidth - 13, y: 0, width: 10, height: 16); tile.bringSubviewToFront(dot) }
+            if compact {
+                let width = max(96, ceil(actionFont.pointSize * 6 + 12))
+                tile.frame = CGRect(x: 8 + CGFloat(index) * (width + 8), y: 4, width: width, height: max(44, tileScroll.bounds.height - 8))
+            } else {
+                tile.frame = CGRect(x: 8 + CGFloat(index % 4) * (tileWidth + 8), y: CGFloat(index / 4) * (tileHeight + 8), width: tileWidth, height: tileHeight)
+            }
+            if let dot = tile.viewWithTag(100) { dot.frame = CGRect(x: tile.bounds.width - 13, y: 0, width: 10, height: 16); tile.bringSubviewToFront(dot) }
         }
+        tileScroll.contentSize = CGSize(width: compact ? (tiles.last?.frame.maxX ?? 0) + 8 : width, height: tileScroll.bounds.height)
         preview.frame = CGRect(x: 8, y: bounds.height - 44, width: width - 16, height: 44)
     }
     @objc private func snapshotPressed() { onSnapshot?() }

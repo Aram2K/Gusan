@@ -134,6 +134,7 @@ final class KeyboardViewController: UIInputViewController {
         guard connected else { return }
         updateTypography()
         instructionHeader.compact = compactLayout
+        panel.compact = compactLayout
         let compactInstruction = compactLayout && surface == .instruction
         [toolbar.logo, toolbar.mic, toolbar.message, toolbar.accessory].forEach { $0.isHidden = compactInstruction }
         toolbar.spinner.isHidden = compactInstruction || !toolbar.spinner.isAnimating
