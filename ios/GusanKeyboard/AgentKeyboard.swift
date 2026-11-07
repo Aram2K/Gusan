@@ -410,12 +410,11 @@ final class AgentCardView: UIView {
                 buttons = [(secondary, "Cancel task", false)]   // left half only: Confirm later appears on the right, never here
             case .awaitingConfirmation:
                 icon.image = UIImage(systemName: "hand.raised.fill"); icon.tintColor = theme.brandOrange
-                status.text = reconfirm ? "Confirm again" : (task.confirmation?.kindLabel ?? "Needs your OK")
+                status.text = (reconfirm ? "Confirm again · " : (task.confirmation?.kindLabel ?? "Needs your OK") + " · ") + "nothing happens until you confirm"
                 var text = task.confirmation?.summary ?? "The agent wants to continue."
                 if reconfirm { text = "Your first confirmation may not have reached the agent. Nothing was done twice.\n\n" + text }
-                text += "\n\nNothing is submitted, bought or sent until you confirm. This request expires after 15 minutes"
-                if let deadline = task.deadlineAt { text += " (and no later than \(Self.clock.string(from: deadline)))" }
-                body.text = text + "."
+                text += "\n\nExpires after 15 minutes" + (task.deadlineAt.map { " (no later than \(Self.clock.string(from: $0)))" } ?? "") + "."
+                body.text = text
                 buttons = [(secondary, "Cancel task", false), (primary, reconfirm ? "Confirm again" : "Confirm", true)]
                 announce = (reconfirm ? "Confirm again. " : "Needs your OK. ") + (task.confirmation?.summary ?? "")
                 if !wasAwaiting { armConfirm() }
