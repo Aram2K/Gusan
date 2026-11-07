@@ -6,7 +6,7 @@ struct HowToUseView: View {
         ("2. Tap the Gusan button", "keyboard", "Look for the round Gusan logo above the keys. Tap it to open actions; hold it to run your default action."),
         ("3. Pick an action, or ask", "sparkles", "Choose Rephrase, Fix grammar, Email and more. Or tap Ask Gusan… and type an instruction, such as ‘make it more formal’ or ‘translate to Armenian’. Tap Run."),
         ("4. Your words, improved", "arrow.uturn.backward", "The result replaces your text. Tap Undo in the Gusan bar to restore it before you keep typing."),
-        ("5. Voice is coming soon", "mic.fill", "Gusan's red-and-blue mic will bring voice to your keyboard. For now, you can keep using Apple's dictation mic below the keyboard.")
+        ("5. Speak with Gusan", "mic.fill", "Tap Gusan's red-and-blue mic to start dictation. If Gusan opens, allow microphone access, then switch back to your app. Tap the mic again to stop and insert your words. Select text first to use your voice as an instruction. Apple's dictation mic stays below the keyboard.")
     ]
     var body: some View {
         ScreenContent {

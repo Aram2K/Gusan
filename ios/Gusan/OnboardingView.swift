@@ -79,7 +79,7 @@ struct OnboardingView: View {
             }
             AppCard {
                 Label("Two mics, different jobs", systemImage: "mic").font(.headline)
-                Text("The mic below the keyboard is Apple's dictation. Gusan's red-and-blue mic is in the Gusan bar. Gusan voice is coming soon.").font(.body)
+                Text("The mic below the keyboard is Apple's dictation. Tap Gusan's red-and-blue mic in the Gusan bar to start voice. If Gusan opens to prepare recording, switch back to your app.").font(.body)
             }
             PrimaryButton(title: "Continue", icon: "arrow.right") { advance() }
         }
