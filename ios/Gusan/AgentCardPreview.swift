@@ -26,7 +26,7 @@ struct AgentCardPreview: View {
             let demo = StubAgentService.demoTasks()
             switch state {
             case "confirm": card.render(.task(demo[1]))
-            case "proposal": card.render(.proposal(AgentIntent(mode: .do, instruction: "Book a table for two at Osteria Francescana on Friday at 19:30")))
+            case "proposal": card.render(.proposal(AgentIntent(mode: .do, instruction: "Book a table for two at Osteria Francescana on Friday at 19:30"), sendsContext: false))
             case "result": card.render(.task(demo[2]))
             case "failed": card.render(.task(demo[3]))
             case "error": card.canRetry = true; card.render(.failed(message: AgentError.tooManyActive.errorDescription ?? "", retryable: false))

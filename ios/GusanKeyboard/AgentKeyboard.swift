@@ -66,7 +66,7 @@ final class AgentKeyboardController {
         job?.cancel(); pending = nil; task = nil; error = nil
         proposal = (intent, context, fallback)
         show()
-        card.render(.proposal(intent))
+        card.render(.proposal(intent, sendsContext: !context.isEmpty))
     }
     /// One line for the toolbar while the card replaces the keys.
     var toolbarStatus: String {
@@ -275,7 +275,7 @@ final class AgentKeyboardController {
 /// Compact card that replaces the keys: progress, confirmation, result or error. Every control is
 /// at least 44pt tall; VoiceOver gets labels, hints and announcements.
 final class AgentCardView: UIView {
-    enum State { case empty, proposal(AgentIntent), task(AgentTask), failed(message: String, retryable: Bool) }
+    enum State { case empty, proposal(AgentIntent, sendsContext: Bool), task(AgentTask), failed(message: String, retryable: Bool) }
     var onRun: (() -> Void)?
     var onEditInstead: (() -> Void)?
     /// Height the card really gets in the keyboard: the 260pt keyboard minus the 44pt toolbar.
@@ -380,14 +380,15 @@ final class AgentCardView: UIView {
         switch state {
         case .empty:
             title.text = nil; status.text = nil; body.text = nil; icon.image = nil; spinner.stopAnimating()
-        case .proposal(let intent):
+        case .proposal(let intent, let sendsContext):
             icon.image = UIImage(systemName: "sparkles"); icon.tintColor = KeyboardTheme.blue; icon.isHidden = false
             spinner.stopAnimating()
             title.text = intent.title
             status.text = intent.mode == .research ? "Run as an agent task? Research · read-only" : "Run as an agent task? Do-it · asks before acting"
             body.text = intent.mode == .research
-                ? "A Gusan agent would browse the web and report back. It never submits, buys or sends anything. Your text is not sent unless the request refers to it."
+                ? "A Gusan agent would browse the web and report back. It never submits, buys or sends anything."
                 : "A Gusan agent would carry this out on the web, but it stops and asks you before anything is submitted, bought or sent."
+            body.text! += sendsContext ? "\n\nYour selected text will be sent with the request because it refers to it." : "\n\nYour text stays on the phone; only the instruction is sent."
             buttons = [(secondary, "Edit text instead", false), (primary, "Run", true)]
             announce = "Run as an agent task? " + intent.title
         case .failed(let message, let retryable):

@@ -22,6 +22,8 @@ final class AgentTests: XCTestCase {
         XCTAssertEqual(AgentIntent.detect("Send Mary the notes from today")?.mode, .do, "sending to a person is a do-it task; the card asks before anything is sent")
         XCTAssertTrue(AgentIntent.referencesDraft("Find flights matching the dates in this text"))
         XCTAssertFalse(AgentIntent.referencesDraft("Find the cheapest flights to Rome"))
+        XCTAssertFalse(AgentIntent.referencesDraft("Find coffee shops near here"))
+        XCTAssertFalse(AgentIntent.referencesDraft("Book the hotel mentioned above"))
     }
 
     // MARK: Decoding
