@@ -74,7 +74,7 @@ final class KeyboardViewController: UIInputViewController {
         agent.onOpenApp = { [weak self] in self?.openContainingApp($0) }
         agent.onStatus = { [weak self] text, accessory in
             guard let self else { return }
-            if let text { self.showMessage(text, accessory: accessory) } else if self.accessory == "View" || self.message == nil { self.message = nil; self.accessory = nil; self.updateContext() }
+            if let text { self.showMessage(text, accessory: accessory) } else if self.accessory == "View" || self.accessory == "Undo insert" || self.message == nil { self.message = nil; self.accessory = nil; self.updateContext() }
         }
         voice.bar.backgroundColor = .secondarySystemBackground; voice.bar.layer.cornerRadius = 8
         toolbar.accessory.addTarget(self, action: #selector(accessoryPressed), for: .touchUpInside)
