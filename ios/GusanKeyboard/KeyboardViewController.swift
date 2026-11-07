@@ -77,7 +77,9 @@ final class KeyboardViewController: UIInputViewController {
         voice.bar.backgroundColor = .secondarySystemBackground; voice.bar.layer.cornerRadius = 8
         toolbar.accessory.addTarget(self, action: #selector(accessoryPressed), for: .touchUpInside)
         toolbar.message.addTarget(self, action: #selector(expandMessage), for: .touchUpInside)
+        toolbar.context.addTarget(self, action: #selector(expandContext), for: .touchUpInside)
         panel.onClose = { [weak self] in self?.showTyping() }
+        panel.onSnapshot = { [weak self] in self?.expandContext() }
         panel.onAsk = { [weak self] in self?.beginInstruction() }
         panel.onAction = { [weak self] in guard let self else { return }; self.impact(); self.run($0, context: self.currentContext) }
         instructionHeader.onSuggestion = { [weak self] in self?.setInstruction($0) }
@@ -102,13 +104,13 @@ final class KeyboardViewController: UIInputViewController {
     override func viewWillLayoutSubviews() {
         super.viewWillLayoutSubviews()
         let width = view.bounds.width
-        toolbar.frame = CGRect(x: 0, y: 0, width: width, height: 44)
-        voice.bar.frame = CGRect(x: 50, y: 0, width: max(0, width - 100), height: 44)
+        toolbar.frame = CGRect(x: 0, y: 0, width: width, height: 64)
+        voice.bar.frame = CGRect(x: 50, y: 20, width: max(0, width - 100), height: 44)
         voice.panel.frame = view.bounds
         let extra: CGFloat = surface == .instruction ? 74 : 0
-        instructionHeader.frame = CGRect(x: 0, y: 44, width: width, height: extra)
-        keyArea.frame = CGRect(x: 0, y: 44 + extra, width: width, height: max(0, view.bounds.height - 44 - extra))
-        panel.frame = CGRect(x: 0, y: 44, width: width, height: max(0, view.bounds.height - 44))
+        instructionHeader.frame = CGRect(x: 0, y: 64, width: width, height: extra)
+        keyArea.frame = CGRect(x: 0, y: 64 + extra, width: width, height: max(0, view.bounds.height - 64 - extra))
+        panel.frame = CGRect(x: 0, y: 64, width: width, height: max(0, view.bounds.height - 64))
         explanationScroll.frame = panel.frame
         let explanationHeight = max(panel.bounds.height - 24, explanation.sizeThatFits(CGSize(width: width - 36, height: .greatestFiniteMagnitude)).height)
         explanation.frame = CGRect(x: 18, y: 12, width: width - 36, height: explanationHeight)
@@ -136,7 +138,9 @@ final class KeyboardViewController: UIInputViewController {
         panel.update(theme: theme, target: settings.translateTarget, defaultAction: settings.keyboardAction.action, context: context.text)
         instructionHeader.update(text: instruction, theme: theme)
         explanation.textColor = theme.foreground
-        toolbar.message.setTitle(message ?? context.summary, for: .normal)
+        toolbar.context.setTitle(context.summary, for: .normal)
+        toolbar.context.accessibilityValue = context.summary
+        toolbar.message.setTitle(message ?? "", for: .normal)
         let statusAction = accessory ?? (undoRecord == nil ? nil : undoIsRedo ? "Redo" : "Undo")
         toolbar.accessory.setTitle(statusAction, for: .normal); toolbar.accessory.isHidden = statusAction == nil
         toolbar.accessory.isEnabled = (statusAction != "Undo" && statusAction != "Redo") || undoRecord?.step(context: currentContext.voiceContext) != nil
@@ -157,7 +161,7 @@ final class KeyboardViewController: UIInputViewController {
         instructionHeader.isHidden = surface != .instruction
         keyArea.isHidden = surface == .panel || surface == .explanation
         keyArea.inputEnabled = true
-        height.constant = 260
+        height.constant = 280
         updateContext(); view.setNeedsLayout()
     }
     private func showTyping() { instructionContext = nil; surface = .typing; updateSurface() }
@@ -197,6 +201,13 @@ final class KeyboardViewController: UIInputViewController {
         explanation.text = detail + "\n\nTap the Gusan logo to return to actions."
         explanationScroll.setContentOffset(.zero, animated: false)
         surface = .explanation; updateSurface()
+    }
+    @objc private func expandContext() {
+        let context = instructionContext ?? currentContext
+        explanation.text = context.summary + "\n\n" + (context.text.isEmpty ? "No existing text will be replaced." : context.text) + "\n\nTap the Gusan logo to return to actions."
+        explanationScroll.setContentOffset(.zero, animated: false)
+        surface = .explanation
+        updateSurface()
     }
     @objc private func accessoryPressed() {
         switch accessory ?? (undoRecord == nil ? nil : undoIsRedo ? "Redo" : "Undo") {

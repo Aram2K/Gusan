@@ -1,10 +1,6 @@
 import UIKit
 import GusanKit
 
-private final class ContextLabel: UILabel {
-    override func drawText(in rect: CGRect) { super.drawText(in: rect.insetBy(dx: 8, dy: 0)) }
-}
-
 class ToolbarButton: UIButton {
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         bounds.insetBy(dx: -max(0, (44 - bounds.width) / 2), dy: -max(0, (44 - bounds.height) / 2)).contains(point)
@@ -40,6 +36,7 @@ final class GusanToolbar: UIView {
     let logo = ToolbarButton(type: .system)
     let mic = VoiceKey(frame: .zero)
     let message = UIButton(type: .system)
+    let context = UIButton(type: .system)
     let accessory = UIButton(type: .system)
     let spinner = UIActivityIndicatorView(style: .medium)
     override init(frame: CGRect) {
@@ -48,27 +45,35 @@ final class GusanToolbar: UIView {
         logo.imageView?.contentMode = .scaleAspectFit; logo.accessibilityLabel = "Gusan actions"
         logo.accessibilityHint = "Tap for actions. Hold to run your default action."
         message.accessibilityHint = "Tap a status message for details"
+        context.titleLabel?.font = .systemFont(ofSize: 12, weight: .medium)
+        context.contentHorizontalAlignment = .leading
+        context.accessibilityLabel = "Text context"
+        context.accessibilityHint = "Shows the full text Gusan will use"
         message.titleLabel?.font = .systemFont(ofSize: 12, weight: .medium)
         message.titleLabel?.numberOfLines = 2; message.titleLabel?.lineBreakMode = .byWordWrapping
         message.contentHorizontalAlignment = .leading
         accessory.titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
         accessory.titleLabel?.numberOfLines = 2
         accessory.titleLabel?.lineBreakMode = .byWordWrapping
-        [logo, message, accessory, spinner, mic].forEach { addSubview($0) }
+        [logo, context, message, accessory, spinner, mic].forEach { addSubview($0) }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func layoutSubviews() {
         super.layoutSubviews()
-        logo.frame = CGRect(x: 10, y: 7, width: 30, height: 30)
-        mic.frame = CGRect(x: bounds.width - 44, y: 5, width: 34, height: 34)
+        context.frame = CGRect(x: 8, y: 0, width: bounds.width - 16, height: 20)
+        logo.frame = CGRect(x: 10, y: 27, width: 30, height: 30)
+        mic.frame = CGRect(x: bounds.width - 44, y: 25, width: 34, height: 34)
         let extra: CGFloat = accessory.isHidden ? 0 : (accessory.currentTitle == "How to enable" ? 88 : 56)
-        accessory.frame = CGRect(x: mic.frame.minX - extra - 4, y: 0, width: extra, height: 44)
-        spinner.frame = CGRect(x: 48, y: 12, width: 20, height: 20)
+        accessory.frame = CGRect(x: mic.frame.minX - extra - 4, y: 20, width: extra, height: 44)
+        spinner.frame = CGRect(x: 48, y: 32, width: 20, height: 20)
         let start: CGFloat = spinner.isAnimating ? 74 : 50
-        message.frame = CGRect(x: start, y: 0, width: max(0, mic.frame.minX - start - extra - 8), height: 44)
+        message.frame = CGRect(x: start, y: 20, width: max(0, mic.frame.minX - start - extra - 8), height: 44)
     }
     func apply(_ theme: KeyboardTheme) {
         message.setTitleColor(theme.foreground, for: .normal)
+        context.setTitleColor(theme.foreground, for: .normal)
+        context.backgroundColor = theme.special.withAlphaComponent(0.4)
+        context.layer.cornerRadius = 6
         accessory.tintColor = KeyboardTheme.blue
         logo.backgroundColor = theme.letter; logo.layer.cornerRadius = 15
         mic.apply(theme)
@@ -79,9 +84,10 @@ final class GusanPanel: UIView {
     var onAction: ((SmartAction) -> Void)?
     var onAsk: (() -> Void)?
     var onClose: (() -> Void)?
+    var onSnapshot: (() -> Void)?
     private let ask = UIButton(type: .system)
     private let close = UIButton(type: .system)
-    private let preview = ContextLabel()
+    private let preview = UIButton(type: .system)
     private var tiles: [UIButton] = []
     private let actions: [SmartAction] = [.mode(.smartAuto), .rephrase, .fixGrammar, .mode(.writeEmail), .mode(.makeTodoList), .mode(.translate), .mode(.summarize)]
     override init(frame: CGRect) {
@@ -93,7 +99,13 @@ final class GusanPanel: UIView {
         close.setImage(UIImage(systemName: "keyboard"), for: .normal); close.accessibilityLabel = "Return to typing"
         close.accessibilityHint = "Closes Gusan actions"
         close.addTarget(self, action: #selector(closePressed), for: .touchUpInside)
-        preview.font = .systemFont(ofSize: 11); preview.numberOfLines = 2; preview.lineBreakMode = .byTruncatingTail
+        preview.titleLabel?.font = .systemFont(ofSize: 12)
+        preview.titleLabel?.numberOfLines = 2
+        preview.titleLabel?.lineBreakMode = .byTruncatingTail
+        preview.contentHorizontalAlignment = .leading
+        preview.accessibilityLabel = "Text snapshot"
+        preview.accessibilityHint = "Expands the complete text Gusan will use"
+        preview.addTarget(self, action: #selector(snapshotPressed), for: .touchUpInside)
         let icons = ["sparkles", "arrow.triangle.2.circlepath", "checkmark.seal", "envelope", "checklist", "character.bubble", "text.alignleft"]
         for index in actions.indices {
             let tile = UIButton(type: .system); tile.tag = index
@@ -131,7 +143,9 @@ final class GusanPanel: UIView {
         }
         ask.backgroundColor = theme.letter; ask.layer.cornerRadius = 10; ask.tintColor = theme.dark ? .white : KeyboardTheme.blue
         close.tintColor = KeyboardTheme.blue
-        preview.textColor = theme.foreground; preview.text = context.isEmpty ? "No text: Ask Gusan will write it" : "Using: “" + context + "”"
+        preview.setTitleColor(theme.foreground, for: .normal)
+        preview.setTitle(context.isEmpty ? "No text: Ask Gusan will write it ›" : "Using: “" + context + "” ›", for: .normal)
+        preview.accessibilityValue = context.isEmpty ? "No existing text" : context
         preview.backgroundColor = theme.special; preview.layer.cornerRadius = 10; preview.clipsToBounds = true
     }
     override func layoutSubviews() {
@@ -140,13 +154,14 @@ final class GusanPanel: UIView {
         ask.frame = CGRect(x: 8, y: 0, width: width - 64, height: 38)
         close.frame = CGRect(x: width - 48, y: 0, width: 40, height: 38)
         let tileWidth = (width - 40) / 4
-        let tileHeight = max(44, (bounds.height - 92) / 2)
+        let tileHeight = max(44, (bounds.height - 104) / 2)
         for (index, tile) in tiles.enumerated() {
             tile.frame = CGRect(x: 8 + CGFloat(index % 4) * (tileWidth + 8), y: 44 + CGFloat(index / 4) * (tileHeight + 8), width: tileWidth, height: tileHeight)
             if let dot = tile.viewWithTag(100) { dot.frame = CGRect(x: tileWidth - 13, y: 0, width: 10, height: 16); tile.bringSubviewToFront(dot) }
         }
-        preview.frame = CGRect(x: 8, y: bounds.height - 36, width: width - 16, height: 32)
+        preview.frame = CGRect(x: 8, y: bounds.height - 44, width: width - 16, height: 44)
     }
+    @objc private func snapshotPressed() { onSnapshot?() }
     @objc private func askPressed() { onAsk?() }
     @objc private func closePressed() { onClose?() }
     @objc private func tilePressed(_ sender: UIButton) { onAction?(actions[sender.tag]) }
