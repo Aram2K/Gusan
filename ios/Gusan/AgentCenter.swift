@@ -72,7 +72,7 @@ final class AgentCenter: NSObject, ObservableObject {
         loading = tasks.isEmpty
         defer { loading = false }
         do {
-            var fetched = try await service.list(limit: 50)
+            var fetched = try await service.list(limit: 100)
             // The table hides the pending confirmation text; ask the function for it.
             for index in fetched.indices where fetched[index].status == .awaitingConfirmation && fetched[index].confirmation == nil {
                 if let full = try? await service.status(fetched[index].id, waitSeconds: 0) { fetched[index] = full }
@@ -120,6 +120,12 @@ final class AgentCenter: NSObject, ObservableObject {
 
     func cancel(_ id: UUID) async {
         await mutate(id) { try await $0.cancel(id) }
+    }
+
+    /// Fetches one task that is not in the loaded page (older history, or a brand-new deep link).
+    func load(_ id: UUID) async {
+        guard task(id) == nil, let service = currentService(), let fetched = try? await service.status(id, waitSeconds: 0) else { return }
+        if task(id) == nil { tasks.append(fetched); tasks.sort { $0.createdAt > $1.createdAt } }
     }
 
     func markSeen(_ id: UUID) {

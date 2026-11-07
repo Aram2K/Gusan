@@ -169,6 +169,7 @@ struct TaskDetailView: View {
     @EnvironmentObject private var agent: AgentCenter
     @State private var working = false
     @State private var copied = false
+    @State private var loadingTask = false
 
     private var task: AgentTask? { agent.task(id) }
 
@@ -185,13 +186,15 @@ struct TaskDetailView: View {
                     }
                     .buttonStyle(.bordered).disabled(working)
                 }
+            } else if loadingTask {
+                ProgressView().frame(maxWidth: .infinity, minHeight: 120)
             } else {
                 AppCard { Text("This task is no longer available.").foregroundStyle(.secondary) }
             }
         }
         .navigationTitle(task?.mode.label ?? "Task")
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { agent.markSeen(id) }
+        .task { if task == nil { loadingTask = true; await agent.load(id); loadingTask = false }; agent.markSeen(id) }
         .onChange(of: task?.status) { _ in agent.markSeen(id) }
     }
 
