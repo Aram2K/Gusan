@@ -378,8 +378,9 @@ def _migrate_config(loaded, on_disk):
     # "Gladia Fusion" (2.1.2 test builds) is gone - our Gladia account is refused that model: a saved pick is Gladia Solaria.
     if loaded.get("file_model") == "cloud:gladia-fusion":
         loaded["file_model"] = "cloud:gladia"
-    if loaded.get("managed_speech_profile") == "gladia-fusion":
-        loaded["managed_speech_profile"] = "gladia"
+    # Dictation no longer runs on Gladia (2-5 s a piece, engine_choice.DICTATION_CLOUD_PROFILES): Fast instead.
+    if loaded.get("managed_speech_profile") in ("gladia", "gladia-fusion"):
+        loaded["managed_speech_profile"] = "fast"
     loaded["config_schema_version"] = CONFIG_SCHEMA_VERSION
 
 storage.migrate_legacy_file(LEGACY_CONFIG_PATH, CONFIG_PATH)
@@ -7383,6 +7384,9 @@ class AppController(QObject):
                 if sel:
                     action_mode = actions.ACTION_SMART_SELECTION
                     action_input = smart_prompt.selection_input(sel.text, text)
+                    # the pill says the take works on the selection ("On your selection · Gusan Cloud")
+                    self.overlay.call_soon(self.overlay.set_task, pill_kind, pill_detail,
+                                           dict(pill_info or {}, on_selection=True))
             try:
                 output_text = actions.process(
                     action_input,
@@ -7469,11 +7473,13 @@ class AppController(QObject):
         config = config or {}
         kind = actions.ACTION_MODELS.get(engine, {}).get("kind")
         if kind in ("cloud", "managed") and config.get("privacy_mode"):
+            logger.info("Selected text not used: Privacy mode keeps Smart Actions on this computer")
             return None
         if ((kind == "managed" and not config.get("_managed_token"))
                 or (kind == "cloud" and not actions.engine_has_key(engine, config))
                 or (kind == "local_llm" and not local_llm.model_downloaded(engine))
                 or kind not in ("managed", "cloud", "local_llm")):
+            logger.info("Selected text not used: Smart Actions run on %s, which can't read it", engine)
             return None
         sel = job.result(SELECTION_WAIT_S)
         if not sel:

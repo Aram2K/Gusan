@@ -13,15 +13,6 @@ from tests.test_cloud_speech import FakePost, Resp, WAV
 def test_gladia_round_trip(profile):
     value = "cloud:" + profile
     assert ec.cloud_profile(profile) == profile
-    assert ec.dictation_speech_source(value) == "cloud"
-    change = ec.set_dictation_speech({}, value, pro=True)
-    assert change["ok"]
-    cfg = change["changes"]
-    assert cfg[ec.SPEECH_PROFILE_KEY] == profile
-    assert ec.dictation_speech_value(cfg) == value
-    assert value in {r["value"] for r in ec.dictation_speech_rows({}, pro=True)}
-    assert ec.set_dictation_speech({}, value, pro=False)["problem"] == "pro"
-    assert ec.set_dictation_speech({"privacy_mode": True}, value, pro=True)["problem"] == "privacy_mode"
     assert ec.set_file_model({}, value, pro=True)["changes"] == {ec.FILE_KEY: value}
     assert ec.file_session({ec.FILE_KEY: value}, True) == ("managed", profile)
     assert ec.file_model_id({ec.FILE_KEY: value}) == profile
@@ -95,8 +86,6 @@ def test_there_is_no_gladia_fusion_and_a_saved_pick_of_it_is_gladia_solaria():
     assert ec.CLOUD_PROFILES == (ec.CLOUD_FAST, ec.CLOUD_BEST, ec.CLOUD_GLADIA)
     assert "Gladia Fusion" not in ec.CLOUD_PROFILE_NAMES.values()
     assert ec.cloud_profile("gladia-fusion") == ec.CLOUD_GLADIA
-    assert ec.dictation_speech_value({"backend": "managed", ec.SPEECH_PROFILE_KEY: "gladia-fusion"}) in (
-        "cloud:gladia", ec.dictation_speech_value({"backend": "managed", ec.SPEECH_PROFILE_KEY: "gladia"}))
     assert "cloud:gladia-fusion" not in ec.FILE_CLOUD_VALUES
     assert "cloud:gladia-fusion" not in settings_apply.FILE_CLOUD_VALUES
     for rows in (ec.dictation_speech_rows({}, pro=True), ec.file_rows({}, pro=True)):
@@ -119,3 +108,13 @@ def test_gladia_is_told_the_language_and_gets_the_vocabulary():
     assert "const vocabulary = vocabularyOf(body);" in source
     # ... and the app sends it (cloud_speech: the request body's "vocabulary")
     assert 'body["vocabulary"] = list(spec.terms)' in (Path(__file__).resolve().parents[1] / "cloud_speech.py").read_text()
+
+
+def test_dictation_does_not_offer_gladia_and_a_saved_pick_is_fast():
+    """Gladia's recorded-audio API takes 2-5 s a dictation piece (upload, job, polling), Fast 0.25-0.4 s (the
+    server's log, 2026-11-07): Gladia is for Audio to text only."""
+    assert "cloud:gladia" not in {r["value"] for r in ec.dictation_speech_rows({}, pro=True)}
+    assert "cloud:gladia" not in {r["value"] for r in ec.live_speech_rows({}, True)}
+    for saved in ("gladia", "gladia-fusion"):
+        assert ec.dictation_speech_value({"backend": "managed", ec.SPEECH_PROFILE_KEY: saved}) == "cloud"
+    assert "cloud:gladia" in {r["value"] for r in ec.file_rows({}, pro=True)}

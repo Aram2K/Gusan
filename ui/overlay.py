@@ -538,6 +538,8 @@ class Overlay(QWidget):
         self._writing = True
         if isinstance(info, dict):
             self._ctx.update(info)
+        # "On your selection" is this take's own (the context outlives a take)
+        self._ctx["on_selection"] = bool(isinstance(info, dict) and info.get("on_selection"))
         self._kick()
 
     def set_speech(self, info):

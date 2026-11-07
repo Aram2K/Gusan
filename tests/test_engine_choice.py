@@ -801,7 +801,7 @@ class TestDictationSpeechPicker(unittest.TestCase):
         rows = ec.dictation_speech_rows(self.KEYS, pro=False)
         values = [r["value"] for r in rows]
         self.assertEqual(values[:6], ["tiny", "base", "small", "medium", "large-v3-turbo", "large-v3"])
-        self.assertEqual(values[-4:], ["cloud", "cloud:best", "cloud:gladia", "key:k1"])
+        self.assertEqual(values[-3:], ["cloud", "cloud:best", "key:k1"])
         cloud = rows[values.index("cloud:best")]
         self.assertEqual((cloud["group"], cloud["tags"], cloud["title"]),
                          (ec.GROUP_GUSAN_CLOUD, ("cloud", "pro"), "Best accuracy"))
@@ -810,7 +810,7 @@ class TestDictationSpeechPicker(unittest.TestCase):
 
     def test_a_source_keeps_its_group_only(self):
         self.assertEqual([r["value"] for r in ec.dictation_speech_rows({}, source="cloud")],
-                         ["cloud", "cloud:best", "cloud:gladia"])
+                         ["cloud", "cloud:best"])
         self.assertEqual(ec.dictation_speech_rows({}, source="own_key"), [])   # no saved key: nothing to list
 
     def test_value_follows_the_settings(self):

@@ -157,3 +157,16 @@ def test_history_never_keeps_the_selected_text(controller):
     i = src.index("if action_mode == actions.ACTION_SMART_SELECTION:\n                # The pages know")
     block = src[i:i + 400]
     assert '"said": text' in block and "sel.text" not in block and "action_input" not in block
+
+
+def test_the_pill_forgets_on_your_selection_at_the_next_take(qapp):
+    from ui.overlay import Overlay
+    ov = Overlay()
+    try:
+        ov.set_task("translate", "English", {"writer": "Gusan Cloud", "on_selection": True})
+        assert ov._ctx["on_selection"] is True
+        ov.set_task("translate", "English", {"writer": "Gusan Cloud"})
+        assert ov._ctx["on_selection"] is False
+    finally:
+        ov.hide()
+        ov.deleteLater()

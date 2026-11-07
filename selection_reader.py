@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 MAX_CHARS = 20000              # longer selections are cut (the pill says so)
 KEYS_UP_WAIT_S = 0.8           # the shortcut's keys must be up before a copy chord (Alt+Ctrl+C is another shortcut)
-COPY_WAIT_S = 0.4              # how long the app may take to put its selection on the clipboard
+COPY_WAIT_S = 1.0              # how long the app may take to put its selection on the clipboard (Google Docs: ~0.5 s)
 
 # Windows: no copy chord into these (window classes / programs where Ctrl+C can stop a running program).
 _TERMINAL_CLASSES = {"ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS", "mintty", "PuTTY", "VirtualConsoleClass",
@@ -427,12 +427,21 @@ class SelectionJob:
         threading.Thread(target=self._run, daemon=True, name="gusan-selection").start()
 
     def _run(self):
+        start = time.monotonic()
         try:
             self._value = self._reader() or Selection()
         except Exception:
+            logger.info("Selected text: reading it failed", exc_info=True)
             self._value = Selection()
         finally:
             self._done.set()
+        # One line per Smart Action (never the text): how it was read, how long, where.
+        try:
+            program = _foreground_window()[1] if sys.platform == "win32" else ""
+        except Exception:
+            program = ""
+        logger.info("Selected text: %s, %d characters, %d ms%s", self._value.source or "none", len(self._value.text),
+                    int((time.monotonic() - start) * 1000), (" (%s)" % program) if program else "")
 
     def result(self, timeout=1.5):
         self._done.wait(timeout)

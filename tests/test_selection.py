@@ -206,3 +206,12 @@ class TestWhereItGoes(unittest.TestCase):
                 mock.patch.object(sr, "_read_only", return_value=True), \
                 mock.patch.object(sr, "_release"):
             self.assertIs(sr.focus_editable(), False)
+
+
+class TestThePillSaysSo(unittest.TestCase):
+    def test_the_pill_says_on_your_selection_while_it_works(self):
+        import pill_copy
+        title, sub = pill_copy._writing(pill_copy.TRANSLATE, "English", {"writer": "Gusan Cloud", "on_selection": True}, 0.5)
+        self.assertEqual((title, sub), ("Translating to English", "On your selection · Gusan Cloud"))
+        title, sub = pill_copy._writing(pill_copy.TRANSLATE, "English", {"writer": "Gusan Cloud", "on_selection": False}, 0.5)
+        self.assertEqual(sub, "Gusan Cloud")
