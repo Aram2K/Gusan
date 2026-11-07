@@ -779,8 +779,9 @@ def set_smart_speech(app_or_cfg, value, *, pro=None, downloaded=None, turn_off_p
 # "own:mistral" / "own:google" (your own key). Qt-free.
 DICTATION_CLOUD = "cloud"
 DICTATION_CLOUD_BEST = "cloud:best"
-DICTATION_CLOUD_PROFILES = {DICTATION_CLOUD: CLOUD_FAST, DICTATION_CLOUD_BEST: CLOUD_BEST,
-                            "cloud:gladia": CLOUD_GLADIA}
+# (No Gladia here: its recorded-audio API uploads, starts a job and polls - 2-5 s for every dictation piece, where
+# Fast answers in 0.25-0.4 s. Gladia is for Audio to text, FILE_MANAGED_PROFILES; a saved dictation pick of it is Fast.)
+DICTATION_CLOUD_PROFILES = {DICTATION_CLOUD: CLOUD_FAST, DICTATION_CLOUD_BEST: CLOUD_BEST}
 DICTATION_OWN_MISTRAL, DICTATION_OWN_GOOGLE = "own:mistral", "own:google"
 DICTATION_OWN = {DICTATION_OWN_MISTRAL: "mistral", DICTATION_OWN_GOOGLE: "google"}
 # Gusan Cloud speech for dictation and meetings: its "fast" or "best" profile (main.AudioRecorder
@@ -798,7 +799,7 @@ def dictation_speech_value(cfg):
     choice = speech_choice(cfg)
     if choice == "cloud":
         profile = cloud_profile(cfg.get(SPEECH_PROFILE_KEY))
-        return next(value for value, p in DICTATION_CLOUD_PROFILES.items() if p == profile)
+        return next((value for value, p in DICTATION_CLOUD_PROFILES.items() if p == profile), DICTATION_CLOUD)
     if choice == "own_key":
         entry = _entry(cfg, cfg.get("speech_key_id"))
         if entry is not None and SPEECH_KEY_PROVIDERS.get(entry.get("provider")) == cfg.get("backend"):
