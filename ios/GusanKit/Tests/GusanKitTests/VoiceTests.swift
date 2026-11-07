@@ -54,7 +54,7 @@ final class VoiceTests: XCTestCase {
         XCTAssertTrue(board.values.isEmpty)
         try app.write(transcript: transcript); try keyboard.write(keyboard: KeyboardVoiceState(requestID: id, context: context))
         try app.write(status: VoiceStatus(phase: .failed, requestID: id, message: "Network error"))
-        XCTAssertNil(board.values["transcript"]); XCTAssertNil(board.values["keyboard"])
+        XCTAssertNil(board.values["transcript"]); XCTAssertNil(app.readKeyboardState()?.context)
         app.clear(); XCTAssertTrue(board.values.isEmpty)
     }
     func testVoiceFallbackOffPurgesDataAndRejectsRequests() throws {
@@ -77,6 +77,31 @@ final class VoiceTests: XCTestCase {
         for age in [-60.0, 601.0] {
             board.values["status"] = try JSONSerialization.data(withJSONObject: ["issuedAt": Date().addingTimeInterval(-age).timeIntervalSinceReferenceDate, "value": ["phase": "done", "heartbeat": Date().timeIntervalSinceReferenceDate, "level": 0, "result": "Expired", "replacesSelection": false]])
             XCTAssertNil(channel.readStatus()); XCTAssertNil(board.values["status"])
+        }
+    }
+    func testStartupFailureSurvivesStopUntilReturningKeyboardAcknowledgesIt() throws {
+        for pasteboard in [false, true] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let board = Board()
+            let channel = VoiceChannel(container: directory, group: "voice", pasteboard: board, route: { pasteboard ? .pasteboard : .file })
+            let id = UUID()
+            try channel.write(keyboard: KeyboardVoiceState(requestID: id, context: VoiceContext(selected: "private text")))
+            try channel.write(command: VoiceCommand(kind: .start, requestID: id))
+            let failure = channel.failureStatus(message: VoiceError.micPermissionDenied.localizedDescription)
+            try channel.write(status: VoiceStatus(phase: .off))
+            XCTAssertNil(channel.readCommand()); XCTAssertNil(channel.readKeyboardState())
+            try channel.write(status: failure)
+            XCTAssertEqual(channel.readKeyboardState()?.requestID, id)
+            XCTAssertNil(channel.readKeyboardState()?.context)
+            XCTAssertEqual(channel.readStatus()?.requestID, id)
+            XCTAssertEqual(channel.readStatus()?.message, VoiceError.micPermissionDenied.localizedDescription)
+            XCTAssertEqual(channel.readStatus(), failure, "Reading must not clear an unseen failure")
+            try channel.consumeResult(requestID: id)
+            XCTAssertNil(channel.readStatus()); XCTAssertNil(channel.readKeyboardState())
+            try channel.write(status: failure)
+            XCTAssertNil(channel.readStatus(), "An acknowledged failure must not be republished")
+            channel.clear(); XCTAssertTrue(board.values.isEmpty)
         }
     }
     func testVoiceUsesPasteboardWhenFileGroupsDifferEvenIfKeychainIsShared() throws {

@@ -142,6 +142,9 @@ public struct VoiceChannel {
     }
     public func readStatus() -> VoiceStatus? { read("status", as: VoiceStatus.self) }
     public func readCommand() -> VoiceCommand? { read("command", as: VoiceCommand.self) }
+    public func failureStatus(message: String) -> VoiceStatus {
+        VoiceStatus(phase: .failed, requestID: readCommand()?.requestID ?? readKeyboardState()?.requestID, heartbeat: .distantPast, message: message)
+    }
     public func consumeCommand() -> VoiceCommand? { let command = readCommand(); if command != nil { _ = remove("command") }; return command }
     public func readTranscript() -> VoiceTranscript? { read("transcript", as: VoiceTranscript.self) }
     public func write(transcript: VoiceTranscript) throws { try write(transcript, name: "transcript") }
@@ -178,8 +181,11 @@ public struct VoiceChannel {
     public func consumeReceipt() -> UUID? { let id = read("receipt", as: UUID.self); if id != nil { _ = remove("receipt") }; return id }
     public func write(status: VoiceStatus) throws {
         if status.phase == .off { clear(); return }
-        if status.phase == .failed, let id = status.requestID { discardRequest(id) }
-        if status.phase == .done, let id = status.requestID, read("receipt", as: UUID.self) == id { return }
+        if [.done, .failed].contains(status.phase), let id = status.requestID, read("receipt", as: UUID.self) == id { return }
+        if status.phase == .failed, let id = status.requestID {
+            discardRequest(id)
+            try write(keyboard: KeyboardVoiceState(requestID: id))
+        }
         try write(status, name: "status")
     }
     public func write(command: VoiceCommand) throws { try write(command, name: "command") }

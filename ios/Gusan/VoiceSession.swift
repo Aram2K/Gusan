@@ -101,8 +101,9 @@ final class VoiceSession: ObservableObject {
                 scheduleReturn()
             } catch is CancellationError {} catch {
                 self.error = error.localizedDescription
+                let failure = channel.failureStatus(message: self.error)
                 stop()
-                status = VoiceStatus(phase: .failed, requestID: channel.readCommand()?.requestID, heartbeat: .distantPast, message: self.error)
+                status = failure
                 try? channel.write(status: status); channel.post(.status)
             }
         }

@@ -142,7 +142,10 @@ final class VoiceKeyController: NSObject {
         if phase == .recording { waveform.levels = Array((waveform.levels + [status?.level ?? 0]).suffix(30)) }
         waveform.isHidden = phase != .recording
         if let status, status.phase == .done, status.requestID == requestID, insertedID != requestID { deliver(status) }
-        if let status, status.phase == .failed, status.requestID == requestID { localMessage = status.message }
+        if let status, status.phase == .failed, let id = status.requestID, id == requestID {
+            localMessage = status.message
+            if (try? channel.consumeResult(requestID: id)) != nil { channel.post(.command) }
+        }
         let message: String?
         switch phase {
         case .recording: message = "Listening…"
