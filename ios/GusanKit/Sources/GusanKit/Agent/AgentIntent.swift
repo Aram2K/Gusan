@@ -45,7 +45,7 @@ public struct AgentIntent: Equatable {
 
     /// Whether the instruction talks about the draft ("using this", "from this text"), so the text should be sent as context.
     public static func referencesDraft(_ instruction: String) -> Bool {
-        instruction.lowercased().range(of: #"\b(this text|these|the text|my text|the draft|my draft|the selection|the selected text|in this|from this|using this|with this|about this)\b"#, options: .regularExpression) != nil
+        instruction.lowercased().range(of: #"\b(this (text|itinerary|list|message|email|note|draft|paragraph|table|document|selection|address|recipe|schedule)|these|the text|my text|the draft|my draft|the selection|the selected text|in this|from this|using this|with this|about this)\b"#, options: .regularExpression) != nil
     }
 
     /// Short card title, e.g. "Research: cheapest flights to Rome".
