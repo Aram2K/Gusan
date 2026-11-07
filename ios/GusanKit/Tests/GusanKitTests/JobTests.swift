@@ -51,13 +51,21 @@ final class JobTests: XCTestCase {
         XCTAssertNil(VoiceEdit.plan(result: JobResult(text: "", kind: .replaceContext), context: context))
     }
     func testUndoCaptureWaitsForTheInsertedTextAndMatchingDocument() {
-        XCTAssertTrue(VoiceEdit.containsInsertedResult("Hello world", context: VoiceContext(before: "Prefix Hello world", documentID: "one"), documentID: "one"))
-        XCTAssertTrue(VoiceEdit.containsInsertedResult("Hello world", context: VoiceContext(before: "world", documentID: "one"), documentID: "one"))
+        let snapshot = VoiceContext(before: "Prefix ", after: "Suffix", documentID: "one")
+        XCTAssertTrue(VoiceEdit.containsInsertedResult("Hello world", context: VoiceContext(before: "Prefix Hello world", after: "Suffix", documentID: "one"), snapshot: snapshot))
         for context in [VoiceContext(before: "Old text", documentID: "one"), VoiceContext(documentID: "one"), VoiceContext(before: "Hello world", documentID: "two"), VoiceContext(selected: "world", before: "Hello world", documentID: "one")] {
-            XCTAssertFalse(VoiceEdit.containsInsertedResult("Hello world", context: context, documentID: "one"))
+            XCTAssertFalse(VoiceEdit.containsInsertedResult("Hello world", context: context, snapshot: snapshot))
         }
-        XCTAssertFalse(VoiceEdit.containsInsertedResult("", context: VoiceContext(before: "Text", documentID: "one"), documentID: "one"))
-        XCTAssertFalse(VoiceEdit.containsInsertedResult("Text", context: VoiceContext(before: "Text"), documentID: nil))
+        XCTAssertFalse(VoiceEdit.containsInsertedResult("", context: VoiceContext(before: "Text", documentID: "one"), snapshot: snapshot))
+        XCTAssertFalse(VoiceEdit.containsInsertedResult("Text", context: VoiceContext(before: "Text"), snapshot: VoiceContext()))
+    }
+    func testUndoRejectsSuffixCollisionAndTruncation() {
+        let snapshot = VoiceContext(before: "Existing result", after: "Tail", documentID: "one")
+        XCTAssertFalse(VoiceEdit.containsInsertedResult("result", context: snapshot, snapshot: snapshot))
+        XCTAssertFalse(VoiceEdit.containsInsertedResult("result", context: VoiceContext(before: "Existing resultres", after: "Tail", documentID: "one"), snapshot: snapshot))
+        XCTAssertFalse(VoiceEdit.containsInsertedResult("result", context: VoiceContext(before: "result", after: "Tail", documentID: "one"), snapshot: snapshot))
+        XCTAssertFalse(VoiceEdit.containsInsertedResult("result", context: VoiceContext(before: "Existing resultresult", after: "Changed", documentID: "one"), snapshot: snapshot))
+        XCTAssertTrue(VoiceEdit.containsInsertedResult("result", context: VoiceContext(before: "Existing resultresult", after: "Tail", documentID: "one"), snapshot: snapshot))
     }
     func testJobStreamNormalEmptyAndError() async throws {
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [StubProtocol.self]
