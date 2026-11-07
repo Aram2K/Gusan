@@ -3,6 +3,8 @@ import GusanKit
 
 final class VoiceWaveform: UIView {
     var levels: [Float] = [] { didSet { setNeedsDisplay() } }
+    override init(frame: CGRect) { super.init(frame: frame); isOpaque = false; backgroundColor = .clear }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override var intrinsicContentSize: CGSize { CGSize(width: 65, height: 24) }
     override func draw(_ rect: CGRect) {
         KeyboardTheme.blue.setStroke()
