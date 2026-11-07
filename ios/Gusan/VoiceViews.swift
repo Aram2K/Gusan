@@ -2,6 +2,19 @@ import SwiftUI
 import AVFoundation
 import GusanKit
 
+fileprivate extension VoiceSession {
+    var inAppError: String {
+        switch error {
+        case VoiceError.notSignedIn.localizedDescription: return "Sign in to start a voice session."
+        case VoiceError.unauthorized.localizedDescription: return "Your sign-in has expired. Sign in again to continue."
+        case VoiceError.notShared.localizedDescription: return "Voice can't connect to your keyboard. Check Keyboard settings, then try again."
+        case VoiceError.fallbackOff.localizedDescription: return "Voice sharing is off. Enable pasteboard fallback in Keyboard settings to connect your keyboard."
+        case VoiceError.sessionEnded.localizedDescription: return "This voice session has ended. Tap Record to start a new one."
+        default: return error.hasPrefix("Audio failed:") ? "Your microphone couldn't start. Check microphone access in Settings, then try again." : error
+        }
+    }
+}
+
 struct VoiceReadyView: View {
     @ObservedObject var voice: VoiceSession
     let onSignIn: () -> Void
@@ -19,26 +32,49 @@ struct VoiceReadyView: View {
     }
     var body: some View {
         NavigationStack {
-            VStack(spacing: 24) {
-                Image(systemName: "mic.fill").font(.system(size: 64)).foregroundStyle(.tint)
-                Text(voice.alive ? "Recording ready — swipe back" : "Voice dictation").font(.title2).bold()
+            ScreenContent {
+                AppCard {
+                    BrandMark(large: true)
+                    Text("Voice dictation").font(.largeTitle).bold().accessibilityAddTraits(.isHeader)
+                    Text(voice.alive ? "Your voice session is ready. Switch back to your app, keep Gusan selected, and tap the mic to dictate." : "Speak naturally, right from your Gusan keyboard. Tap Record to prepare a voice session, then return to your app.")
+                        .font(.body).foregroundStyle(.secondary)
+                    if !voice.alive && voice.error.isEmpty {
+                        PrimaryButton(title: "Record", icon: "mic.fill") { voice.start() }
+                    }
+                }
+                if let statusText {
+                    AppCard {
+                        Label(statusText, systemImage: voice.alive ? "waveform" : "mic").font(.headline).foregroundStyle(Theme.accent)
+                        if let end = voice.status.sessionEndsAt, voice.alive {
+                            Text("Session until \(end.formatted(date: .omitted, time: .shortened))").font(.body).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                if !voice.error.isEmpty {
+                    AppCard {
+                        Label("Voice needs attention", systemImage: "exclamationmark.circle").font(.headline).foregroundStyle(Theme.danger)
+                        Text(voice.inAppError).font(.body)
+                        if voice.error == VoiceError.notSignedIn.localizedDescription || voice.error == VoiceError.unauthorized.localizedDescription {
+                            PrimaryButton(title: "Sign in", icon: "person.crop.circle") { onSignIn(); dismiss() }
+                        } else if voice.error == VoiceError.fallbackOff.localizedDescription || voice.error == VoiceError.notShared.localizedDescription {
+                            PrimaryButton(title: "Keyboard settings", icon: "keyboard") { dismiss(); UIApplication.shared.open(URL(string: "gusan://keyboard-settings")!) }
+                        } else if voice.permission == .denied {
+                            PrimaryButton(title: "Open Settings", icon: "gear") { Theme.openSettings() }
+                        } else if !voice.alive {
+                            PrimaryButton(title: "Record", icon: "mic.fill") { voice.start() }
+                        }
+                    }
+                }
                 if voice.alive {
-                    Text("Tap ‹ at the top-left, or swipe right along the bottom edge, to go back to your app").multilineTextAlignment(.center)
-                } else {
-                    Text("Tap Record to prepare a voice session.").multilineTextAlignment(.center)
-                    Button("Record") { voice.start() }.frame(minHeight: 44)
+                    AppCard {
+                        Button(role: .destructive) { voice.stop() } label: {
+                            Label("Stop voice session", systemImage: "stop.circle").frame(maxWidth: .infinity, minHeight: 44)
+                        }
+                    }
                 }
-                if let statusText { Text(statusText).foregroundStyle(.secondary) }
-                if let end = voice.status.sessionEndsAt, voice.alive { Text("Session until \(end.formatted(date: .omitted, time: .shortened))") }
-                if !voice.error.isEmpty { Text(voice.error).foregroundStyle(.red) }
-                if voice.error == VoiceError.notSignedIn.localizedDescription {
-                    Button("Sign in") { onSignIn(); dismiss() }.frame(minHeight: 44)
-                }
-                if voice.error == VoiceError.fallbackOff.localizedDescription {
-                    Button("Keyboard settings") { dismiss(); UIApplication.shared.open(URL(string: "gusan://keyboard-settings")!) }.frame(minHeight: 44)
-                }
-                if voice.alive { Button("Stop voice session", role: .destructive) { voice.stop() }.frame(minHeight: 44) }
-            }.padding().toolbar { Button("Close") { dismiss() } }
+            }.navigationTitle("Voice").navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() }.frame(minWidth: 44, minHeight: 44) } }
+                .onAppear { voice.refreshPermission() }
         }
     }
 }
@@ -56,7 +92,7 @@ struct VoiceSettingsSection: View {
             Button(voice.alive ? "Stop voice session" : "Start voice session") { if voice.alive { voice.stop() } else { voice.start() } }
             LabeledContent("Microphone", value: voice.permission == .granted ? "Allowed" : voice.permission == .denied ? "Denied" : "Not requested")
             if voice.permission == .denied { Button("Open Settings") { UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!) } }
-            if !voice.error.isEmpty { Text(voice.error).foregroundStyle(.red) }
+            if !voice.error.isEmpty { Text(voice.inAppError).foregroundStyle(Theme.danger) }
             Picker("Spoken language", selection: $language) { ForEach(VoiceSettings.languages, id: \.code) { Text($0.name).tag($0.code) } }.onChange(of: language) { voice.settings.language = $0 }
             Picker("Default voice action", selection: $action) { ForEach(VoiceAction.all, id: \.self) { Text($0.label).tag($0) } }.onChange(of: action) { voice.settings.defaultAction = $0 }
             Picker("Keep session alive", selection: $minutes) { ForEach(VoiceSettings.idleOptions, id: \.self) { Text("\($0) min").tag($0) } }.onChange(of: minutes) { voice.settings.idleMinutes = $0 }
