@@ -388,7 +388,7 @@ final class AgentCardView: UIView {
             body.text = intent.mode == .research
                 ? "A Gusan agent would browse the web and report back. It never submits, buys or sends anything."
                 : "A Gusan agent would carry this out on the web, but it stops and asks you before anything is submitted, bought or sent."
-            body.text! += sendsContext ? "\n\nYour selected text will be sent with the request because it refers to it." : "\n\nYour text stays on the phone; only the instruction is sent."
+            body.text! += sendsContext ? "\n\nThe text you're working on (your selection, or the text around the cursor) will be sent too, because the request refers to it." : "\n\nYour text stays on the phone; only the instruction is sent."
             buttons = [(secondary, "Edit text instead", false), (primary, "Run", true)]
             announce = "Run as an agent task? " + intent.title
         case .failed(let message, let retryable):
