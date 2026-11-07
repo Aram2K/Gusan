@@ -108,7 +108,7 @@ final class KeyboardViewController: UIInputViewController {
         toolbar.frame = CGRect(x: 0, y: 0, width: width, height: 64)
         voice.bar.frame = CGRect(x: 50, y: 20, width: max(0, width - 100), height: 44)
         voice.panel.frame = view.bounds
-        let extra: CGFloat = surface == .instruction ? 74 : 0
+        let extra: CGFloat = surface == .instruction ? 88 : 0
         instructionHeader.frame = CGRect(x: 0, y: 64, width: width, height: extra)
         keyArea.frame = CGRect(x: 0, y: 64 + extra, width: width, height: max(0, view.bounds.height - 64 - extra))
         panel.frame = CGRect(x: 0, y: 64, width: width, height: max(0, view.bounds.height - 64))
@@ -162,7 +162,7 @@ final class KeyboardViewController: UIInputViewController {
         instructionHeader.isHidden = surface != .instruction
         keyArea.isHidden = surface == .panel || surface == .explanation
         keyArea.inputEnabled = true
-        height.constant = 280
+        height.constant = 280 + (surface == .instruction ? 88 : 0)
         updateContext(); view.setNeedsLayout()
     }
     private func showTyping() { snapshotReturnSurface = nil; instructionContext = nil; surface = .typing; updateSurface() }

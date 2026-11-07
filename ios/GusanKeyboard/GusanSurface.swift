@@ -188,11 +188,13 @@ final class InstructionHeader: UIView {
         cancel.addTarget(self, action: #selector(cancelPressed), for: .touchUpInside)
         suggestions.spacing = 8; suggestions.translatesAutoresizingMaskIntoConstraints = false
         scroll.showsHorizontalScrollIndicator = false; scroll.addSubview(suggestions)
+        scroll.alwaysBounceHorizontal = true
         NSLayoutConstraint.activate([suggestions.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor), suggestions.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor), suggestions.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor), suggestions.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor), suggestions.heightAnchor.constraint(equalTo: scroll.frameLayoutGuide.heightAnchor)])
         for title in ["More formal", "Shorter", "Friendlier", "Fix grammar", "Translate to Armenian"] {
             let chip = UIButton(type: .system); chip.setTitle(title, for: .normal)
             chip.titleLabel?.font = .systemFont(ofSize: 12, weight: .medium)
             chip.accessibilityHint = "Use this instruction"
+            chip.widthAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
             chip.addTarget(self, action: #selector(suggestionPressed(_:)), for: .touchUpInside)
             suggestions.addArrangedSubview(chip)
         }
@@ -208,10 +210,10 @@ final class InstructionHeader: UIView {
     }
     override func layoutSubviews() {
         super.layoutSubviews()
-        cancel.frame = CGRect(x: 4, y: 0, width: 34, height: 38)
-        run.frame = CGRect(x: bounds.width - 44, y: 0, width: 40, height: 38)
-        field.frame = CGRect(x: 42, y: 0, width: bounds.width - 90, height: 38)
-        scroll.frame = CGRect(x: 12, y: 40, width: bounds.width - 24, height: 28)
+        cancel.frame = CGRect(x: 0, y: 0, width: 44, height: 44)
+        run.frame = CGRect(x: bounds.width - 44, y: 0, width: 44, height: 44)
+        field.frame = CGRect(x: 46, y: 0, width: bounds.width - 94, height: 44)
+        scroll.frame = CGRect(x: 12, y: 44, width: bounds.width - 24, height: 44)
     }
     @objc private func suggestionPressed(_ sender: UIButton) { if let title = sender.currentTitle { onSuggestion?(title) } }
     @objc private func runPressed() { onRun?() }
