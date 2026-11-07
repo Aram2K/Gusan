@@ -7383,6 +7383,9 @@ class AppController(QObject):
                 if sel:
                     action_mode = actions.ACTION_SMART_SELECTION
                     action_input = smart_prompt.selection_input(sel.text, text)
+                    # the pill says the take works on the selection ("On your selection · Gusan Cloud")
+                    self.overlay.call_soon(self.overlay.set_task, pill_kind, pill_detail,
+                                           dict(pill_info or {}, on_selection=True))
             try:
                 output_text = actions.process(
                     action_input,
@@ -7469,11 +7472,13 @@ class AppController(QObject):
         config = config or {}
         kind = actions.ACTION_MODELS.get(engine, {}).get("kind")
         if kind in ("cloud", "managed") and config.get("privacy_mode"):
+            logger.info("Selected text not used: Privacy mode keeps Smart Actions on this computer")
             return None
         if ((kind == "managed" and not config.get("_managed_token"))
                 or (kind == "cloud" and not actions.engine_has_key(engine, config))
                 or (kind == "local_llm" and not local_llm.model_downloaded(engine))
                 or kind not in ("managed", "cloud", "local_llm")):
+            logger.info("Selected text not used: Smart Actions run on %s, which can't read it", engine)
             return None
         sel = job.result(SELECTION_WAIT_S)
         if not sel:
