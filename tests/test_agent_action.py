@@ -37,6 +37,10 @@ for (let i=0; i<scenarios.length; i++) {
    const q={select:()=>q,update:p=>{patch=p;return q},eq:(k,v)=>{filters.push([k,v]);return q},maybeSingle:async()=>{
     dbCalls.push({table,patch,filters});
     if(s.notFound)return {data:null,error:null};
+    if(table==='agent_task_runs' && patch && filters.some(([k,v])=>
+      k==='plan' ? JSON.stringify(run.plan)!==v : k==='h_session_id' && run[k]!==v)){
+     return {data:null,error:null};
+    }
     if(table==='agent_tasks' && patch && conflict){conflict=false;row={...row,status:'completed',updated_at:'concurrent-write'};return {data:null,error:null};}
     if(patch){if(table==='agent_tasks')row={...row,...patch};else run={...run,...patch};}
     return {data:structuredClone(table==='agent_tasks'?row:run),error:null};
@@ -52,7 +56,7 @@ for (let i=0; i<scenarios.length; i++) {
   if(init.method==='DELETE')return new Response(null,{status:204});
   if(url.includes('/tool_results'))return new Response(null,{status:202});
   if(url.includes('/changes'))return s.empty?new Response(null,{status:204}):new Response(JSON.stringify(s.change??{status:'running',new_events:[]}));
-  return new Response(JSON.stringify({id:'session1',latest_answer:s.latest}));
+  return new Response(JSON.stringify({id:init.headers['Idempotency-Key']?.endsWith(':prepare-retry')?'retry-session':'session1',latest_answer:s.latest}));
  };
  await import(`${process.argv[2]}/proxy.mts?${i}`);
  const replies=[], snapshots=[];
@@ -66,8 +70,11 @@ for (let i=0; i<scenarios.length; i++) {
    headers['X-H-Webhook-Timestamp']=ts;
    headers['X-H-Webhook-Signature']='sha256='+ (r.bad?'0'.repeat(64):createHmac('sha256','hook-secret').update(ts+'.'+raw).digest('hex'));
   }
-  const res=await handler(new Request('https://edge.test/'+(r.webhook?'?action=webhook':''),{method:'POST',headers,body:raw}));
-  replies.push({status:res.status,body:await res.json()});
+  const respond=async()=>{
+   const res=await handler(new Request('https://edge.test/'+(r.webhook?'?action=webhook':''),{method:'POST',headers,body:raw}));
+   return {status:res.status,body:await res.json()};
+  };
+  replies.push(...await Promise.all(Array.from({length:r.concurrent??1},respond)));
   snapshots.push(structuredClone({row,run}));
  }
  results.push({replies,calls,logs,dbCalls,row,run,snapshots});
@@ -284,6 +291,11 @@ def test_do_prepare_request_is_structurally_read_only(run):
     assert "agent.tools" not in overrides
     assert "needs_action" in overrides["agent.answer_format"]["properties"]
     assert "cannot and must not act" in overrides["agent.instructions"]
+    assert "PLANNING-ONLY" in body["messages"][0]["message"]
+    assert "GET requests or URL/query tricks" in overrides["agent.instructions"]
+    assert "Do NOT tell the user to do it manually" in overrides["agent.instructions"]
+    assert "separate interactive browser session" in body["messages"][0]["message"]
+    assert overrides["agent.answer_format"]["properties"]["needs_action"]["const"] is True
     assert out["run"]["plan"]["instruction"] == "Send it"
 
 
@@ -302,11 +314,13 @@ def test_prepare_waits_with_private_plan(run):
             datetime.fromisoformat(out["row"]["confirmation_at"])).total_seconds() == pytest.approx(1080, abs=1)
 
 
-def test_prepare_no_action_completes(run):
+def test_prepare_no_action_retries_then_fails(run):
     out, = run({"row": {"mode": "do"}, "change": {"status": "completed", "answer": {
-        "markdown": "Nothing to do", "needs_action": False}}})
-    assert out["row"]["status"] == "completed"
-    assert out["row"]["result"]["markdown"] == "Nothing to do"
+        "markdown": "Nothing to do", "needs_action": False}},
+        "requests": [{"body": {"action": "status", "task_id": ID}}] * 2})
+    assert [r["body"]["status"] for r in out["replies"]] == ["running", "failed"]
+    assert out["row"]["error_code"] == "plan_missing"
+    assert out["row"]["result"] is None
 
 
 @pytest.mark.parametrize("answer", [{}, {"needs_action": True},
@@ -317,7 +331,8 @@ def test_prepare_no_action_completes(run):
     {"needs_action": True, "plan": {**PLAN, "steps": [123]}},
     {"needs_action": True, "plan": {**PLAN, "action_kind": "bad"}}])
 def test_invalid_prepare_fails(run, answer):
-    out, = run({"row": {"mode": "do"}, "change": {"status": "completed", "answer": answer}})
+    out, = run({"row": {"mode": "do"}, "change": {"status": "completed", "answer": answer},
+                "requests": [{"body": {"action": "status", "task_id": ID}}] * 2})
     assert out["row"]["status"] == "failed" and out["row"]["error_code"] == "plan_missing"
 
 
@@ -449,7 +464,8 @@ def test_empty_links_and_link_caps(run):
 def test_step_length_boundary_never_truncates(run, length, expected):
     step = " " + "x" * (length - 2) + " "
     out, = run({"row": {"mode": "do"}, "change": {"status": "completed", "answer": {
-        "markdown": "Plan", "needs_action": True, "plan": {**PLAN, "steps": [step]}}}})
+        "markdown": "Plan", "needs_action": True, "plan": {**PLAN, "steps": [step]}}},
+        "requests": [{"body": {"action": "status", "task_id": ID}}] * 2})
     assert out["row"]["status"] == expected
     if expected == "failed":
         assert out["row"]["error_code"] == "plan_missing"
@@ -478,3 +494,53 @@ def test_timezone_survives_start_prepare_and_execute(run, timezone):
     assert "timezone" not in out["snapshots"][1]["row"]["confirmation"]
     message = sessions[-1]["messages"][0]["message"]
     assert "timezone" not in message
+
+
+@pytest.mark.parametrize("answer", ["I cannot submit; fill it manually.", "{invalid json"])
+def test_prose_prepare_retries_once_then_fails(run, answer):
+    out, = run({"row": {"mode": "do"}, "change": {"status": "completed", "answer": answer},
+                "requests": [{"body": {"action": "status", "task_id": ID}}] * 2})
+    assert [r["body"]["status"] for r in out["replies"]] == ["running", "failed"]
+    assert out["row"]["error_code"] == "plan_missing" and out["row"]["result"] is None
+    retries = [c for c in out["calls"] if c["method"] == "POST"]
+    assert len(retries) == 1
+    retry = retries[0]
+    assert retry["headers"]["Idempotency-Key"] == f"{ID}:prepare-retry"
+    assert retry["body"]["max_time_s"] == 300 and retry["body"]["max_steps"] == 60
+    assert retry["body"]["overrides"]["agent.environments[kind=web].mode"]["type"] == "text"
+    assert "agent.tools" not in retry["body"]["overrides"]
+    assert "mandatory correction" in retry["body"]["messages"][0]["message"]
+    assert "SECRET instruction" in retry["body"]["messages"][0]["message"]
+    assert out["run"]["h_session_id"] == "retry-session"
+    assert "/sessions/retry-session/changes" in out["calls"][-1]["url"]
+    retry_row = out["snapshots"][0]["row"]
+    assert (datetime.fromisoformat(retry_row["deadline_at"]) -
+            datetime.fromisoformat(retry_row["updated_at"])).total_seconds() == pytest.approx(480, abs=1)
+
+
+def test_prose_then_valid_plan_awaits_approval(run):
+    out, = run({"row": {"mode": "do"}, "requests": [
+        {"body": {"action": "status", "task_id": ID}, "change": {"status": "completed", "answer": "Do it manually."}},
+        {"body": {"action": "status", "task_id": ID}, "change": {
+            "status": "completed", "answer": {"markdown": "Plan", "needs_action": True, "plan": PLAN}}}]})
+    assert [r["body"]["status"] for r in out["replies"]] == ["running", "awaiting_confirmation"]
+    assert out["row"]["confirmation"] == PLAN
+
+
+def test_concurrent_prepare_syncs_claim_only_one_retry(run):
+    out, = run({"row": {"mode": "do"}, "change": {"status": "completed", "answer": "Do it manually."},
+                "requests": [{"body": {"action": "status", "task_id": ID}, "concurrent": 2}]})
+    retries = [c for c in out["calls"] if c["method"] == "POST"]
+    assert len(retries) == 1
+    assert all(r["body"]["status"] == "running" for r in out["replies"])
+    claim = next(c for c in out["dbCalls"] if (c.get("patch") or {}).get("plan", {}).get("prepare_retry") == "creating")
+    assert ["h_session_id", "session1"] in claim["filters"]
+    assert any(k == "plan" for k, _ in claim["filters"])
+
+
+@pytest.mark.parametrize("code,error", [(429, "agent_busy"), (500, "upstream_error")])
+def test_prepare_retry_creation_failure_is_terminal(run, code, error):
+    out, = run({"row": {"mode": "do"}, "createFailure": code,
+                "change": {"status": "completed", "answer": "Do it manually."}})
+    assert out["row"]["status"] == "failed" and out["row"]["error_code"] == error
+    assert out["row"]["result"] is None
