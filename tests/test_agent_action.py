@@ -333,7 +333,9 @@ def test_ambiguous_confirmation_is_not_reposted(run, failure):
                 "change": {"status": "awaiting_tool_results", "pending_tool_calls": [CALL]},
                 "requests": [{"body": {"action": a, "task_id": ID}}
                              for a in ["confirm", "status", "status"]]})
-    assert out["replies"][0] == {"status": 502, "body": {"error": "upstream_error"}}
+    expected_reply = {"status": 503, "body": {"error": "agent_busy"}} if failure == "429" else {
+        "status": 502, "body": {"error": "upstream_error"}}
+    assert out["replies"][0] == expected_reply
     assert out["snapshots"][0]["run"]["confirmed_call_ids"] == [CALL["id"]]
     assert out["replies"][1]["body"]["status"] == "running"
     assert out["replies"][1]["body"]["confirmation"] is None

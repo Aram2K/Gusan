@@ -320,7 +320,10 @@ async function settle(db: any, row: Obj, call: Obj, body: Obj) {
     const rejected = error instanceof HFailure &&
       ((error.httpStatus >= 400 && error.httpStatus < 500 &&
         ![409, 429].includes(error.httpStatus)) || error.httpStatus >= 500);
-    if (!rejected) throw new Failure("upstream_error");
+    if (!rejected) {
+      if (error instanceof HFailure && error.code === "agent_busy") throw error;
+      throw new Failure("upstream_error");
+    }
     // A definite rejection releases only this claim, preserving other calls.
     while (true) {
       const current = await loadRun(db, row);
