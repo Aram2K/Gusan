@@ -155,7 +155,7 @@ final class KeyboardViewController: UIInputViewController {
         let context = instructionContext ?? currentContext
         panel.update(theme: theme, target: settings.translateTarget, defaultAction: settings.keyboardAction.action, context: context.text)
         let screenInstruction = editing && screen.armed
-        instructionHeader.update(text: instruction, theme: theme, placeholder: screenInstruction ? "Ask about your screen…" : "Tell Gusan what to do…", suggestions: screenInstruction ? ScreenPrompts.suggestions : InstructionHeader.defaultSuggestions)
+        instructionHeader.update(text: instruction, theme: theme, busy: busy, placeholder: screenInstruction ? "Ask about your screen…" : "Tell Gusan what to do…", suggestions: screenInstruction ? ScreenPrompts.suggestions : InstructionHeader.defaultSuggestions)
         explanation.textColor = theme.foreground
         toolbar.context.setTitle(screen.summary(context.summary), for: .normal)
         toolbar.context.accessibilityValue = context.summary

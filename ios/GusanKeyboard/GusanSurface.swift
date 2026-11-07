@@ -255,17 +255,18 @@ final class InstructionHeader: UIView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     static let defaultSuggestions = ["More formal", "Shorter", "Friendlier", "Fix grammar", "Translate to Armenian"]
     private var currentSuggestions = InstructionHeader.defaultSuggestions
-    func update(text: String, theme: KeyboardTheme, placeholder: String = "Tell Gusan what to do…", suggestions: [String] = InstructionHeader.defaultSuggestions) {
+    func update(text: String, theme: KeyboardTheme, busy: Bool, placeholder: String = "Tell Gusan what to do…", suggestions: [String] = InstructionHeader.defaultSuggestions) {
         if suggestions != currentSuggestions {
             currentSuggestions = suggestions
             self.suggestions.arrangedSubviews.forEach { $0.removeFromSuperview() }
             suggestions.forEach { self.suggestions.addArrangedSubview(makeChip($0)) }
         }
-        field.text = text.isEmpty ? placeholder + " │" : text + "│"
-        field.accessibilityValue = text
+        field.text = busy ? "Working…" : text.isEmpty ? placeholder + " │" : text + "│"
+        field.accessibilityValue = busy ? "Working on: " + text : text
         field.textColor = text.isEmpty ? .secondaryLabel : theme.foreground
         run.tintColor = KeyboardTheme.blue; cancel.tintColor = theme.foreground
-        run.isEnabled = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        run.isEnabled = !busy && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        cancel.accessibilityLabel = busy ? "Cancel request" : "Cancel instruction"
     }
     override func layoutSubviews() {
         super.layoutSubviews()
