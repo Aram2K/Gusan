@@ -29,21 +29,29 @@ for (let i=0; i<scenarios.length; i++) {
  let run={task_id:id,h_session_id:'session1',phase:'prepare',plan:{instruction:'SECRET instruction'},...s.run};
  let conflict=s.conflict;
  let createFailure=s.createFailure;
+ let runReads=0;
  globalThis.__db={
   auth:{getUser:async()=>({data:{user:s.noUser?null:{id:'u1'}},error:null})},
   rpc:async(name,args)=>{dbCalls.push({name,args});return name==='is_pro'?{data:s.pro??true,error:s.proError?{}:null}:{data:{...row,status:'queued',mode:args.p_mode,title:args.p_title},error:s.quota?{code:s.quota}:null}},
   from:(table)=>{
-   let patch=null, filters=[];
-   const q={select:()=>q,update:p=>{patch=p;return q},eq:(k,v)=>{filters.push([k,v]);return q},maybeSingle:async()=>{
+   let patch=null, filters=[], allowedStatuses=null;
+   const q={select:()=>q,update:p=>{patch=p;return q},eq:(k,v)=>{filters.push([k,v]);return q},
+    in:(k,v)=>{filters.push([k,v]);allowedStatuses=v;return q},maybeSingle:async()=>{
     dbCalls.push({table,patch,filters});
     if(s.notFound)return {data:null,error:null};
+    if(table==='agent_tasks' && patch && allowedStatuses){
+     if(s.cancelBeforeRetrySave){s.cancelBeforeRetrySave=false;row={...row,status:'cancelled'};}
+     if(!allowedStatuses.includes(row.status))return {data:null,error:null};
+    }
     if(table==='agent_task_runs' && patch && filters.some(([k,v])=>
       k==='plan' ? JSON.stringify(run.plan)!==v : k==='h_session_id' && run[k]!==v)){
      return {data:null,error:null};
     }
     if(table==='agent_tasks' && patch && conflict){conflict=false;row={...row,status:'completed',updated_at:'concurrent-write'};return {data:null,error:null};}
     if(patch){if(table==='agent_tasks')row={...row,...patch};else run={...run,...patch};}
-    return {data:structuredClone(table==='agent_tasks'?row:run),error:null};
+    const data=structuredClone(table==='agent_tasks'?row:run);
+    if(table==='agent_task_runs' && !patch && ++runReads===1 && s.swapRunAfterFirstLoad)run.h_session_id='current-session';
+    return {data,error:null};
    },then:(resolve,reject)=>q.maybeSingle().then(resolve,reject)};return q;
   }
  };
@@ -52,6 +60,10 @@ for (let i=0; i<scenarios.length; i++) {
  globalThis.fetch=async(url,init)=>{
   calls.push({url,method:init.method,headers:init.headers,body:init.body?JSON.parse(init.body):null});
   if(s.upstream) return new Response('untrusted error text',{status:s.upstream});
+  if(url.endsWith('/messages') && s.cancelDuringMessages){
+   s.cancelDuringMessages=false;
+   await handler(new Request('https://edge.test/',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer aaa.bbb.ccc'},body:JSON.stringify({action:'cancel',task_id:id})}));
+  }
   if((url.endsWith('/sessions') || url.endsWith('/messages')) && createFailure){const code=createFailure;createFailure=null;return new Response('failure',{status:code});}
   if(url.endsWith('/messages'))return new Response(null,{status:202});
   if(init.method==='DELETE')return new Response(null,{status:204});
@@ -562,3 +574,37 @@ def test_retry_restarts_same_session_without_persisting_screen_data(run):
     assert "PRIVATE SCREEN" not in json.dumps(out["run"])
     assert "data:image" not in json.dumps(out["run"])
     assert "from_index=1" in out["calls"][-1]["url"]
+
+
+@pytest.mark.parametrize("failure", [None, 500])
+def test_cancel_during_restart_deletes_session_after_response(run, failure):
+    out, = run({"row": {"mode": "do"}, "cancelDuringMessages": True, "createFailure": failure,
+                "change": {"status": "completed", "answer": "Cannot act"}})
+    assert out["row"]["status"] == "cancelled"
+    assert out["replies"][0]["body"]["status"] == "cancelled"
+    assert out["calls"][-1]["method"] == "DELETE"
+    assert out["calls"][-1]["url"].endswith("/sessions/session1")
+    assert out["row"].get("error_code") is None
+
+
+def test_retry_cannot_overwrite_terminal_row_before_restart(run):
+    out, = run({"row": {"mode": "do"}, "cancelBeforeRetrySave": True,
+                "change": {"status": "completed", "answer": "Cannot act"}})
+    assert out["row"]["status"] == "cancelled"
+    assert not any(c["method"] == "POST" for c in out["calls"])
+    guarded = next(c for c in out["dbCalls"] if c.get("table") == "agent_tasks" and c.get("patch"))
+    assert ["status", ["queued", "running", "awaiting_confirmation"]] in guarded["filters"]
+
+
+def test_cancel_reloads_current_session_before_delete(run):
+    out, = run({"swapRunAfterFirstLoad": True, "body": {"action": "cancel", "task_id": ID}})
+    assert out["row"]["status"] == "cancelled"
+    assert out["calls"][0]["url"].endswith("/sessions/current-session")
+
+
+def test_cancel_repeats_delete_after_terminal_write_for_a_restart(run):
+    out, = run({"run": {"plan": {"instruction": "Task", "prepare_retry": "running"}},
+                "body": {"action": "cancel", "task_id": ID}})
+    assert out["row"]["status"] == "cancelled"
+    assert len(out["calls"]) == 2 and all(c["method"] == "DELETE" for c in out["calls"])
+    assert out["calls"][0]["url"] == out["calls"][1]["url"]

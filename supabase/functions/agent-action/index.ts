@@ -142,7 +142,9 @@ async function h(
     throw new HFailure(res.status);
   }
   if (
-    res.status === 204 || method === "DELETE" || path.endsWith("/tool_results")
+    res.status === 204 || method === "DELETE" ||
+    path.endsWith("/tool_results") ||
+    path.endsWith("/messages")
   ) return null;
   return res.json();
 }
@@ -354,14 +356,18 @@ function sessionRequest(
     },
   };
 }
-async function save(db: any, row: Obj, patch: Obj) {
-  const { data, error } = await db.from("agent_tasks").update({
+async function save(db: any, row: Obj, patch: Obj, activeOnly = false) {
+  let query = db.from("agent_tasks").update({
     ...patch,
     updated_at: new Date().toISOString(),
   }).eq("id", row.id).eq("user_id", row.user_id).eq(
     "updated_at",
     row.updated_at,
-  ).select().maybeSingle();
+  );
+  if (activeOnly) {
+    query = query.in("status", ["queued", "running", "awaiting_confirmation"]);
+  }
+  const { data, error } = await query.select().maybeSingle();
   if (error) throw new Failure("storage_error", 500);
   // A webhook or another poll won the update: return its authoritative row.
   if (!data) return loadTask(db, row.id, row.user_id);
@@ -407,7 +413,9 @@ async function retryPrepare(db: any, row: Obj, run: Obj, patch: Obj) {
     error_code: null,
     finished_at: null,
     deadline_at: new Date(Date.now() + (300 + 180) * 1000).toISOString(),
-  });
+  }, true);
+  if (terminal(row)) return row;
+  let failure: string | null = null;
   try {
     const message =
       "Your previous preparation failed to return a valid plan. This is a mandatory correction: return ONLY the structured planning answer, never prose-only refusal or needs_action false.\n\n" +
@@ -417,19 +425,25 @@ async function retryPrepare(db: any, row: Obj, run: Obj, patch: Obj) {
       "POST",
       { type: "user_message", message },
     );
-    await saveRun(db, row, {
-      plan: { ...plan, prepare_retry: "running" },
-    });
-    return row;
   } catch (error) {
+    failure = error instanceof Failure && error.code === "agent_busy"
+      ? "agent_busy"
+      : "upstream_error";
+  }
+  row = await loadTask(db, row.id, row.user_id);
+  if (terminal(row)) {
+    await h(`/sessions/${encodeURIComponent(run.h_session_id)}`, "DELETE");
+    return row;
+  }
+  if (failure) {
     return save(db, row, {
       status: "failed",
-      error_code: error instanceof Failure && error.code === "agent_busy"
-        ? "agent_busy"
-        : "upstream_error",
+      error_code: failure,
       finished_at: new Date().toISOString(),
-    });
+    }, true);
   }
+  await saveRun(db, row, { plan: { ...plan, prepare_retry: "running" } });
+  return row;
 }
 async function expire(db: any, row: Obj, run: Obj) {
   if (terminal(row)) return row;
@@ -847,8 +861,13 @@ Deno.serve(async (req: Request) => {
         deadline_at: new Date(Date.now() + (600 + 180) * 1000).toISOString(),
       });
     } else if (!terminal(row)) {
-      if (run.h_session_id && row.status !== "awaiting_confirmation") {
-        await h(`/sessions/${encodeURIComponent(run.h_session_id)}`, "DELETE");
+      const currentRun = await loadRun(db, row);
+      const awaiting = row.status === "awaiting_confirmation";
+      if (currentRun.h_session_id && !awaiting) {
+        await h(
+          `/sessions/${encodeURIComponent(currentRun.h_session_id)}`,
+          "DELETE",
+        );
       }
       row = await save(db, row, {
         status: "cancelled",
@@ -856,6 +875,20 @@ Deno.serve(async (req: Request) => {
         confirmation_at: null,
         finished_at: new Date().toISOString(),
       });
+      if (!awaiting && row.status === "cancelled") {
+        const latestRun = await loadRun(db, row);
+        // A restart may land between the first DELETE and the terminal write.
+        if (
+          latestRun.h_session_id &&
+          (latestRun.plan?.prepare_retry ||
+            latestRun.h_session_id !== currentRun.h_session_id)
+        ) {
+          await h(
+            `/sessions/${encodeURIComponent(latestRun.h_session_id)}`,
+            "DELETE",
+          );
+        }
+      }
     }
     return json(task(row));
   } catch (e) {
