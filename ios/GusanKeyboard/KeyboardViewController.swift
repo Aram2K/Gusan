@@ -8,7 +8,7 @@ final class KeyboardViewController: UIInputViewController {
     private let status = UILabel()
     private let spinner = UIActivityIndicatorView(style: .medium)
     private let undoButton = UIButton(type: .system)
-    private let globe = UIButton(type: .system)
+    private let keyArea = TypingKeyboardView()
     private var actionButtons: [UIButton] = []
     private var translateButton: UIButton?
     private var busy = false
@@ -17,68 +17,89 @@ final class KeyboardViewController: UIInputViewController {
     private var undoDocument: UUID?
     private var undoBefore: String?
     private var undoAfter: String?
-    private var deleteTimer: Timer?
     private var task: Task<Void, Never>?
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .secondarySystemBackground
-        let height = view.heightAnchor.constraint(equalToConstant: 240)
+        let height = view.heightAnchor.constraint(equalToConstant: 260)
         height.priority = .defaultHigh; height.isActive = true
         let stack = UIStackView()
-        stack.axis = .vertical; stack.spacing = 10; stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.axis = .vertical; stack.spacing = 0; stack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(stack)
-        NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10), stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10), stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 10), stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -10)])
-        let top = row()
+        NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: view.leadingAnchor), stack.trailingAnchor.constraint(equalTo: view.trailingAnchor), stack.topAnchor.constraint(equalTo: view.topAnchor), stack.bottomAnchor.constraint(equalTo: view.bottomAnchor)])
+        let bar = UIStackView()
+        bar.axis = .vertical; bar.spacing = 0
+        bar.heightAnchor.constraint(equalToConstant: 44).isActive = true
+        let scroll = UIScrollView()
+        scroll.showsHorizontalScrollIndicator = false
+        let top = UIStackView()
+        top.spacing = 6; top.translatesAutoresizingMaskIntoConstraints = false
+        scroll.addSubview(top)
+        NSLayoutConstraint.activate([
+            top.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor, constant: 6),
+            top.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor, constant: -6),
+            top.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor),
+            top.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor),
+            top.heightAnchor.constraint(equalTo: scroll.frameLayoutGuide.heightAnchor)
+        ])
         let logo = button("", action: #selector(defaultAction))
         logo.setImage(UIImage(named: "GusanLogo")?.withRenderingMode(.alwaysOriginal), for: .normal)
         logo.imageView?.contentMode = .scaleAspectFit
+        logo.widthAnchor.constraint(equalToConstant: 30).isActive = true
         logo.accessibilityLabel = "Run default Gusan action"
         top.addArrangedSubview(logo); actionButtons.append(logo)
         for (title, mode) in [("Smart", SmartActionMode.smartAuto), ("Email", .writeEmail), ("To-do", .makeTodoList)] {
             top.addArrangedSubview(actionButton(title, mode: mode))
         }
-        stack.addArrangedSubview(top)
-        let second = row()
         let translate = actionButton("Translate", mode: .translate)
         translateButton = translate
-        second.addArrangedSubview(translate)
-        second.addArrangedSubview(actionButton("Summarize", mode: .summarize))
-        stack.addArrangedSubview(second)
+        top.addArrangedSubview(translate)
+        top.addArrangedSubview(actionButton("Summarize", mode: .summarize))
+        bar.addArrangedSubview(scroll)
         let stateRow = UIStackView(arrangedSubviews: [spinner, status, undoButton])
         stateRow.spacing = 8
-        status.numberOfLines = 3; status.font = .systemFont(ofSize: 12); status.textColor = .secondaryLabel
-        status.text = "Type or select text, then choose an action."
+        status.numberOfLines = 1; status.font = .systemFont(ofSize: 10); status.textColor = .secondaryLabel
+        status.adjustsFontSizeToFitWidth = true; status.minimumScaleFactor = 0.6
+        status.text = "Select text or type, then choose an action."
         undoButton.setTitle("Undo", for: .normal); undoButton.addTarget(self, action: #selector(undo), for: .touchUpInside)
         undoButton.isHidden = true
+        undoButton.titleLabel?.font = .systemFont(ofSize: 11, weight: .semibold)
         undoButton.setContentHuggingPriority(.required, for: .horizontal)
-        stack.addArrangedSubview(stateRow)
-        let bottom = row()
-        globe.setImage(UIImage(systemName: "globe"), for: .normal)
-        globe.addTarget(self, action: #selector(handleInputModeList(from:with:)), for: .allTouchEvents)
-        globe.accessibilityLabel = "Next keyboard"
-        bottom.addArrangedSubview(globe)
-        bottom.addArrangedSubview(button("space", action: #selector(space)))
-        let delete = button("⌫", action: #selector(deleteOnce))
-        delete.accessibilityLabel = "Delete"
-        delete.addGestureRecognizer(UILongPressGestureRecognizer(target: self, action: #selector(holdDelete(_:))))
-        bottom.addArrangedSubview(delete)
-        bottom.addArrangedSubview(button("return", action: #selector(newline)))
-        stack.addArrangedSubview(bottom)
+        stateRow.heightAnchor.constraint(equalToConstant: 16).isActive = true
+        stateRow.isLayoutMarginsRelativeArrangement = true
+        stateRow.layoutMargins = UIEdgeInsets(top: 0, left: 8, bottom: 0, right: 8)
+        bar.addArrangedSubview(stateRow)
+        stack.addArrangedSubview(bar)
+        stack.addArrangedSubview(keyArea)
+        keyArea.globeButton.addTarget(self, action: #selector(handleInputModeList(from:with:)), for: .allTouchEvents)
+        keyArea.onInsert = { [weak self] in self?.insert($0) }
+        keyArea.onDelete = { [weak self] in self?.deleteOnce() }
+        keyArea.onReturn = { [weak self] in self?.newline() }
+        keyArea.onDoubleSpace = { [weak self] in self?.doubleSpace() }
         refreshLabels()
     }
     override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); refreshLabels() }
-    override func viewWillLayoutSubviews() { super.viewWillLayoutSubviews(); globe.isHidden = !needsInputModeSwitchKey }
-    override func viewWillDisappear(_ animated: Bool) {
-        super.viewWillDisappear(animated); task?.cancel(); deleteTimer?.invalidate()
+    override func viewWillLayoutSubviews() { super.viewWillLayoutSubviews(); updateTypingContext() }
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        updateTypingContext()
     }
-    private func row() -> UIStackView {
-        let row = UIStackView(); row.distribution = .fillEqually; row.spacing = 8; return row
+    override func textDidChange(_ textInput: UITextInput?) { super.textDidChange(textInput); updateTypingContext() }
+    override func selectionDidChange(_ textInput: UITextInput?) { super.selectionDidChange(textInput); updateTypingContext() }
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated); task?.cancel(); keyArea.cancelTouches()
+    }
+    private func updateTypingContext() {
+        keyArea.updateContext(before: textDocumentProxy.documentContextBeforeInput, capitalization: textDocumentProxy.autocapitalizationType, returnType: textDocumentProxy.returnKeyType, appearance: textDocumentProxy.keyboardAppearance, needsGlobe: needsInputModeSwitchKey)
+        let theme = KeyboardTheme(appearance: textDocumentProxy.keyboardAppearance, traits: traitCollection)
+        view.backgroundColor = theme.background
+        actionButtons.forEach { $0.backgroundColor = theme.letter; $0.tintColor = KeyboardTheme.blue }
     }
     private func button(_ title: String, action: Selector) -> UIButton {
         let b = UIButton(type: .system)
-        b.setTitle(title, for: .normal); b.titleLabel?.font = .systemFont(ofSize: 14, weight: .medium)
-        b.backgroundColor = .tertiarySystemBackground; b.layer.cornerRadius = 8
+        b.setTitle(title, for: .normal); b.titleLabel?.font = .systemFont(ofSize: 12, weight: .medium)
+        b.contentEdgeInsets = UIEdgeInsets(top: 0, left: 10, bottom: 0, right: 10)
+        b.layer.cornerRadius = 6
         b.addTarget(self, action: action, for: .touchUpInside)
         return b
     }
@@ -102,9 +123,10 @@ final class KeyboardViewController: UIInputViewController {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { status.text = "Type or select some text first"; return }
         let document = textDocumentProxy.documentIdentifier
         busy = true; spinner.startAnimating(); status.text = "Working…"; undoButton.isHidden = true
+        keyArea.inputEnabled = false
         actionButtons.forEach { $0.isEnabled = false }
         task = Task { @MainActor in
-            defer { busy = false; spinner.stopAnimating(); actionButtons.forEach { $0.isEnabled = true } }
+            defer { busy = false; keyArea.inputEnabled = true; spinner.stopAnimating(); actionButtons.forEach { $0.isEnabled = true }; updateTypingContext() }
             do {
                 guard let session = try await auth.refresh() else { throw GusanError.unauthorized }
                 let client = SmartActionClient()
@@ -147,15 +169,20 @@ final class KeyboardViewController: UIInputViewController {
         for _ in replacement { textDocumentProxy.deleteBackward() }
         textDocumentProxy.insertText(original)
         self.original = nil; self.replacement = nil; undoButton.isHidden = true; status.text = "Undone"
+        updateTypingContext()
     }
     private func invalidateUndo() { original = nil; replacement = nil; undoButton.isHidden = true }
-    @objc private func space() { guard !busy else { return }; invalidateUndo(); textDocumentProxy.insertText(" ") }
-    @objc private func newline() { guard !busy else { return }; invalidateUndo(); textDocumentProxy.insertText("\n") }
-    @objc private func deleteOnce() { guard !busy else { return }; invalidateUndo(); textDocumentProxy.deleteBackward() }
-    @objc private func holdDelete(_ gesture: UILongPressGestureRecognizer) {
-        if gesture.state == .began {
-            deleteOnce()
-            deleteTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in self?.deleteOnce() }
-        } else if gesture.state != .changed { deleteTimer?.invalidate(); deleteTimer = nil }
+    private func insert(_ text: String) {
+        guard !busy else { return }
+        invalidateUndo(); textDocumentProxy.insertText(text); updateTypingContext()
+    }
+    private func newline() { insert("\n") }
+    private func deleteOnce() {
+        guard !busy else { return }
+        invalidateUndo(); textDocumentProxy.deleteBackward(); updateTypingContext()
+    }
+    private func doubleSpace() {
+        guard !busy else { return }
+        invalidateUndo(); textDocumentProxy.deleteBackward(); textDocumentProxy.insertText(". "); updateTypingContext()
     }
 }
