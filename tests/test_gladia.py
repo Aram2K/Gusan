@@ -62,6 +62,7 @@ def test_gladia_capable_family(model):
 
 def test_gladia_proxy_source():
     source = (Path(__file__).resolve().parents[1] / "supabase/functions/transcribe-proxy/index.ts").read_text()
+    assert 'return env("Gladia_STT") || env("GLADIA_API_KEY") || env("GLADIA_KEY") || env("GLADIA_TOKEN") || env("GLADIA_API_TOKEN");' in source
     for text in ('"solaria-1": "gladia"', '"solaria-3": "gladia"', '"solaria-fusion": "gladia"',
                  'orderFor("STT_GLADIA_ORDER", ["solaria-3", "solaria-1"])',
                  'orderFor("STT_GLADIA_FUSION_ORDER", ["solaria-fusion", "solaria-1"])',

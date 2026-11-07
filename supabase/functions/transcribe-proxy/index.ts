@@ -59,7 +59,7 @@
 // Secrets: OPENAI_TOKEN (or OPENAI_API_KEY / OPENAI_KEY), MISTRAL_STT_KEY, GOOGLE_STT_KEY (or
 //          GEMINI_KEY), ELEVENLABS_API_KEY (or ELEVENLABS_KEY / ELEVEN_API_KEY / XI_API_KEY, the first
 //          one that is not empty). At least one must be set or the proxy returns 503.
-//          GLADIA_API_KEY (or GLADIA_KEY / GLADIA_TOKEN / GLADIA_API_TOKEN, first non-empty).
+//          Gladia_STT (or GLADIA_API_KEY / GLADIA_KEY / GLADIA_TOKEN / GLADIA_API_TOKEN, first non-empty).
 //          STT_GLADIA_ORDER (solaria-3,solaria-1), STT_GLADIA_FUSION_ORDER
 //          (solaria-fusion,solaria-1): Gladia profiles, followed by the BEST order.
 //          Optional: STT_FAST_ORDER, STT_BEST_ORDER (comma-separated; an entry is a catalog id or
@@ -129,7 +129,7 @@ function own(table: Record<string, string>, key: string): string | undefined {
 }
 
 function engineKey(provider: string): string {
-  if (provider === "gladia") return env("GLADIA_API_KEY") || env("GLADIA_KEY") || env("GLADIA_TOKEN") || env("GLADIA_API_TOKEN");
+  if (provider === "gladia") return env("Gladia_STT") || env("GLADIA_API_KEY") || env("GLADIA_KEY") || env("GLADIA_TOKEN") || env("GLADIA_API_TOKEN");
   if (provider === "openai") return env("OPENAI_TOKEN") || env("OPENAI_API_KEY") || env("OPENAI_KEY");
   if (provider === "mistral") return env("MISTRAL_STT_KEY");
   if (provider === "elevenlabs") {
