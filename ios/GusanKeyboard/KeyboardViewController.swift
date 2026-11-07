@@ -99,7 +99,7 @@ final class KeyboardViewController: UIInputViewController {
         updateSurface()
     }
     private var currentContext: Context {
-        Context(document: textDocumentProxy.documentIdentifier, selected: textDocumentProxy.selectedText ?? "", before: textDocumentProxy.documentContextBeforeInput ?? "", after: textDocumentProxy.documentContextAfterInput ?? "")
+        Context(document: textDocumentProxy.documentID, selected: textDocumentProxy.selectedText ?? "", before: textDocumentProxy.documentContextBeforeInput ?? "", after: textDocumentProxy.documentContextAfterInput ?? "")
     }
     override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); updateSurface(); voice.appear(); screen.appear() }
     override func viewDidAppear(_ animated: Bool) {

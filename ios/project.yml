@@ -73,6 +73,28 @@ targets:
         com.apple.security.application-groups: [group.com.aram2k.gusan]
     dependencies:
       - package: GusanKit
+  # Simulator-only host for screenshots and manual checks of the keyboard; never embedded in the app.
+  GusanKeyboardPreview:
+    type: application
+    platform: iOS
+    sources:
+      - path: GusanKeyboard
+        excludes: ["Info.plist", "*.entitlements"]
+      - GusanKeyboardPreview
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aram2k.gusan.keyboardpreview
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        TARGETED_DEVICE_FAMILY: "1"
+        SUPPORTED_PLATFORMS: iphonesimulator
+    info:
+      path: GusanKeyboardPreview/Info.plist
+      properties:
+        CFBundleDisplayName: Gusan Keyboard Preview
+        UILaunchScreen: {}
+        GusanAppGroup: group.com.aram2k.gusan
+    dependencies:
+      - package: GusanKit
   GusanScreen:
     type: app-extension
     platform: iOS

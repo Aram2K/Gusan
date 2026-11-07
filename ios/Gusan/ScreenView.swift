@@ -19,6 +19,7 @@ final class ScreenMonitor: ObservableObject {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--gusan-debug-screen-live") {
             status = ScreenStatus(startedAt: Date().addingTimeInterval(-90), idleDeadline: Date().addingTimeInterval(510), width: 590, height: 1280, requests: 2)
+            explained = true
         }
         #endif
     }
@@ -146,6 +147,7 @@ struct ScreenView: View {
 /// Home card: one line of status and a link to the full screen.
 struct ScreenCard: View {
     @EnvironmentObject private var screen: ScreenMonitor
+    @State private var opened = false
     var body: some View {
         AppCard {
             NavigationLink { ScreenView() } label: {
@@ -159,7 +161,14 @@ struct ScreenCard: View {
                     Image(systemName: "chevron.right").foregroundStyle(.secondary).accessibilityHidden(true)
                 }.frame(minHeight: 44)
             }
-        }.onAppear { screen.refresh() }
+        }
+        .navigationDestination(isPresented: $opened) { ScreenView() }
+        .onAppear {
+            screen.refresh()
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--gusan-debug-screen-page") { opened = true }
+            #endif
+        }
     }
 }
 

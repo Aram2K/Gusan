@@ -168,7 +168,7 @@ final class VoiceKeyController: NSObject {
     func disappear() { visible = false; observer = nil; timer?.invalidate(); timer = nil; statusTask?.cancel(); statusTask = nil; statusLoadID = nil; panel.waveform.update(level: 0, animated: false); closeResult() }
     private func currentContext() -> VoiceContext? {
         guard let proxy = host?.textDocumentProxy else { return nil }
-        return VoiceContext(selected: proxy.selectedText ?? "", before: proxy.documentContextBeforeInput ?? "", after: proxy.documentContextAfterInput ?? "", documentID: proxy.documentIdentifier.uuidString)
+        return VoiceContext(selected: proxy.selectedText ?? "", before: proxy.documentContextBeforeInput ?? "", after: proxy.documentContextAfterInput ?? "", documentID: proxy.documentID.uuidString)
     }
     @objc private func tap() {
         guard !handlingTap else { return }; handlingTap = true

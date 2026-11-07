@@ -41,22 +41,30 @@ final class ScreenKeyboardController {
     private weak var host: UIInputViewController?
     private let channel: ScreenChannel
     private let settings: ScreenSettings
+    private let group: String?
     private var observer: DarwinObserver?
     private var timer: Timer?
     private var visible = false
     init(host: UIInputViewController, store: SessionStore, pasteboardAllowed: @escaping () -> Bool) {
         self.host = host
+        group = store.resolution.chosen
         channel = ScreenChannel(container: store.resolution.container, pasteboardAllowed: pasteboardAllowed)
         settings = ScreenSettings(group: store.resolution.chosen, pasteboardAccessAllowed: pasteboardAllowed)
         chip.addTarget(self, action: #selector(toggle), for: .touchUpInside)
     }
     /// Secure fields never use the screen (iOS blanks them in the broadcast anyway).
     var secureField: Bool { host?.textDocumentProxy.isSecureTextEntry == true }
-    var available: Bool { live && explained && !secureField && host?.hasFullAccess == true }
+    /// Debug-only: `debugScreenPreview` in the shared defaults fakes a live broadcast so the chip can be screenshotted in the Simulator host.
+    private var previewEnabled = false
+    var available: Bool { previewEnabled || (live && explained && !secureField && host?.hasFullAccess == true) }
     var frames: ScreenFrameProvider { ScreenChannelFrameProvider(channel: channel) }
     var diagnostics: String { "Screen channel: " + channel.diagnosticsDescription }
     func appear() {
         visible = true
+        #if DEBUG
+        previewEnabled = group.flatMap { UserDefaults(suiteName: $0) }?.bool(forKey: "debugScreenPreview") == true || UserDefaults.standard.bool(forKey: "debugScreenPreview")
+        if previewEnabled { live = true; explained = true; armed = true; onChange?() }
+        #endif
         observer = channel.observe(.status) { [weak self] in self?.refresh() }
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.refresh() }
@@ -64,6 +72,7 @@ final class ScreenKeyboardController {
     }
     func disappear() { visible = false; observer = nil; timer?.invalidate(); timer = nil }
     func refresh() {
+        if previewEnabled { return }
         guard visible, host?.hasFullAccess == true else { setLive(false); return }
         explained = settings.explained
         setLive(channel.isLive())

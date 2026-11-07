@@ -76,6 +76,13 @@ and **10 App IDs per 7 days**; Gusan's app, keyboard and Gusan Screen extension 
    then return to the keyboard. Tap stop to process your recording, or cancel
    while transcribing/thinking. Results return to the keyboard for insertion.
 
+**Simulator preview of the keyboard.** Third-party keyboards cannot be enabled in the
+Simulator, so the `GusanKeyboardPreview` scheme (Simulator-only, never embedded in the
+.ipa) hosts `KeyboardViewController` inside a plain app. Launch it with `--screen` to
+show the Screen chip armed. Debug launch arguments for the app:
+`--gusan-debug-screen-page` opens Home › Gusan Screen; `--gusan-debug-screen-live`
+fakes a live broadcast on that page.
+
 6. **Gusan Screen:** open Home › Gusan Screen, read what is shared, then Start.
    While the red indicator shows, the keyboard gets a **Screen** chip; tap it,
    type "reply to this" (or pick a suggestion) and Run. One picture of the
