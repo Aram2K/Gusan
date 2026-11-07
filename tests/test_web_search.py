@@ -91,18 +91,27 @@ def test_actions_only_questions_opt_in(mode):
 
 def test_server_contract():
     src = SERVER.read_text()
-    for name in ("Linkup_web", "LINKUP_API_KEY", "LINKUP_KEY", "LINKUP_TOKEN", "LINKUP_TIMEOUT_MS", "LINKUP_DEPTH"):
+    for name in ("Linkup_web", "LINKUP_API_KEY", "LINKUP_KEY", "LINKUP_TOKEN", "LINKUP_TIMEOUT_MS", "LINKUP_DEPTH", "LINKUP_DECIDE_TIMEOUT_MS"):
         assert name in src
     assert '["Linkup_web", "LINKUP_API_KEY", "LINKUP_KEY", "LINKUP_TOKEN"]' in src
     assert 'body.web_search === true' in src
     assert 'AbortSignal.timeout(LINKUP_TIMEOUT_MS)' in src
-    assert 'catch { console.log("Linkup unavailable - answering without web search")' in src
+    assert 'catch { results = []; }' in src
+    assert 'AbortSignal.timeout(ms)' in src
     assert '"Access-Control-Expose-Headers": "X-Web-Sources, X-Answer-Family"' in src
     assert 'encodeURIComponent(JSON.stringify(sources))' in src
     assert 'JSON.stringify({ text, sources })' in src
     for cue in ("exchange rate", "interest rate", "inflation", "forecast", "market cap"):
         assert cue in src
     assert 'liveData.test(q)' in src
+
+
+def test_meeting_chat_baseline_has_no_web_exception():
+    messages = action_api.build_messages("<question>Who is the current CEO of OpenAI?</question>", "meeting_chat")
+    assert "Answer only from this meeting." in messages[0]["content"]
+    assert "Never guess or invent names, numbers, dates or quotes." in messages[0]["content"]
+    assert "Linkup" not in messages[0]["content"]
+    assert "web results" not in messages[0]["content"]
 
 
 def test_heuristic_runtime(tmp_path):
@@ -131,6 +140,66 @@ def test_heuristic_runtime(tmp_path):
     assert [bool(v) for v in json.loads(out.stdout)] == list(cases.values())
 
 
+def test_web_decisions_deno(tmp_path):
+    deno = shutil.which("deno")
+    if not deno:
+        pytest.skip("Deno unavailable")
+    src = SERVER.read_text()
+    functions = src[src.index("export function webSearchQuery"):src.index("type WebResult")]
+    script = tmp_path / "decisions.ts"
+    script.write_text(functions + r'''
+function equal(a: unknown, b: unknown) {
+  if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(JSON.stringify({actual:a, expected:b}));
+}
+const explicit = [
+  ["Please search the web for Acme, thanks", "Acme"],
+  ["search online for Acme", "Acme"], ["search internet for Acme", "Acme"],
+  ["Can you please google Acme?", "Acme?"], ["look up Acme please", "Acme"],
+  ["check online Acme", "Acme"], ["find online Acme", "Acme"],
+  ["can you search Acme", "Acme"], ["search for Acme", "Acme"],
+  ["browse Acme", "Acme"], ["what does the internet say about Acme", "Acme"],
+  ["cherche sur internet Acme", "Acme"], ["busca en internet Acme", "Acme"],
+  ["such im Internet Acme bitte", "Acme"], ["search the web", "search the web"],
+];
+for (const [question, query] of explicit) {
+  equal(explicitWebQuery(question), query);
+  const d = await decideWebSearch(question, "secret context", () => { throw new Error("must not classify"); });
+  equal([d.source, d.query, d.classifier_ms], ["explicit", query, 0]);
+}
+equal(explicitWebQuery("Summarize the discussion"), "");
+equal(explicitWebQuery("google " + "x".repeat(500)).length, 400);
+equal(parseWebDecision('```json\n{"search":true,"query":"Acme facts"}\n```'), {search:true, query:"Acme facts"});
+for (const raw of ["garbage", "{}", "null", '{"search":"true","query":"x"}', '{"search":true}']) equal(parseWebDecision(raw), null);
+equal(parseWebDecision(JSON.stringify({search:true, query:"word ".repeat(20)}))?.query.split(" ").length, 12);
+let calls = 0;
+const yes = await decideWebSearch("How big is Acme?", "x".repeat(2000), async (q, context) => {
+  calls++; equal(q, "How big is Acme?"); equal(context.length, 1200);
+  return {search:true, query:"Acme size"};
+});
+equal([yes.source, yes.query, calls], ["model", "Acme size", 1]);
+for (const q of ["What should I say now?", "Summarize our decisions", "Who mentioned today's price?"]) {
+  const d = await decideWebSearch(q, "meeting", async () => ({search:false, query:""}));
+  equal([d.source, d.query], ["model", ""]);
+}
+const empty = await decideWebSearch("How big is Acme?", "", async () => ({search:true, query:""}));
+equal(empty.query, "How big is Acme?");
+for (const fail of [async () => { throw new Error("network"); },
+                   async () => { throw new DOMException("timeout", "TimeoutError"); },
+                   async () => parseWebDecision("garbage")]) {
+  const d = await decideWebSearch("What is the latest price?", "", fail);
+  equal([d.source, d.query], ["heuristic", "What is the latest price?"]);
+  equal((await decideWebSearch("Summarize this discussion", "", fail)).source, "none");
+}
+for (const q of ["", " hi ", "short?"]) {
+  equal(await decideWebSearch(q, "", () => { throw new Error("must not classify"); }), {query:"", source:"none", classifier_ms:0});
+}
+console.log("Deno web decision regressions passed");
+''')
+    out = subprocess.run([deno, "run", str(script)], capture_output=True, text=True, timeout=20)
+    assert out.returncode == 0, out.stderr
+    assert "Deno web decision regressions passed" in out.stdout
+
+
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("parts", [False, True])
 @pytest.mark.parametrize("keys", [
@@ -149,36 +218,66 @@ def test_server_linkup_runtime(tmp_path, stream, parts, keys):
     (tmp_path / "proxy.mts").write_text(src)
     (tmp_path / "stub_supabase.mjs").write_text(STUB_SUPABASE)
     (tmp_path / "stub_anthropic.mjs").write_text(STUB_ANTHROPIC)
-    harness = HARNESS.replace('const text = r.empty', '''if (host === "other") return new Response(JSON.stringify({results: [
+    harness = HARNESS.replace('const text = r.empty', '''if (body?.max_completion_tokens === 60 || body?.max_tokens === 60) {
+      return new Response(JSON.stringify({choices:[{message:{content:r.decision ?? "garbage"}}]}));
+    }
+    if (host === "other") return new Response(JSON.stringify({results: [
       {type:"image", name:"no", url:"https://example.com/img"},
       {type:"text", name:"unsafe", url:"javascript:alert(1)", content:"no"},
       {type:"text", name:"Example", url:"https://example.com/news", content:"facts"}]}));
     const text = r.empty''').replace('family: res.headers.get("X-Answer-Family"),',
         'family: res.headers.get("X-Answer-Family"), sources: res.headers.get("X-Web-Sources"),')
     harness = harness.replace("globalThis.Deno =", "globalThis.__testDeno =")
-    (tmp_path / "harness.mjs").write_text('import process from "node:process";\n' + harness)
     msg = [{"role": "user", "content": [{"type": "text", "text": "Private meeting notes\nUser's question: latest Acme news?"},
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}}]}]
     if not parts:
         msg[0]["content"] = msg[0]["content"][0]["text"]
+    meeting_messages = action_api.build_messages(
+        "Private transcript\n<question>Who is the current CEO of OpenAI?</question>", "meeting_chat")
     requests = [req("live_assist", stream=stream, messages=msg, web_search=True),
                 req("live_assist", stream=stream, messages=msg),
                 req("live_assist", stream=stream, messages=msg, web_search=True),
                 req("live_assist", stream=stream, messages=[{"role": "user", "content": "Private latest news in transcript"}], web_search=True),
                 req("meeting_chat", stream=stream, messages=[{"role": "user", "content": "Private latest news in transcript"}], web_search=True),
                 req("live_assist", stream=stream, messages=[{"role": "user", "content": "Private transcript and docs"}], web_search=True, web_query=" latest Acme news? "),
-                req("meeting_chat", stream=stream, messages=[{"role": "user", "content": "Private transcript\n<question>latest Acme news?</question>"}], web_search=True)]
+                req("meeting_chat", stream=stream, messages=[{"role": "user", "content": "Private transcript\n<question>latest Acme news?</question>"}], web_search=True),
+                req("meeting_chat", stream=stream, messages=meeting_messages, web_search=True,
+                    web_query="Who is the current CEO of OpenAI?"),
+                req("meeting_chat", stream=stream, messages=meeting_messages),
+                req("meeting_chat", stream=stream, messages=meeting_messages, web_search=True),
+                req("meeting_chat", stream=stream, messages=meeting_messages, web_search=True),
+                req("live_assist", stream=stream, messages=msg, web_search=True, web_query="How big is Acme?"),
+                req("meeting_chat", stream=stream, messages=meeting_messages, web_search=True,
+                    web_query="Who mentioned today's price?"),
+                req("live_assist", stream=stream, messages=msg, web_search=True),
+                req("live_assist", stream=stream, messages=msg, web_search=True),
+                req("live_assist", stream=stream, messages=msg, web_search=True),
+                req("live_assist", stream=stream, messages=msg, web_search=True, web_query="Please google Acme size")]
     requests[2]["behave"] = {"other": [{"status": 500}]}
+    requests[9]["behave"] = {"other": [{"status": 500}]}
+    requests[10]["behave"] = {"other": [{"empty_results": True}]}
+    requests[11]["behave"] = {"openai": [{"decision": '{"search":true,"query":"Acme size"}'}]}
+    requests[12]["behave"] = {"openai": [{"decision": '{"search":false,"query":""}'}]}
+    requests[13]["behave"] = {"openai": [{"status": 503}, {}]}
+    requests[14]["behave"] = {"openai": [{"throw": "private network failure"}, {}]}
+    requests[15]["behave"] = {"openai": [{"stall": True}, {}]}
     for request in requests:
         for key in ("web_search", "web_query"):
             if key in request:
                 request["body"][key] = request.pop(key)
-    scenarios = [{"id": "web", "env": {"OPENAI_TOKEN": "test-openai", **keys}, "requests": requests}]
+    harness = harness.replace('if (host === "other") return',
+        'if (host === "other" && r.empty_results) return new Response(JSON.stringify({results: []}));\n    if (host === "other") return')
+    (tmp_path / "harness.mjs").write_text('import process from "node:process";\n' + harness)
+    scenarios = [{"id": "web", "env": {"OPENAI_TOKEN": "test-openai", "LINKUP_DECIDE_TIMEOUT_MS": "300", **keys}, "requests": requests},
+                 {"id": "no_key", "env": {"OPENAI_TOKEN": "test-openai"}, "requests": [requests[7]]}]
     (tmp_path / "scenarios.json").write_text(json.dumps(scenarios))
     out = subprocess.run([deno, "run", "--allow-all", str(tmp_path / "harness.mjs"),
                           tmp_path.as_uri(), str(tmp_path / "scenarios.json")], capture_output=True, text=True, timeout=30)
     assert out.returncode == 0, out.stderr
-    good, old, failed, no_question_live, no_question_chat, explicit, tagged = json.loads(out.stdout)["web"]
+    results = json.loads(out.stdout)
+    (good, old, failed, no_question_live, no_question_chat, explicit, tagged, meeting_web,
+     meeting_off, meeting_failed, meeting_empty, model_yes, model_no, unavailable,
+     network_error, timeout, direct) = results["web"]
     assert good["status"] == old["status"] == failed["status"] == 200
     calls = good["calls"]
     search = next(c for c in calls if "linkup.so" in c["url"])
@@ -186,7 +285,7 @@ def test_server_linkup_runtime(tmp_path, stream, parts, keys):
     assert search["body"] == {"q": "latest Acme news?", "depth": "flash", "outputType": "searchResults", "maxResults": 5}
     sources = [{"title": "Example", "url": "https://example.com/news"}]
     assert action_api.parse_web_sources(good["sources"]) == sources
-    upstream = next(c for c in calls if c["host"] == "openai")
+    upstream = next(c for c in calls if c["host"] == "openai" and c["body"].get("max_completion_tokens") != 60)
     assert len(upstream["body"]["messages"]) == len(msg)
     content = upstream["body"]["messages"][-1]["content"]
     if parts:
@@ -201,6 +300,43 @@ def test_server_linkup_runtime(tmp_path, stream, parts, keys):
         assert not any("linkup.so" in c["url"] for c in response["calls"])
     for response in (explicit, tagged):
         assert next(c for c in response["calls"] if "linkup.so" in c["url"])["body"]["q"] == "latest Acme news?"
+    meeting_upstream = next(c for c in meeting_web["calls"] if c["host"] == "openai" and c["body"].get("max_completion_tokens") != 60)["body"]["messages"]
+    assert len(meeting_upstream) == len(meeting_messages)
+    system = meeting_upstream[0]["content"]
+    assert system.startswith(action_api.MEETING_CHAT_SYSTEM + "\n\n")
+    assert "exception to the answer-only-from-this-meeting rule" in system
+    assert "cite each web-supported fact inline as [1], [2]" in system
+    assert "prefer the meeting transcript and notes" in system
+    assert "Never invent meeting content or attribute web facts to the meeting" in system
+    assert "Use only the supplied results for outside facts" in system
+    assert "Web search results (Linkup)" in meeting_upstream[-1]["content"]
+    for response in (meeting_off, meeting_failed, meeting_empty, results["no_key"][0]):
+        sent = next(c for c in response["calls"] if c["host"] == "openai" and c["body"].get("max_completion_tokens") != 60)["body"]["messages"]
+        assert sent == meeting_messages
+        assert action_api.parse_web_sources(response["sources"]) == []
+    for response in (old, no_question_live, no_question_chat, results["no_key"][0], direct):
+        assert not any(c["body"].get("max_completion_tokens") == 60 for c in response["calls"] if c["body"])
+    assert next(c for c in model_yes["calls"] if "linkup.so" in c["url"])["body"]["q"] == "Acme size"
+    assert not any("linkup.so" in c["url"] for c in model_no["calls"])
+    for response in (unavailable, network_error, timeout):
+        assert response["status"] == 200
+        assert next(c for c in response["calls"] if "linkup.so" in c["url"])["body"]["q"] == "latest Acme news?"
+    for response, source in ((good, "heuristic"), (model_yes, "model"), (model_no, "model"),
+                             (direct, "explicit"), (timeout, "heuristic")):
+        log = [line for line in response["logs"] if line.startswith("Linkup decision ")]
+        assert len(log) == 1
+        info = json.loads(log[0].split("Linkup decision ")[1])
+        assert info["source"] == source
+        assert set(info) == {"source", "classifier_ms", "search_ms", "results"}
+    classifier = [c for c in good["calls"] if c["host"] == "openai" and c["body"].get("max_completion_tokens") == 60]
+    assert len(classifier) == 1
+    assert classifier[0]["body"]["stream"] is False
+    classifier_input = json.loads(classifier[0]["body"]["messages"][-1]["content"])
+    assert classifier_input["question"] == "latest Acme news?"
+    assert len(classifier_input["context"]) <= 1200
+    assert "image_url" not in classifier_input["context"]
+    assert not any("private network failure" in line for line in network_error["logs"])
+    assert "exception to the answer-only-from-this-meeting rule" not in json.dumps(upstream["body"]["messages"])
     assert "test-linkup" not in "".join(good["logs"])
     assert "latest Acme news" not in "".join(good["logs"])
     if not stream:
