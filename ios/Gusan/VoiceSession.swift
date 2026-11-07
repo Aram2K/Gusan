@@ -171,7 +171,7 @@ final class VoiceSession: ObservableObject {
                     } catch is CancellationError {} catch { execute(machine.handle(.failed(id, error.localizedDescription))) }
                 }
             case .runAction(let id, let transcript, let context):
-                if machine.action == .automatic, let intent = AgentIntent.detect(transcript), let agentHandoff {
+                if machine.action == .automatic, !SettingsStore(group: store.resolution.chosen).privacyMode, let intent = AgentIntent.detect(transcript), let agentHandoff {
                     work = Task {
                         do {
                             try await agentHandoff(intent, context?.selected ?? "")

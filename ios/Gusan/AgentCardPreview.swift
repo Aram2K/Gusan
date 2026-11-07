@@ -28,7 +28,9 @@ struct AgentCardPreview: View {
             case "confirm": card.render(.task(demo[1]))
             case "result": card.render(.task(demo[2]))
             case "failed": card.render(.task(demo[3]))
-            case "error": card.render(.failed(message: AgentError.tooManyActive.errorDescription ?? ""))
+            case "error": card.canRetry = true; card.render(.failed(message: AgentError.tooManyActive.errorDescription ?? "", retryable: false))
+            case "expired": card.canRetry = true; card.render(.task(AgentTask(mode: .do, status: .cancelled, title: demo[1].title, errorCode: "confirmation_expired", createdAt: Date())))
+            case "reconfirm": card.reconfirm = true; card.render(.task(demo[1]))
             default:
                 var running = demo[0]; running.steps = [AgentStep(text: "Comparing prices on three airline sites")]
                 card.render(.task(running))

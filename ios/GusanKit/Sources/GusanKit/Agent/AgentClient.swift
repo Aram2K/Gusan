@@ -51,7 +51,7 @@ public final class AgentClient: AgentService {
     public static func listRequest(limit: Int, token: String) -> URLRequest {
         var components = URLComponents(url: tableURL, resolvingAgainstBaseURL: false)!
         components.queryItems = [
-            URLQueryItem(name: "select", value: "id,mode,status,title,steps,result,outcome,error_code,created_at,updated_at,finished_at,deadline_at,seen_at"),
+            URLQueryItem(name: "select", value: "id,mode,status,title,steps,confirmation,result,outcome,error_code,created_at,updated_at,finished_at,deadline_at,seen_at"),
             URLQueryItem(name: "order", value: "created_at.desc"),
             URLQueryItem(name: "limit", value: String(max(1, min(limit, 100)))),
         ]
@@ -133,8 +133,11 @@ public final class StubAgentService: AgentService {
     public struct Scenario {
         public var pollsUntilProgress: Int = 1
         public var pollsUntilDone: Int = 3
+        /// Re-surface the same confirmation once after it was confirmed (PR #18: uncertain delivery → "confirm again").
+        public var reconfirmOnce = false
         public init() {}
     }
+    private var reconfirmed: Set<UUID> = []
 
     private var tasks: [UUID: AgentTask] = [:]
     private var polls: [UUID: Int] = [:]
@@ -161,7 +164,8 @@ public final class StubAgentService: AgentService {
         let count = (polls[id] ?? 0) + 1
         polls[id] = count
         if count >= scenario.pollsUntilDone {
-            if task.mode == .do, task.confirmation == nil, task.outcome == nil {
+            if task.mode == .do, task.confirmation == nil, task.outcome == nil || (scenario.reconfirmOnce && !reconfirmed.contains(id)) {
+                if task.outcome != nil { reconfirmed.insert(id) }
                 task.status = .awaitingConfirmation
                 task.confirmation = AgentConfirmation(summary: "Submit the booking form on the restaurant's site for 2 people, Friday 19:30, under your name. No payment is taken.", actionKind: "submit")
             } else {

@@ -228,7 +228,7 @@ final class KeyboardViewController: UIInputViewController {
             if surface != .instruction { showTyping() }
             showMessage("Sign in to use Gusan", detail: store.diagnostics().summary, accessory: "Sign in"); return
         }
-        if let request = action.agentRequest(contextText: context.text), let intent = AgentIntent.detect(request) {
+        if !settings.privacyMode, let request = action.agentRequest(contextText: context.text), let intent = AgentIntent.detect(request) {
             instructionContext = nil; instruction = ""; showTyping()
             agent.start(intent, context: action.isCustomInstruction ? context.text : ""); return
         }

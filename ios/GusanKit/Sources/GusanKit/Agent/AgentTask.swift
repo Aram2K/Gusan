@@ -122,6 +122,12 @@ public struct AgentTask: Codable, Equatable, Identifiable {
     }
 
     public var latestStep: String? { steps.last?.text }
+    /// Cancelled because the 15-minute confirmation window (capped at the task deadline) ran out.
+    public var confirmationExpired: Bool { status == .cancelled && errorCode == "confirmation_expired" }
+    /// Server limits (PR #18): at most this many non-terminal tasks per user, and starts per rolling 24 h.
+    public static let maxActive = 2
+    public static let maxPerDay = 40
+    public static let confirmationWindow: TimeInterval = 15 * 60
     public var needsAttention: Bool { status == .awaitingConfirmation || (status.isTerminal && seenAt == nil) }
     /// One line for cards and notifications.
     public var summaryLine: String {
@@ -131,8 +137,8 @@ public struct AgentTask: Codable, Equatable, Identifiable {
         case .awaitingConfirmation: return confirmation.map { "Needs your OK: " + $0.summary } ?? "Needs your OK before continuing"
         case .completed: return result.map { MarkdownBlocks.firstLine($0.markdown) } ?? "Finished"
         case .failed: return AgentError.message(forCode: errorCode) ?? "The task failed"
-        case .cancelled: return errorCode == "confirmation_expired" ? "Cancelled: the confirmation expired" : "Cancelled"
-        case .timedOut: return "Ran out of time"
+        case .cancelled: return confirmationExpired ? "Cancelled: the confirmation expired after 15 minutes" : "Cancelled"
+        case .timedOut: return "Ran out of time before finishing"
         }
     }
 
@@ -158,7 +164,7 @@ public struct AgentTask: Codable, Equatable, Identifiable {
 
 public enum AgentError: Error, LocalizedError, Equatable {
     case code(String, status: Int)
-    case notConfigured, busy, tooManyActive, quotaExceeded, notAwaitingConfirmation, notFound, privacyMode
+    case notConfigured, busy, tooManyActive, quotaExceeded, notAwaitingConfirmation, notFound, privacyMode, proRequired, unauthorized
 
     public init(code: String, status: Int) {
         switch code {
@@ -169,6 +175,8 @@ public enum AgentError: Error, LocalizedError, Equatable {
         case "not_awaiting_confirmation": self = .notAwaitingConfirmation
         case "not_found": self = .notFound
         case "privacy_mode": self = .privacyMode
+        case "pro_required": self = .proRequired
+        case "unauthorized": self = .unauthorized
         default: self = .code(code, status: status)
         }
     }
@@ -176,12 +184,25 @@ public enum AgentError: Error, LocalizedError, Equatable {
         switch self {
         case .notConfigured: return "Agent tasks aren't set up on Gusan Cloud yet."
         case .busy: return "The agents are busy right now. Try again in a minute."
-        case .tooManyActive: return "Two tasks are already running. Wait for one to finish."
-        case .quotaExceeded: return "You've reached today's limit of agent tasks."
-        case .notAwaitingConfirmation: return "This task isn't waiting for confirmation."
+        case .tooManyActive: return "You already have \(AgentTask.maxActive) tasks running. Wait for one to finish, or cancel it in Activity."
+        case .quotaExceeded: return "You've reached today's limit of \(AgentTask.maxPerDay) agent tasks. It resets 24 hours after the first one."
+        case .notAwaitingConfirmation: return "This task isn't waiting for confirmation any more."
         case .notFound: return "That task no longer exists."
         case .privacyMode: return "Agent tasks are off in Privacy Mode."
-        case .code(let code, _): return Self.message(forCode: code) ?? "The task failed (\(code))."
+        case .proRequired: return "Gusan Pro is needed for agent tasks."
+        case .unauthorized: return "Sign in to use agent tasks."
+        case .code(let code, let status):
+            if status == 400 { return "The request wasn't accepted (\(code))." }
+            if status == 413 { return "That request is too large. Shorten the text or remove images." }
+            return Self.message(forCode: code) ?? "The task failed (\(code))."
+        }
+    }
+    /// Worth trying again right away (the server said so, or the network blinked).
+    public var isRetryable: Bool {
+        switch self {
+        case .busy: return true
+        case .code(let code, let status): return code == "upstream_error" || code == "storage_error" || code == "bad_response" || status >= 500
+        default: return false
         }
     }
     /// Friendly text for a task row's `error_code` (H's enum and ours). nil for unknown codes.
@@ -190,7 +211,13 @@ public enum AgentError: Error, LocalizedError, Equatable {
         case nil, "": return nil
         case "agent_capacity": return "The agents were busy; try again."
         case "upstream_error": return "The agent service had a problem."
-        case "confirmation_expired": return "The confirmation expired."
+        case "confirmation_expired": return "The confirmation expired after 15 minutes."
+        case "timeout": return "The task ran out of time."
+        case "environment_error": return "The agent's browser hit a problem."
+        case "no_answer": return "The agent finished without an answer."
+        case "answer_validation": return "The agent's answer couldn't be read."
+        case "insufficient_credit": return "The agent service is out of credit."
+        case "internal", "storage_error": return "Something went wrong on Gusan Cloud."
         case "max_steps_reached": return "The task took too many steps."
         case "blocked", "content_policy": return "The agent stopped: that action isn't allowed."
         default: return "The task failed (\(code!))."

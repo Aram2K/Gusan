@@ -34,8 +34,13 @@ final class AgentKeyboardController {
     private(set) var task: AgentTask?
     private var pending: JobConfirmation?
     private var error: String?
+    private var errorRetryable = false
     private var job: Task<Void, Never>?
     private var visible = false
+    private var lastIntent: AgentIntent?
+    private var lastContext = ""
+    private var confirmations = 0
+    private lazy var settings = SettingsStore(group: store.resolution.chosen)
 
     init(store: SessionStore, auth: AuthClient, host: UIInputViewController) {
         self.store = store; self.auth = auth; self.host = host
@@ -46,6 +51,7 @@ final class AgentKeyboardController {
         card.onOpenApp = { [weak self] in self?.openApp() }
         card.onDismiss = { [weak self] in self?.dismiss() }
         card.onMinimise = { [weak self] in self?.hide() }
+        card.onRetry = { [weak self] in self?.retry() }
         card.isHidden = true
     }
 
@@ -55,6 +61,8 @@ final class AgentKeyboardController {
 
     func appear() {
         visible = true
+        settings.refresh()
+        if settings.privacyMode { if isActive { dismiss() }; return }
         #if DEBUG
         // Simulator screenshots: the app seeds a demo instruction on a named pasteboard (`--gusan-keyboard-agent-demo`).
         if task == nil, let board = UIPasteboard(name: UIPasteboard.Name("gusan.debug.agentDemo"), create: false), let demo = board.string, let intent = AgentIntent.detect(demo) {
@@ -75,7 +83,8 @@ final class AgentKeyboardController {
 
     func start(_ intent: AgentIntent, context: String) {
         job?.cancel(); pending = nil
-        error = nil
+        error = nil; errorRetryable = false
+        lastIntent = intent; lastContext = context; confirmations = 0
         task = AgentTask(mode: intent.mode, status: .queued, title: intent.title)
         show()
         render()
@@ -89,9 +98,15 @@ final class AgentKeyboardController {
         if let task, !task.status.isTerminal || task.seenAt == nil { onStatus?(toolbarLine(task), "View") } else { onStatus?(nil, nil) }
     }
 
+    private func retry() {
+        guard let lastIntent else { dismiss(); return }
+        start(lastIntent, context: lastContext)
+    }
+
     private func confirm() {
         guard let pending else { return }
         self.pending = nil
+        confirmations += 1
         card.setBusy(true)
         Task { await pending.resolve(true) }
     }
@@ -161,6 +176,7 @@ final class AgentKeyboardController {
                 if self.task?.status.isTerminal == true { self.render(); return }
                 if case .resume = start, (error as? AgentError) == .notFound { self.tracker.activeTaskID = nil; self.task = nil; self.render(); return }
                 self.task = nil; self.error = (error as? AgentError)?.errorDescription ?? error.localizedDescription
+                self.errorRetryable = (error as? AgentError)?.isRetryable ?? true
                 UIAccessibility.post(notification: .announcement, argument: self.error)
                 self.render()
             }
@@ -196,7 +212,9 @@ final class AgentKeyboardController {
     }
 
     private func render() {
-        if let error { card.render(.failed(message: error)); return }
+        card.canRetry = lastIntent != nil
+        card.reconfirm = confirmations > 0
+        if let error { card.render(.failed(message: error, retryable: errorRetryable)); return }
         guard let task else { card.render(.empty); return }
         card.render(.task(task))
     }
@@ -215,8 +233,13 @@ final class AgentKeyboardController {
 /// Compact card that replaces the keys: progress, confirmation, result or error. Every control is
 /// at least 44pt tall; VoiceOver gets labels, hints and announcements.
 final class AgentCardView: UIView {
-    enum State { case empty, task(AgentTask), failed(message: String) }
+    enum State { case empty, task(AgentTask), failed(message: String, retryable: Bool) }
 
+    /// Whether "Run again"/"Retry" can restart the same request (the controller still has the intent).
+    var canRetry = false
+    /// The server asked for the same confirmation again (its first delivery was uncertain).
+    var reconfirm = false
+    var onRetry: (() -> Void)?
     var onConfirm: (() -> Void)?
     var onCancel: (() -> Void)?
     var onInsert: (() -> Void)?
@@ -295,11 +318,14 @@ final class AgentCardView: UIView {
         switch state {
         case .empty:
             title.text = nil; status.text = nil; body.text = nil; icon.image = nil; spinner.stopAnimating()
-        case .failed(let message):
+        case .failed(let message, let retryable):
             icon.image = UIImage(systemName: "exclamationmark.triangle.fill"); icon.tintColor = theme.danger
+            icon.isHidden = false
             title.text = "Couldn't start the task"; status.text = nil; body.text = message
             spinner.stopAnimating()
-            buttons = [(primary, "OK", true)]
+            if retryable, canRetry { buttons = [(secondary, "OK", false), (primary, "Retry", true)] }
+            else if message.contains("Activity") { buttons = [(secondary, "OK", false), (primary, "Open in app", true)] }
+            else { buttons = [(primary, "OK", true)] }
         case .task(let task):
             title.text = task.title
             let running = task.status == .queued || task.status == .running
@@ -312,10 +338,14 @@ final class AgentCardView: UIView {
                 buttons = [(secondary, "Cancel", false)]
             case .awaitingConfirmation:
                 icon.image = UIImage(systemName: "hand.raised.fill"); icon.tintColor = theme.brandOrange
-                status.text = task.confirmation?.kindLabel ?? "Needs your OK"
-                body.text = (task.confirmation?.summary ?? "The agent wants to continue.") + "\n\nNothing is submitted, bought or sent until you confirm."
-                buttons = [(secondary, "Cancel", false), (primary, "Confirm", true)]
-                announce = "Needs your OK. " + (task.confirmation?.summary ?? "")
+                status.text = reconfirm ? "Confirm again" : (task.confirmation?.kindLabel ?? "Needs your OK")
+                var text = task.confirmation?.summary ?? "The agent wants to continue."
+                if reconfirm { text = "Your first confirmation may not have reached the agent. Nothing was done twice.\n\n" + text }
+                text += "\n\nNothing is submitted, bought or sent until you confirm. This request expires after 15 minutes"
+                if let deadline = task.deadlineAt { text += " (and no later than \(Self.clock.string(from: deadline)))" }
+                body.text = text + "."
+                buttons = [(secondary, "Cancel", false), (primary, reconfirm ? "Confirm again" : "Confirm", true)]
+                announce = (reconfirm ? "Confirm again. " : "Needs your OK. ") + (task.confirmation?.summary ?? "")
             case .completed:
                 icon.image = UIImage(systemName: "checkmark.circle.fill"); icon.tintColor = theme.success
                 status.text = "Done · " + (task.mode == .research ? "Research" : "Do-it task")
@@ -326,9 +356,10 @@ final class AgentCardView: UIView {
             case .failed, .timedOut, .cancelled:
                 icon.image = UIImage(systemName: task.status == .cancelled ? "xmark.circle.fill" : "exclamationmark.triangle.fill")
                 icon.tintColor = task.status == .cancelled ? .gray : theme.danger
-                status.text = task.status.label
-                body.text = task.summaryLine
+                status.text = task.confirmationExpired ? "Confirmation expired" : task.status.label
+                body.text = task.confirmationExpired ? "The agent waited 15 minutes for your OK and then stopped. Nothing was submitted, bought or sent." : task.summaryLine
                 buttons = [(secondary, "Dismiss", false), (primary, "Open in app", true)]
+                if canRetry, task.status != .cancelled || task.confirmationExpired { buttons = [(secondary, "Dismiss", false), (tertiary, "Open in app", false), (primary, "Run again", true)] }
             }
         }
         for button in [primary, secondary, tertiary] { button.isHidden = true }
@@ -344,13 +375,16 @@ final class AgentCardView: UIView {
 
     private func hint(for name: String) -> String {
         switch name {
-        case "Confirm": return "Lets the agent take exactly the action described"
+        case "Confirm", "Confirm again": return "Lets the agent take exactly the action described"
         case "Cancel": return "Stops the task; nothing is submitted"
+        case "Retry", "Run again": return "Starts the same request again"
         case "Insert": return "Pastes the result at the cursor"
         case "Open in app": return "Shows the full result in the Gusan app"
         default: return "Closes this card"
         }
     }
+
+    static let clock: DateFormatter = { let f = DateFormatter(); f.timeStyle = .short; f.dateStyle = .none; return f }()
 
     override func layoutSubviews() {
         super.layoutSubviews()
@@ -368,13 +402,16 @@ final class AgentCardView: UIView {
         let width = count > 0 ? (w - 24 - gap * (count - 1)) / count : 0
         for (index, entry) in buttons.enumerated() {
             entry.0.frame = CGRect(x: 12 + CGFloat(index) * (width + gap), y: sheet.bounds.height - 44 - 10, width: width, height: 44)
+            entry.0.titleLabel?.font = .systemFont(ofSize: buttons.count > 2 ? 14 : 15, weight: .semibold)
+            entry.0.titleLabel?.adjustsFontSizeToFitWidth = true; entry.0.titleLabel?.minimumScaleFactor = 0.8
         }
     }
 
     @objc private func minimisePressed() { onMinimise?() }
     @objc private func buttonPressed(_ sender: UIButton) {
         switch sender.currentTitle {
-        case "Confirm": onConfirm?()
+        case "Confirm", "Confirm again": onConfirm?()
+        case "Retry", "Run again": onRetry?()
         case "Cancel": onCancel?()
         case "Insert": onInsert?()
         case "Open in app": onOpenApp?()

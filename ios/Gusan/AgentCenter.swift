@@ -42,6 +42,18 @@ final class AgentCenter: NSObject, ObservableObject {
     }
 
     var signedIn: Bool { model.session != nil }
+    var privacyMode: Bool { model.settings.privacyMode }
+    var activeCount: Int { tasks.filter { !$0.status.isTerminal }.count }
+    var atActiveLimit: Bool { activeCount >= AgentTask.maxActive }
+    /// Tasks the user confirmed from this device; if one is awaiting again, the server is asking to confirm again.
+    @Published private(set) var confirmedIDs: Set<UUID> = []
+    func needsReconfirm(_ task: AgentTask) -> Bool { task.status == .awaitingConfirmation && confirmedIDs.contains(task.id) }
+
+    func setPrivacyMode(_ on: Bool) {
+        objectWillChange.send()
+        model.settings.privacyMode = on
+        if on { poller?.cancel(); poller = nil; tasks = []; error = nil } else if active { setActive(true) }
+    }
     var unseenCount: Int { tasks.filter(\.needsAttention).count }
     var hasLiveTasks: Bool { tasks.contains { !$0.status.isTerminal } }
     var isDemo: Bool { model.session?.accessToken == "gusan-debug-no-network" }
@@ -68,7 +80,7 @@ final class AgentCenter: NSObject, ObservableObject {
     // MARK: Loading and polling
 
     func refresh() async {
-        guard let service = currentService() else { tasks = []; return }
+        guard !privacyMode, let service = currentService() else { tasks = []; return }
         loading = tasks.isEmpty
         defer { loading = false }
         do {
@@ -106,7 +118,8 @@ final class AgentCenter: NSObject, ObservableObject {
 
     @discardableResult
     func start(_ intent: AgentIntent, context: String? = nil) async throws -> AgentTask {
-        guard let service = currentService() else { throw AgentError.code("unauthorized", status: 401) }
+        guard !privacyMode else { throw AgentError.privacyMode }
+        guard let service = currentService() else { throw AgentError.unauthorized }
         let task = try await service.start(intent, context: context)
         tracker.markNotified(task)
         tasks.insert(task, at: 0)
@@ -115,7 +128,13 @@ final class AgentCenter: NSObject, ObservableObject {
     }
 
     func confirm(_ id: UUID) async {
+        confirmedIDs.insert(id)
         await mutate(id) { try await $0.confirm(id) }
+    }
+
+    /// Starts the same request again (e.g. after a confirmation expired).
+    func runAgain(_ task: AgentTask) async throws -> AgentTask {
+        try await start(AgentIntent(mode: task.mode, instruction: task.title))
     }
 
     func cancel(_ id: UUID) async {

@@ -51,10 +51,19 @@ final class AgentTests: XCTestCase {
     }
 
     func testErrorCodesMap() {
-        XCTAssertEqual(AgentError(code: "pro_required", status: 403), .code("pro_required", status: 403))
+        XCTAssertEqual(AgentError(code: "pro_required", status: 403), .proRequired)
+        XCTAssertTrue(AgentError(code: "agent_busy", status: 503).isRetryable)
+        XCTAssertTrue(AgentError(code: "upstream_error", status: 502).isRetryable)
+        XCTAssertFalse(AgentError.tooManyActive.isRetryable)
+        XCTAssertTrue(AgentError.tooManyActive.errorDescription!.contains("2 tasks"))
+        XCTAssertTrue(AgentError.quotaExceeded.errorDescription!.contains("40"))
+        XCTAssertEqual(AgentError.message(forCode: "timeout"), "The task ran out of time.")
         XCTAssertEqual(AgentError(code: "too_many_active", status: 429), .tooManyActive)
         XCTAssertEqual(AgentError(code: "agent_busy", status: 503), .busy)
-        XCTAssertEqual(AgentError.message(forCode: "confirmation_expired"), "The confirmation expired.")
+        XCTAssertEqual(AgentError.message(forCode: "confirmation_expired"), "The confirmation expired after 15 minutes.")
+        let expired = AgentTask(mode: .do, status: .cancelled, title: "Book", errorCode: "confirmation_expired")
+        XCTAssertTrue(expired.confirmationExpired)
+        XCTAssertTrue(expired.summaryLine.contains("expired"))
         XCTAssertNil(AgentError.message(forCode: nil))
     }
 
@@ -76,6 +85,7 @@ final class AgentTests: XCTestCase {
         XCTAssertEqual(items.first { $0.name == "limit" }?.value, "100")
         XCTAssertEqual(items.first { $0.name == "order" }?.value, "created_at.desc")
         XCTAssertTrue(items.first { $0.name == "select" }!.value!.contains("seen_at"))
+        XCTAssertTrue(items.first { $0.name == "select" }!.value!.contains("confirmation"))
     }
 
     func testClientSurfacesServerErrorCodes() async throws {
@@ -220,6 +230,16 @@ final class AgentJobTests: XCTestCase {
         var task = try await stub.status(try XCTUnwrap(id), waitSeconds: 0)
         for _ in 0..<50 where task.status != .cancelled { try await Task.sleep(nanoseconds: 20_000_000); task = try await stub.status(try XCTUnwrap(id), waitSeconds: 0) }
         XCTAssertEqual(task.status, .cancelled)
+    }
+
+    func testReconfirmationIsAskedAgain() async throws {
+        let stub = StubAgentService()
+        stub.scenario.reconfirmOnce = true
+        let job = AgentJob(service: stub, start: .new(AgentIntent(mode: .do, instruction: "Book a table"), context: nil), interval: 1_000)
+        var prompts = 0
+        let result = try await JobRunner().result(of: job, confirmation: { _ in prompts += 1; return true })
+        XCTAssertEqual(prompts, 2, "the same confirmation re-surfaced by the server must be asked again")
+        XCTAssertEqual(result.kind, .cardOnly)
     }
 
     func testServerSideCancelUnblocksPendingConfirmation() async throws {

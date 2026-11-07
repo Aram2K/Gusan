@@ -40,6 +40,7 @@ public struct AgentJob: GusanJob {
                             reportedSteps = current.steps.count
                             continuation.yield(.progress(step))
                         }
+                        if current.status != .awaitingConfirmation { askedFor = nil }
                         if current.status == .awaitingConfirmation, let confirmation = current.confirmation, askedFor != confirmation.summary {
                             askedFor = confirmation.summary
                             let request = JobConfirmation(prompt: confirmation.summary)

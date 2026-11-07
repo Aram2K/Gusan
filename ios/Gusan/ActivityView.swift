@@ -10,7 +10,9 @@ struct ActivityView: View {
 
     var body: some View {
         Group {
-            if !agent.signedIn {
+            if agent.privacyMode {
+                ScreenContent { privacyCard }
+            } else if !agent.signedIn {
                 ScreenContent {
                     AppCard {
                         Label("Sign in to use agent tasks", systemImage: "person.crop.circle.badge.exclamationmark").font(.headline)
@@ -39,7 +41,7 @@ struct ActivityView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button { composing = true } label: { Label("New task", systemImage: "plus") }
-                    .disabled(!agent.signedIn)
+                    .disabled(!agent.signedIn || agent.privacyMode)
             }
         }
         .refreshable { await agent.refresh() }
@@ -73,9 +75,31 @@ struct ActivityView: View {
             Section {
                 Text(agent.isDemo ? "Demo data: tasks here are simulated locally." : "Gusan checks for updates while it's open and when iOS lets it refresh in the background. Sideloaded builds can't receive push, so a finished task may show up a little later.")
                     .font(.footnote).foregroundStyle(.secondary)
+                Text("Limits: \(AgentTask.maxActive) tasks at a time, \(AgentTask.maxPerDay) per day. A do-it task waits up to 15 minutes for your OK, then stops.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            Section {
+                privacyToggle
+            } footer: {
+                Text("In Privacy Mode nothing is sent to agents and agent actions are hidden on the keyboard.")
             }
         }
         .listStyle(.insetGrouped)
+    }
+
+    private var privacyToggle: some View {
+        Toggle("Privacy Mode", isOn: Binding(get: { agent.privacyMode }, set: { agent.setPrivacyMode($0) }))
+            .frame(minHeight: 44)
+            .accessibilityHint("Turns agent tasks off entirely")
+    }
+
+    private var privacyCard: some View {
+        AppCard {
+            Label("Privacy Mode is on", systemImage: "hand.raised.fill").font(.headline)
+            Text("Agent tasks are off: nothing is sent to Gusan Cloud agents, and the keyboard treats every request as a text edit. Turn Privacy Mode off to use research and do-it tasks again.")
+                .foregroundStyle(.secondary)
+            privacyToggle
+        }
     }
 
     private func row(_ task: AgentTask) -> some View {
@@ -94,6 +118,7 @@ struct ActivityView: View {
             Text("Ask from the keyboard (\"find the cheapest flights to Rome\", \"book a table for two on Friday\") or start one here. Research tasks only read the web; do-it tasks stop and ask before anything is submitted, bought or sent.")
                 .foregroundStyle(.secondary)
             PrimaryButton(title: "New task") { composing = true }
+            privacyToggle
         }
     }
 
@@ -185,6 +210,7 @@ struct TaskDetailView: View {
         ScreenContent {
             if let task {
                 header(task)
+                if task.confirmationExpired || task.status == .timedOut || task.status == .failed { runAgain(task) }
                 if task.status == .awaitingConfirmation { confirmation(task) }
                 if let result = task.result { resultCard(result) }
                 if !task.steps.isEmpty { steps(task) }
@@ -206,6 +232,25 @@ struct TaskDetailView: View {
         .onChange(of: task?.status) { _ in agent.markSeen(id) }
     }
 
+    private func runAgain(_ task: AgentTask) -> some View {
+        AppCard {
+            if task.confirmationExpired {
+                Label("Confirmation expired", systemImage: "clock.badge.xmark").font(.headline)
+                Text("The agent waited 15 minutes for your OK and then stopped. Nothing was submitted, bought or sent.").foregroundStyle(.secondary)
+            } else {
+                Label(task.status.label, systemImage: "exclamationmark.triangle").font(.headline)
+                Text(task.summaryLine).foregroundStyle(.secondary)
+            }
+            if agent.atActiveLimit {
+                Text("You already have \(AgentTask.maxActive) tasks running; wait for one to finish before running this again.").font(.footnote).foregroundStyle(.secondary)
+            }
+            PrimaryButton(title: working ? "Starting…" : "Run again") {
+                Task { working = true; if let started = try? await agent.runAgain(task) { agent.openTaskID = started.id }; working = false }
+            }
+            .disabled(working || agent.atActiveLimit || agent.privacyMode)
+        }
+    }
+
     private func header(_ task: AgentTask) -> some View {
         AppCard {
             HStack(alignment: .top, spacing: 12) {
@@ -224,17 +269,22 @@ struct TaskDetailView: View {
     }
 
     private func confirmation(_ task: AgentTask) -> some View {
-        AppCard {
-            Label(task.confirmation?.kindLabel ?? "Needs your OK", systemImage: "hand.raised.fill").font(.headline).foregroundStyle(.orange)
+        let again = agent.needsReconfirm(task)
+        return AppCard {
+            Label(again ? "Confirm again" : (task.confirmation?.kindLabel ?? "Needs your OK"), systemImage: "hand.raised.fill").font(.headline).foregroundStyle(.orange)
+            if again {
+                Text("Your first confirmation may not have reached the agent, so it is asking once more. Nothing was done twice.").font(.subheadline)
+            }
             Text(task.confirmation?.summary ?? "The agent wants to continue.").font(.body)
-            Text("Nothing is submitted, bought or sent until you confirm. The request expires after 15 minutes.").font(.footnote).foregroundStyle(.secondary)
+            Text("Nothing is submitted, bought or sent until you confirm. The request expires after 15 minutes" + (task.deadlineAt.map { " (and no later than \($0.formatted(date: .omitted, time: .shortened)))" } ?? "") + ".")
+                .font(.footnote).foregroundStyle(.secondary)
             HStack(spacing: 12) {
                 Button(role: .destructive) { Task { working = true; await agent.cancel(task.id); working = false } } label: {
                     Text("Cancel").frame(maxWidth: .infinity, minHeight: 44)
                 }
                 .buttonStyle(.bordered)
                 Button { Task { working = true; await agent.confirm(task.id); working = false } } label: {
-                    Text("Confirm").frame(maxWidth: .infinity, minHeight: 44)
+                    Text(again ? "Confirm again" : "Confirm").frame(maxWidth: .infinity, minHeight: 44)
                 }
                 .buttonStyle(.borderedProminent)
                 .accessibilityHint("Lets the agent take exactly the action described")
@@ -357,6 +407,13 @@ struct NewTaskView: View {
                 }
                 .pickerStyle(.segmented)
             }
+            Section {
+                if agent.atActiveLimit {
+                    Label("\(agent.activeCount) of \(AgentTask.maxActive) tasks running. Wait for one to finish, or cancel it, before starting another.", systemImage: "hourglass").foregroundStyle(.secondary)
+                } else {
+                    Text("\(agent.activeCount) of \(AgentTask.maxActive) tasks running · up to \(AgentTask.maxPerDay) per day").font(.footnote).foregroundStyle(.secondary)
+                }
+            }
             if let error { Section { Text(error).foregroundStyle(Theme.danger) } }
         }
         .navigationTitle("New task")
@@ -364,7 +421,7 @@ struct NewTaskView: View {
         .toolbar {
             ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
             ToolbarItem(placement: .confirmationAction) {
-                Button(starting ? "Starting…" : "Start") { start() }.disabled(starting || instruction.trimmingCharacters(in: .whitespacesAndNewlines).count < 3)
+                Button(starting ? "Starting…" : "Start") { start() }.disabled(starting || agent.atActiveLimit || instruction.trimmingCharacters(in: .whitespacesAndNewlines).count < 3)
             }
         }
         .onAppear { focused = true }
