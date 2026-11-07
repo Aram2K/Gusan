@@ -54,6 +54,16 @@ final class AgentKeyboardController {
     }
 
     var isActive: Bool { task != nil || error != nil }
+    /// One line for the toolbar while the card replaces the keys.
+    var toolbarStatus: String {
+        if error != nil { return "Agent task didn't start" }
+        guard let task else { return "Agent task" }
+        switch task.status {
+        case .queued, .running: return task.mode == .research ? "Research · read-only" : "Do-it task · asks before acting"
+        case .awaitingConfirmation: return "Needs your OK · nothing is sent until you confirm"
+        default: return task.status.label
+        }
+    }
 
     // MARK: Lifecycle
 
@@ -258,6 +268,10 @@ final class AgentCardView: UIView {
     private var theme = KeyboardTheme(appearance: nil, traits: UITraitCollection.current)
     private var flashTimer: Timer?
     private var state: State = .empty
+    /// Confirm is disabled for a moment after it appears so a tap aimed at the previous layout can't land on it.
+    private var confirmArmedAt: Date = .distantPast
+    private var wasAwaiting = false
+    static let confirmArmDelay: TimeInterval = 0.7
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -333,7 +347,7 @@ final class AgentCardView: UIView {
             case .queued, .running:
                 status.text = task.mode == .research ? "Research · read-only" : "Do-it task · asks before acting"
                 body.text = task.latestStep.map { "Latest: " + $0 } ?? "Starting an agent…"
-                buttons = [(secondary, "Cancel", false)]
+                buttons = [(secondary, "Cancel task", false)]   // left half only: Confirm later appears on the right, never here
             case .awaitingConfirmation:
                 icon.image = UIImage(systemName: "hand.raised.fill"); icon.tintColor = theme.brandOrange
                 status.text = reconfirm ? "Confirm again" : (task.confirmation?.kindLabel ?? "Needs your OK")
@@ -342,8 +356,9 @@ final class AgentCardView: UIView {
                 text += "\n\nNothing is submitted, bought or sent until you confirm. This request expires after 15 minutes"
                 if let deadline = task.deadlineAt { text += " (and no later than \(Self.clock.string(from: deadline)))" }
                 body.text = text + "."
-                buttons = [(secondary, "Cancel", false), (primary, reconfirm ? "Confirm again" : "Confirm", true)]
+                buttons = [(secondary, "Cancel task", false), (primary, reconfirm ? "Confirm again" : "Confirm", true)]
                 announce = (reconfirm ? "Confirm again. " : "Needs your OK. ") + (task.confirmation?.summary ?? "")
+                if !wasAwaiting { armConfirm() }
             case .completed:
                 icon.image = UIImage(systemName: "checkmark.circle.fill"); icon.tintColor = theme.success
                 status.text = "Done · " + (task.mode == .research ? "Research" : "Do-it task")
@@ -360,21 +375,33 @@ final class AgentCardView: UIView {
                 if canRetry, task.status != .cancelled || task.confirmationExpired { buttons = [(secondary, "Dismiss", false), (tertiary, "Open in app", false), (primary, "Run again", true)] }
             }
         }
+        if case .task(let task) = state { wasAwaiting = task.status == .awaitingConfirmation } else { wasAwaiting = false }
         for button in [primary, secondary, tertiary] { button.isHidden = true }
         for (button, name, filled) in buttons {
             button.isHidden = false; button.setTitle(name, for: .normal)
             button.backgroundColor = filled ? KeyboardTheme.blue : theme.special
-            button.setTitleColor(filled ? .white : (name == "Cancel" ? theme.danger : theme.foreground), for: .normal)
+            button.setTitleColor(filled ? .white : (name.hasPrefix("Cancel") ? theme.danger : theme.foreground), for: .normal)
             button.accessibilityHint = hint(for: name)
         }
         body.accessibilityLabel = body.text
         if let announce { UIAccessibility.post(notification: .layoutChanged, argument: announce) }
     }
 
+    private func armConfirm() {
+        confirmArmedAt = Date().addingTimeInterval(Self.confirmArmDelay)
+        primary.isEnabled = false; primary.alpha = 0.4
+        UIView.animate(withDuration: UIAccessibility.isReduceMotionEnabled ? 0 : Self.confirmArmDelay, delay: 0, options: [.allowUserInteraction]) { self.primary.alpha = 1 }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.confirmArmDelay) { [weak self] in
+            guard let self, case .task(let task) = self.state, task.status == .awaitingConfirmation else { return }
+            self.primary.isEnabled = true; self.primary.alpha = 1
+            UIAccessibility.post(notification: .layoutChanged, argument: self.primary)
+        }
+    }
+
     private func hint(for name: String) -> String {
         switch name {
         case "Confirm", "Confirm again": return "Lets the agent take exactly the action described"
-        case "Cancel": return "Stops the task; nothing is submitted"
+        case "Cancel", "Cancel task": return "Stops the task; nothing is submitted"
         case "Retry", "Run again": return "Starts the same request again"
         case "Insert": return "Pastes the result at the cursor"
         case "Open in app": return "Shows the full result in the Gusan app"
@@ -396,8 +423,9 @@ final class AgentCardView: UIView {
         let bodyTop: CGFloat = 60
         body.frame = CGRect(x: 12, y: bodyTop, width: w - 24, height: max(0, sheet.bounds.height - bodyTop - buttonsHeight - (buttons.isEmpty ? 10 : 18)))
         let gap: CGFloat = 8
-        let count = CGFloat(buttons.count)
-        let width = count > 0 ? (w - 24 - gap * (count - 1)) / count : 0
+        // A lone Cancel takes the left half so Confirm, when it arrives, never lands where Cancel was.
+        let count = max(CGFloat(buttons.count), buttons.count == 1 && buttons[0].0 === secondary ? 2 : 1)
+        let width = buttons.isEmpty ? 0 : (w - 24 - gap * (count - 1)) / count
         for (index, entry) in buttons.enumerated() {
             entry.0.frame = CGRect(x: 12 + CGFloat(index) * (width + gap), y: sheet.bounds.height - 44 - 10, width: width, height: 44)
             entry.0.titleLabel?.font = .systemFont(ofSize: buttons.count > 2 ? 14 : 15, weight: .semibold)
@@ -408,9 +436,9 @@ final class AgentCardView: UIView {
     @objc private func minimisePressed() { onMinimise?() }
     @objc private func buttonPressed(_ sender: UIButton) {
         switch sender.currentTitle {
-        case "Confirm", "Confirm again": onConfirm?()
+        case "Confirm", "Confirm again": if Date() >= confirmArmedAt { onConfirm?() }
         case "Retry", "Run again": onRetry?()
-        case "Cancel": onCancel?()
+        case "Cancel", "Cancel task": onCancel?()
         case "Insert": onInsert?()
         case "Open in app": onOpenApp?()
         default: onDismiss?()

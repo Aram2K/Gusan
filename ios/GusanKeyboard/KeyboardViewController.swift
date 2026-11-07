@@ -138,7 +138,8 @@ final class KeyboardViewController: UIInputViewController {
         panel.update(theme: theme, target: settings.translateTarget, defaultAction: settings.keyboardAction.action, context: context.text)
         instructionHeader.update(text: instruction, theme: theme)
         explanation.textColor = theme.foreground
-        toolbar.message.setTitle(message ?? context.summary, for: .normal)
+        toolbar.message.setTitle(agent.showingCard ? agent.toolbarStatus : (message ?? context.summary), for: .normal)
+        toolbar.mic.isHidden = agent.showingCard
         let statusAction = accessory ?? (undoRecord == nil ? nil : undoIsRedo ? "Redo" : "Undo")
         toolbar.accessory.setTitle(statusAction, for: .normal); toolbar.accessory.isHidden = statusAction == nil
         toolbar.accessory.isEnabled = (statusAction != "Undo" && statusAction != "Redo") || undoRecord?.step(context: currentContext.voiceContext) != nil
