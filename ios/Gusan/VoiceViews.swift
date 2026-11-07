@@ -47,9 +47,10 @@ struct VoiceReadyView: View {
                         PrimaryButton(title: "Record", icon: "mic.fill") { voice.start() }
                     }
                 }
-                if let statusText {
+                if let statusText, voice.error.isEmpty {
                     AppCard {
-                        Label(statusText, systemImage: voice.alive ? "waveform" : "mic").font(.headline).foregroundStyle(Theme.accent)
+                        Label(statusText, systemImage: voice.status.phase == .failed ? "exclamationmark.circle" : voice.alive ? "waveform" : "mic")
+                            .font(.headline).foregroundStyle(voice.status.phase == .failed ? Color.secondary : Theme.accent)
                         if let end = voice.status.sessionEndsAt, voice.alive {
                             Text("Session until \(end.formatted(date: .omitted, time: .shortened))").font(.body).foregroundStyle(.secondary)
                         }
@@ -57,8 +58,8 @@ struct VoiceReadyView: View {
                 }
                 if !voice.error.isEmpty {
                     AppCard {
-                        Label("Voice needs attention", systemImage: "exclamationmark.circle").font(.headline).foregroundStyle(Theme.accent)
-                        Text(voice.inAppError).font(.body)
+                        Label("Voice needs attention", systemImage: "exclamationmark.circle").font(.headline).foregroundStyle(.secondary)
+                        Text(voice.inAppError).font(.body).foregroundStyle(.secondary)
                         if voice.error == VoiceError.notSignedIn.localizedDescription || voice.error == VoiceError.unauthorized.localizedDescription {
                             PrimaryButton(title: "Sign in", icon: "person.crop.circle") { onSignIn(); dismiss() }
                         } else if voice.error == VoiceError.fallbackOff.localizedDescription || voice.error == VoiceError.notShared.localizedDescription {
@@ -74,7 +75,7 @@ struct VoiceReadyView: View {
                     AppCard {
                         Button { voice.stop() } label: {
                             Label("Stop voice session", systemImage: "stop.circle").frame(maxWidth: .infinity, minHeight: 44)
-                        }
+                        }.buttonStyle(.bordered).tint(Theme.accent)
                     }
                 }
             }.navigationTitle("Voice").navigationBarTitleDisplayMode(.inline)
@@ -106,7 +107,7 @@ struct VoiceSettingsSection: View {
             Button(voice.alive ? "Stop voice session" : "Start voice session") { if voice.alive { voice.stop() } else { voice.start() } }
             LabeledContent("Microphone", value: voice.permission == .granted ? "Allowed" : voice.permission == .denied ? "Denied" : "Not requested")
             if voice.permission == .denied { Button("Open Settings") { UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!) } }
-            if !voice.error.isEmpty { Text(voice.inAppError).foregroundStyle(Theme.accent) }
+            if !voice.error.isEmpty { Label(voice.inAppError, systemImage: "exclamationmark.circle").foregroundStyle(.secondary) }
             Picker("Spoken language", selection: $language) { ForEach(VoiceSettings.languages, id: \.code) { Text($0.name).tag($0.code) } }.onChange(of: language) { voice.settings.language = $0 }
             Picker("Default voice action", selection: $action) { ForEach(VoiceAction.all, id: \.self) { Text($0.label).tag($0) } }.onChange(of: action) { voice.settings.defaultAction = $0 }
             Picker("Keep session alive", selection: $minutes) { ForEach(VoiceSettings.idleOptions, id: \.self) { Text("\($0) min").tag($0) } }.onChange(of: minutes) { voice.settings.idleMinutes = $0 }
