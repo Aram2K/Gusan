@@ -27,11 +27,21 @@ final class AccountModel: NSObject, ObservableObject, ASWebAuthenticationPresent
     private var pkce: PKCE?
     override init() {
         super.init()
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--gusan-pasteboard-only"), ProcessInfo.processInfo.arguments.contains("--gusan-debug-session") {
+            store.write(Session(accessToken: "gusan-debug-no-network", expiresAt: .distantFuture, refreshToken: "gusan-debug-no-network", userID: "debug", email: "pasteboard@example.invalid"))
+        }
+        #endif
         session = store.read()
         diagnostics = store.diagnostics()
     }
     func update() async {
         session = store.read()
+        #if DEBUG
+        if session?.accessToken == "gusan-debug-no-network" {
+            tier = "DEBUG · fake session"; diagnostics = store.diagnostics(); return
+        }
+        #endif
         if session != nil {
             do {
                 session = try await auth.refresh()
@@ -151,7 +161,17 @@ struct ContentView: View {
                     Text("Candidates: " + account.store.resolution.candidatesTried.joined(separator: ", ")).font(.caption)
                     LabeledContent("Shared keychain", value: account.diagnostics?.keychainOK == true ? "OK" : "Unavailable")
                     LabeledContent("Shared file", value: account.diagnostics?.fileOK == true ? "OK" : "Unavailable")
+                    LabeledContent("Team pasteboard", value: account.diagnostics?.pasteboardOK == true ? "OK" : "Unavailable")
                     LabeledContent("Session storage", value: account.diagnostics?.sharingStatus ?? "not shared")
+                    if let diagnostics = account.diagnostics {
+                        Text(diagnostics.summary).font(.caption)
+                        Text("Checked " + diagnostics.local.timestamp.formatted()).font(.caption)
+                        Text("Keychain group: " + (diagnostics.local.keychainGroupID ?? "None")).font(.caption)
+                        if let peer = diagnostics.peer {
+                            Text("Keyboard sees: " + peer.stores.map(\.summary).joined(separator: "; ")).font(.caption)
+                            Text("Keyboard checked \(peer.timestamp.formatted()) · group \(peer.groupID ?? "None") · keychain \(peer.keychainGroupID ?? "None")").font(.caption)
+                        } else { Text("Keyboard: no report yet").font(.caption) }
+                    }
                 }.font(.footnote)
             }
             .navigationTitle("Gusan")
