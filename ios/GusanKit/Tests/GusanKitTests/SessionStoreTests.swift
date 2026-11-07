@@ -227,6 +227,41 @@ final class SessionStoreTests: XCTestCase {
         XCTAssertNil(board.values["session"])
         XCTAssertNotNil(normal.values["session"])
     }
+    func testRefreshSurvivesClockRollbackAndReconcilesUnavailableStore() throws {
+        let file = Backend("App-group file"), board = Backend("Team pasteboard"); peer(board)
+        var before = session(100); before.refreshToken = "old"
+        var rotated = session(20); rotated.refreshToken = "rotated"
+        file.session(before); board.session(before); file.writable = false
+        let store = SessionStore(resolution: resolution, backends: [file, board], privateBackend: Backend("private"))
+        XCTAssertEqual(store.writeRefreshed(rotated, replacing: before).refreshToken, "rotated")
+        file.writable = true
+        XCTAssertEqual(store.read()?.refreshToken, "rotated")
+        XCTAssertEqual(try JSONDecoder().decode(Session.self, from: XCTUnwrap(file.values["session"])).refreshToken, "rotated")
+    }
+    func testRefreshAdoptsConcurrentPeerRotationRegardlessOfClock() {
+        let file = Backend("App-group file"), board = Backend("Team pasteboard"); peer(board)
+        var before = session(100); before.refreshToken = "old"
+        var peerSession = session(10); peerSession.refreshToken = "peer"
+        var ours = session(20); ours.refreshToken = "ours"
+        file.session(before); board.session(peerSession)
+        let store = SessionStore(resolution: resolution, backends: [file, board], privateBackend: Backend("private"))
+        XCTAssertEqual(store.writeRefreshed(ours, replacing: before).refreshToken, "peer")
+        XCTAssertEqual(store.read()?.refreshToken, "peer")
+    }
+    func testStaleReconcileCannotOverwritePeerRotationAfterClockRollback() {
+        let board = Backend("Team pasteboard"); peer(board)
+        var before = session(100); before.refreshToken = "old"
+        var rotated = session(20); rotated.refreshToken = "rotated"
+        let peerSession = rotated.refreshed(replacing: before)
+        board.session(before)
+        var reads = 0
+        board.onRead = { [weak board] key in
+            if key == "session" { reads += 1; if reads == 2 { board?.session(peerSession) } }
+        }
+        let store = SessionStore(resolution: resolution, backends: [board], privateBackend: Backend("private"))
+        _ = store.read(); board.onRead = nil
+        XCTAssertEqual(store.read()?.refreshToken, "rotated")
+    }
     func testUnavailablePasteboardOnMacDoesNotReportSharing() {
         #if !canImport(UIKit)
         let backend = NamedSessionPasteboard()

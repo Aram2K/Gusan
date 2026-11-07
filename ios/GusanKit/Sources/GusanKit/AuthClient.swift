@@ -109,8 +109,7 @@ public final class AuthClient {
             throw GusanError.failed
         }
         let session = try Self.decodeSession(data, previousRefreshToken: before.refreshToken)
-        store.write(session)
-        return session
+        return store.writeRefreshed(session, replacing: before)
     }
     public func entitlement(accessToken: String) async throws -> Entitlement {
         let (data, response) = try await send(request(path: "/rest/v1/rpc/my_entitlement", token: accessToken))

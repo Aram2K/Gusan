@@ -8,16 +8,36 @@ public struct Session: Codable, Equatable {
     public var userID: String?
     public var email: String?
     public var updatedAt: Date
+    public var refreshLineage: String?
+    public var refreshGeneration: Int?
     public init(accessToken: String, expiresAt: Date, refreshToken: String, userID: String? = nil, email: String? = nil, updatedAt: Date = Date()) {
         self.accessToken = accessToken; self.expiresAt = expiresAt; self.refreshToken = refreshToken
         self.userID = userID; self.email = email; self.updatedAt = updatedAt
+    }
+    var lineage: String { refreshLineage ?? SHA256.digest(Array(refreshToken.utf8)).map { String(format: "%02x", $0) }.joined() }
+    var generation: Int { refreshGeneration ?? 0 }
+    func refreshed(replacing previous: Session) -> Session {
+        var result = self
+        result.refreshLineage = previous.lineage
+        result.refreshGeneration = previous.generation + 1
+        return result
     }
 }
 
 public protocol SessionStorage: AnyObject {
     func read() -> Session?
     func write(_ session: Session)
+    func writeRefreshed(_ session: Session, replacing previous: Session) -> Session
     func clear()
+}
+
+public extension SessionStorage {
+    func writeRefreshed(_ session: Session, replacing previous: Session) -> Session {
+        if let current = read(), current.refreshToken != previous.refreshToken { return current }
+        let rotated = session.refreshed(replacing: previous)
+        write(rotated)
+        return read() ?? rotated
+    }
 }
 
 public struct AppGroupResolution {
@@ -176,7 +196,8 @@ public final class SessionStore: SessionStorage {
     }
     private func reconcile() -> Session? {
         let sessions = backends.compactMap { decode($0.read("session").data) }
-        let newest = sessions.max { $0.updatedAt == $1.updatedAt ? $0.expiresAt < $1.expiresAt : $0.updatedAt < $1.updatedAt } ?? decode(privateBackend.read("session").data)
+        var newest = sessions.max { newer($1, than: $0) }
+        if let privateCopy = decode(privateBackend.read("session").data), newest == nil || (privateCopy.lineage == newest!.lineage && privateCopy.generation > newest!.generation) { newest = privateCopy }
         if let newest, let data = try? JSONEncoder().encode(newest) {
             if writeShared(data) { privateBackend.clear("session") }
             else { _ = persist(data, to: privateBackend) }
@@ -196,15 +217,49 @@ public final class SessionStore: SessionStorage {
     }
     private func persist(_ data: Data, to backend: SessionBackend) -> Bool {
         guard let incoming = decode(data) else { return false }
-        if let current = decode(backend.read("session").data),
-           current.updatedAt > incoming.updatedAt || (current.updatedAt == incoming.updatedAt && current.expiresAt >= incoming.expiresAt) { return true }
+        if let current = decode(backend.read("session").data), !newer(incoming, than: current) { return true }
         return backend.write(data, key: "session")
+    }
+    private func newer(_ candidate: Session, than current: Session) -> Bool {
+        if candidate.lineage == current.lineage || candidate.refreshToken == current.refreshToken,
+           candidate.generation != current.generation { return candidate.generation > current.generation }
+        return candidate.updatedAt == current.updatedAt ? candidate.expiresAt > current.expiresAt : candidate.updatedAt > current.updatedAt
     }
     public func write(_ session: Session) {
         synchronized {
             guard let data = try? JSONEncoder().encode(session) else { return }
             if writeShared(data) { privateBackend.clear("session") }
             else { _ = persist(data, to: privateBackend) }
+        }
+    }
+    public func writeRefreshed(_ session: Session, replacing previous: Session) -> Session {
+        synchronized {
+            let allowed = usePasteboard()
+            let targets = backends.filter { $0.name != "Team pasteboard" || allowed }
+            if !allowed { backends.filter { $0.name == "Team pasteboard" }.forEach { $0.clear("session") } }
+            var winner = session.refreshed(replacing: previous)
+            func isPeerRotation(_ current: Session) -> Bool {
+                current.refreshToken != previous.refreshToken && current.refreshToken != winner.refreshToken
+                    && !(current.lineage == previous.lineage && current.generation < previous.generation)
+            }
+            func adopt(_ current: Session) {
+                let generation = max(winner.generation, current.generation) + 1
+                winner = current
+                if current.userID == previous.userID { winner.refreshLineage = previous.lineage; winner.refreshGeneration = generation }
+            }
+            let copies = targets.compactMap { decode($0.read("session").data) }
+            if let peer = copies.filter(isPeerRotation).max(by: { newer($1, than: $0) }) { adopt(peer) }
+            var saved = false
+            for backend in targets {
+                if let current = decode(backend.read("session").data), isPeerRotation(current) { adopt(current); continue }
+                if let data = try? JSONEncoder().encode(winner), backend.write(data, key: "session") { saved = true }
+            }
+            if !saved {
+                if let current = decode(privateBackend.read("session").data), isPeerRotation(current), copies.isEmpty || (current.lineage == winner.lineage && current.generation > winner.generation) { adopt(current) }
+                if let data = try? JSONEncoder().encode(winner) { _ = privateBackend.write(data, key: "session") }
+            }
+            if let data = try? JSONEncoder().encode(winner), writeShared(data) || saved { privateBackend.clear("session") }
+            return winner
         }
     }
     public func clear() {

@@ -192,6 +192,7 @@ final class GusanKitTests: XCTestCase {
         StubProtocol.handler = { _ in (200, try self.payload(), [:]) }
         let refreshed = try await client.refresh()
         XCTAssertEqual(refreshed?.refreshToken, "rotated")
+        XCTAssertEqual(refreshed?.refreshGeneration, 1)
         store.session = rotated
         let forced = try await client.refresh(force: true)
         XCTAssertEqual(forced?.refreshToken, "rotated")
