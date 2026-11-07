@@ -248,19 +248,21 @@ MISTRAL_LANGS = frozenset({"en", "es", "fr", "de", "it", "nl", "pt", "hi", "ar",
 # The other cloud engines Gusan Cloud runs: OpenAI's GPT transcribe models and ElevenLabs Scribe take any
 # language of the table below (they detect it, Armenian included); they are never Whisper.
 FAMILY_GPT, FAMILY_SCRIBE = "gpt", "scribe"
+FAMILY_GLADIA = "gladia"
 LANGUAGE_SUPPORT = {
     FAMILY_WHISPER: frozenset(WHISPER_NAMES),
     FAMILY_GEMINI: frozenset(WHISPER_NAMES),
     FAMILY_GPT: frozenset(WHISPER_NAMES),
     FAMILY_SCRIBE: frozenset(WHISPER_NAMES),
+    FAMILY_GLADIA: frozenset(WHISPER_NAMES),
     FAMILY_VOXTRAL: MISTRAL_LANGS,
 }
 FAMILY_NAMES = {FAMILY_WHISPER: "Whisper", FAMILY_GEMINI: "Gemini", FAMILY_VOXTRAL: "Voxtral",
-                FAMILY_GPT: "GPT", FAMILY_SCRIBE: "Scribe"}
+                FAMILY_GPT: "GPT", FAMILY_SCRIBE: "Scribe", FAMILY_GLADIA: "Gladia"}
 # The cloud families that cover a language and are known to be good at it: an answer from one of them in
 # another script is code-switching (the speaker used other words), not a model that does not know the
 # language. Voxtral is not here (it does not cover Armenian, its words in another script are an error).
-CAPABLE_FAMILIES = frozenset({FAMILY_GEMINI, FAMILY_GPT, FAMILY_SCRIBE})
+CAPABLE_FAMILIES = frozenset({FAMILY_GEMINI, FAMILY_GPT, FAMILY_SCRIBE, FAMILY_GLADIA})
 
 
 def family_of_model(model_id):
@@ -278,6 +280,8 @@ def family_of_model(model_id):
         return FAMILY_GPT
     if text.startswith(("scribe", "elevenlabs")):
         return FAMILY_SCRIBE
+    if text.startswith(("solaria", "gladia")):
+        return FAMILY_GLADIA
     if text.startswith("whisper") or text in ("tiny", "base", "small", "medium", "large",
                                               "large-v2", "large-v3", "large-v3-turbo"):
         return FAMILY_WHISPER

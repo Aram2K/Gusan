@@ -50,6 +50,16 @@ def test_gladia_empty_and_language_answers():
     assert speech_langs.answer_problem("Բարեւ աշխարհ", "hy", "solaria-1") == ""
 
 
+@pytest.mark.parametrize("model", ["solaria-1", "solaria-3", "solaria-fusion",
+                                   "gladia", "Gladia Solaria-1", "Gladia Solaria-3",
+                                   "Gladia Solaria Fusion"])
+def test_gladia_capable_family(model):
+    assert speech_langs.family_of_model(model) == speech_langs.FAMILY_GLADIA
+    assert speech_langs.is_capable(model)
+    assert speech_langs.answer_problem("Բարեւ աշխարհ", "hy", model) == ""
+    assert speech_langs.answer_problem("Hello world this is English", "hy", model) == "script"
+
+
 def test_gladia_proxy_source():
     source = (Path(__file__).resolve().parents[1] / "supabase/functions/transcribe-proxy/index.ts").read_text()
     for text in ('"solaria-1": "gladia"', '"solaria-3": "gladia"', '"solaria-fusion": "gladia"',
