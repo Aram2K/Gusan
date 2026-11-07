@@ -134,7 +134,7 @@ final class VoiceKeyController: NSObject {
         guard let result = status.result, !result.isEmpty, let context, let current = currentContext(), let proxy = host?.textDocumentProxy else {
             if let result = status.result { UIPasteboard.general.string = result; show("Text changed — result copied, paste it") }; return
         }
-        if !pending.canInsert(selected: current.selected) {
+        if !pending.canInsert(context: current) {
             UIPasteboard.general.string = result; show("Text changed — result copied, paste it"); return
         }
         proxy.insertText(result)

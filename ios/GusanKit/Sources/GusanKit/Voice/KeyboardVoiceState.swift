@@ -11,5 +11,8 @@ public struct KeyboardVoiceState: Codable, Equatable {
     public func isStale(status: VoiceStatus, now: Date = Date()) -> Bool {
         now.timeIntervalSince(status.heartbeat) >= 600 || now.timeIntervalSince(startedAt) >= 600
     }
-    public func canInsert(selected: String) -> Bool { context.map { $0.selected == selected } ?? false }
+    public func canInsert(context current: VoiceContext) -> Bool {
+        guard let context, let documentID = context.documentID, !documentID.isEmpty else { return false }
+        return documentID == current.documentID && context == current
+    }
 }
