@@ -72,8 +72,8 @@ class FakeAI:
         self.gate = threading.Event()
         self.label, self.kind = "Gusan Cloud \u00b7 Mistral Small", "cloud"
 
-    def push(self, text="An answer.", parts=(), error=None, block=False, coverage=None):
-        self.steps.append(dict(text=text, parts=parts, error=error, block=block, coverage=coverage))
+    def push(self, text="An answer.", parts=(), error=None, block=False, coverage=None, gap=0.06):
+        self.steps.append(dict(text=text, parts=parts, error=error, block=block, coverage=coverage, gap=gap))
         return self
 
     def release(self):
@@ -88,7 +88,7 @@ class FakeAI:
             acc += piece
             if on_text:
                 on_text(acc)
-            time.sleep(0.06)
+            time.sleep(step.get("gap", 0.06))
         if step["block"]:
             self.gate.wait(8)
             if cancelled and cancelled():
@@ -473,6 +473,25 @@ def test_stop_keeps_the_words_marked_stopped_and_they_are_never_sent_back(build,
     assert ai.calls[1]["history"][-1]["status"] == "stopped"         # the card hands it over; meeting_chat drops it
     assert "Half of an" in ai.calls[1]["history"][-1]["text"]
     assert meeting_chat._history_text(ai.calls[1]["history"], False) == ""
+
+
+def test_chunks_that_come_one_right_after_another_all_reach_the_card_when_the_stream_pauses(
+        build, meetings_root, ai, monkeypatch):
+    """The worker used to hand a chunk over only when 50 ms had passed since the last one, and dropped the rest.
+    Dropped is gone for good: when the model then paused (thinking between sentences, a slow line), the card
+    showed older words until the next chunk. On Windows, whose clock ticks every 15 ms, a 60 ms gap was a coin
+    flip: this test (and test_stop_keeps_the_words...) failed now and then on GitHub's runner and here."""
+    from ui.pages import meeting_chat_ui
+    monkeypatch.setattr(meeting_chat_ui, "SYNC_ASK", False)
+    f = make_meeting(meetings_root)
+    ai.push("never finished", parts=["One ", "two ", "three ", "four"], gap=0.0, block=True)
+    win, page, card, *_ = build("pro", f)
+    type_and_send(card, "Q?")
+    live = card._live
+    assert _pump(lambda: "four" in live.body.text(), timeout=5)       # the last chunk, not only the first
+    assert "One two three four" in live.body.text().replace(" ", " ")
+    card.stop_btn.click()
+    ai.release()
 
 
 def test_escape_stops_an_answer_that_is_coming_and_only_then(build, meetings_root, ai, monkeypatch):

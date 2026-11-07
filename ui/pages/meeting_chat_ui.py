@@ -48,8 +48,8 @@ from ui.pages import meeting_views as views
 logger = logging.getLogger("transcribe")
 
 SYNC_ASK = False               # tests: run a question inline
-STREAM_RENDER_MS = 120         # a streaming answer is drawn at most this often
-PARTIAL_MS = 50                # the worker hands the text over at most this often
+STREAM_RENDER_MS = 120         # a streaming answer is drawn at most this often (the worker hands over every update;
+                               # _on_partial keeps the latest and draws it on a timer: nothing is lost in a pause)
 QUESTION_SHOWN = 600           # a question's bubble shows this many characters (all of it is sent)
 COUNTER_FROM = 3500            # the characters counter shows from here
 INPUT_MIN_H, INPUT_MAX_H = 44, 120
@@ -829,7 +829,7 @@ class ChatCard(Card):
 
     def _work(self, req, folder, question, history, cfg, pro, signed_in, resolve, me=""):
         """Worker thread: ask, and say how it ended."""
-        last = [0.0]
+        last = [None]
 
         def emit(sig, *args):
             try:
@@ -838,9 +838,12 @@ class ChatCard(Card):
                 pass                                       # the card is gone
 
         def on_text(text):
-            now = time.monotonic()
-            if now - last[0] >= PARTIAL_MS / 1000.0:
-                last[0] = now
+            # Every update goes over, not one in so many milliseconds: a chunk dropped here is never sent again,
+            # and when the model then pauses the card showed older words until the next chunk (a coin flip on
+            # Windows, whose clock ticks every 15 ms). The card draws the latest text at most every
+            # STREAM_RENDER_MS (_on_partial), so this costs nothing on screen.
+            if text != last[0]:
+                last[0] = text
                 emit(self._bridge.partial, req, text)
 
         def cancelled():
