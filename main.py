@@ -1262,6 +1262,9 @@ class AudioRecorder:
         self.on_chunk_gap = None
         self._capture_mode = None     # smart_meeting/system_only/default_mic; None = dictation
         self.fast_live_chunks = False  # Live Assistance session: short pieces (see _record_loop)
+        # Real-time dictation (live_stt.py): the take's live Gladia session, and the words while speaking.
+        self._live_session = None
+        self.on_live_text = None
         self._loopback_peak = 0.0     # loudest loopback sample this session (0 = no system audio)
         # Meeting Pause (set_paused): the record thread keeps reading - and so
         # draining - the streams, but keeps nothing while this is set.
@@ -2071,6 +2074,8 @@ class AudioRecorder:
                 self._tracks = recorder_tracks.DualTrackBuffer(self._full_audio_max)
 
         self.stop_requested = False
+        # A dictation on Gusan Cloud also streams to Gladia live: words while speaking, the text at Stop at once.
+        AudioRecorder._start_live(self, capture_mode)
         # The recording thread OWNS the streams: it is the only reader and the
         # only closer. Stream handles are passed as locals so a later
         # start_recording can never make an old thread close the new streams.
@@ -2446,6 +2451,9 @@ class AudioRecorder:
                 was_paused = False
 
                 arr = np.frombuffer(data, dtype=np.float32)
+                live = self._live_session
+                if live is not None and len(arr):
+                    live.feed(arr)                     # never blocks: real-time dictation (live_stt.py)
                 this_dur = (len(arr) / sr) if len(arr) > 0 else frame_dur
                 buffered_sec += this_dur
                 if len(arr) > 0:
@@ -2631,6 +2639,9 @@ class AudioRecorder:
         of blocking on a slow/stuck local transcription."""
         self._abort = True
         self.stop_requested = True
+        live, self._live_session = getattr(self, "_live_session", None), None
+        if live is not None:
+            live.cancel()             # the take's real-time session ends now (nothing is waited for)
         pipe = getattr(self, "_chunk_pipeline", None)
         if pipe is not None:
             pipe.abort()              # a meeting's waiting pieces are discarded
@@ -2654,8 +2665,86 @@ class AudioRecorder:
         if pipe is not None:
             pipe.close()              # the recording is over: the worker drains the queue, then ends
 
+    def _live_wanted(self, capture_mode):
+        """Real-time for this take: a dictation (not a meeting) on Gusan Cloud, signed in, not Privacy mode, the
+        setting not turned off (cfg live_stt)."""
+        if capture_mode is not None or getattr(self, "fast_live_chunks", False):
+            return False
+        if not callable(getattr(self, "get_auth_token", None)) or cfg.get("privacy_mode"):
+            return False
+        if not cfg.get("live_stt", True):
+            return False
+        return AudioRecorder._backend(self) == "managed"
+
+    def _start_live(self, capture_mode):
+        """Open this take's live session on its own thread (the audio waits in its queue meanwhile). Never raises:
+        no session means the pieces carry the take, as before."""
+        self._live_session = None
+        try:
+            if not AudioRecorder._live_wanted(self, capture_mode):
+                return
+            import live_stt
+            terms = ()
+            try:
+                terms = tuple(vocabulary.cloud_terms(cfg))
+            except Exception:
+                terms = ()
+            committed = []
+
+            def on_final(text, _lang):
+                committed.append(text)
+                cb = self.on_live_text
+                if cb is not None:
+                    cb(" ".join(committed))
+
+            def on_partial(text):
+                cb = self.on_live_text
+                if cb is not None:
+                    cb(" ".join(committed + [text]))
+            session = live_stt.LiveSession(self.get_auth_token, AudioRecorder._lang_setting(self),
+                                           speech_langs.mix_languages(cfg), terms, purpose="dictation",
+                                           on_partial=on_partial, on_final=on_final)
+            self._live_session = session
+
+            def opener():
+                try:
+                    session.start()
+                except Exception as e:
+                    logger.info("Real-time transcription not available for this take: %s", getattr(e, "code", e))
+                    session.failed = "unavailable"
+                    if self._live_session is session:
+                        self._live_session = None
+            threading.Thread(target=opener, daemon=True, name="gusan-live-open").start()
+        except Exception:
+            logger.debug("Real-time transcription could not start", exc_info=True)
+            self._live_session = None
+
+    def _finish_live(self):
+        """At the end of a dictation: the live session's final text when it was clean (no drop, nothing lost), else
+        None - the pieces' text is used. Waits at most LIVE_STOP_S for Gladia's last sentence."""
+        session, self._live_session = getattr(self, "_live_session", None), None
+        if session is None:
+            return None
+        started = time.monotonic()
+        text = session.stop(timeout=LIVE_STOP_S)
+        if session.failed or session.dropped_audio or not text:
+            logger.info("Real-time transcript not used (%s): the pieces' text instead",
+                        session.failed or ("audio missing" if session.dropped_audio else "empty"))
+            return None
+        logger.info("Real-time transcript: %d characters, final %d ms after Stop", len(text),
+                    int((time.monotonic() - started) * 1000))
+        AudioRecorder._note_cloud_ran(self, "solaria-1")
+        return text, session.language
+
     def transcribe(self):
         pipe = getattr(self, "_chunk_pipeline", None)
+        # A dictation that streamed to Gladia live: its text is ready the moment the last sentence is closed.
+        if pipe is None and getattr(self, "_live_session", None) is not None:
+            got = AudioRecorder._finish_live(self)
+            if got is not None:
+                text, lang = got
+                if not self._abort:
+                    return text.strip(), lang or AudioRecorder._final_language(self)
         if pipe is not None:
             pipe.close()                  # a meeting: no more pieces - the worker drains the queue and ends
         pending = list(self._chunk_threads)
@@ -3873,6 +3962,9 @@ PENDING_NOTES_MAX_TRIES = 240
 TITLE_PASS_DELAY_MS = 60_000
 TITLE_PASS_RETRY_MS = 120_000
 TITLE_PASS_MAX_TRIES = 30
+# Real-time dictation (live_stt.py, Gladia live): how long Stop waits for Gladia's last sentence (Gladia: finals
+# ~0.3 s after the speech ends) before the pieces' text is used instead.
+LIVE_STOP_S = 2.5
 # Smart Actions on the selected text (selection_reader.py, docs/redesign/selected-text-spec.md): how long a take waits,
 # after the person stops speaking, for a selection still being read; an on-computer model reads at most this much of
 # a long selection (its whole window is 8192 tokens).
@@ -3992,6 +4084,8 @@ class AppController(QObject):
         self.recorder.on_levels = self._on_levels
         self.recorder.on_lang_detected = self._on_lang
         self.recorder.on_partial = self._on_partial
+        # Real-time dictation: the words so far, while speaking (the pill's live line)
+        self.recorder.on_live_text = lambda text: self.overlay.call_soon(self.overlay.set_partial, text)
         from pynput.keyboard import Controller
         self.kbd = Controller()
         self.is_rec = False
