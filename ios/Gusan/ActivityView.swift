@@ -62,7 +62,18 @@ struct ActivityView: View {
                 Section { Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(Theme.danger) }
             }
             if agent.notificationStatus != .authorized {
-                Section { notificationsCard.listRowInsets(EdgeInsets()).listRowBackground(Color.clear) }
+                Section {
+                    HStack(spacing: 12) {
+                        Image(systemName: "bell.badge").foregroundStyle(Theme.accent).accessibilityHidden(true)
+                        Text(agent.notificationStatus == .denied ? "Notifications are off" : "Get told when a task needs your OK").font(.subheadline)
+                        Spacer()
+                        if agent.notificationStatus == .denied {
+                            Button("Settings") { if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) } }.frame(minHeight: 44)
+                        } else {
+                            Button("Allow") { Task { await agent.requestNotifications() } }.frame(minHeight: 44)
+                        }
+                    }
+                }
             }
             let live = agent.tasks.filter { !$0.status.isTerminal }
             let done = agent.tasks.filter { $0.status.isTerminal }
@@ -107,7 +118,12 @@ struct ActivityView: View {
             .buttonStyle(.plain)
             .swipeActions(edge: .trailing) {
                 if !task.status.isTerminal {
-                    Button(role: .destructive) { Task { await agent.cancel(task.id) } } label: { Label("Cancel", systemImage: "xmark") }
+                    Button(role: .destructive) { Task { await agent.cancel(task.id) } } label: { Label("Cancel task", systemImage: "xmark") }
+                }
+            }
+            .contextMenu {
+                if !task.status.isTerminal {
+                    Button(role: .destructive) { Task { await agent.cancel(task.id) } } label: { Label("Cancel task", systemImage: "xmark.circle") }
                 }
             }
     }
@@ -144,6 +160,7 @@ struct ActivityView: View {
 
 struct TaskRow: View {
     let task: AgentTask
+    static let relative: RelativeDateTimeFormatter = { let f = RelativeDateTimeFormatter(); f.unitsStyle = .abbreviated; return f }()
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             StatusGlyph(status: task.status)
@@ -151,11 +168,11 @@ struct TaskRow: View {
                 Text(task.title).font(.body).foregroundStyle(.primary).lineLimit(2)
                 Text(task.summaryLine).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
                 HStack(spacing: 6) {
-                    Text(task.mode.label)
+                    Text(task.mode == .do ? "Do-it task" : "Research")
                     Text("·")
                     Text(task.status.label)
                     Text("·")
-                    Text(task.createdAt, style: .relative) + Text(" ago")
+                    Text(Self.relative.localizedString(for: task.createdAt, relativeTo: Date()))
                 }
                 .font(.caption).foregroundStyle(.tertiary)
             }
@@ -284,9 +301,10 @@ struct TaskDetailView: View {
                 .font(.footnote).foregroundStyle(.secondary)
             HStack(spacing: 12) {
                 Button(role: .destructive) { Task { working = true; await agent.cancel(task.id); working = false } } label: {
-                    Text("Cancel").frame(maxWidth: .infinity, minHeight: 44)
+                    Text("Cancel task").frame(maxWidth: .infinity, minHeight: 44)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.bordered).tint(Theme.danger)
+                .accessibilityHint("Stops the task; nothing is submitted")
                 Button { Task { working = true; await agent.confirm(task.id); working = false } } label: {
                     Text(again ? "Confirm again" : "Confirm").frame(maxWidth: .infinity, minHeight: 44)
                 }

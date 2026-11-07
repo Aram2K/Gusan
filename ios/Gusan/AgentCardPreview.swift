@@ -13,7 +13,7 @@ struct AgentCardPreview: View {
 
     var body: some View {
         if let state = Self.requested {
-            CardHost(state: state).frame(height: 260).ignoresSafeArea(edges: .bottom)
+            CardHost(state: state).frame(height: AgentCardView.keyboardHeight).ignoresSafeArea(edges: .bottom)
                 .accessibilityLabel("Agent card preview")
         }
     }

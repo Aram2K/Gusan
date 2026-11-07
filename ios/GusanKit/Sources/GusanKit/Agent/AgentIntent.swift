@@ -51,7 +51,6 @@ public struct AgentIntent: Equatable {
     /// Short card title, e.g. "Research: cheapest flights to Rome".
     public var title: String {
         let trimmed = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cut = trimmed.count > 90 ? String(trimmed.prefix(87)).trimmingCharacters(in: .whitespaces) + "…" : trimmed
-        return cut
+        return String(trimmed.prefix(120))
     }
 }

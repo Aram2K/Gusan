@@ -107,6 +107,7 @@ final class AgentCenter: NSObject, ObservableObject {
         self.active = active
         poller?.cancel(); poller = nil
         guard active else { scheduleBackgroundRefresh(); return }
+        if notificationStatus == .notDetermined, !privacyMode, tracker.activeTaskID != nil { Task { await requestNotifications() } }
         poller = Task { @MainActor [weak self] in
             while let self, self.active, !Task.isCancelled {
                 await self.refresh()
@@ -170,6 +171,13 @@ final class AgentCenter: NSObject, ObservableObject {
             UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id.uuidString])
         } catch {
             self.error = (error as? AgentError)?.errorDescription ?? error.localizedDescription
+            if !active {
+                let content = UNMutableNotificationContent()
+                content.title = "Couldn't update the task"
+                content.body = self.error ?? "Open Gusan to check it."
+                content.userInfo = ["taskID": id.uuidString]
+                try? await UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id.uuidString + ".error", content: content, trigger: nil))
+            }
         }
     }
 

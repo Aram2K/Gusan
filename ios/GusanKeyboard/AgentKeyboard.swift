@@ -131,12 +131,31 @@ final class AgentKeyboardController {
         }
     }
 
+    /// Inserts the first paragraph of the result and offers Undo in the toolbar for a while.
     private func insert() {
-        guard let text = task?.result?.plainText, !text.isEmpty, let proxy = host?.textDocumentProxy else { return }
+        guard let plain = task?.result?.plainText, !plain.isEmpty, let proxy = host?.textDocumentProxy else { return }
+        let text = plain.components(separatedBy: "\n\n").first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? plain
         proxy.insertText(text)
-        UIAccessibility.post(notification: .announcement, argument: "Inserted")
+        inserted = text
         dismiss()
+        onStatus?("Inserted", "Undo insert")
+        UIAccessibility.post(notification: .announcement, argument: "Inserted. Undo available in the status bar.")
+        undoTimer?.invalidate()
+        undoTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: false) { [weak self] _ in self?.inserted = nil; self?.onStatus?(nil, nil) }
     }
+
+    /// Removes what Insert added, if the text after the cursor still ends with it.
+    func undoInsert() {
+        undoTimer?.invalidate()
+        guard let inserted, let proxy = host?.textDocumentProxy else { return }
+        self.inserted = nil
+        guard (proxy.documentContextBeforeInput ?? "").hasSuffix(inserted) else { onStatus?("Text changed. Undo is no longer available.", nil); return }
+        for _ in inserted { proxy.deleteBackward() }
+        onStatus?("Undone", nil)
+        UIAccessibility.post(notification: .announcement, argument: "Undone")
+    }
+    private var inserted: String?
+    private var undoTimer: Timer?
 
     private func openApp() {
         let url = task.map { "gusan://task?id=\($0.id.uuidString.lowercased())" } ?? "gusan://task"
@@ -198,12 +217,12 @@ final class AgentKeyboardController {
         tracker.activeTaskID = fresh.status.isTerminal ? nil : fresh.id
         tracker.markNotified(fresh)
         if previous != fresh.status, previous != nil, fresh.status == .awaitingConfirmation || fresh.status.isTerminal {
-            if settingsHaptics { UINotificationFeedbackGenerator().notificationOccurred(fresh.status == .completed || fresh.status == .awaitingConfirmation ? .success : .error) }
             if !showingCard { onStatus?(toolbarLine(fresh), "View") }
             UIAccessibility.post(notification: .announcement, argument: fresh.summaryLine)
         }
         if fresh.status != .awaitingConfirmation { pending = nil }
-        if previous == nil, !showingCard { onStatus?(toolbarLine(fresh), "View") }
+        // A resumed task stays minimised (toolbar line + View) unless it needs the user's OK.
+        if previous == nil, !showingCard { if fresh.status == .awaitingConfirmation { show() } else { onStatus?(toolbarLine(fresh), "View") } }
         render()
     }
 
@@ -242,6 +261,8 @@ final class AgentKeyboardController {
 /// at least 44pt tall; VoiceOver gets labels, hints and announcements.
 final class AgentCardView: UIView {
     enum State { case empty, task(AgentTask), failed(message: String, retryable: Bool) }
+    /// Height the card really gets in the keyboard: the 260pt keyboard minus the 44pt toolbar.
+    static let keyboardHeight: CGFloat = 216
 
     /// Whether "Run again"/"Retry" can restart the same request (the controller still has the intent).
     var canRetry = false
@@ -262,6 +283,7 @@ final class AgentCardView: UIView {
     private let status = UILabel()
     private let body = UITextView()
     private let minimise = UIButton(type: .system)
+    private let more = UILabel()
     private let primary = UIButton(type: .system)
     private let secondary = UIButton(type: .system)
     private let tertiary = UIButton(type: .system)
@@ -279,8 +301,15 @@ final class AgentCardView: UIView {
         [icon, spinner, title, status, body, minimise, primary, secondary, tertiary].forEach { sheet.addSubview($0) }
         sheet.layer.cornerRadius = 14; sheet.layer.cornerCurve = .continuous
         icon.contentMode = .scaleAspectFit; icon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
-        title.font = .systemFont(ofSize: 14, weight: .semibold); title.numberOfLines = 2
-        status.font = .systemFont(ofSize: 12, weight: .medium); status.numberOfLines = 1
+        title.font = UIFontMetrics(forTextStyle: .subheadline).scaledFont(for: .systemFont(ofSize: 14, weight: .semibold), maximumPointSize: 20)
+        title.adjustsFontForContentSizeCategory = true; title.numberOfLines = 2; title.lineBreakMode = .byTruncatingTail
+        title.accessibilityTraits.insert(.header)
+        status.font = UIFontMetrics(forTextStyle: .caption1).scaledFont(for: .systemFont(ofSize: 12, weight: .medium), maximumPointSize: 16)
+        status.adjustsFontForContentSizeCategory = true; status.numberOfLines = 1
+        more.text = "more ⌄"; more.font = .systemFont(ofSize: 11, weight: .semibold); more.textAlignment = .right; more.isHidden = true
+        more.isAccessibilityElement = false
+        sheet.addSubview(more)
+        accessibilityElements = [title, status, body, secondary, primary, tertiary, minimise]
         body.isEditable = false; body.isSelectable = false; body.font = .preferredFont(forTextStyle: .footnote); body.adjustsFontForContentSizeCategory = true
         body.textContainerInset = UIEdgeInsets(top: 6, left: 4, bottom: 6, right: 4); body.layer.cornerRadius = 10; body.layer.cornerCurve = .continuous
         body.alwaysBounceVertical = true; body.showsVerticalScrollIndicator = true
@@ -313,7 +342,11 @@ final class AgentCardView: UIView {
     func render(_ state: State) { self.state = state; restyle(); setNeedsLayout() }
 
     /// Live progress line while a task runs, without re-rendering the whole card.
-    func showStep(_ text: String) { body.text = "Latest: " + text; body.accessibilityLabel = body.text }
+    func showStep(_ text: String) {
+        body.text = "Latest: " + text; body.accessibilityLabel = body.text
+        if Date().timeIntervalSince(lastStepAnnouncement) > 4 { lastStepAnnouncement = Date(); UIAccessibility.post(notification: .announcement, argument: text) }
+    }
+    private var lastStepAnnouncement = Date.distantPast
 
     private var buttons: [(UIButton, String, Bool)] = []
 
@@ -363,7 +396,7 @@ final class AgentCardView: UIView {
                 icon.image = UIImage(systemName: "checkmark.circle.fill"); icon.tintColor = theme.success
                 status.text = "Done · " + (task.mode == .research ? "Research" : "Do-it task")
                 body.text = task.result?.plainText ?? task.outcome ?? "Finished"
-                buttons = [(tertiary, "Open in app", false), (primary, "Insert", true)]
+                buttons = task.mode == .do ? [(tertiary, "Insert", false), (primary, "Open in app", true)] : [(tertiary, "Open in app", false), (primary, "Insert", true)]
                 if task.result?.plainText.isEmpty ?? true { buttons = [(secondary, "Dismiss", false), (primary, "Open in app", true)] }
                 announce = "Done. " + MarkdownBlocks.firstLine(task.result?.markdown ?? "")
             case .failed, .timedOut, .cancelled:
@@ -384,7 +417,7 @@ final class AgentCardView: UIView {
             button.accessibilityHint = hint(for: name)
         }
         body.accessibilityLabel = body.text
-        if let announce { UIAccessibility.post(notification: .layoutChanged, argument: announce) }
+        if let announce { title.accessibilityValue = nil; UIAccessibility.post(notification: .screenChanged, argument: title); UIAccessibility.post(notification: .announcement, argument: announce) }
     }
 
     private func armConfirm() {
@@ -403,7 +436,7 @@ final class AgentCardView: UIView {
         case "Confirm", "Confirm again": return "Lets the agent take exactly the action described"
         case "Cancel", "Cancel task": return "Stops the task; nothing is submitted"
         case "Retry", "Run again": return "Starts the same request again"
-        case "Insert": return "Pastes the result at the cursor"
+        case "Insert": return "Pastes the first paragraph of the result at the cursor; Undo appears in the status bar"
         case "Open in app": return "Shows the full result in the Gusan app"
         default: return "Closes this card"
         }
@@ -422,6 +455,9 @@ final class AgentCardView: UIView {
         let buttonsHeight: CGFloat = buttons.isEmpty ? 0 : 44
         let bodyTop: CGFloat = 60
         body.frame = CGRect(x: 12, y: bodyTop, width: w - 24, height: max(0, sheet.bounds.height - bodyTop - buttonsHeight - (buttons.isEmpty ? 10 : 18)))
+        more.frame = CGRect(x: body.frame.maxX - 70, y: body.frame.maxY - 18, width: 62, height: 16)
+        more.textColor = KeyboardTheme.blue
+        more.isHidden = body.contentSize.height <= body.bounds.height + 2
         let gap: CGFloat = 8
         // A lone Cancel takes the left half so Confirm, when it arrives, never lands where Cancel was.
         let count = max(CGFloat(buttons.count), buttons.count == 1 && buttons[0].0 === secondary ? 2 : 1)

@@ -183,7 +183,7 @@ public enum AgentError: Error, LocalizedError, Equatable {
     public var errorDescription: String? {
         switch self {
         case .notConfigured: return "Agent tasks aren't set up on Gusan Cloud yet."
-        case .busy: return "The agents are busy right now. Try again in a minute."
+        case .busy: return "Gusan's agent is busy right now. Try again in a minute."
         case .tooManyActive: return "You already have \(AgentTask.maxActive) tasks running. Wait for one to finish, or cancel it in Activity."
         case .quotaExceeded: return "You've reached today's limit of \(AgentTask.maxPerDay) agent tasks. It resets 24 hours after the first one."
         case .notAwaitingConfirmation: return "This task isn't waiting for confirmation any more."

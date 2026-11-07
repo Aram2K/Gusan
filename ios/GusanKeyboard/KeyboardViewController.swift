@@ -203,6 +203,7 @@ final class KeyboardViewController: UIInputViewController {
         case "See plans": openContainingApp(URL(string: "https://gusan.aibuben.xyz")!)
         case "Retry": if let retryAction, let retryContext { run(retryAction, context: retryContext) }
         case "View": agent.show()
+        case "Undo insert": agent.undoInsert()
         default: break
         }
     }
