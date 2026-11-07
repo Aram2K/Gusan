@@ -176,7 +176,10 @@ final class KeyboardViewController: UIInputViewController {
         height.constant = keyboardHeight
         updateContext(); view.setNeedsLayout()
     }
-    private func showTyping() { snapshotReturnSurface = nil; instructionContext = nil; surface = .typing; updateSurface() }
+    private func showTyping(cancelPending: Bool = true) {
+        if cancelPending { task?.cancel() }
+        snapshotReturnSurface = nil; instructionContext = nil; surface = .typing; updateSurface()
+    }
     private var compactLayout: Bool {
         traitCollection.verticalSizeClass == .compact || view.window?.windowScene?.interfaceOrientation.isLandscape == true
     }
@@ -268,7 +271,7 @@ final class KeyboardViewController: UIInputViewController {
     private func run(_ action: SmartAction, context: Context) {
         voice.dismiss()
         guard !busy else { return }
-        let access = store.sessionState(fullAccess: hasFullAccess)
+        let access = previewActions ? SessionState(signedIn: true, fullAccess: true, shareable: true) : store.sessionState(fullAccess: hasFullAccess)
         accessState = access
         if access.actionError == .fullAccessRequired {
             if surface != .instruction { showTyping() }
@@ -280,7 +283,7 @@ final class KeyboardViewController: UIInputViewController {
             showMessage(error == .notSignedIn ? "Sign in to use Gusan" : "Gusan can't read shared sign-in", detail: store.diagnostics().summary, accessory: error == .notSignedIn ? "Sign in" : "Details"); return
         }
         #if DEBUG
-        if store.read()?.accessToken == "gusan-debug-no-network" {
+        if !previewActions, store.read()?.accessToken == "gusan-debug-no-network" {
             showMessage("DEBUG session available", detail: store.diagnostics().summary, accessory: "Details"); return
         }
         #endif
@@ -295,14 +298,7 @@ final class KeyboardViewController: UIInputViewController {
         task = Task { @MainActor in
             defer { busy = false; toolbar.spinner.stopAnimating(); keyArea.inputEnabled = true; updateContext() }
             do {
-                guard let session = try await auth.refresh() else { throw GusanError.unauthorized }
-                let result: String
-                let kind: JobResult.Kind = context.selected.isEmpty ? (context.text.isEmpty ? .insert : .replaceContext) : .replaceSelection
-                do { result = try await SmartActionJob(text: context.text, action: action, accessToken: session.accessToken, target: settings.translateTarget, kind: kind).result().text }
-                catch GusanError.unauthorized {
-                    guard let refreshed = try await auth.refresh(force: true) else { throw GusanError.unauthorized }
-                    result = try await SmartActionJob(text: context.text, action: action, accessToken: refreshed.accessToken, target: settings.translateTarget, kind: kind).result().text
-                }
+                let result = try await actionResult(action, context: context)
                 try Task.checkCancellation()
                 guard currentContext == context else { showMessage("Text changed. Select it and try again."); return }
                 guard !result.isEmpty else { throw GusanError.invalidResponse }
@@ -313,7 +309,7 @@ final class KeyboardViewController: UIInputViewController {
                 undoSnapshot = currentContext.voiceContext
                 textDocumentProxy.insertText(result)
                 original = context.text; replacement = result; captureUndo(restoreUTF16: context.selected.isEmpty ? context.paragraph.after.utf16.count : 0)
-                instructionContext = nil; instruction = ""; showTyping()
+                instructionContext = nil; instruction = ""; showTyping(cancelPending: false)
                 showMessage("Replaced", accessory: "Undo")
                 UIAccessibility.post(notification: .announcement, argument: "Replaced. Undo available.")
             } catch is CancellationError { showMessage("Cancelled") }
@@ -326,6 +322,25 @@ final class KeyboardViewController: UIInputViewController {
                 let title = error as? GusanError == .network ? "You're offline. Tap for details." : "Action failed. Tap for details."
                 showMessage(title, detail: error.localizedDescription, accessory: retry ? "Retry" : nil)
             }
+        }
+    }
+    private var previewActions: Bool {
+        #if DEBUG
+        UserDefaults(suiteName: store.resolution.chosen)?.bool(forKey: "debugActionPreview") == true
+        #else
+        false
+        #endif
+    }
+    private func actionResult(_ action: SmartAction, context: Context) async throws -> String {
+        #if DEBUG
+        if previewActions { return try await InstructionPreviewJob().result().text }
+        #endif
+        guard let session = try await auth.refresh() else { throw GusanError.unauthorized }
+        let kind: JobResult.Kind = context.selected.isEmpty ? (context.text.isEmpty ? .insert : .replaceContext) : .replaceSelection
+        do { return try await SmartActionJob(text: context.text, action: action, accessToken: session.accessToken, target: settings.translateTarget, kind: kind).result().text }
+        catch GusanError.unauthorized {
+            guard let refreshed = try await auth.refresh(force: true) else { throw GusanError.unauthorized }
+            return try await SmartActionJob(text: context.text, action: action, accessToken: refreshed.accessToken, target: settings.translateTarget, kind: kind).result().text
         }
     }
     private func undo() {
@@ -402,3 +417,20 @@ final class KeyboardViewController: UIInputViewController {
         showMessage("Open the Gusan app to sign in.")
     }
 }
+
+#if DEBUG
+private struct InstructionPreviewJob: GusanJob {
+    func run() -> AsyncThrowingStream<JobEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    try await Task.sleep(nanoseconds: 10_000_000_000)
+                    continuation.yield(.result(JobResult(text: "DEBUG action completed", kind: .replaceContext)))
+                    continuation.finish()
+                } catch { continuation.finish(throwing: error) }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}
+#endif
