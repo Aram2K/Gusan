@@ -69,7 +69,11 @@ public enum ScreenPrompts {
 /// the current frame; same endpoint, headers and answer format as text actions.
 public struct ScreenActionClient {
     public let transport: HTTPTransport
-    public init(transport: HTTPTransport = URLSession.shared) { self.transport = transport }
+    private let calendarStore: CalendarSnapshotStore
+    public init(transport: HTTPTransport = URLSession.shared, calendarStore: CalendarSnapshotStore? = nil) {
+        self.transport = transport
+        self.calendarStore = calendarStore ?? CalendarSnapshotStore(group: AppGroupResolver.resolve().chosen)
+    }
     public func request(instruction: String, text: String, selected: String = "", frame: ScreenFrame, accessToken: String) throws -> URLRequest {
         try request(instruction: instruction, text: text, selected: selected, frames: [frame], accessToken: accessToken)
     }
@@ -79,8 +83,9 @@ public struct ScreenActionClient {
         request.httpMethod = "POST"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        struct Body: Encodable { let messages: [ScreenChatMessage]; let max_tokens: Int; let mode: String }
-        request.httpBody = try JSONEncoder().encode(Body(messages: messages, max_tokens: SmartActionMode.smartAuto.maxTokens, mode: SmartActionMode.smartAuto.rawValue))
+        let calendar = CalendarContext.schedulingSummary(texts: [instruction], store: calendarStore)
+        struct Body: Encodable { let messages: [ScreenChatMessage]; let max_tokens: Int; let mode: String; let calendar: String? }
+        request.httpBody = try JSONEncoder().encode(Body(messages: messages, max_tokens: SmartActionMode.smartAuto.maxTokens, mode: SmartActionMode.smartAuto.rawValue, calendar: calendar))
         return request
     }
     public func run(instruction: String, text: String, selected: String = "", frame: ScreenFrame, accessToken: String) async throws -> String {

@@ -26,6 +26,7 @@ final class AgentCenter: NSObject, ObservableObject {
     @Published private(set) var requestingNotifications = false
     private(set) var lastRefresh: Date?
     private var refreshing = false
+    private let statusPoller = AgentStatusPoller()
     private var revision = 0
     private var mutating = 0
 
@@ -124,21 +125,15 @@ final class AgentCenter: NSObject, ObservableObject {
         if tasks.isEmpty && !loading { loading = true }
         defer { refreshing = false; if loading { loading = false } }
         do {
-            var fetched = try await service.list(limit: 100)
-            let listedIDs = Set(fetched.map(\.id))
-            for task in tasks where !listedIDs.contains(task.id) && !task.status.isTerminal {
-                fetched.append(try await service.status(task.id, waitSeconds: 0))
-            }
-            // The table hides the pending confirmation text; ask the function for it.
-            for index in fetched.indices where fetched[index].status == .awaitingConfirmation && fetched[index].confirmation == nil {
-                if let full = try? await service.status(fetched[index].id, waitSeconds: 0) { fetched[index] = full }
-            }
+            let listed = try await service.list(limit: 100)
+            let result = await statusPoller.refresh(listed: listed, known: tasks, service: service)
+            let fetched = result.tasks
             let fetchedIDs = Set(fetched.map(\.id))
             guard version == revision, !Task.isCancelled else { return }
             let updated = (fetched + tasks.filter { !fetchedIDs.contains($0.id) }).sorted { $0.createdAt > $1.createdAt }
             if tasks != updated { tasks = updated }
             lastRefresh = Date()
-            if error != nil { error = nil }
+            error = result.failedIDs.isEmpty ? nil : "Couldn't update some Agent tasks. Trying again…"
             await deliver(tracker.consumeEvents(from: fetched))
         } catch {
             guard version == revision, !Task.isCancelled else { return }
@@ -166,6 +161,7 @@ final class AgentCenter: NSObject, ObservableObject {
         let userID = model.session.map { $0.userID ?? $0.accessToken }
         guard userID != activityUserID else { return }
         revision += 1
+        statusPoller.reset()
         if userID != activityUserID, #available(iOS 16.1, *) {
             (liveActivities as? AgentLiveActivityController)?.dismissAll()
         }
@@ -207,7 +203,7 @@ final class AgentCenter: NSObject, ObservableObject {
         guard let service = currentService() else { throw AgentError.unauthorized }
         let previous: AgentTask
         if let loaded = task(id) { previous = loaded }
-        else { previous = try await service.status(id, waitSeconds: 0) }
+        else { previous = try await statusPoller.status(id, service: service) }
         mutating += 1; revision += 1
         defer { mutating -= 1; revision += 1 }
         let context = instructions[id]?.context
@@ -264,7 +260,9 @@ final class AgentCenter: NSObject, ObservableObject {
 
     /// Fetches one task that is not in the loaded page (older history, or a brand-new deep link).
     func load(_ id: UUID) async {
-        guard task(id) == nil, let service = currentService(), let fetched = try? await service.status(id, waitSeconds: 0) else { return }
+        guard task(id) == nil, let service = currentService() else { return }
+        let version = revision
+        guard let fetched = try? await statusPoller.status(id, service: service), version == revision else { return }
         if task(id) == nil { tasks.append(fetched); tasks.sort { $0.createdAt > $1.createdAt } }
     }
 

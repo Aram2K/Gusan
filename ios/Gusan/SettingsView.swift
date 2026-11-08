@@ -23,6 +23,9 @@ struct SettingsView: View {
             }
             VoiceSettingsSection(voice: voice)
             Section {
+                NavigationLink { ConnectionsView() } label: { Label("Connections", systemImage: "link") }
+            }
+            Section {
                 Toggle("Keyboard sounds", isOn: $keyClicks)
                 Toggle("In-app haptics", isOn: $haptics)
             } footer: { Text("Keyboard sounds follow iOS sound settings. Haptic feedback applies inside the Gusan app.") }
