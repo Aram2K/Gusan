@@ -121,7 +121,10 @@ final class KeyboardViewController: UIInputViewController {
             voice.insert(JobResult(text: pendingInsert.text, kind: snapshot.selected.isEmpty ? .insert : .replaceSelection), context: snapshot)
             VoicePendingInsert.clear(in: sharedDefaults); self.pendingInsert = nil; update()
         }
-        else if voice.actionTitle == "Retry", let retryTake { process(retryTake.text, context: retryTake.context) }
+        else if voice.actionTitle == "Retry" {
+            if let retryTake { process(retryTake.text, context: retryTake.context) }
+            else { voice.toggle() }
+        }
         else if screenHint && voice.message == nil { openContainingApp(URL(string: "gusan://screen")!) }
         else { voice.performAction() }
     }
