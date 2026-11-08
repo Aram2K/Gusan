@@ -79,6 +79,7 @@ public final class VaultClient: VaultService {
     public func add(hostname: String, usernameHint: String?, hasTOTP: Bool) async throws -> VaultLogin {
         var body: [String: Any] = ["action": "add", "hostname": try VaultHostname.normalize(hostname), "has_totp": hasTOTP]
         if let usernameHint { body["username_hint"] = String(usernameHint.prefix(64)) }
+        else { body["username_hint"] = NSNull() }
         return try AgentTask.dateDecoder.decode(VaultLogin.self, from: await send(body))
     }
     public func delete(loginID: UUID) async throws { _ = try await send(["action": "delete", "login_id": loginID.uuidString.lowercased()]) }

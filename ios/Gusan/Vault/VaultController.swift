@@ -101,11 +101,11 @@ final class VaultController: ObservableObject {
             let host = try VaultHostname.normalize(hostname)
             let secret = try VaultHostname.authenticatorSecret(authenticator)
             guard !password.isEmpty, password.count <= 4096, username.count <= 4096 else { throw VaultValidationError.credential }
-            let existingIDs = Set(logins.map(\.id))
+            let previousLogins = logins
             let login = try await service.add(hostname: host, usernameHint: VaultHostname.usernameHint(username), hasTOTP: secret != nil)
             guard version == generation else { return false }
             try await VaultLoginChanges.save(VaultCredential(username: username, password: password, totp: secret),
-                                             loginID: login.id, existingLoginIDs: existingIDs, store: store, service: service)
+                                             loginID: login.id, previousLogins: previousLogins, store: store, service: service)
             guard version == generation else { return false }
             logins.removeAll { $0.id == login.id }; logins.insert(login, at: 0)
             return true

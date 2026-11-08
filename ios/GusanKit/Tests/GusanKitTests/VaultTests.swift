@@ -38,14 +38,21 @@ final class VaultTests: XCTestCase {
         let stub = StubVaultService()
         var deleted: [UUID] = []
         var deleteFails = false
+        var addFails = false
+        var deleteMissingIsNotFound = false
         var onDelete: (() -> Void)?
         func list() async throws -> VaultList { try await stub.list() }
         func add(hostname: String, usernameHint: String?, hasTOTP: Bool) async throws -> VaultLogin {
-            try await stub.add(hostname: hostname, usernameHint: usernameHint, hasTOTP: hasTOTP)
+            if addFails { throw VaultClientError(code: "unknown", status: 500) }
+            return try await stub.add(hostname: hostname, usernameHint: usernameHint, hasTOTP: hasTOTP)
         }
         func delete(loginID: UUID) async throws {
             deleted.append(loginID); onDelete?()
             if deleteFails { throw VaultClientError(code: "unknown", status: 500) }
+            if deleteMissingIsNotFound {
+                let list = try await stub.list()
+                if !list.logins.contains(where: { $0.id == loginID }) { throw VaultClientError(code: "not_found", status: 404) }
+            }
             try await stub.delete(loginID: loginID)
         }
         func pending() async throws -> [VaultPendingLogin] { try await stub.pending() }
@@ -70,10 +77,11 @@ final class VaultTests: XCTestCase {
         let fake = Keychain(), store = VaultStore(keychain: fake), service = Service()
         let login = try await service.add(hostname: "example.com", usernameHint: nil, hasTOTP: false)
         try store.save(VaultCredential(username: "u", password: "old"), loginID: login.id)
+        _ = try await service.add(hostname: login.hostname, usernameHint: "n•••", hasTOTP: true)
         fake.updateStatus = errSecParam
         do {
             try await VaultLoginChanges.save(VaultCredential(username: "u", password: "new"), loginID: login.id,
-                                             existingLoginIDs: [login.id], store: store, service: service)
+                                             previousLogins: [login], store: store, service: service)
             XCTFail("Expected replacement failure")
         } catch { XCTAssertTrue(error is VaultStoreError) }
         XCTAssertTrue(service.deleted.isEmpty)
@@ -82,6 +90,8 @@ final class VaultTests: XCTestCase {
         XCTAssertEqual(try store.read(loginID: login.id, context: LAContext()).password, "old")
         let list = try await service.list()
         XCTAssertEqual(list.logins.map(\.id), [login.id])
+        XCTAssertNil(list.logins.first?.usernameHint)
+        XCTAssertEqual(list.logins.first?.hasTOTP, false)
     }
     func testNewLoginSaveRollsBackOnlyOnFailure() async throws {
         let fake = Keychain(), store = VaultStore(keychain: fake), service = Service()
@@ -89,7 +99,7 @@ final class VaultTests: XCTestCase {
         fake.addStatus = errSecNotAvailable
         do {
             try await VaultLoginChanges.save(VaultCredential(username: "u", password: "p"), loginID: login.id,
-                                             existingLoginIDs: [], store: store, service: service)
+                                             previousLogins: [], store: store, service: service)
             XCTFail("Expected save failure")
         } catch { XCTAssertEqual(error.localizedDescription, "Set a device passcode to use Vault") }
         XCTAssertEqual(service.deleted, [login.id])
@@ -100,7 +110,7 @@ final class VaultTests: XCTestCase {
         fake.addStatus = nil
         let saved = try await service.add(hostname: "example.com", usernameHint: nil, hasTOTP: false)
         try await VaultLoginChanges.save(VaultCredential(username: "u", password: "p"), loginID: saved.id,
-                                         existingLoginIDs: [], store: store, service: service)
+                                         previousLogins: [], store: store, service: service)
         XCTAssertEqual(service.deleted, [login.id])
         XCTAssertEqual(try store.read(loginID: saved.id, context: LAContext()).password, "p")
     }
@@ -131,7 +141,7 @@ final class VaultTests: XCTestCase {
         fake.addStatus = errSecNotAvailable; service.deleteFails = true
         do {
             try await VaultLoginChanges.save(VaultCredential(username: "u", password: "p"), loginID: login.id,
-                                             existingLoginIDs: [], store: store, service: service)
+                                             previousLogins: [], store: store, service: service)
             XCTFail("Expected rollback failure")
         } catch {
             XCTAssertTrue(error is VaultLoginChangeError)
@@ -141,6 +151,60 @@ final class VaultTests: XCTestCase {
         XCTAssertNil(fake.data)
         let retained = try await service.list()
         XCTAssertEqual(retained.logins.map(\.id), [login.id])
+    }
+    func testDeleteRetriesLocalFailureAfterCloudRowIsGone() async throws {
+        let fake = Keychain(), store = VaultStore(keychain: fake), service = Service()
+        let login = try await service.add(hostname: "example.com", usernameHint: nil, hasTOTP: false)
+        try store.save(VaultCredential(username: "u", password: "p"), loginID: login.id)
+        service.deleteMissingIsNotFound = true
+        fake.status = errSecInteractionNotAllowed
+        do {
+            try await VaultLoginChanges.delete(loginID: login.id, store: store, service: service)
+            XCTFail("Expected local delete failure")
+        } catch { XCTAssertTrue(error is VaultStoreError) }
+        XCTAssertNotNil(fake.data)
+        let cloud = try await service.list()
+        XCTAssertTrue(cloud.logins.isEmpty)
+        fake.status = errSecSuccess
+        try await VaultLoginChanges.delete(loginID: login.id, store: store, service: service)
+        XCTAssertNil(fake.data)
+        XCTAssertEqual(fake.deleted.count, 2)
+        fake.status = errSecItemNotFound
+        try await VaultLoginChanges.delete(loginID: login.id, store: store, service: service)
+        XCTAssertEqual(fake.deleted.count, 3)
+    }
+    func testMetadataRestoreFailureKeepsOldCredentialAndSurfacesError() async throws {
+        let fake = Keychain(), store = VaultStore(keychain: fake), service = Service()
+        let login = try await service.add(hostname: "example.com", usernameHint: "o•••", hasTOTP: true)
+        try store.save(VaultCredential(username: "u", password: "old"), loginID: login.id)
+        _ = try await service.add(hostname: login.hostname, usernameHint: "n•••", hasTOTP: false)
+        fake.updateStatus = errSecParam; service.addFails = true
+        do {
+            try await VaultLoginChanges.save(VaultCredential(username: "u", password: "new"), loginID: login.id,
+                                             previousLogins: [login], store: store, service: service)
+            XCTFail("Expected metadata restore failure")
+        } catch {
+            XCTAssertTrue(error is VaultLoginChangeError)
+            XCTAssertTrue(error.localizedDescription.contains("cloud details couldn't be restored"))
+        }
+        XCTAssertTrue(service.deleted.isEmpty)
+        XCTAssertEqual(try store.read(loginID: login.id, context: LAContext()).password, "old")
+    }
+    func testAddExplicitlyClearsAbsentUsernameHint() async throws {
+        final class Transport: HTTPTransport {
+            var seen: URLRequest?
+            func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+                seen = request
+                let login = VaultLogin(loginID: UUID(), hostname: "example.com", usernameHint: nil, hasTOTP: false)
+                let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+                return (try encoder.encode(login), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+            }
+        }
+        let transport = Transport(), client = VaultClient(tokenProvider: { "jwt" }, transport: transport)
+        _ = try await client.add(hostname: "example.com", usernameHint: nil, hasTOTP: false)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(transport.seen?.httpBody)) as? [String: Any])
+        XCTAssertTrue(body["username_hint"] is NSNull)
+        XCTAssertEqual(body["has_totp"] as? Bool, false)
     }
     func testPrivateBiometricKeychainQueries() throws {
         let fake = Keychain(), store = VaultStore(keychain: fake), id = UUID()
