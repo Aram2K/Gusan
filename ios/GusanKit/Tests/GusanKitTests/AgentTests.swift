@@ -207,6 +207,32 @@ final class AgentTests: XCTestCase {
         }
     }
 
+    func testFailedSameTaskFollowupRetriesThroughContinue() async throws {
+        let transport = ActionTransport()
+        let client = AgentClient(tokenProvider: { "jwt" }, transport: transport)
+        let id = UUID()
+        transport.responses = [
+            (200, """
+            {"task_id":"\(id)","mode":"research","status":"running","title":"Follow up","result":null}
+            """),
+            (200, """
+            {"task_id":"\(id)","mode":"research","status":"failed","title":"Follow up","result":null,"error_code":"internal"}
+            """),
+            (200, """
+            {"task_id":"\(id)","mode":"research","status":"running","title":"Follow up","result":null,"error_code":null}
+            """)
+        ]
+        let first = try await client.continueTask(id, message: "Compare the next option")
+        XCTAssertEqual(first.id, id)
+        let failed = try await client.status(id, waitSeconds: 0)
+        XCTAssertEqual(failed.phase, .failed)
+        let retry = try await client.continueTask(failed.id, message: "Compare the next option")
+        XCTAssertEqual(retry.id, id)
+        XCTAssertEqual(retry.phase, .working)
+        XCTAssertEqual(transport.bodies.map { $0["action"] as! String }, ["continue", "status", "continue"])
+        XCTAssertEqual(transport.bodies.first?["message"] as? String, transport.bodies.last?["message"] as? String)
+    }
+
     func testInPlaceContinuationPreservesChatAndRestoresLegacyRecords() throws {
         let suite = "AgentSameTaskTests." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

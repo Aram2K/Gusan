@@ -59,7 +59,7 @@ final class AgentCenter: NSObject, ObservableObject {
     /// Tasks the user confirmed from this device; if one is awaiting again, the server is asking to confirm again.
     @Published private(set) var confirmedIDs: Set<UUID> = []
     /// Full instructions of tasks started on this device (the server keeps only a 120-char title).
-    private var instructions: [UUID: (instruction: String, context: String?)] = [:]
+    private var instructions: [UUID: (instruction: String, context: String?, continuation: Bool)] = [:]
     /// Whether "Run again" can reproduce the original request faithfully.
     func canRunAgain(_ task: AgentTask) -> Bool { instructions[task.id] != nil }
     var threads: [AgentSessionStore.Thread] { sessionStore.threads(for: tasks) }
@@ -180,7 +180,7 @@ final class AgentCenter: NSObject, ObservableObject {
     func start(_ intent: AgentIntent, context: String? = nil, continuing parentID: UUID? = nil) async throws -> AgentTask {
         guard let service = currentService() else { throw AgentError.unauthorized }
         let task = try await service.start(intent, context: context)
-        instructions[task.id] = (intent.instruction, context)
+        instructions[task.id] = (intent.instruction, context, false)
         sessionStore.record(taskID: task.id, message: intent.instruction, continuing: parentID, date: task.createdAt)
         tracker.markNotified(task)
         tasks.insert(task, at: 0)
@@ -198,6 +198,7 @@ final class AgentCenter: NSObject, ObservableObject {
         guard let original = instructions[task.id] else {
             throw NSError(domain: "Gusan.AgentRetry", code: 1, userInfo: [NSLocalizedDescriptionKey: "The original input is no longer available. Start again from Home."])
         }
+        if original.continuation { return try await continueTask(task.id, message: original.instruction) }
         return try await start(AgentIntent(mode: task.mode, instruction: original.instruction), context: original.context, continuing: task.id)
     }
 
@@ -209,9 +210,11 @@ final class AgentCenter: NSObject, ObservableObject {
         else { previous = try await service.status(id, waitSeconds: 0) }
         mutating += 1; revision += 1
         defer { mutating -= 1; revision += 1 }
+        let context = instructions[id]?.context
         let task = try await service.continueTask(id, message: message)
         sessionStore.recordContinuation(previous: previous, task: task, message: message)
-        instructions[task.id] = nil
+        if task.id == id { instructions[id] = (message, context, true) }
+        else { instructions[task.id] = nil }
         tracker.markNotified(task)
         if let index = tasks.firstIndex(where: { $0.id == task.id }) { tasks[index] = task }
         else { tasks.insert(task, at: 0) }
