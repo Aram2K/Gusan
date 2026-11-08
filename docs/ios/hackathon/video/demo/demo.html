@@ -624,9 +624,15 @@ if (!RENDER) {
     else if (e.key === 'f' || e.key === 'F') { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(); }
     else if (e.key === 'h' || e.key === 'H') { hudVisible = !hudVisible; showHud(); }
   });
-  barEl.addEventListener('click', e => { const r = barEl.getBoundingClientRect(); seek((e.clientX - r.left) / r.width * DUR); });
+  let scrubbing = false, skipClick = false;
+  const scrubTo = x => { const r = barEl.getBoundingClientRect(); seek(Math.max(0, Math.min(1, (x - r.left) / r.width)) * DUR); };
+  barEl.addEventListener('pointerdown', e => { e.preventDefault(); scrubbing = true; skipClick = true; barEl.setPointerCapture(e.pointerId); scrubTo(e.clientX); });
+  barEl.addEventListener('pointermove', e => { if (scrubbing) scrubTo(e.clientX); });
+  const endScrub = () => { scrubbing = false; setTimeout(() => { skipClick = false; }, 0); };
+  barEl.addEventListener('pointerup', endScrub);
+  barEl.addEventListener('pointercancel', endScrub);
   addEventListener('mousemove', showHud);
-  addEventListener('click', e => { if (!barEl.contains(e.target)) playing ? pause() : play(); });
+  addEventListener('click', e => { if (skipClick || barEl.contains(e.target)) return; playing ? pause() : play(); });
   render(0); showHud();
   if (Q.get('autoplay') === '1') play();
 } else {
