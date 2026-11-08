@@ -40,6 +40,9 @@
 // after retries, any step list in accumulated answers can be shown for approval.
 // H answer_validation failures follow the same salvage/two-retry flow.
 // Plans contain 1–30 steps of at most 2000 characters; oversized steps fail.
+// Missing research links fall back to up to 8 private trajectory sources,
+// ranked by visit count then recency, excluding search result pages. Follow-ups
+// prefer visits after their matching user message, falling back to all visits.
 // Execute is submit-once. Sync reactively stops duplicate_action and
 // off_plan_navigation from observable events; this is not a pre-action gate.
 // Errors: bad_request (400, field), unauthorized (401), privacy_mode and
@@ -666,6 +669,12 @@ async function continueTask(db: any, row: Obj, run: Obj, message: string, client
     return json(task(resumed));
   }
   const plan = { ...claimedRun.plan, prepare_retry: "running" };
+  const previousSources = claimedRun.plan.continuation_previous_plan;
+  plan.source_visits = (previousSources?.source_visits ?? []).map((visit: Obj) => ({
+    ...visit, followup_count: 0, followup_last: 0,
+  }));
+  plan.source_cursor = previousSources?.source_cursor ?? 0;
+  plan.source_followup_index = null;
   delete plan.continuation_previous_task;
   delete plan.continuation_previous_plan;
   const updated = await db.from("agent_task_runs").update({ plan })
@@ -805,6 +814,79 @@ function pageURL(value: unknown) {
     const u = new URL(String(value));
     return ["https:", "http:"].includes(u.protocol) ? u.origin + u.pathname : null;
   } catch { return null; }
+}
+function sourceURL(value: unknown) {
+  if (typeof value !== "string" || value.length > 2000) return null;
+  const clean = pageURL(value);
+  if (!clean) return null;
+  const { hostname: host, pathname: path } = new URL(clean);
+  if ((/(^|\.)google\.[a-z.]+$/.test(host) && (path.startsWith("/search") ||
+    (["/", "/webhp"].includes(path) && new URL(value).searchParams.has("q")))) ||
+    (/(^|\.)(bing\.com|search\.yahoo\.com|search\.brave\.com|ecosia\.org|yandex\.[a-z.]+)$/.test(host) && path.startsWith("/search")) ||
+    (/(^|\.)duckduckgo\.com$/.test(host) && ["/", "/html", "/html/", "/lite", "/lite/"].includes(path)) ||
+    (/(^|\.)baidu\.com$/.test(host) && path === "/s")) return null;
+  return clean;
+}
+function collectSources(plan: Obj, events: Obj[], fromIndex: number) {
+  const previous = plan.continuation_previous_plan;
+  const visits: Obj[] = (plan.source_visits ?? previous?.source_visits ?? []).map((visit: Obj) => ({
+    ...visit,
+    ...(plan.source_visits ? {} : { followup_count: 0, followup_last: 0 }),
+  }));
+  let cursor = plan.source_cursor ?? previous?.source_cursor ?? 0;
+  let followup = plan.source_followup_index ?? null;
+  for (const [offset, event] of events.entries()) {
+    const index = fromIndex + offset;
+    if (index < cursor) continue;
+    cursor = index + 1;
+    if (event.type !== "AgentEvent") continue;
+    const data = event.data;
+    if (plan.prepare_retry_kind === "continue" && data?.kind === "message_event" &&
+      data.caller_id === "user" && typeof plan.prepare_retry_marker === "string" &&
+      (Array.isArray(data.content) ? data.content : [data.content]).some((part: unknown) =>
+        typeof part === "string" && part.includes(plan.prepare_retry_marker))) {
+      followup = index;
+    }
+    const candidates: Obj[] = [];
+    if (data?.kind === "observation_event" && ["web", "textual_web"].includes(data.type)) {
+      candidates.push({ url: data.metadata?.url, title: data.metadata?.title });
+    }
+    if (data?.kind === "policy_event") {
+      for (const call of Array.isArray(data.tool_reqs) ? data.tool_reqs : []) {
+        candidates.push({ url: call.args?.url });
+        for (const action of Array.isArray(call.args?.actions) ? call.args.actions : []) {
+          candidates.push({ url: action.url });
+        }
+      }
+    }
+    for (const candidate of candidates) {
+      const href = sourceURL(candidate.url);
+      if (!href) continue;
+      let visit = visits.find((item) => item.url === href);
+      if (!visit) {
+        visit = { url: href, title: href, count: 0, last: index, followup_count: 0, followup_last: 0 };
+        visits.push(visit);
+      }
+      if (typeof candidate.title === "string" && candidate.title.trim()) visit.title = candidate.title.slice(0, 200);
+      visit.count++;
+      visit.last = index;
+      if (Number.isInteger(followup) && index > followup) {
+        visit.followup_count++;
+        visit.followup_last = index;
+      }
+    }
+  }
+  return { ...plan, source_cursor: cursor, source_followup_index: followup,
+    source_visits: visits.sort((a, b) => b.last - a.last).slice(0, 128) };
+}
+function sourceLinks(plan: Obj) {
+  const all: Obj[] = plan.source_visits ?? [];
+  const recent = all.filter((visit) => visit.followup_count > 0);
+  const count = recent.length ? "followup_count" : "count";
+  const last = recent.length ? "followup_last" : "last";
+  return [...(recent.length ? recent : all)].filter((visit) => sourceURL(visit.url))
+    .sort((a, b) => b[count] - a[count] || b[last] - a[last]).slice(0, 8)
+    .map((visit) => ({ title: visit.title, url: visit.url }));
 }
 async function expire(db: any, row: Obj, run: Obj) {
   if (terminal(row)) { await cleanupVault(db, row, run); return row; }
@@ -979,6 +1061,14 @@ async function sync(db: any, row: Obj, wait = 0) {
   );
   if (!change) return row;
   const events = Array.isArray(change.new_events) ? change.new_events : [];
+  if (row.mode === "research" && events.length) {
+    const plan = collectSources(run.plan ?? {}, events, row.event_index);
+    const claimed = await db.from("agent_task_runs").update({ plan }).eq("task_id", row.id)
+      .eq("plan", JSON.stringify(run.plan)).select().maybeSingle();
+    if (claimed.error) throw new Failure("storage_error", 500);
+    if (!claimed.data) return loadTask(db, row.id, row.user_id);
+    run.plan = plan;
+  }
   if (row.mode === "do" && run.phase === "prepare") {
     const answers = events.filter((e: Obj) => e.type === "AgentEvent" && e.data?.kind === "answer_event")
       .map((e: Obj) => e.data.answer ?? e.data.content).filter((a: unknown) => a != null);
@@ -1205,6 +1295,9 @@ async function sync(db: any, row: Obj, wait = 0) {
     patch.result = patch.status === "completed"
       ? safeResult(final.answer ?? final.latest_answer)
       : null;
+    if (row.mode === "research" && patch.result && !patch.result.links.length) {
+      patch.result.links = sourceLinks(run.plan ?? {});
+    }
     patch.outcome =
       ["success", "partial", "infeasible", "blocked"].includes(final.outcome)
         ? final.outcome

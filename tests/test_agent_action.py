@@ -1143,6 +1143,65 @@ def test_empty_links_and_link_caps(run):
     assert all(len(link["title"]) == 200 for link in capped["row"]["result"]["links"])
 
 
+def source_observation(url, mode="textual_web"):
+    return {"type": "AgentEvent", "data": {"kind": "observation_event", "type": mode,
+            "metadata": {"url": url, "title": "Source page"}}}
+
+
+def test_research_links_use_private_sources_across_polls_ranked_and_capped(run):
+    events = [source_observation("https://apple.com/page/" + str(i)) for i in range(10)]
+    events += [source_observation("https://apple.com/page/0?token=private#secret", "web")]
+    out, = run({"requests": [
+        {"body": {"action": "status", "task_id": ID}, "change": {"status": "running", "new_events": events}},
+        {"body": {"action": "status", "task_id": ID}, "change": answered({"markdown": "Found it", "links": []})}]})
+    links = out["row"]["result"]["links"]
+    assert [link["url"] for link in links] == ["https://apple.com/page/0"] + [
+        "https://apple.com/page/" + str(i) for i in range(9, 2, -1)]
+    assert len(out["run"]["plan"]["source_visits"]) == 10
+    assert "source_visits" not in json.dumps(out["replies"])
+    assert "private" not in json.dumps(out["run"]["plan"])
+
+
+@pytest.mark.parametrize("href", ["about:blank", "javascript:alert(1)", "file:///private",
+    "https://google.com/search?q=apple", "https://www.google.fr/?q=apple",
+    "https://bing.com/search?q=apple", "https://duckduckgo.com/?q=apple",
+    "https://search.yahoo.com/search?p=apple"])
+def test_source_links_exclude_search_and_non_http_urls(run, href):
+    out, = run({"change": {**answered({"markdown": "No source"}),
+        "new_events": [source_observation(href)]}})
+    assert out["row"]["result"]["links"] == []
+
+
+def test_source_links_include_navigation_tool_urls_and_preserve_authored_links(run):
+    event = {"type": "AgentEvent", "data": {"kind": "policy_event", "tool_reqs": [
+        {"tool_name": "go_to_web", "args": {"url": "https://apple.com/mac/?private=yes"}},
+        {"tool_name": "browser", "args": {"actions": [{"url": "https://apple.com/ipad/"}]}}]}}
+    fallback, authored = run({"change": {**answered("Result"), "new_events": [event]}},
+        {"change": {**answered({"markdown": "See https://cited.example/page"}), "new_events": [event]}})
+    assert [link["url"] for link in fallback["row"]["result"]["links"]] == [
+        "https://apple.com/mac/", "https://apple.com/ipad/"]
+    assert [link["url"] for link in authored["row"]["result"]["links"]] == ["https://cited.example/page"]
+
+
+@pytest.mark.parametrize("new_visits", [True, False])
+def test_continued_research_links_prefer_after_message_or_fall_back_to_history(run, new_visits):
+    followup_events = [source_observation("https://stale.example/before-message"), retry_message_event()]
+    if new_visits:
+        followup_events += [source_observation("https://apple.com/mac/"), source_observation("https://apple.com/iphone/")]
+    followup_events += answered({"markdown": "Follow-up result"})["new_events"]
+    out, = run({"requests": [
+        {"body": {"action": "status", "task_id": ID}, "change": {**answered("Original result"),
+            "new_events": [source_observation("https://apple.com/mac/")] * 3}},
+        {"body": {"action": "continue", "task_id": ID, "message": "Next"}},
+        {"body": {"action": "status", "task_id": ID}, "change": {"status": "completed",
+            "answer": {"markdown": "Follow-up result"}, "new_events": followup_events}}]})
+    assert out["row"]["status"] == "completed"
+    urls = [link["url"] for link in out["row"]["result"]["links"]]
+    assert urls == (["https://apple.com/iphone/", "https://apple.com/mac/"] if new_visits else [
+        "https://apple.com/mac/", "https://stale.example/before-message"])
+    assert out["run"]["plan"]["source_visits"]
+
+
 @pytest.mark.parametrize("length,expected", [(2000, "awaiting_confirmation"), (2001, "failed")])
 def test_step_length_boundary_never_truncates(run, length, expected):
     step = " " + "x" * (length - 2) + " "
