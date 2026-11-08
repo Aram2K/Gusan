@@ -38,7 +38,7 @@ final class AgentKeyboardController {
     private var lastIntent: AgentIntent?
     private var lastContext = ""
     private var confirmations = 0
-    private lazy var settings = SettingsStore(group: store.resolution.chosen)
+    private lazy var settings = SettingsStore(group: store.resolution.chosen, pasteboardAccessAllowed: { [weak self] in self?.host?.hasFullAccess == true })
 
     init(store: SessionStore, auth: AuthClient, host: UIInputViewController) {
         self.store = store; self.auth = auth; self.host = host
@@ -84,6 +84,7 @@ final class AgentKeyboardController {
 
     func appear() {
         visible = true
+        guard host?.hasFullAccess == true else { job?.cancel(); job = nil; return }
         settings.refresh()
         #if DEBUG
         // Simulator screenshots: the app seeds a demo instruction on a named pasteboard (`--gusan-keyboard-agent-demo`).
@@ -188,6 +189,7 @@ final class AgentKeyboardController {
     // MARK: Job pipeline
 
     private func run(_ start: AgentJob.Start, announce: Bool) {
+        guard host?.hasFullAccess == true else { onStatus?("Allow Full Access", nil); return }
         let service = makeService()
         self.service = service
         let agentJob = AgentJob(service: service, start: start, interval: service is StubAgentService ? 1_200_000_000 : 1_500_000_000) { [weak self] task in

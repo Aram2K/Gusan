@@ -136,7 +136,7 @@ final class KeyboardViewController: UIInputViewController {
         // A task waiting on the user outranks stale strip text, but never an active take or a Smart result/error.
         let attention = active || voice.message != nil ? nil : agent.task.flatMap { AgentKeyboardAttention.resolve($0) }
         let agentStatus = !working && pendingInsert == nil && (attention != nil || (voice.message == nil && agentMessage != nil))
-        let message = working ? voice.message ?? "Working…" : pendingInsert != nil ? "Result ready" : attention?.text ?? voice.message ?? agentMessage ?? (hint ? "Gusan Screen is off" : nil)
+        let message = !hasFullAccess && !active && voice.message == nil ? "Allow Full Access" : working ? voice.message ?? "Working…" : pendingInsert != nil ? "Result ready" : attention?.text ?? voice.message ?? agentMessage ?? (hint ? "Gusan Screen is off" : nil)
         strip.update(agent: preferences.keyboardMode == .agent, screenOn: preferences.keyboardScreenEnabled, live: screen.live && !secure, context: title, phase: working ? .thinking : voice.phase, level: voice.level, message: message, action: pendingInsert != nil && !active ? "Insert" : actionTitle, theme: theme, pendingInsert: pendingInsert != nil && !active, agentStatus: agentStatus)
     }
     @objc private func toggleMode() {
@@ -155,6 +155,7 @@ final class KeyboardViewController: UIInputViewController {
         firstFrame = nil; lastFrame = nil; working = false; voice.cancel()
     }
     @objc private func actionPressed() {
+        if !hasFullAccess { openContainingApp(URL(string: "gusan://open-settings")!); return }
         if let pendingInsert {
             guard hasFullAccess, VoicePendingInsert.read(from: sharedDefaults, account: store.read().flatMap { $0.userID ?? $0.email }) == pendingInsert else {
                 self.pendingInsert = nil; scheduleUpdate(); return
@@ -171,6 +172,7 @@ final class KeyboardViewController: UIInputViewController {
         else { voice.performAction() }
     }
     @objc private func statusPressed() {
+        if !hasFullAccess { openContainingApp(URL(string: "gusan://open-settings")!); return }
         if let task = agent.task, let attention = AgentKeyboardAttention.resolve(task) {
             openContainingApp(attention.url)
         } else if agent.isActive { agent.show() }
