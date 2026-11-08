@@ -114,7 +114,8 @@ ACTION_OFF = "transcribe_only"
 HOTKEY_KEY = "smart_actions_hotkey"
 DEFAULT_HOTKEY = hotkeys.SMART_ACTIONS_DEFAULT
 SPEECH_KEY = "smart_actions_speech_model"      # engine_choice.SMART_SPEECH_KEY
-SPEECH_CLOUD = "cloud"                          # engine_choice.SMART_SPEECH_CLOUD
+SPEECH_CLOUD = "cloud"                          # engine_choice.SMART_SPEECH_CLOUD (Fast)
+SPEECH_CLOUDS = ("cloud", "cloud:best")         # Gusan Cloud Fast / Best accuracy (SMART_SPEECH_CLOUD_PROFILES)
 SPEECH_COMBO_WIDTH = 260                        # room for a real model name and its chips
 RECENT_MAX = 5
 
@@ -1272,7 +1273,7 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
                 continue
             value = str(box.itemData(i) or "")
             mark, note = "", ""
-            if value and value != SPEECH_CLOUD and is_model(value) and self._speech_state(value) in ("missing", "failed"):
+            if value and value not in SPEECH_CLOUDS and is_model(value) and self._speech_state(value) in ("missing", "failed"):
                 mark = MARK_DOWNLOAD
                 note = getattr(info(value), "size", "") or ""
             box.set_choice_mark(i, mark, note)
@@ -1305,14 +1306,15 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
         value = str(_cfg(self.app).get(SPEECH_KEY) or "").strip()
         try:
             import engine_choice
-            backend, model = engine_choice.smart_speech_session(_cfg(self.app), _is_pro(self.app))
+            got = engine_choice.smart_speech_session(_cfg(self.app), _is_pro(self.app))
         except Exception:
             return ""
+        backend, model = got[0], got[1]
         if backend == "managed":
-            return SPEECH_CLOUD
+            return value if value in SPEECH_CLOUDS else SPEECH_CLOUD
         if backend == "local":
             return model
-        return "" if value == SPEECH_CLOUD or self.speech_combo.findData(value) < 0 else value
+        return "" if value in SPEECH_CLOUDS or self.speech_combo.findData(value) < 0 else value
 
     def _speech_line(self):
         """The muted line under the picker: what it really runs on."""
@@ -1373,17 +1375,17 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
         value = self.speech_combo.currentData()
         value = "" if value is None else str(value)
         self._speech_note = ""
-        if value == SPEECH_CLOUD:
+        if value in SPEECH_CLOUDS:
             self._refresh_speech()                  # back to what is really set
-            self._pick_gusan_cloud()
+            self._pick_gusan_cloud(value)
         elif value and self._speech_state(value) in ("missing", "failed"):
             self._refresh_speech()
             self._pick_missing_model(value)
         else:
             self._apply_speech(value)
 
-    def _pick_gusan_cloud(self):
-        """Gusan Cloud: Pro first (the Pro window), then Privacy mode (turn it
+    def _pick_gusan_cloud(self, value=SPEECH_CLOUD):
+        """Gusan Cloud (Fast or Best accuracy): Pro first (the Pro window), then Privacy mode (turn it
         off, or keep it), else just select it."""
         if not _is_pro(self.app):
             _call(self.app, "_pro_upsell", UPSELL_SPEECH)
@@ -1393,7 +1395,7 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
             if not privacy_prompt.confirm_turn_off_privacy(self, "Gusan Cloud"):
                 return
             turn_off = True
-        self._apply_speech(SPEECH_CLOUD, turn_off_privacy=turn_off)
+        self._apply_speech(value, turn_off_privacy=turn_off)
 
     def _pick_missing_model(self, mid):
         """A Whisper model that is not on this computer: a small popup asks;
@@ -1438,7 +1440,7 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
             if problem == "pro":
                 _call(self.app, "_pro_upsell", res.get("upsell") or UPSELL_SPEECH)
             return
-        if value and value != SPEECH_CLOUD:
+        if value and value not in SPEECH_CLOUDS:
             self._download_speech_model(value)
         _set_many(self.app, res.get("changes"))     # refused: the redraw shows the real value
         self._refresh_speech()

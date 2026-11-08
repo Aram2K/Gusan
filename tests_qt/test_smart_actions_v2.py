@@ -131,10 +131,10 @@ def test_transcribes_with_lists_same_whisper_and_cloud(page_for):
     combo = page.speech_combo
     items = _items(combo)
     assert items[0] == ("", "Same as Dictation · Whisper Base · Local")      # it names what Dictation runs now
-    assert [v for v, _t in items[1:-1]] == list(hardware.MODEL_INFO)
+    assert [v for v, _t in items[1:-2]] == list(hardware.MODEL_INFO)
     # REAL model names; where each runs and the plan it needs are chips painted at the row's right edge
     assert ("small", "Whisper Small · Local") in items
-    assert items[-1] == ("cloud", "Fast · Cloud · Pro")
+    assert items[-2:] == [("cloud", "Fast · Cloud · Pro"), ("cloud:best", "Best accuracy · Cloud · Pro")]
     assert combo.row_tags(combo.findData("cloud")) == ("cloud", "pro")
     assert combo.row_tags(combo.findData("small")) == ("local",)
     assert combo.choice_mark(combo.findData("cloud")) == ""                  # (a mark is a download icon only)
@@ -149,7 +149,7 @@ def test_pro_picks_gusan_cloud_and_the_row_wears_its_chips(page_for, asked):
     app = live_app("pro")
     page = page_for(app)
     combo = page.speech_combo
-    assert _items(combo)[-1] == ("cloud", "Fast · Cloud · Pro")
+    assert _items(combo)[-2] == ("cloud", "Fast · Cloud · Pro")
     assert combo.choice_mark(combo.findData("cloud")) == ""
     combo.setCurrentIndex(combo.findData("cloud"))
     assert settings(app, "smart_actions_speech_model") == [("set_setting", "smart_actions_speech_model", "cloud")]
@@ -158,6 +158,12 @@ def test_pro_picks_gusan_cloud_and_the_row_wears_its_chips(page_for, asked):
     assert page.speech_line.text() == "Fast · Cloud"
     assert not upsells(app)
     assert not asked.calls                                                   # nothing to ask
+    # Best accuracy too (the founder, 2026-11-09): its own profile, whatever Dictation's is
+    combo.setCurrentIndex(combo.findData("cloud:best"))
+    assert settings(app, "smart_actions_speech_model")[-1] == ("set_setting", "smart_actions_speech_model",
+                                                               "cloud:best")
+    assert combo.currentData() == "cloud:best" and combo.plain_text() == "Best accuracy"
+    assert page.speech_line.text() == "Best accuracy · Cloud"
 
 
 def test_free_picking_gusan_cloud_opens_the_pro_window(page_for):
@@ -328,7 +334,7 @@ def test_the_chips_of_a_row_do_not_change_with_the_plan(page_for):
     app = live_app("free")
     page = page_for(app)
     combo = page.speech_combo
-    last = combo.count() - 1
+    last = combo.findData("cloud")
     for tier in ("free", "pro", "guest"):
         app.set_tier(tier)
         page.refresh_account()

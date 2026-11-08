@@ -398,6 +398,9 @@ _FEATURE_ALIASES = {
 SMART_SPEECH_KEY = "smart_actions_speech_model"
 SMART_SPEECH_SAME = ""
 SMART_SPEECH_CLOUD = "cloud"
+SMART_SPEECH_CLOUD_BEST = "cloud:best"
+# Gusan Cloud for a Smart Action: its own profile, whatever Dictation's is ("cloud" was Dictation's before 2.1.3).
+SMART_SPEECH_CLOUD_PROFILES = {SMART_SPEECH_CLOUD: "fast", SMART_SPEECH_CLOUD_BEST: "best"}
 SMART_SPEECH_SAME_LABEL = "Same as Dictation"
 
 # The Live Assistant's own speech model (cfg key live_assist_speech_model):
@@ -727,14 +730,15 @@ def speech_engine(cfg, pro, feature="dictation"):
 
 # ── Smart Actions' speech model (D8) ─────────────────────────────────────────
 def smart_speech_session(cfg, pro):
-    """(backend, model) for a Smart Action take (AudioRecorder.start_recording
-    speech=), or (None, None) = transcribe like Dictation. "cloud" needs Pro
-    and no Privacy mode; an unknown value is Same as Dictation."""
+    """(backend, model[, cloud profile]) for a Smart Action take (AudioRecorder.start_recording
+    speech=), or (None, None) = transcribe like Dictation. Gusan Cloud ("cloud" Fast, "cloud:best"
+    Best accuracy) needs Pro and no Privacy mode and carries its profile; an unknown value is Same as
+    Dictation."""
     cfg = cfg or {}
     value = str(cfg.get(SMART_SPEECH_KEY) or "").strip()
-    if value == SMART_SPEECH_CLOUD:
+    if value in SMART_SPEECH_CLOUD_PROFILES:
         if pro and not cfg.get("privacy_mode"):
-            return ("managed", None)
+            return ("managed", None, SMART_SPEECH_CLOUD_PROFILES[value])
         return (None, None)
     if hardware.is_speech_id(value):
         return ("local", value)
@@ -747,9 +751,12 @@ def smart_speech_engine(cfg, pro, downloaded=None):
     on disk") marks a local pick not on disk as problem "needs_download"."""
     cfg = cfg or {}
     feature = "smart_actions_speech"
-    backend, model = smart_speech_session(cfg, pro)
+    got = smart_speech_session(cfg, pro)
+    backend, model = got[0], got[1]
     if backend == "managed":
-        return speech_engine(dict(cfg, backend="managed"), pro, feature)
+        profile = got[2] if len(got) > 2 else None
+        return speech_engine(dict(cfg, backend="managed", **({SPEECH_PROFILE_KEY: profile} if profile else {})),
+                             pro, feature)
     if backend == "local":
         res = _local_speech(feature, model)
         if downloaded is not None and not downloaded(model):
@@ -769,10 +776,11 @@ def smart_speech_rows(cfg=None, pro=None):
     rows = [_row_for_engine(SMART_SPEECH_SAME, SMART_SPEECH_SAME_LABEL, dictation,
                             show_pro=pro_chip(pro))]
     rows += _local_rows()
-    name = CLOUD_PROFILE_NAMES[CLOUD_FAST]
-    rows.append(speech_row(SMART_SPEECH_CLOUD, name, "cloud", GROUP_GUSAN_CLOUD,
-                           note=realtime_note(CLOUD_FAST, cfg), pro=True, model=name,
-                           show_pro=pro_chip(pro)))
+    for value, profile in SMART_SPEECH_CLOUD_PROFILES.items():
+        name = CLOUD_PROFILE_NAMES[profile]
+        rows.append(speech_row(value, name, "cloud", GROUP_GUSAN_CLOUD,
+                               note=realtime_note(profile, cfg), pro=True, model=name,
+                               show_pro=pro_chip(pro)))
     return rows
 
 
@@ -793,7 +801,7 @@ def set_smart_speech(app_or_cfg, value, *, pro=None, downloaded=None, turn_off_p
     Pro is checked before Privacy mode: a Free person gets the Pro window."""
     cfg, pro, _signed_in = _context(app_or_cfg, pro)
     value = str(value or "").strip()
-    if value == SMART_SPEECH_CLOUD:
+    if value in SMART_SPEECH_CLOUD_PROFILES:
         if not pro:
             return _outcome(problem="pro", upsell=UPSELL_SPEECH)
         if cfg.get("privacy_mode"):

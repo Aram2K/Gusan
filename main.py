@@ -2698,6 +2698,11 @@ class AudioRecorder:
                 threading.Thread(target=live.stop, kwargs={"timeout": 3.0}, daemon=True,
                                  name="gusan-live-stop").start()
 
+    def _is_live_take(self, cloud_override):
+        """A Live Assistant (or meeting) take with its own Gusan Cloud profile - not a Smart Action, whose own
+        profile (cloud_model_override too, since 2.1.3: Fast / Best accuracy) is a dictation's (capture_mode None)."""
+        return cloud_override is not None and getattr(self, "_capture_mode", "meeting") is not None
+
     def _watch_for_sound(self):
         """A dictation or Smart Action: when not one block of audio has come after NO_SOUND_S, the microphone sends
         nothing (a stuck driver) - on_no_sound() stops the take and the pill says so (stop_recording sets the
@@ -2796,7 +2801,9 @@ class AudioRecorder:
             return live_stt.ENGINE_OPENAI if poor else live_stt.ENGINE_GLADIA
         if AudioRecorder._lang_setting(self) in speech_langs.LIVE_POOR:
             import engine_choice
-            profile = engine_choice.cloud_profile(cfg.get(engine_choice.SPEECH_PROFILE_KEY))
+            # A Smart Action with its own Gusan Cloud profile (cloud_model_override) uses that one.
+            profile = engine_choice.cloud_profile(getattr(self, "cloud_model_override", None)
+                                                  or cfg.get(engine_choice.SPEECH_PROFILE_KEY))
             return live_stt.ENGINE_OPENAI if profile == engine_choice.CLOUD_FAST else None
         return live_stt.ENGINE_GLADIA
 
@@ -3891,7 +3898,7 @@ class AudioRecorder:
             # proxy deployments ignore unknown fields, so this is a no-op until
             # the server side ships - never an error.
             lang_setting = self._lang_setting()
-            if getattr(self, "_backup_detects", False) and live_model is None:
+            if getattr(self, "_backup_detects", False) and not AudioRecorder._is_live_take(self, live_model):
                 # Real-time carries this dictation in the set language: the backup detects the language itself,
                 # so a take spoken in another one is noticed at Stop (_spoke_other_language).
                 lang_setting = "auto"
@@ -3962,7 +3969,7 @@ class AudioRecorder:
             answer, err = AudioRecorder._cloud_attempt(
                 self, once, retries, timeout=cloud_speech.live_timeout(seconds))
             if err is not None:
-                if (err.kind == "signed_out" and live_model is None
+                if (err.kind == "signed_out" and not AudioRecorder._is_live_take(self, live_model)
                         and not AudioRecorder._poor_language(self)):
                     return "", "!managed:Session expired - sign in again."
                 # (A Live Assistant call keeps its transcript through an expired session: this
@@ -4764,7 +4771,7 @@ class AppController(QObject):
                 # Meetings pick their own engine again (a downloaded local one).
                 self.cfg["meeting_notes_model"] = ""
                 _changed = True
-            if self.cfg.get("smart_actions_speech_model") == "cloud":
+            if self.cfg.get("smart_actions_speech_model") in ("cloud", "cloud:best"):
                 # Smart Actions transcribe like Dictation again.
                 self.cfg["smart_actions_speech_model"] = ""
                 _changed = True
@@ -7244,11 +7251,11 @@ class AppController(QObject):
             return (None, None)
         try:
             import engine_choice
-            backend, model = engine_choice.smart_speech_session(self.cfg, self.is_pro())
+            got = engine_choice.smart_speech_session(self.cfg, self.is_pro())
         except Exception:
             logger.debug("Smart Actions speech model ignored", exc_info=True)
             return (None, None)
-        return (backend, model) if backend else (None, None)
+        return tuple(got) if got and got[0] else (None, None)
 
     def _cancel(self):
         self.recorder.stop_recording()

@@ -187,7 +187,9 @@ class TestSmartTakeStart(unittest.TestCase):
 
     def test_gusan_cloud_for_pro(self):
         app = self._start(smart_actions_speech_model="cloud")
-        self.assertEqual(app.starts, [{"speech": ("managed", None)}])
+        self.assertEqual(app.starts, [{"speech": ("managed", None, "fast")}])     # Fast, whatever Dictation's is
+        app = self._start(smart_actions_speech_model="cloud:best")
+        self.assertEqual(app.starts, [{"speech": ("managed", None, "best")}])
         self.assertEqual(app.loads, [])                          # nothing local to load
         self.assertIs(app._smart_speech_restore, True)
 
@@ -211,7 +213,9 @@ class TestSmartTakeStart(unittest.TestCase):
         cfg = {"smart_actions_speech_model": "small"}
         self.assertEqual(engine_choice.smart_speech_session(cfg, False), ("local", "small"))
         cfg = {"smart_actions_speech_model": "cloud"}
-        self.assertEqual(engine_choice.smart_speech_session(cfg, True), ("managed", None))
+        self.assertEqual(engine_choice.smart_speech_session(cfg, True), ("managed", None, "fast"))
+        self.assertEqual(engine_choice.smart_speech_session({"smart_actions_speech_model": "cloud:best"}, True),
+                         ("managed", None, "best"))
         self.assertEqual(engine_choice.smart_speech_session(dict(cfg, privacy_mode=True), True),
                          (None, None))
 

@@ -623,8 +623,10 @@ class TestSmartActionsSpeech(unittest.TestCase):
                     self.assertEqual(ec.smart_speech_session(dict(base, **{key: "huge"}), pro), (None, None))
                     self.assertEqual(ec.smart_speech_session(dict(base, **{key: "small"}), pro),
                                      ("local", "small"))
-                    want = ("managed", None) if (pro and not privacy) else (None, None)
+                    want = ("managed", None, "fast") if (pro and not privacy) else (None, None)
                     self.assertEqual(ec.smart_speech_session(dict(base, **{key: "cloud"}), pro), want)
+                    want = ("managed", None, "best") if (pro and not privacy) else (None, None)
+                    self.assertEqual(ec.smart_speech_session(dict(base, **{key: "cloud:best"}), pro), want)
         self.assertEqual(ec.smart_speech_session(None, True), (None, None))
         for mid in ec.SPEECH_MODELS:
             self.assertEqual(ec.smart_speech_session({key: mid}, False), ("local", mid))
@@ -667,13 +669,27 @@ class TestSmartActionsSpeech(unittest.TestCase):
         # "Same as Dictation" names what Dictation runs now (here: no cfg = Whisper Base on this computer)
         self.assertEqual(choices[0], ("", "Same as Dictation · Whisper Base",
                                       "Same as Dictation · Whisper Base · Local", False))
-        self.assertEqual(choices[-1], ("cloud", "Fast", "Fast · Cloud · Pro", True))
-        middle = choices[1:-1]
+        self.assertEqual(choices[-2:], [("cloud", "Fast", "Fast · Cloud · Pro", True),
+                                        ("cloud:best", "Best accuracy", "Best accuracy · Cloud · Pro", True)])
+        middle = choices[1:-2]
         self.assertEqual([c[0] for c in middle], list(ec.SPEECH_MODELS))
         self.assertIn(("small", "Whisper Small", "Whisper Small · Local", False), middle)
         self.assertTrue(all(not c[3] for c in middle))
-        self.assertEqual(ec.smart_speech_choices({"managed_provider": "mistral"})[-1][2],
+        self.assertEqual(ec.smart_speech_choices({"managed_provider": "mistral"})[-2][2],
                          "Fast · Cloud · Pro")
+
+    def test_gusan_cloud_offers_fast_and_best_accuracy_each_its_own_profile(self):
+        """The founder (2026-11-09): Best accuracy in the Smart Actions list too - and each row is what runs."""
+        rows = {r["value"]: r for r in ec.smart_speech_rows({"backend": "managed"}, True)}
+        self.assertEqual((rows["cloud"]["title"], rows["cloud:best"]["title"]), ("Fast", "Best accuracy"))
+        self.assertTrue(rows["cloud:best"]["note"].endswith(ec.CLOUD_PROFILE_NOTES[ec.CLOUD_BEST].split(" \u00b7 ")[1]))
+        best = ec.smart_speech_engine({"smart_actions_speech_model": "cloud:best", "managed_speech_profile": "fast"},
+                                      True)
+        fast = ec.smart_speech_engine({"smart_actions_speech_model": "cloud", "managed_speech_profile": "best"}, True)
+        self.assertNotEqual(best, fast)
+        self.assertEqual(ec.set_smart_speech({}, "cloud:best", pro=True)["changes"],
+                         {"smart_actions_speech_model": "cloud:best"})
+        self.assertEqual(ec.set_smart_speech({}, "cloud:best", pro=False)["problem"], "pro")
 
     def test_same_as_dictation_wears_the_tags_of_what_dictation_runs(self):
         rows = ec.smart_speech_rows({"backend": "managed", "managed_provider": "gemini"}, True)
