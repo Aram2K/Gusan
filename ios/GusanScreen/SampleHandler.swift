@@ -28,6 +28,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
     private var requestObserver: DarwinObserver?
     private var keyboardObserver: DarwinObserver?
     private var pending: ScreenRequest?
+    private var cadence = ScreenCaptureCadence()
     private var paused = false
     private let endLock = NSLock()
     private var finished = false
@@ -38,6 +39,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
         let settings = ScreenSettings(group: resolution.chosen)
         idle = ScreenIdleTimer(timeout: TimeInterval(settings.idleMinutes * 60))
         startedAt = Date(); requests = 0; pending = nil
+        cadence = ScreenCaptureCadence()
         endLock.lock(); finished = false; endLock.unlock()
         let keyboardSettings = SettingsStore(group: resolution.chosen)
         let channel = ScreenChannel(container: resolution.container, pasteboardAllowed: { keyboardSettings.refresh(); return keyboardSettings.pasteboardFallback })
@@ -96,7 +98,9 @@ final class SampleHandler: RPBroadcastSampleHandler {
     /// The keyboard came up: briefly accept frames at the faster rate.
     private func keyboardChanged() {
         guard !isFinished, let channel else { return }
-        if channel.readKeyboard() != nil { frames.boost(until: Date().addingTimeInterval(Self.fastWindow)) }
+        if cadence.shouldBoost(keyboard: channel.readKeyboard()) {
+            frames.boost(until: Date().addingTimeInterval(Self.fastWindow))
+        }
     }
     /// Answers a pending keyboard request with the right frame, once. A request
     /// that finds no frame (right after a pause) is kept until the next frame arrives.
