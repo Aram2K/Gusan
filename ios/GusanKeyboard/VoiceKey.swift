@@ -283,7 +283,8 @@ final class VoiceKeyController: NSObject {
         var responder: UIResponder? = host
         while let current = responder {
             if current.isKind(of: applicationClass), current.responds(to: selector) {
-                _ = current.perform(selector, with: url)
+                // `openURL:` returns a BOOL, surfaced here only as a nil/non-nil raw value; never dereferenced.
+                if current.perform(selector, with: url) == nil { fallbackOpen(url) }
                 return
             }
             responder = current.next
