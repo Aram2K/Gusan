@@ -125,7 +125,8 @@ struct HomeView: View {
                     starting = true; error = nil
                     defer { starting = false }
                     do {
-                        let task = try await agent.start(AgentIntent(mode: .research, instruction: text))
+                        let intent = AgentIntent.detect(text) ?? AgentIntent(mode: .research, instruction: text)
+                        let task = try await agent.start(intent)
                         instruction = ""; model.openSessionID = task.id; model.selectedTab = .sessions
                     } catch { self.error = error.localizedDescription }
                 }
