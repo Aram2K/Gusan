@@ -30,7 +30,7 @@ class App(QObject):
         self.cfg = {"privacy_mode": False, "screen_chat_hotkey": "ctrl+alt+g",
                     "hotkey": "alt+r", "live_assist_hotkey": "ctrl+alt+a", "smart_actions_hotkey": "alt+s"}
         self.paste_text = Mock()
-        self._resolve_action_engine = lambda: ("api_managed", dict(self.cfg))
+        self._resolve_action_engine = Mock(return_value=("api_managed", dict(self.cfg)))
 
 
 @pytest.fixture
@@ -175,6 +175,7 @@ def test_stream_runs_off_gui_history_and_text_only_followup(chat, monkeypatch):
     assert len(w.history) == 2 and w.history[-1]["status"] == "done"
     assert calls[0][3] is not threading.main_thread()
     assert calls[0][2]["image_b64"]
+    app._resolve_action_engine.assert_called_once_with(allow_live_session=False)
     assert w._answer.toPlainText() == "Thanks for the update."
     buttons = [b.text() for b in w._answer_box.findChildren(QPushButton)]
     assert "Copy" in buttons and "Paste into previous app" in buttons

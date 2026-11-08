@@ -59,7 +59,7 @@ def run_turn(history, question, *, cfg, model, image_b64, on_token,
                               else "Allow Screen Recording to use Screen chat.")
     if not question or not question.strip():
         raise ScreenChatError("empty_question", "Type a message first.")
-    engine = actions.live_engine(model, cfg)
+    engine = actions.usable_engine(model, cfg)
     if actions.ACTION_MODELS.get(engine, {}).get("kind") not in ("cloud", "managed"):
         raise ScreenChatError("needs_vision", NEEDS_VISION)
     if capture_failed:

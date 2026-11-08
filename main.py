@@ -7200,7 +7200,7 @@ class AppController(QObject):
             threading.Thread(target=_restore, daemon=True).start()
         return pasted
 
-    def _resolve_action_engine(self, action_model=None):
+    def _resolve_action_engine(self, action_model=None, *, allow_live_session=True):
         """Resolve (model, config) for a Smart Action / meeting-notes run,
         applying Pro routing: a signed-in Pro user runs through the managed cloud
         (our key, no BYO key needed) unless they deliberately picked a local LLM
@@ -7227,7 +7227,7 @@ class AppController(QObject):
         # A free Live Assistant session (one a month) may use Gusan Cloud for
         # its answers. The id is what the server checks. Local / privacy stays local.
         sid = getattr(self, "_live_session_id", None)
-        if sid and not self.cfg.get("privacy_mode") and self.cfg.get("live_assist_writer") != "local":
+        if allow_live_session and sid and not self.cfg.get("privacy_mode") and self.cfg.get("live_assist_writer") != "local":
             token = action_config.get("_managed_token") if isinstance(action_config, dict) else None
             if not token:
                 try:

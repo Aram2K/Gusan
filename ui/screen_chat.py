@@ -406,7 +406,7 @@ class ScreenChatWindow(QWidget):
                 self.partial.emit(generation, "".join(accumulated))
 
             try:
-                model, config = self.app._resolve_action_engine()
+                model, config = self.app._resolve_action_engine(allow_live_session=False)
                 text = screen_chat.run_turn(history, question, cfg=config, model=model,
                                             image_b64=image, on_token=token, capture_failed=failed,
                                             mac_perm_status=mac_permissions.screen_recording_granted())

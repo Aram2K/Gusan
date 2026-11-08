@@ -54,6 +54,14 @@ class TestTurn(unittest.TestCase):
             self.assertEqual(screen_chat.can_capture({}, True), "ok")
             self.assertEqual(screen_chat.can_capture({}, False), "mac_permission")
             self.assertEqual(screen_chat.can_capture({}, None), "ok")
+
+    def test_own_key_engine_ignores_live_assistant_routing_preferences(self):
+        stream = mock.Mock(return_value="Answer")
+        cfg = {"action_api_key": "own-key", "live_assist_writer": "local",
+               "_managed_token": "token", "_live_session_id": "meeting"}
+        self.call(model="api_openai", cfg=cfg, stream=stream)
+        self.assertEqual(stream.call_args.kwargs["model"], "api_openai")
+        self.assertNotIn("_live_session_id", stream.call_args.kwargs["config"])
             self.assertEqual(screen_chat.can_capture({"privacy_mode": True}, False), "privacy")
         with mock.patch.object(sys, "platform", "linux"):
             self.assertEqual(screen_chat.can_capture({}, None), "ok")
