@@ -25,18 +25,20 @@ public final class AgentClient: AgentService {
     public typealias TokenProvider = () async throws -> String
     private let token: TokenProvider
     private let transport: HTTPTransport
+    private let calendarStore: CalendarSnapshotStore
 
-    public init(tokenProvider: @escaping TokenProvider, transport: HTTPTransport = URLSession.shared) {
+    public init(tokenProvider: @escaping TokenProvider, transport: HTTPTransport = URLSession.shared, calendarStore: CalendarSnapshotStore? = nil) {
         self.token = tokenProvider
         self.transport = transport
+        self.calendarStore = calendarStore ?? CalendarSnapshotStore(group: AppGroupResolver.resolve().chosen)
     }
 
     /// Uses the shared Supabase session; refreshes it when it is about to expire. No provider keys on the phone.
-    public convenience init(auth: AuthClient, transport: HTTPTransport = URLSession.shared) {
+    public convenience init(auth: AuthClient, transport: HTTPTransport = URLSession.shared, calendarStore: CalendarSnapshotStore? = nil) {
         self.init(tokenProvider: {
             guard let session = try await auth.refresh() else { throw AgentError.code("unauthorized", status: 401) }
             return session.accessToken
-        }, transport: transport)
+        }, transport: transport, calendarStore: calendarStore)
     }
 
     // MARK: Requests (public so tests can pin the wire format)
@@ -70,8 +72,9 @@ public final class AgentClient: AgentService {
 
     public func start(_ intent: AgentIntent, context: String?) async throws -> AgentTask {
         var body: [String: Any] = ["action": "start", "instruction": intent.instruction, "mode": intent.mode.rawValue]
-        if let context = context?.trimmingCharacters(in: .whitespacesAndNewlines), !context.isEmpty {
-            body["context"] = String(context.prefix(20_000))
+        let calendar = CalendarContext.schedulingSummary(texts: [intent.instruction], store: calendarStore)
+        if let context = CalendarContext.prepending(calendar, to: context?.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            body["context"] = context
         }
         body["timezone"] = TimeZone.current.identifier
         return try await task(body)
@@ -90,8 +93,11 @@ public final class AgentClient: AgentService {
     }
 
     public func continueTask(_ id: UUID, message: String) async throws -> AgentTask {
+        let calendar = CalendarContext.schedulingSummary(texts: [message], store: calendarStore)
+        let enriched = CalendarContext.prepending(calendar, to: nil).map { message + "\n\n" + $0 } ?? message
+        let wireMessage = enriched.utf16.count <= 4_000 ? enriched : message
         do {
-            return try await task(["action": "continue", "task_id": id.uuidString.lowercased(), "message": message], detectUnsupportedAction: true)
+            return try await task(["action": "continue", "task_id": id.uuidString.lowercased(), "message": wireMessage], detectUnsupportedAction: true)
         } catch ActionFailure.unsupported {
             let previous = try await status(id, waitSeconds: 0)
             let summary = "Earlier in this session:\n" + previous.title + "\n" + (previous.result?.plainText ?? "")

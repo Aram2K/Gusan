@@ -325,6 +325,7 @@ public final class SessionStore: SessionStorage {
         }
     }
     public func clear() {
+        CalendarSnapshotStore(group: resolution.chosen).clear()
         synchronized {
             for backend in backends { backend.clear("session") }
             privateBackend.clear("session")

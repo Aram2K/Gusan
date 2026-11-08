@@ -1,10 +1,12 @@
 import SwiftUI
+import GusanKit
 
 @main
 struct GusanApp: App {
     @StateObject private var model: AppModel
     @StateObject private var voice: VoiceSession
     @StateObject private var agent: AgentCenter
+    @StateObject private var connections: CalendarConnections
     @Environment(\.scenePhase) private var scenePhase
     init() {
         Theme.configureTabBar()
@@ -21,6 +23,9 @@ struct GusanApp: App {
             try await voice.perform(command)
         }
         AgentCenter.registerBackgroundRefresh(agent)
+        let connections = CalendarConnections(group: model.store.resolution.chosen, client: CalendarClient(auth: model.auth), signedIn: model.session != nil)
+        _connections = StateObject(wrappedValue: connections)
+        CalendarConnections.registerBackgroundRefresh(connections)
     }
     @StateObject private var screen = ScreenMonitor()
     @State private var voiceSignInRequested = false
@@ -33,21 +38,21 @@ struct GusanApp: App {
                         model.handleURL(URL(string: "gusan://signin")!)
                     })
                 } else { AppRootView() }
-            }.environmentObject(model).environmentObject(voice).environmentObject(agent).environmentObject(screen).tint(Theme.accent)
+            }.environmentObject(model).environmentObject(voice).environmentObject(agent).environmentObject(screen).environmentObject(connections).tint(Theme.accent)
                 .background(KeyboardDismissal())
                 .onAppear { voice.agentHandoff = { intent, context in try await agent.start(intent, context: context) } }
-                .onChange(of: scenePhase) { agent.setActive($0 == .active) }
+                .onChange(of: scenePhase) { agent.setActive($0 == .active); connections.sceneChanged($0) }
                 #if DEBUG
                 .overlay(alignment: .bottom) { AgentCardPreview() }
                 #endif
-                .onOpenURL { if $0.host == "voice" { voice.handleURL($0) } else { model.handleURL($0) } }
+                .onOpenURL { if $0.host == "voice" { voice.handleURL($0) } else if $0.host == "calendar" { connections.handleGoogleCallback($0) } else { model.handleURL($0) } }
                 .sheet(isPresented: Binding(get: { voice.presented && !voice.keyboardActivation }, set: { voice.presented = $0 }), onDismiss: {
                     if voiceSignInRequested {
                         voiceSignInRequested = false
                         model.handleURL(URL(string: "gusan://signin")!)
                     }
                 }) { VoiceListeningView(voice: voice, onSignIn: { voiceSignInRequested = true; voice.closePresentation() }).tint(Theme.accent) }
-                .onChange(of: model.session) { if $0 == nil { voice.stop() }; agent.sessionChanged() }
+                .onChange(of: model.session) { if $0 == nil { voice.stop() }; agent.sessionChanged(); connections.sessionChanged(signedIn: $0 != nil) }
         }
     }
 }
