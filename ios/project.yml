@@ -43,6 +43,8 @@ targets:
       - package: GusanKit
       - target: GusanKeyboard
         embed: true
+      - target: GusanScreen
+        embed: true
   GusanKeyboard:
     type: app-extension
     platform: iOS
@@ -68,6 +70,55 @@ targets:
             IsASCIICapable: false
     entitlements:
       path: GusanKeyboard/GusanKeyboard.entitlements
+      properties:
+        com.apple.security.application-groups: [group.com.aram2k.gusan]
+    dependencies:
+      - package: GusanKit
+  # Simulator-only host for screenshots and manual checks of the keyboard; never embedded in the app.
+  GusanKeyboardPreview:
+    type: application
+    platform: iOS
+    sources:
+      - path: GusanKeyboard
+        excludes: ["Info.plist", "*.entitlements"]
+      - GusanKeyboardPreview
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aram2k.gusan.keyboardpreview
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        TARGETED_DEVICE_FAMILY: "1"
+        SUPPORTED_PLATFORMS: iphonesimulator
+    info:
+      path: GusanKeyboardPreview/Info.plist
+      properties:
+        CFBundleDisplayName: Gusan Keyboard Preview
+        UILaunchScreen: {}
+        GusanAppGroup: group.com.aram2k.gusan
+    dependencies:
+      - package: GusanKit
+  GusanScreen:
+    type: app-extension
+    platform: iOS
+    sources: [GusanScreen]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aram2k.gusan.screen
+        TARGETED_DEVICE_FAMILY: "1,2"
+        APPLICATION_EXTENSION_API_ONLY: YES
+    info:
+      path: GusanScreen/Info.plist
+      properties:
+        CFBundleDisplayName: Gusan Screen
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        GusanAppGroup: group.com.aram2k.gusan
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.broadcast-services-upload
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).SampleHandler
+          NSExtensionAttributes:
+            RPBroadcastProcessMode: RPBroadcastProcessModeSampleBuffer
+    entitlements:
+      path: GusanScreen/GusanScreen.entitlements
       properties:
         com.apple.security.application-groups: [group.com.aram2k.gusan]
     dependencies:

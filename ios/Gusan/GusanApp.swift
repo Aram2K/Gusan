@@ -12,10 +12,11 @@ struct GusanApp: App {
         _model = StateObject(wrappedValue: model); _agent = StateObject(wrappedValue: agent)
         AgentCenter.registerBackgroundRefresh(agent)
     }
+    @StateObject private var screen = ScreenMonitor()
     @State private var voiceSignInRequested = false
     var body: some Scene {
         WindowGroup {
-            AppRootView().environmentObject(model).environmentObject(voice).environmentObject(agent).tint(Theme.accent)
+            AppRootView().environmentObject(model).environmentObject(voice).environmentObject(agent).environmentObject(screen).tint(Theme.accent)
                 .onAppear { voice.agentHandoff = { intent, context in try await agent.start(intent, context: context) } }
                 .onChange(of: scenePhase) { agent.setActive($0 == .active) }
                 #if DEBUG

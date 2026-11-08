@@ -20,6 +20,7 @@ final class KeyboardViewController: UIInputViewController {
     private enum Surface { case typing, panel, instruction, explanation }
     private lazy var store = SessionStore(role: .keyboard, pasteboardAccessAllowed: { [weak self] in self?.hasFullAccess == true })
     private lazy var voice = VoiceKeyController(host: self, store: store, micKey: toolbar.mic)
+    private lazy var screen = ScreenKeyboardController(host: self, store: store, pasteboardAllowed: { [weak self] in self?.hasFullAccess == true && self?.settings.pasteboardFallback == true })
     private lazy var auth = AuthClient(store: store)
     private lazy var agent = AgentKeyboardController(store: store, auth: auth, host: self)
     private lazy var settings = SettingsStore(group: store.resolution.chosen, pasteboardAccessAllowed: { [weak self] in self?.hasFullAccess == true })
@@ -46,6 +47,7 @@ final class KeyboardViewController: UIInputViewController {
     private var height: NSLayoutConstraint!
     private var retryAction: SmartAction?
     private var retryContext: Context?
+    private var retryScreen = false
     private var connected = false
     private var fontCategory: UIContentSizeCategory?
     private var accessState = SessionState(signedIn: false, fullAccess: false, shareable: false)
@@ -87,6 +89,16 @@ final class KeyboardViewController: UIInputViewController {
         }
         voice.bar.backgroundColor = .secondarySystemBackground; voice.bar.layer.cornerRadius = 8
         toolbar.accessory.addTarget(self, action: #selector(accessoryPressed), for: .touchUpInside)
+        toolbar.addSubview(screen.chip)
+        screen.onChange = { [weak self] in self?.screenChanged() }
+        screen.onLost = { [weak self] in self?.screenLost() }
+        screen.onStopped = { [weak self] in
+            self?.showMessage("Gusan Screen stopped")
+            UIAccessibility.post(notification: .announcement, argument: "Gusan Screen stopped.")
+        }
+        screen.onOffer = { [weak self] in
+            self?.showMessage("Start Gusan Screen in the Gusan app to ask about your screen", detail: "Gusan Screen shares a picture of your screen only when you ask with the Screen chip. Start it from Home › Gusan Screen in the Gusan app, or from Control Center's screen recording control.", accessory: "Open")
+        }
         toolbar.message.addTarget(self, action: #selector(expandMessage), for: .touchUpInside)
         toolbar.context.addTarget(self, action: #selector(expandContext), for: .touchUpInside)
         panel.onClose = { [weak self] in self?.showTyping() }
@@ -104,19 +116,21 @@ final class KeyboardViewController: UIInputViewController {
         updateSurface()
     }
     private var currentContext: Context {
-        Context(document: textDocumentProxy.documentIdentifier, selected: textDocumentProxy.selectedText ?? "", before: textDocumentProxy.documentContextBeforeInput ?? "", after: textDocumentProxy.documentContextAfterInput ?? "")
+        Context(document: textDocumentProxy.documentID, selected: textDocumentProxy.selectedText ?? "", before: textDocumentProxy.documentContextBeforeInput ?? "", after: textDocumentProxy.documentContextAfterInput ?? "")
     }
-    override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); updateSurface(); voice.appear(); agent.appear() }
+    override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); updateSurface(); voice.appear(); agent.appear(); screen.appear() }
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated); connected = true
         accessState = store.sessionState(fullAccess: hasFullAccess)
         settings.refresh(); updateContext()
+        screen.publishKeyboard(height: Double(keyboardHeight), screenHeight: Double(view.window?.windowScene?.screen.bounds.height ?? UIScreen.main.bounds.height))
     }
     override func viewWillLayoutSubviews() {
         super.viewWillLayoutSubviews()
         let width = view.bounds.width
         let barHeight = toolbar.preferredHeight
         toolbar.frame = CGRect(x: 0, y: 0, width: width, height: barHeight)
+        toolbar.layoutIfNeeded(); layoutScreenChip()
         voice.bar.frame = CGRect(x: 50, y: toolbar.contextHeight, width: max(0, width - 100), height: toolbar.controlsHeight)
         voice.panel.frame = view.bounds
         let extra: CGFloat = surface == .instruction && !compactLayout ? instructionHeader.preferredHeight : 0
@@ -137,7 +151,7 @@ final class KeyboardViewController: UIInputViewController {
     override func selectionDidChange(_ textInput: UITextInput?) { super.selectionDidChange(textInput); updateContext() }
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated); task?.cancel(); keyArea.cancelTouches()
-        voice.disappear(); agent.disappear()
+        voice.disappear(); agent.disappear(); screen.disappear()
     }
     private func updateContext() {
         guard connected else { return }
@@ -157,10 +171,11 @@ final class KeyboardViewController: UIInputViewController {
         applyTheme(theme)
         let context = instructionContext ?? currentContext
         panel.update(theme: theme, target: settings.translateTarget, defaultAction: settings.keyboardAction.action, context: context.text)
-        instructionHeader.update(text: instruction, theme: theme, busy: busy)
+        let screenInstruction = editing && screen.armed
+        instructionHeader.update(text: instruction, theme: theme, busy: busy, placeholder: screenInstruction ? "Ask about your screen…" : "Tell Gusan what to do…", suggestions: screenInstruction ? ScreenPrompts.suggestions : InstructionHeader.defaultSuggestions)
         explanation.textColor = theme.foreground
-        toolbar.context.setTitle(context.summary, for: .normal)
-        toolbar.context.accessibilityValue = context.summary
+        updateContextTitle(screen.summary(context.summary), theme: theme)
+        toolbar.context.accessibilityValue = (screen.live ? "Gusan Screen is live. " : "") + context.summary
         toolbar.message.setTitle(agent.showingCard ? agent.toolbarStatus : (snapshotReturnSurface != nil ? "Text snapshot" : message ?? ""), for: .normal)
         toolbar.mic.isHidden = agent.showingCard
         toolbar.context.isHidden = agent.showingCard
@@ -170,8 +185,46 @@ final class KeyboardViewController: UIInputViewController {
         toolbar.accessory.isEnabled = (statusAction != "Undo" && statusAction != "Redo") || undoRecord?.step(context: currentContext.voiceContext) != nil
         toolbar.accessory.accessibilityHint = accessory == "Sign in" ? "Opens the Gusan app" : "Activates the status action"
         toolbar.mic.isEnabled = !busy; toolbar.logo.isEnabled = !busy
+        screen.update(theme: theme, busy: busy, traits: traitCollection)
         toolbar.logo.accessibilityValue = accessState.actionError?.localizedDescription
-        toolbar.setNeedsLayout()
+        toolbar.setNeedsLayout(); layoutScreenChip()
+    }
+    /// While Gusan Screen is live the context line starts with a red dot, like the system indicator.
+    private func updateContextTitle(_ title: String, theme: KeyboardTheme) {
+        let font = toolbar.context.titleLabel?.font ?? .systemFont(ofSize: 12, weight: .medium)
+        guard screen.live else { toolbar.context.setAttributedTitle(nil, for: .normal); toolbar.context.setTitle(title, for: .normal); return }
+        let text = NSMutableAttributedString(string: "● ", attributes: [.foregroundColor: UIColor.systemRed, .font: font])
+        text.append(NSAttributedString(string: title, attributes: [.foregroundColor: theme.foreground, .font: font]))
+        toolbar.context.setAttributedTitle(text, for: .normal)
+    }
+    /// The Screen chip sits left of the mic, as tall as the mic, and takes its width from the message area.
+    private func layoutScreenChip() {
+        let chip = screen.chip
+        guard !chip.isHidden else { return }
+        let size = chip.intrinsicContentSize
+        let height = max(size.height, toolbar.mic.frame.height)
+        let right = toolbar.accessory.isHidden ? toolbar.mic.frame.minX : toolbar.accessory.frame.minX
+        chip.frame = CGRect(x: right - size.width - 6, y: toolbar.contextHeight + (toolbar.controlsHeight - height) / 2, width: size.width, height: height)
+        toolbar.message.frame.size.width = max(0, chip.frame.minX - toolbar.message.frame.minX - 6)
+    }
+    private func screenChanged() {
+        if screen.armed {
+            if surface != .instruction { beginInstruction() }
+            if screen.needsArmReminder { screen.markArmReminderShown(); showMessage("Your next Run sends a picture of this screen") }
+            UIAccessibility.post(notification: .layoutChanged, argument: instructionHeader)
+            UIAccessibility.post(notification: .announcement, argument: "Screen on. Ask about your screen; Run sends a picture of it.")
+        } else {
+            if surface == .instruction, instruction.isEmpty, instructionContext != nil, !busy { cancelInstruction() }
+            if screen.available { UIAccessibility.post(notification: .announcement, argument: "Screen off.") }
+        }
+        updateContext()
+    }
+    /// The broadcast ended mid-instruction: never let the question fall through to a plain text action.
+    private func screenLost() {
+        guard surface == .instruction, !busy else { return }
+        cancelInstruction()
+        showMessage("Gusan Screen stopped. Start it again to ask about your screen.")
+        UIAccessibility.post(notification: .announcement, argument: "Gusan Screen stopped. Your question was cancelled.")
     }
     private func applyTheme(_ theme: KeyboardTheme) {
         agent.apply(theme)
@@ -264,9 +317,10 @@ final class KeyboardViewController: UIInputViewController {
         case "Cancel": task?.cancel()
         case "How to enable", "Details": expandMessage()
         case "See plans": openContainingApp(URL(string: "https://gusan.aibuben.xyz")!)
-        case "Retry": if let retryAction, let retryContext { run(retryAction, context: retryContext) }
+        case "Retry": if let retryAction, let retryContext { run(retryAction, context: retryContext, useScreen: retryScreen) }
         case "View": agent.show()
         case "Undo insert": agent.undoInsert()
+        case "Open": openContainingApp(URL(string: "gusan://screen")!)
         default: break
         }
     }
@@ -279,12 +333,13 @@ final class KeyboardViewController: UIInputViewController {
     func setInstruction(_ text: String) { instruction = text; updateContext() }
     private func cancelInstruction() {
         instruction = ""; instructionContext = nil; message = nil; accessory = nil; detail = nil; showTyping()
+        screen.armed = false
     }
     private func runInstruction() {
         guard let context = instructionContext else { return }
-        run(.custom(instruction: instruction), context: context)
+        run(.custom(instruction: instruction), context: context, useScreen: screen.armed)
     }
-    private func run(_ action: SmartAction, context: Context) {
+    private func run(_ action: SmartAction, context: Context, useScreen: Bool = false) {
         voice.dismiss()
         guard !busy else { return }
         let access = previewActions ? SessionState(signedIn: true, fullAccess: true, shareable: true) : store.sessionState(fullAccess: hasFullAccess)
@@ -314,31 +369,35 @@ final class KeyboardViewController: UIInputViewController {
         catch { showMessage(error.localizedDescription, detail: error.localizedDescription); return }
         guard currentContext == context else { showMessage("Text changed. Select it and try again."); return }
         busy = true; invalidateUndo(); toolbar.spinner.startAnimating()
-        retryAction = action; retryContext = context
+        retryAction = action; retryContext = context; retryScreen = useScreen
         let progress: String
-        switch action { case .rephrase: progress = "Rephrasing…"; case .fixGrammar: progress = "Fixing grammar…"; default: progress = "Working…" }
+        switch action { case .rephrase: progress = "Rephrasing…"; case .fixGrammar: progress = "Fixing grammar…"; default: progress = useScreen ? "Looking at your screen…" : "Working…" }
         showMessage(progress, accessory: "Cancel"); updateSurface()
         task = Task { @MainActor in
             defer { busy = false; toolbar.spinner.stopAnimating(); keyArea.inputEnabled = true; updateContext() }
             do {
-                let result = try await actionResult(action, context: context)
+                let outcome = try await actionResult(action, context: context, useScreen: useScreen)
+                let result = outcome.text
                 try Task.checkCancellation()
                 guard currentContext == context else { showMessage("Text changed. Select it and try again."); return }
                 guard !result.isEmpty else { throw GusanError.invalidResponse }
-                if context.selected.isEmpty {
+                if outcome.kind == .replaceContext {
                     textDocumentProxy.adjustTextPosition(byCharacterOffset: context.paragraph.after.utf16.count)
                     for _ in context.text { textDocumentProxy.deleteBackward() }
                 }
                 undoSnapshot = currentContext.voiceContext
                 textDocumentProxy.insertText(result)
-                original = context.text; replacement = result; captureUndo(restoreUTF16: context.selected.isEmpty ? context.paragraph.after.utf16.count : 0)
-                instructionContext = nil; instruction = ""; showTyping(cancelPending: false)
+                original = outcome.kind == .insert ? "" : context.text; replacement = result; captureUndo(restoreUTF16: outcome.kind == .replaceContext ? context.paragraph.after.utf16.count : 0)
+                instructionContext = nil; instruction = ""; showTyping(cancelPending: false); screen.armed = false
                 showMessage("Replaced", accessory: "Undo")
                 UIAccessibility.post(notification: .announcement, argument: "Replaced. Undo available.")
             } catch is CancellationError { showMessage("Cancelled") }
             catch GusanError.unauthorized { showMessage("Sign in to use Gusan", accessory: "Sign in") }
             catch GusanError.proRequired {
                 showMessage("Gusan Pro is needed for AI actions", accessory: "See plans")
+            }
+            catch let error as ScreenError {
+                showMessage(error == .noFrame ? "No picture from Gusan Screen. Tap for details." : "Gusan Screen isn't available. Tap for details.", detail: error.localizedDescription + "\n\n" + screen.diagnostics, accessory: error == .noFrame ? "Retry" : nil)
             }
             catch {
                 let retry = [GusanError.network, .timeout, .failed, .serverNotConfigured, .invalidResponse].contains(error as? GusanError ?? .emptyInput)
@@ -354,16 +413,22 @@ final class KeyboardViewController: UIInputViewController {
         false
         #endif
     }
-    private func actionResult(_ action: SmartAction, context: Context) async throws -> String {
+    /// Screen answers go in at the cursor (or replace the selection); they never rewrite the surrounding text.
+    private func actionResult(_ action: SmartAction, context: Context, useScreen: Bool = false) async throws -> JobResult {
         #if DEBUG
-        if previewActions { return try await InstructionPreviewJob().result().text }
+        if previewActions { return try await InstructionPreviewJob().result() }
         #endif
         guard let session = try await auth.refresh() else { throw GusanError.unauthorized }
         let kind: JobResult.Kind = context.selected.isEmpty ? (context.text.isEmpty ? .insert : .replaceContext) : .replaceSelection
-        do { return try await SmartActionJob(text: context.text, action: action, accessToken: session.accessToken, target: settings.translateTarget, kind: kind).result().text }
+        func job(_ token: String) throws -> GusanJob {
+            guard useScreen, case .custom(let instruction) = action else { return SmartActionJob(text: context.text, action: action, accessToken: token, target: settings.translateTarget, kind: kind) }
+            return try screen.job(instruction: instruction, text: context.text, selected: context.selected, accessToken: token, kind: kind)
+        }
+        let progress: @Sendable (String) async -> Void = { [weak self] message in await MainActor.run { self?.showMessage(message, accessory: "Cancel") } }
+        do { return try await JobRunner().result(of: try job(session.accessToken), progress: progress) }
         catch GusanError.unauthorized {
             guard let refreshed = try await auth.refresh(force: true) else { throw GusanError.unauthorized }
-            return try await SmartActionJob(text: context.text, action: action, accessToken: refreshed.accessToken, target: settings.translateTarget, kind: kind).result().text
+            return try await JobRunner().result(of: try job(refreshed.accessToken), progress: progress)
         }
     }
     private func undo() {

@@ -10,6 +10,7 @@ app for microphone access and returns results to the keyboard.
 - `project.yml`: XcodeGen app + keyboard targets (iOS 16+, Swift 5).
 - `Gusan/`: SwiftUI account, keyboard setup/settings and sharing diagnostics.
 - `GusanKeyboard/`: lightweight UIKit keyboard extension.
+- `GusanScreen/`: ReplayKit broadcast upload extension ("Gusan Screen"); keeps one downscaled frame in memory for the keyboard's Screen chip.
 - `GusanKit/`: shared prompts, cloud/auth clients, session/settings stores and tests.
 - `scripts/`: desktop prompt parity check and IPA packaging.
 
@@ -60,7 +61,7 @@ runs package tests, prompt parity and a Simulator build, then uploads the
 Free Apple ID installs expire after **7 days**: re-sign/refresh with Sideloadly.
 Data is usually kept when using the same Apple ID and bundle ID, but is not
 guaranteed. Free provisioning generally permits **3 installed sideloaded apps**
-and **10 App IDs per 7 days**; Gusan's app and keyboard consume **2 App IDs**.
+and **10 App IDs per 7 days**; Gusan's app, keyboard and Gusan Screen extension consume **3 App IDs**.
 
 ## Enable and use
 
@@ -74,6 +75,27 @@ and **10 App IDs per 7 days**; Gusan's app and keyboard consume **2 App IDs**.
 5. Tap the Gusan mic to open the app and start a voice session the first time,
    then return to the keyboard. Tap stop to process your recording, or cancel
    while transcribing/thinking. Results return to the keyboard for insertion.
+
+**Simulator preview of the keyboard.** Third-party keyboards cannot be enabled in the
+Simulator, so the `GusanKeyboardPreview` scheme (Simulator-only, never embedded in the
+.ipa) hosts `KeyboardViewController` inside a plain app. Launch it with `--screen` to
+show the Screen chip armed, or `--screen-offer` for the ghosted chip shown when no
+broadcast is live. The same can be done with the real keyboard extension in a debug
+build by setting the `debugScreenPreview` / `debugScreenOffer` boolean in the keyboard's
+defaults (`xcrun simctl spawn booted defaults write group.com.aram2k.gusan debugScreenPreview -bool YES`).
+Debug launch arguments for the app: `--gusan-debug-screen-page` opens Home › Gusan Screen;
+`--gusan-debug-screen-live` fakes a live broadcast on that page.
+
+6. **Gusan Screen:** open Home › Gusan Screen, read what is shared, then Start.
+   While the red indicator shows, the keyboard gets a **Screen** chip; tap it,
+   type "reply to this" (or pick a suggestion) and Run. One picture of the
+   screen from just before the keyboard came up goes to Gusan Cloud with your
+   instruction; the answer is inserted with Undo. The picture contains everything
+   visible on the screen at that moment; the chip is never offered in password
+   fields. It stops by itself after 10 minutes without a question (Keyboard ›
+   Screen). The Simulator cannot run broadcasts; test on a device. If Sideloadly
+   renames the extension so it no longer ends in `.screen`, the broadcast sheet
+   lists every broadcast extension instead of preselecting Gusan Screen.
 
 **Privacy:** Full Access enables networking and shared storage. Text is sent to
 Gusan Cloud only when you tap an action. Authentication and entitlement checks

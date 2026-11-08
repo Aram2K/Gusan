@@ -46,6 +46,7 @@ jobs:
         run: |
           xcodegen generate
           xcodebuild -project Gusan.xcodeproj -scheme Gusan -destination 'generic/platform=iOS Simulator' build
+          xcodebuild -project Gusan.xcodeproj -scheme GusanKeyboardPreview -destination 'generic/platform=iOS Simulator' build
       - name: Package unsigned IPA
         run: bash ios/scripts/build_unsigned_ipa.sh
       - uses: actions/upload-artifact@v4
