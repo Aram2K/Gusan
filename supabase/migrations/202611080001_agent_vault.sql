@@ -14,6 +14,22 @@ revoke all on public.vault_logins from public, anon, authenticated;
 grant select on public.vault_logins to authenticated;
 grant all on public.vault_logins to service_role;
 
+create function public.limit_vault_logins()
+returns trigger language plpgsql security definer set search_path = public, pg_temp
+as $$
+begin
+  perform pg_advisory_xact_lock(hashtextextended(new.user_id::text, 1));
+  if not exists (select 1 from public.vault_logins where user_id = new.user_id and hostname = new.hostname)
+    and (select count(*) from public.vault_logins where user_id = new.user_id) >= 50 then
+    raise exception using errcode = 'P0001', message = 'login_limit';
+  end if;
+  return new;
+end;
+$$;
+revoke all on function public.limit_vault_logins() from public, anon, authenticated;
+create trigger vault_logins_limit before insert on public.vault_logins
+  for each row execute function public.limit_vault_logins();
+
 create table public.vault_events (
   id bigint generated always as identity primary key,
   user_id uuid not null references auth.users on delete cascade,

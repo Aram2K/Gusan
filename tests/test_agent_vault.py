@@ -62,8 +62,11 @@ for(let i=0;i<scenarios.length;i++){
  for(const r of s.requests??[{body:s.body??{action:'release',task_id:id,login_id:login,release_nonce:nonce,values:{username:'private-user-987',password:'private-password-654'}}}]){
   const raw=r.raw??JSON.stringify(r.body);
   const headers={'Content-Type':'application/json',Authorization:s.auth??'Bearer aaa.bbb.ccc',...s.headers,...r.headers};
-  const response=await handler(new Request('https://edge.test/',{method:r.method??'POST',headers,body:raw}));
-  replies.push({status:response.status,body:await response.json()});
+  const respond=async()=>{
+   const response=await handler(new Request('https://edge.test/',{method:r.method??'POST',headers,body:raw}));
+   return {status:response.status,body:await response.json()};
+  };
+  replies.push(...await Promise.all(Array.from({length:r.concurrent??1},respond)));
  }
  results.push({replies,calls,logs,writes,tables,queries});
 }
@@ -176,6 +179,36 @@ def test_nonce_reuse(run):
     out, = run({"requests": [{"body": release()}, {"body": release()}]})
     assert [r["status"] for r in out["replies"]] == [200, 409]
     assert len(out["calls"]) == 2
+
+
+def test_concurrent_release_claims_once(run):
+    out, = run({"requests": [{"body": release(), "concurrent": 2}]})
+    assert sorted(r["status"] for r in out["replies"]) == [200, 409]
+    assert len(out["calls"]) == 2
+    assert out["tables"]["agent_task_runs"][0]["release_count"] == 1
+
+
+@pytest.mark.parametrize("patch", [{"username_hint": "x" * 65}, {"username_hint": 42}, {"has_totp": "true"}])
+def test_add_metadata_validation(run, patch):
+    out, = run({"body": {"action": "add", "hostname": "example.com", **patch}})
+    assert out["replies"][0]["status"] == 400
+    assert not out["writes"]
+
+
+def test_delete_404_and_foreign_pending(run):
+    missing, foreign = run({"body": {"action": "delete", "login_id": ID}},
+                           {"row": {"user_id": "other"}, "body": {"action": "pending"}})
+    assert missing["replies"][0]["status"] == 404
+    assert foreign["replies"][0]["body"] == {"pending": []}
+
+
+@pytest.mark.parametrize("status,event", [(404, "vault_deleted"), (500, "vault_delete_failed")])
+def test_sweep_delete_outcomes(run, status, event):
+    out, = run({"body": {"action": "sweep"}, "headers": {"X-Gusan-Sweep-Secret": "sweep-test"},
+                "row": {"status": "failed"}, "deleteStatus": status,
+                "vaults": [{"id": "vault1", "name": f"gusan-task-{ID}"}]})
+    assert out["replies"][0]["status"] == 200
+    assert out["tables"]["vault_events"][0]["event"] == event
 
 
 @pytest.mark.parametrize("path", ["/items", "/tool_results"])

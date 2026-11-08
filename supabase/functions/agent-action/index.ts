@@ -568,9 +568,11 @@ async function cleanupVault(db: any, row: Obj, run: Obj) {
 function hostname(value: unknown) {
   if (typeof value !== "string" || value.length > 2048) return null;
   try {
-    const u = new URL(value.includes("://") ? value : `https://${value}`);
+    const input = value.trim();
+    const u = new URL(input.includes("://") ? input : `https://${input}`);
     const host = u.hostname.toLowerCase().replace(/\.$/, "");
-    if (!["http:", "https:"].includes(u.protocol) || u.port || u.username || u.password ||
+    const authority = input.replace(/^https?:\/\//i, "").split(/[/?#]/)[0];
+    if (!["http:", "https:"].includes(u.protocol) || authority.includes(":") || u.username || u.password ||
       !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(host)) return null;
     return host;
   } catch { return null; }
@@ -606,8 +608,9 @@ async function expire(db: any, row: Obj, run: Obj) {
       confirmation_at: null,
       finished_at: new Date().toISOString(),
     });
-    if (loginExpired) await vaultEvent(db, row, "expired", run.tool_req?.hostname ?? "", run.tool_req?.login_id ?? null);
-    await cleanupVault(db, row, run);
+    try {
+      if (loginExpired) await vaultEvent(db, row, "expired", run.tool_req?.hostname ?? "", run.tool_req?.login_id ?? null);
+    } finally { await cleanupVault(db, row, run); }
     return row;
   }
   return row;
@@ -651,6 +654,21 @@ async function sync(db: any, row: Obj, wait = 0) {
   );
   if (!change) return row;
   const events = Array.isArray(change.new_events) ? change.new_events : [];
+  try {
+  if (run.phase === "execute" && run.h_vault_id) {
+    const page_url = events.filter((e: Obj) => e.type === "AgentEvent" &&
+      e.data?.kind === "observation_event" && ["web", "textual_web"].includes(e.data.type))
+      .map((e: Obj) => pageURL(e.data.metadata?.url)).filter(Boolean).at(-1);
+    if (page_url && page_url !== run.tool_req?.page_url) {
+      const tool_req = { ...run.tool_req, page_url };
+      let query = db.from("agent_task_runs").update({ tool_req }).eq("task_id", row.id);
+      query = run.tool_req ? query.eq("tool_req", JSON.stringify(run.tool_req)) : query.is("tool_req", null);
+      const updated = await query.select().maybeSingle();
+      if (updated.error) throw new Failure("storage_error", 500);
+      if (!updated.data) return loadTask(db, row.id, row.user_id);
+      run.tool_req = tool_req;
+    }
+  }
   const steps = [...row.steps];
   for (const e of events) {
     if (
@@ -751,19 +769,24 @@ async function sync(db: any, row: Obj, wait = 0) {
         const login = host && (logins.data ?? []).find((l: Obj) => host === l.hostname || host.endsWith(`.${l.hostname}`));
         if (login && (run.release_count ?? 0) < 3) {
           const requested_at = new Date().toISOString();
-          const page_url = events.flatMap((e: Obj) => {
-            const d = e.data ?? {};
-            return [d.url, d.page_url, d.observation?.url, ...(d.tool_reqs ?? []).map((c: Obj) => c.args?.url)];
-          }).map(pageURL).filter(Boolean).at(-1) ?? null;
+          const page_url = run.tool_req?.page_url ?? null;
           // Store the canonical saved host, so release can enforce exact equality.
           const login_request = { hostname: login.hostname, page_url, requested_at };
-          await saveRun(db, row, {
+          let claim = db.from("agent_task_runs").update({
             tool_req: { call, ...login_request, login_id: login.id },
             release_nonce: crypto.randomUUID(),
             release_nonce_expires_at: new Date(Date.now() + 900000).toISOString(),
-          });
+          }).eq("task_id", row.id).is("release_nonce", null)
+            .eq("release_count", run.release_count ?? 0);
+          claim = run.tool_req ? claim.eq("tool_req", JSON.stringify(run.tool_req)) : claim.is("tool_req", null);
+          const claimed = await claim.select().maybeSingle();
+          if (claimed.error) throw new Failure("storage_error", 500);
+          if (!claimed.data) return loadTask(db, row.id, row.user_id);
           await vaultEvent(db, row, "release_requested", login.hostname, login.id);
-          return save(db, row, { status: "awaiting_login", login_request, event_index: patch.event_index }, true);
+          const parked = await save(db, row, { status: "awaiting_login", login_request, event_index: patch.event_index,
+            deadline_at: new Date(Date.now() + 1080000).toISOString() }, true);
+          if (terminal(parked)) await cleanupVault(db, parked, run);
+          return parked;
         }
       }
       await h(`${path}/tool_results`, "POST", {
@@ -843,8 +866,12 @@ async function sync(db: any, row: Obj, wait = 0) {
     }
   }
   row = await save(db, row, patch);
-  if (terminal(row)) await cleanupVault(db, row, run);
   return row;
+  } finally {
+    if (terminal(row) || ["completed", "idle", "failed", "interrupted", "timed_out"].includes(change.status)) {
+      await cleanupVault(db, row, run);
+    }
+  }
 }
 async function verifyWebhook(req: Request, raw: string) {
   const timestamp = req.headers.get("X-H-Webhook-Timestamp") ?? "";
@@ -1122,13 +1149,13 @@ Deno.serve(async (req: Request) => {
       const awaiting = row.status === "awaiting_confirmation";
       if (currentRun.h_session_id && !awaiting) {
         try {
-        await h(
-          `/sessions/${encodeURIComponent(currentRun.h_session_id)}`,
-          "DELETE",
-        );
-        } finally { await cleanupVault(db, row, currentRun); }
+          await h(`/sessions/${encodeURIComponent(currentRun.h_session_id)}`, "DELETE");
+        } catch (error) {
+          if (!currentRun.h_vault_id) throw error;
+          console.log("agent-action", "cancel_session_failed");
+        }
       }
-      await cleanupVault(db, row, { ...currentRun, h_vault_id: awaiting ? currentRun.h_vault_id : null });
+      await cleanupVault(db, row, currentRun);
       row = await save(db, row, {
         status: "cancelled",
         confirmation: null,

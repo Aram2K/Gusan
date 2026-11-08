@@ -26,7 +26,7 @@ for (let i=0; i<scenarios.length; i++) {
  console.log=(...args)=>logs.push(args.join(' '));
  const id='11111111-1111-1111-1111-111111111111';
  let row={id,user_id:'u1',mode:'research',status:'running',title:'task',event_index:0,steps:[],confirmation:null,result:null,created_at:new Date().toISOString(),updated_at:new Date().toISOString(),deadline_at:new Date(Date.now()+600000).toISOString(),...s.row};
- let run={task_id:id,h_session_id:'session1',phase:'prepare',plan:{instruction:'SECRET instruction'},...s.run};
+ let run={task_id:id,h_session_id:'session1',phase:'prepare',release_count:0,release_nonce:null,tool_req:null,plan:{instruction:'SECRET instruction'},...s.run};
  let conflict=s.conflict;
  let createFailure=s.createFailure;
  let runReads=0;
@@ -35,7 +35,7 @@ for (let i=0; i<scenarios.length; i++) {
   rpc:async(name,args)=>{dbCalls.push({name,args});return name==='is_pro'?{data:s.pro??true,error:s.proError?{}:null}:{data:{...row,status:'queued',mode:args.p_mode,title:args.p_title},error:s.quota?{code:s.quota}:null}},
   from:(table)=>{
    let patch=null, filters=[], allowedStatuses=null;
-   const q={select:()=>q,limit:()=>q,insert:p=>{patch=p;return q},update:p=>{patch=p;return q},eq:(k,v)=>{filters.push([k,v]);return q},
+   const q={select:()=>q,limit:()=>q,is:(k,v)=>{filters.push([k,v]);return q},insert:p=>{patch=p;return q},update:p=>{patch=p;return q},eq:(k,v)=>{filters.push([k,v]);return q},
     in:(k,v)=>{filters.push([k,v]);allowedStatuses=v;return q},maybeSingle:async()=>{
     dbCalls.push({table,patch,filters});
     if(table==='vault_logins')return {data:s.logins??[],error:null};
@@ -46,7 +46,7 @@ for (let i=0; i<scenarios.length; i++) {
      if(!allowedStatuses.includes(row.status))return {data:null,error:null};
     }
     if(table==='agent_task_runs' && patch && filters.some(([k,v])=>
-      k==='plan' ? JSON.stringify(run.plan)!==v : k==='h_session_id' && run[k]!==v)){
+      ['plan','tool_req'].includes(k) && typeof v==='string' ? JSON.stringify(run[k])!==v : ['h_session_id','release_nonce','release_count','tool_req'].includes(k) && run[k]!==v)){
      return {data:null,error:null};
     }
     if(table==='agent_tasks' && patch && conflict){conflict=false;row={...row,status:'completed',updated_at:'concurrent-write'};return {data:null,error:null};}
@@ -155,7 +155,7 @@ def test_vault_confirm(run):
 def test_login_parking_and_missing(run):
     scenario = {"row": {"mode": "do"}, "run": {"phase": "execute", "h_vault_id": "vault1"},
                 "change": {"status": "awaiting_tool_results", "pending_tool_calls": [LOGIN_CALL],
-                           "new_events": [{"data": {"url": "https://example.com/login?private=yes#secret"}}]}}
+                           "new_events": [{"type": "AgentEvent", "data": {"kind": "observation_event", "type": "web", "metadata": {"url": "https://example.com/login?private=yes#secret"}}}]}}
     parked, missing = run({**scenario, "logins": [LOGIN], "requests": [{"body": {"action": "status", "task_id": ID}}] * 2}, scenario)
     assert parked["row"]["status"] == "awaiting_login"
     assert parked["run"]["release_nonce"]
@@ -186,6 +186,34 @@ def test_opening_redacts_query(run):
     out, = run({"change": {"status": "running", "new_events": [{"type": "AgentEvent", "data": {
         "kind": "policy_event", "tool_reqs": [{"args": {"url": "https://example.com/login?token=secret#private"}}]}}]}})
     assert out["row"]["steps"][0]["text"] == "Opening https://example.com/login"
+
+
+def test_login_url_from_prior_observation_and_subdomain(run):
+    out, = run({"logins": [LOGIN], "row": {"mode": "do"}, "run": {"phase": "execute", "h_vault_id": "vault1"},
+                "requests": [
+                    {"body": {"action": "status", "task_id": ID}, "change": {"status": "running", "new_events": [{"type": "AgentEvent", "data": {"kind": "observation_event", "type": "web", "metadata": {"url": "https://app.example.com/login?secret=yes"}}}]}},
+                    {"body": {"action": "status", "task_id": ID}, "change": {"status": "awaiting_tool_results", "pending_tool_calls": [{**LOGIN_CALL, "args": {"hostname": "app.example.com"}}]}},
+                ]})
+    assert out["row"]["status"] == "awaiting_login"
+    assert out["row"]["login_request"]["page_url"] == "https://app.example.com/login"
+    assert out["run"]["tool_req"]["hostname"] == "example.com"
+
+
+def test_login_duplicate_delivery_cannot_replace_nonce(run):
+    out, = run({"logins": [LOGIN], "run": {"phase": "execute", "h_vault_id": "vault1"},
+                "requests": [{"body": {"action": "status", "task_id": ID}, "concurrent": 2}],
+                "change": {"status": "awaiting_tool_results", "pending_tool_calls": [LOGIN_CALL]}})
+    events = [c for c in out["dbCalls"] if c.get("table") == "vault_events"]
+    assert len(events) == 1
+    assert out["row"]["status"] == "awaiting_login"
+
+
+def test_vault_cleanup_failure_is_best_effort(run):
+    out, = run({"run": {"h_vault_id": "vault1"}, "upstream": 500,
+                "body": {"action": "cancel", "task_id": ID}})
+    assert out["replies"][0]["body"]["status"] == "cancelled"
+    assert out["run"]["h_vault_id"] is None
+    assert any(c.get("patch", {}).get("event") == "vault_delete_failed" for c in out["dbCalls"] if c.get("patch"))
 
 
 @pytest.mark.parametrize("scenario,status,error", [

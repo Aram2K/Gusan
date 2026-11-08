@@ -163,7 +163,9 @@ Deno.serve(async (req: Request) => {
       if (body.has_totp !== undefined && typeof body.has_totp !== "boolean") throw new Failure("bad_request");
       const rows = checked(await db.from("vault_logins").select("id,hostname").eq("user_id", userId));
       if (rows.length >= 50 && !rows.some((r: Obj) => r.hostname === host)) throw new Failure("login_limit", 409);
-      const login = checked(await db.from("vault_logins").upsert({ user_id: userId, hostname: host, username_hint: body.username_hint ?? null, has_totp: body.has_totp ?? false }, { onConflict: "user_id,hostname" }).select().single());
+      const saved = await db.from("vault_logins").upsert({ user_id: userId, hostname: host, username_hint: body.username_hint ?? null, has_totp: body.has_totp ?? false }, { onConflict: "user_id,hostname" }).select().single();
+      if (saved.error?.code === "P0001") throw new Failure("login_limit", 409);
+      const login = checked(saved);
       await audit(db, { user_id: userId }, "added", host, login.id);
       return json({ login_id: login.id, hostname: login.hostname, username_hint: login.username_hint, has_totp: login.has_totp, created_at: login.created_at, last_used_at: login.last_used_at });
     }
