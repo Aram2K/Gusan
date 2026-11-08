@@ -54,10 +54,10 @@ public final class AgentClient: AgentService {
         return request
     }
 
-    public static func listRequest(limit: Int, token: String) -> URLRequest {
+    public static func listRequest(limit: Int, token: String, includeProvider: Bool = true) -> URLRequest {
         var components = URLComponents(url: tableURL, resolvingAgainstBaseURL: false)!
         components.queryItems = [
-            URLQueryItem(name: "select", value: "id,mode,provider,status,title,steps,confirmation,result,outcome,error_code,created_at,updated_at,finished_at,deadline_at,seen_at"),
+            URLQueryItem(name: "select", value: "id,mode,\(includeProvider ? "provider," : "")status,title,steps,confirmation,result,outcome,error_code,created_at,updated_at,finished_at,deadline_at,seen_at"),
             URLQueryItem(name: "order", value: "created_at.desc"),
             URLQueryItem(name: "limit", value: String(max(1, min(limit, 100)))),
         ]
@@ -112,8 +112,12 @@ public final class AgentClient: AgentService {
     }
 
     public func list(limit: Int = 50) async throws -> [AgentTask] {
-        let request = Self.listRequest(limit: limit, token: try await token())
-        let (data, response) = try await transport.data(for: request)
+        let token = try await token()
+        var (data, response) = try await transport.data(for: Self.listRequest(limit: limit, token: token))
+        // A backend without the provider column (migration not yet applied) rejects the select with 400.
+        if (response as? HTTPURLResponse)?.statusCode == 400 {
+            (data, response) = try await transport.data(for: Self.listRequest(limit: limit, token: token, includeProvider: false))
+        }
         try Self.check(data, response)
         return try AgentTask.dateDecoder.decode([AgentTask].self, from: data)
     }
