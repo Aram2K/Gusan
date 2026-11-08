@@ -64,7 +64,7 @@ final class VaultTests: XCTestCase {
     func testHostnamesHintsAndAuthenticator() throws {
         XCTAssertEqual(try VaultHostname.normalize("HTTPS://Example.COM/login?secret=1#anchor"), "example.com")
         XCTAssertEqual(try VaultHostname.normalize(" sub.example.com. "), "sub.example.com")
-        for value in ["127.0.0.1", "127.1", "https://[::1]", "example.com:443", "https://example.com:443", "localhost", "bad_host.com", "ftp://example.com", "https://u:p@example.com", "-bad.com", ""] {
+        for value in ["127.0.0.1", "127.1", "https://[::1]", "example.com:443", "https://example.com:443", "https://example.com:/", "localhost", "bad_host.com", "ftp://example.com", "https://u:p@example.com", "-bad.com", ""] {
             XCTAssertThrowsError(try VaultHostname.normalize(value), value)
         }
         XCTAssertEqual(VaultHostname.usernameHint("alex@gmail.com"), "a•••@gmail.com")

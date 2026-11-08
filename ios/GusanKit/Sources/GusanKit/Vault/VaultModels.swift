@@ -109,6 +109,8 @@ public enum VaultHostname {
         let input = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard input.count <= 2048 else { throw VaultValidationError.hostname }
         let address = input.contains("://") ? input : "https://" + input
+        let authority = address.components(separatedBy: "://").dropFirst().joined(separator: "://").prefix { !"/?#".contains($0) }
+        guard !authority.contains(":") else { throw VaultValidationError.hostname }
         guard let components = URLComponents(string: address),
               ["http", "https"].contains(components.scheme?.lowercased() ?? ""),
               components.port == nil, components.user == nil, components.password == nil,

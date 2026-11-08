@@ -12,6 +12,7 @@ public protocol VaultService: AnyObject {
 public struct VaultClientError: LocalizedError {
     public let code: String
     public let status: Int
+    public init(code: String, status: Int) { self.code = code; self.status = status }
     public var errorDescription: String? {
         switch code {
         case "unauthorized": return "Sign in again to use Vault."
