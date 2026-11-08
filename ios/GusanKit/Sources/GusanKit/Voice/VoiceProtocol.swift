@@ -21,7 +21,8 @@ public final class VoiceSettings {
     public static let languages: [(code: String, name: String)] = [("auto", "Detect automatically"), ("en", "English"), ("hy", "Armenian"), ("ru", "Russian"), ("fr", "French"), ("de", "German"), ("es", "Spanish"), ("it", "Italian"), ("pt", "Portuguese"), ("ar", "Arabic")]
     /// How long the app stays ready (microphone warm, orange dot) after the last take; 0 = until the user stops it.
     public static let idleOptions = [15, 60, 0]
-    public static let defaultIdleMinutes = 15
+    /// Default is "until I stop": one start, then every keyboard mic tap records in place.
+    public static let defaultIdleMinutes = 0
     public init(group: String?) { defaults = group.flatMap(UserDefaults.init(suiteName:)) ?? .standard }
     public var language: String {
         get { let code = defaults.string(forKey: "voiceLanguage") ?? "auto"; return Self.languages.contains { $0.code == code } ? code : "auto" }
