@@ -1,6 +1,7 @@
 import json
 import re
 import threading
+from urllib.parse import unquote, urlsplit
 from collections.abc import Mapping
 
 import requests
@@ -346,6 +347,7 @@ class ActionAPIError(RuntimeError):
         self.code = code or ""
 
 
+import meeting_titles
 import notes_prompt
 import smart_prompt
 
@@ -375,6 +377,10 @@ def _max_tokens_for(mode, text=None):
         return 220
     if mode == "meeting_chat":
         return 1400      # a short answer, or a drafted email; the server caps a request at 2000
+    if mode == "meeting_title":
+        return 160       # 3-7 words (room for a model that thinks a little first)
+    if mode == "smart_selection":
+        return 2000      # a rewritten selection can be as long as the selection
     return 1000
 
 
@@ -620,6 +626,8 @@ def build_messages(text, mode, source_lang="auto", target_lang="en", vocab_block
         ]
     if mode == "smart_auto":
         return smart_prompt.build_messages(text, vocab_block=vocab_block)
+    if mode == "smart_selection":
+        return smart_prompt.build_selection_messages(text, vocab_block=vocab_block)
     if mode == "write_email":
         instruction = (
             "Turn this dictated text into a comprehensive, professional email draft. "
@@ -647,6 +655,8 @@ def build_messages(text, mode, source_lang="auto", target_lang="en", vocab_block
         # paper (arxiv 2307.15793): two-stage thinking, third-person rephrasing so the notes are shareable, explicit
         # owner attribution, careful name preservation - now with a length that scales with the meeting.
         instruction = None
+    elif mode == "meeting_title":
+        instruction = meeting_titles.TITLE_INSTRUCTION
     elif mode == "live_recap":
         # Rolling "so far" panel during a call: regenerated every ~20 s, read
         # at a glance. Bullets only.
@@ -680,13 +690,68 @@ def server_mode(mode):
     every piece of the talk) and "live_people" (the names of the people on the call, read off
     the Live Assistant's own screenshot: people_from_screen.py) are client-side briefs: the
     server routes them exactly like a live answer - the same fast live model, and inside the
-    Live Assistant session that is already open - so they are sent as "live_assist"."""
-    return "live_assist" if mode in ("live_rule", "live_people") else mode
+    Live Assistant session that is already open - so they are sent as "live_assist".
+    "meeting_title" (the name of a meeting, read off its finished notes) goes as "meeting_notes": the server
+    already lets that through for Free (the same meeting's note_ref is not counted twice) and for Pro."""
+    if mode in ("live_rule", "live_people"):
+        return "live_assist"
+    if mode == "smart_selection":
+        return "smart_auto"          # a Smart Action (on the selected text): the server's Smart Actions route
+    return "meeting_notes" if mode == "meeting_title" else mode
+
+
+def parse_web_sources(value):
+    try:
+        return sanitize_web_sources(json.loads(unquote(value)))
+    except (ValueError, TypeError):
+        return []
+
+
+def sanitize_web_sources(rows):
+    if not isinstance(rows, list):
+        return []
+    sources = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        url = str(row.get("url") or "").strip()
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            continue
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            continue
+        sources.append({"title": str(row.get("title") or "").strip()[:200], "url": url})
+        if len(sources) == 5:
+            break
+    return sources
+
+
+DEEP_SEARCH_TIMEOUT_S = 120      # an answer after a deep web search (the server gives the search 60 s)
+
+
+def _web_timeout(web_search, web_query, mode, default):
+    """How long to wait for Gusan Cloud: longer when this request will do a deep web search."""
+    if not web_search:
+        return default
+    try:
+        import web_sources
+        if web_sources.search_depth(web_query, mode) == "deep":
+            return max(default, DEEP_SEARCH_TIMEOUT_S)
+    except Exception:
+        pass
+    return default
+
+
+# The modes Gusan Cloud may search the web for (Linkup, on the server): Live Assistant answers, "Ask about this meeting",
+# and Smart Actions (with or without a selection) - each only when the person turned it on.
+WEB_SEARCH_MODES = ("live_assist", "meeting_chat", "smart_auto", "smart_selection")
 
 
 def run_managed_action(text, mode, token, source_lang="auto", target_lang="en",
                        vocab_block="", image_b64=None, image_status=None,
-                       session_id="", note_ref="", prefer=""):
+                       session_id="", note_ref="", prefer="", web_search=False, config=None, info=None,
+                       web_query=""):
     """Pro Smart Actions via the server (no BYO key): we build the messages here
     and the edge function runs them on the founder's keys. ``mode`` picks the
     model there: Smart Actions go to DeepSeek V4.1 Flash, meeting notes and the
@@ -704,11 +769,15 @@ def run_managed_action(text, mode, token, source_lang="auto", target_lang="en",
     def _post(msgs):
         body = {"messages": msgs, "max_tokens": _max_tokens_for(mode, text), "mode": server_mode(mode)}
         body.update(_managed_extra(session_id, note_ref, prefer))
+        if web_search and not (config or {}).get("privacy_mode") and mode in WEB_SEARCH_MODES:
+            body["web_search"] = True
+            if isinstance(web_query, str) and web_query.strip():
+                body["web_query"] = web_query.strip()[:400]
         return requests.post(
             SMART_ACTION_URL,
             json=body,
             headers={"Authorization": f"Bearer {token}"},
-            timeout=45,
+            timeout=_web_timeout(web_search, web_query, mode, 45),
         )
     try:
         resp = _post(openai_messages_with_image(messages, image_b64))
@@ -718,6 +787,8 @@ def run_managed_action(text, mode, token, source_lang="auto", target_lang="en",
     except requests.RequestException as e:
         raise ActionAPIError(f"Network error reaching Smart Actions: {e}")
     _raise_for_managed_status(resp)
+    if info is not None and (web_search or "sources" in info or resp.headers.get("X-Web-Sources")):
+        info["sources"] = parse_web_sources(resp.headers.get("X-Web-Sources"))
     raw = _json_or_error(resp).get("text") or ""
     text = strip_think(raw, _answer_family(resp) in ("deepseek", "qwen"))
     if raw.strip() and not text:
@@ -767,7 +838,8 @@ def _raise_for_managed_status(resp):
 
 def run_managed_action_stream(text, mode, token, on_token, source_lang="auto",
                               target_lang="en", vocab_block="", image_b64=None,
-                              image_status=None, session_id="", note_ref="", info=None, prefer=""):
+                              image_status=None, session_id="", note_ref="", info=None, prefer="",
+                              web_search=False, config=None, web_query=""):
     """Streaming Pro Smart Actions: the server relays the model's event stream,
     so the first words show as soon as they are generated. A server that
     predates streaming answers with plain JSON, delivered in one piece.
@@ -783,6 +855,10 @@ def run_managed_action_stream(text, mode, token, on_token, source_lang="auto",
         body = {"messages": msgs, "max_tokens": _max_tokens_for(mode, text),
                 "mode": server_mode(mode), "stream": True}
         body.update(_managed_extra(session_id, note_ref, prefer))
+        if web_search and not (config or {}).get("privacy_mode") and mode in WEB_SEARCH_MODES:
+            body["web_search"] = True
+            if isinstance(web_query, str) and web_query.strip():
+                body["web_query"] = web_query.strip()[:400]
         return requests.post(
             SMART_ACTION_URL,
             json=body,
@@ -798,6 +874,8 @@ def run_managed_action_stream(text, mode, token, on_token, source_lang="auto",
     except requests.RequestException as e:
         raise ActionAPIError(f"Network error reaching Smart Actions: {e}")
     _raise_for_managed_status(resp)
+    if info is not None and (web_search or "sources" in info or resp.headers.get("X-Web-Sources")):
+        info["sources"] = parse_web_sources(resp.headers.get("X-Web-Sources"))
     template_opened = _answer_family(resp) in ("deepseek", "qwen")
     if "text/event-stream" not in (resp.headers.get("Content-Type") or ""):
         out = strip_think(_json_or_error(resp).get("text") or "", template_opened)

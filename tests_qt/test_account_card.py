@@ -334,7 +334,9 @@ def test_closing_the_pro_window_does_not_wait_on_the_spots_fetch(qapp):
     dlg = _pro_dialog(app)
     dlg.deleteLater()
     QApplication.processEvents()
-    assert time.monotonic() - started < 2
+    # The fetch waits 5 s: a window that waited for it would take 5 s or more. Building the Pro window itself
+    # takes a second or two, more on a busy machine (3.4 s on one with a browser and other apps running).
+    assert time.monotonic() - started < 4
     gate.set()
 
 

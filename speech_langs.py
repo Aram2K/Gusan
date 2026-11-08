@@ -8,7 +8,9 @@ sentence. Every word should come out in the language it was spoken in, in that
 language's own script: never translated, never transliterated. With fewer than
 two ticked, any language may be detected (how "multi" always worked).
 """
+import functools
 import re
+import sys
 
 # The languages the app offers, in picker order.
 NAMES = {"en": "English", "ar": "Arabic", "hy": "Armenian", "fr": "French",
@@ -65,6 +67,67 @@ def saved_mix(cfg):
     if not isinstance(raw, (list, tuple)):
         return []
     return [code for code in NAMES if code in raw]
+
+
+# Real-time Gladia (live_stt.py) on Auto-detect: at most this many candidate languages (Gladia: "a small set").
+LIVE_MAX_LANGUAGES = 5
+# Languages real-time Gladia (Solaria-1) writes poorly (the founder's test, 2026-11-07): a take where Gladia heard
+# one uses the pieces' text (Gusan Cloud's own engines: ElevenLabs Scribe first); a dictation set to one streams to
+# OpenAI gpt-live-transcribe on Fast and does not stream on Best accuracy (main.AudioRecorder._live_engine).
+LIVE_POOR = {"hy": "Armenian"}
+
+
+@functools.lru_cache(maxsize=1)
+def computer_languages():
+    """The languages this computer is set up for, ISO codes in order: Windows' keyboard languages, macOS'
+    preferred languages. () when unknown. Asked once per run."""
+    codes = []
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            import locale
+            user32 = ctypes.windll.user32
+            n = user32.GetKeyboardLayoutList(0, None)
+            if n > 0:
+                buf = (ctypes.c_void_p * n)()
+                n = user32.GetKeyboardLayoutList(n, buf)
+                for hkl in list(buf)[:max(0, n)]:
+                    name = locale.windows_locale.get((hkl or 0) & 0xFFFF, "")
+                    codes.append(name.split("_")[0].lower())
+        elif sys.platform == "darwin":
+            import subprocess
+            out = subprocess.run(["defaults", "read", "-g", "AppleLanguages"], capture_output=True, text=True,
+                                 timeout=2).stdout
+            codes += [c.lower() for c in re.findall(r'^\s*"?([A-Za-z]{2,3})\b', out or "", re.M)]
+    except Exception:
+        return ()
+    seen = []
+    for code in codes:
+        if code and code not in seen:
+            seen.append(code)
+    return tuple(seen)
+
+
+def live_languages(lang_setting, cfg=None):
+    """(language, languages) for a real-time Gladia session (live_stt.open_session).
+
+    A set language is THE language (Gladia writes every sentence in it). Auto-detect: Gladia detects each sentence
+    among the person's languages - the Mixed-languages list, then the computer's languages - so a take that goes
+    from English to French to Armenian keeps each in its own language (Gladia: switching needs a short list,
+    never all 100+). Fewer than two: Gladia detects freely (the take's first language). "Mixed languages": its
+    ticked list."""
+    setting = normalize(lang_setting, default="auto")
+    if setting not in ("auto", "multi"):
+        return setting, ()
+    picked = saved_mix(cfg)
+    if setting == "multi" and len(picked) >= 2:
+        return "multi", tuple(picked[:LIVE_MAX_LANGUAGES])
+    found = []
+    for code in list(picked) + list(computer_languages()):
+        if code in WHISPER_NAMES and code not in found:
+            found.append(code)
+    found = found[:LIVE_MAX_LANGUAGES]
+    return ("multi", tuple(found)) if len(found) >= 2 else ("auto", ())
 
 
 def mix_languages(cfg):
@@ -248,19 +311,21 @@ MISTRAL_LANGS = frozenset({"en", "es", "fr", "de", "it", "nl", "pt", "hi", "ar",
 # The other cloud engines Gusan Cloud runs: OpenAI's GPT transcribe models and ElevenLabs Scribe take any
 # language of the table below (they detect it, Armenian included); they are never Whisper.
 FAMILY_GPT, FAMILY_SCRIBE = "gpt", "scribe"
+FAMILY_GLADIA = "gladia"
 LANGUAGE_SUPPORT = {
     FAMILY_WHISPER: frozenset(WHISPER_NAMES),
     FAMILY_GEMINI: frozenset(WHISPER_NAMES),
     FAMILY_GPT: frozenset(WHISPER_NAMES),
     FAMILY_SCRIBE: frozenset(WHISPER_NAMES),
+    FAMILY_GLADIA: frozenset(WHISPER_NAMES),
     FAMILY_VOXTRAL: MISTRAL_LANGS,
 }
 FAMILY_NAMES = {FAMILY_WHISPER: "Whisper", FAMILY_GEMINI: "Gemini", FAMILY_VOXTRAL: "Voxtral",
-                FAMILY_GPT: "GPT", FAMILY_SCRIBE: "Scribe"}
+                FAMILY_GPT: "GPT", FAMILY_SCRIBE: "Scribe", FAMILY_GLADIA: "Gladia"}
 # The cloud families that cover a language and are known to be good at it: an answer from one of them in
 # another script is code-switching (the speaker used other words), not a model that does not know the
 # language. Voxtral is not here (it does not cover Armenian, its words in another script are an error).
-CAPABLE_FAMILIES = frozenset({FAMILY_GEMINI, FAMILY_GPT, FAMILY_SCRIBE})
+CAPABLE_FAMILIES = frozenset({FAMILY_GEMINI, FAMILY_GPT, FAMILY_SCRIBE, FAMILY_GLADIA})
 
 
 def family_of_model(model_id):
@@ -278,6 +343,8 @@ def family_of_model(model_id):
         return FAMILY_GPT
     if text.startswith(("scribe", "elevenlabs")):
         return FAMILY_SCRIBE
+    if text.startswith(("solaria", "gladia")):
+        return FAMILY_GLADIA
     if text.startswith("whisper") or text in ("tiny", "base", "small", "medium", "large",
                                               "large-v2", "large-v3", "large-v3-turbo"):
         return FAMILY_WHISPER

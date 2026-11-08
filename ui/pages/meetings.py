@@ -122,6 +122,7 @@ from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QComboBox, QFrame,
 import calendar_sync
 import invite_context
 import live_context
+import meeting_titles
 import notion_export
 from ui import calendar_door, notion_sheet, theme
 # The Connect box's words moved to ui/calendar_door.py (Home's card asks the same); the names stay here.
@@ -790,7 +791,7 @@ class ListView(QWidget):
         read is shown: an older one finishing late is dropped)."""
         def work():
             import meeting_store
-            return meeting_store.list_meetings()
+            return meeting_store.list_meetings(preview=True)
         self._refresh_token += 1
         token = self._refresh_token
         self._bg.run(work, lambda items, err: self._on_items(items, err, token))
@@ -1901,13 +1902,26 @@ STATUS = {
 }
 
 
+class SectionHeader(QWidget):
+    """One small heading ("Today", "Yesterday", "October") above the meetings of that stretch of time."""
+
+    def __init__(self, text, first=False, parent=None):
+        super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(14, 2 if first else 16, 0, 4)
+        self.label = tlabel(text, 12.5, 700, "muted", parent=self)
+        lay.addWidget(self.label)
+        lay.addStretch(1)
+        self.setAccessibleName(text)
+
+
 class MeetingRow(QAbstractButton):
     """One past meeting: title (dot when the notes are new), date, status,
     people, length. A trash icon at its right end (hover, or the keyboard on the row) deletes it
     without opening it; while the list is selecting, a check box in front ticks it
     (MeetingsList; ui/components/row_actions.py)."""
 
-    def __init__(self, page, m, status, first=False, parent=None, owner=None):
+    def __init__(self, page, m, status, first=False, parent=None, owner=None, grouped=True, now=None):
         super().__init__(parent)
         self.page = page
         self.owner = owner              # the MeetingsList (None: a row on its own)
@@ -1941,14 +1955,24 @@ class MeetingRow(QAbstractButton):
         top.setSpacing(8)
         if new:
             top.addWidget(dot_label("blue", 7, self), 0, Qt.AlignVCenter)
-        title = m.get("title") or "Untitled Meeting"
+        # The name: the title (the person's, the calendar's, or the AI's from the notes); while a meeting still has
+        # the app's "Meeting · Tue 14:30", who it was with ("Meeting with Anna") - never the time twice, never a sentence.
+        title = meeting_titles.display_title(m, me=page.me())
         self.title_label = ElidedLabel(title, self)
         self.title_label.setFont(theme.font(14.5, 700 if new else 600))
         self.title_label.setProperty("mtone", "ink")
         top.addWidget(self.title_label, 1)
         left.addLayout(top)
-        when = fmt_when(m.get("started") or m.get("timestamp"))
-        self.when_label = tlabel(when, 12.5, 400, "muted", parent=self)
+        # The second line: when (under a day header only what the header does not say), then the notes' first line.
+        dt = meeting_titles.parse_started(m.get("started") or m.get("timestamp"))
+        now = now or datetime.now()
+        when = (meeting_titles.when_text(dt, now, grouped) if dt is not None
+                else fmt_when(m.get("started") or m.get("timestamp")))
+        full_when = (meeting_titles.when_text(dt, now, False) if dt is not None else when)
+        about = m.get("preview") or ""
+        self.when_label = ElidedLabel(" · ".join(x for x in (when, about) if x), self)
+        self.when_label.setFont(theme.font(12.5, 400))
+        self.when_label.setProperty("mtone", "muted")
         left.addWidget(self.when_label)
         left.addStretch(1)
         lay.addLayout(left, 1)
@@ -1970,14 +1994,21 @@ class MeetingRow(QAbstractButton):
         self.deleting_label.hide()                    # takes the chip's place while the folder goes
         chip_box.addWidget(self.deleting_label)
         lay.addWidget(holder)
+        # A row with no status chip or no people gives that room to its title and notes line (empty columns used to
+        # cut the title short beside blank space).
+        self.chip_holder = holder
+        self._has_chip = bool(chip_text)
+        holder.setVisible(self._has_chip)
         faces_box = QWidget(self)
         faces_box.setFixedWidth(64)
         fb = QHBoxLayout(faces_box)
         fb.setContentsMargins(0, 0, 0, 0)
         fb.addStretch(1)
-        people = m.get("attendees_list") or []
+        people = [p for p in (m.get("attendees_list") or []) if str(p or "").strip()]
         fb.addWidget(Faces(people, 24, me=page.me(), parent=faces_box), 0, Qt.AlignVCenter)
         lay.addWidget(faces_box)
+        self.faces_box = faces_box
+        faces_box.setVisible(bool(people))
         length = fmt_duration(m.get("duration_sec")) if m.get("duration_sec") else ""
         self.length_label = tlabel(length, 13, 400, "text2", parent=self, tabular=True)
         self.length_label.setFixedWidth(72)               # "1 h 05 min" fits (it was cut to "h 05 min")
@@ -1992,7 +2023,7 @@ class MeetingRow(QAbstractButton):
             w.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         # ...except the trash icon's: it is pressed on its own and never opens the meeting.
         self.trash = row_actions.attach_trash(self, end, title, self._ask_delete)
-        self._base_name = ", ".join(x for x in (title, when, length, chip_text) if x)
+        self._base_name = ", ".join(x for x in (title, full_when, length, chip_text) if x)
         self.setAccessibleName(self._base_name)
         self.clicked.connect(self._on_click)
 
@@ -2088,6 +2119,7 @@ class MeetingRow(QAbstractButton):
             self.check.setChecked(False)
         for chip in self.findChildren(Chip):
             chip.setVisible(not on)
+        self.chip_holder.setVisible(on or self._has_chip)       # "Deleting…" takes the chip's place
         self.deleting_label.setVisible(on)
         self.setEnabled(not on)
         self.trash.setEnabled(not on and not self._blocked)
@@ -2328,8 +2360,11 @@ class MeetingsList(QWidget):
             import meeting_store
         except Exception:
             meeting_store = None
+        # Newest first, in sections by day (Today / Yesterday / ...). A search shows its matches as one list, each
+        # row then saying its whole date.
         self._row_state = {"it": iter(enumerate(items)), "active": active, "phase": phase,
-                           "store": meeting_store, "focused": focused}
+                           "store": meeting_store, "focused": focused,
+                           "grouped": not searching, "now": datetime.now(), "section": None}
         self._build_rows(self.FIRST_ROWS)
         self.no_match.setVisible(bool(searching and not items and self._all))
         self._sync_select_ui()                   # "3 selected" counts what is on the list now
@@ -2358,7 +2393,16 @@ class MeetingsList(QWidget):
                 continue                                # deleted while the list was still being built
             store = st["store"]
             status = store.meeting_status(m, st["active"], st["phase"]) if store else "notes_ready"
-            row = MeetingRow(self.page, m, status, first=(not self.rows), parent=self.rows_box, owner=self)
+            starts_section = False
+            if st["grouped"]:
+                key, label = meeting_titles.day_group(
+                    meeting_titles.parse_started(m.get("started") or m.get("timestamp")), st["now"])
+                if key != st["section"]:
+                    st["section"] = key
+                    starts_section = True
+                    self._rows.addWidget(SectionHeader(label, first=not self.rows, parent=self.rows_box))
+            row = MeetingRow(self.page, m, status, first=(starts_section or not self.rows), parent=self.rows_box,
+                             owner=self, grouped=st["grouped"], now=st["now"])
             self._rows.addWidget(row)
             self.rows.append(row)
             self._prepare_row(row)

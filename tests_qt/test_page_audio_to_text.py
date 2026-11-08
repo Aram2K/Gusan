@@ -177,12 +177,12 @@ def test_same_page_for_free_and_pro_with_no_limit_wording(build, store):
         assert t != "PRO", "calm Pro: no Pro tag or banner, only the chip on the one row in the Accuracy list"
     assert "MP3, WAV, M4A, FLAC or video · any length" in texts
     assert "Private: stays on this computer." in _texts(free)
-    # The one Pro row is Gusan Cloud's best profile (its server chooses the model), wearing its CLOUD
+    # The Pro rows are Gusan Cloud profiles (its server chooses the model), wearing their CLOUD
     # and PRO chips (it says what a row IS, so it reads the same for Free and for Pro).
     for page in (free, pro):
         box = page.model_combo
         assert [box.itemText(i) for i in box.row_indexes() if "pro" in box.row_tags(i)] == [
-            "Best accuracy · Cloud · Pro"]
+            "Best accuracy · Cloud · Pro", "Gladia Solaria · Cloud · Pro"]
         assert box.headings() == ["On this computer", "Gusan Cloud"]
     assert not [c for c in free_app.calls + pro_app.calls if c[0] == "_pro_upsell"], "nothing opens by itself"
 
@@ -348,11 +348,11 @@ def test_language_list_and_model_list(build, store):
     box = page.model_combo
     names = [box.itemData(i, Qt.UserRole + 1) for i in box.row_indexes()]
     assert names == ["Automatic", "Whisper Tiny", "Whisper Base", "Whisper Small", "Whisper Medium",
-                     "Whisper Large v3 Turbo", "Whisper Large v3", "Best accuracy"]      # real names, no plain words
+                     "Whisper Large v3 Turbo", "Whisper Large v3", "Best accuracy", "Gladia Solaria"]
     assert box.itemText(box.findData("large-v3-turbo")) == "Whisper Large v3 Turbo · Local"
     assert box.itemText(box.findData("cloud")) == "Best accuracy · Cloud · Pro"
     assert box.row_note(box.findData("medium")) == "Accurate"
-    assert box.row_note(box.findData("cloud")) == "Most accurate · Gusan chooses the model"
+    assert box.row_note(box.findData("cloud")) == "ElevenLabs Scribe v2 · OpenAI GPT Transcribe · GPT-4o Transcribe"
     assert box.headings() == ["On this computer", "Gusan Cloud"]
     box.showPopup()
     QApplication.processEvents()

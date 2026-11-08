@@ -242,6 +242,7 @@ import diarization
 import invite_context
 import meeting_speakers
 import meeting_store
+import meeting_titles
 import people_from_screen
 import rich_text
 import speaker_followup
@@ -304,6 +305,9 @@ QUIT_CHUNK_WAIT = 3.0      # s: pieces being transcribed at Quit may still land
 RECOVERED_NOTICE = ("Gusan was closed before this meeting was finished, so the transcript was "
                     "rebuilt from the saved recording.")
 # The AI stopped writing at its limit: the notes are kept up to their last whole line (actions.CutShort).
+# How long the notes wait for the meeting's new name (one short call); a slower engine still saves it, a moment later.
+TITLE_WAIT_S = 8.0
+
 NOTES_CUT_NOTICE = ("The notes stopped early, so the last topic may be missing. "
                     "Write them again from \u22ef \u203a Rewrite notes.")
 # ...and when it stopped before the Discussion, so that the rest of the notes (not one topic) is what is missing.
@@ -1006,10 +1010,14 @@ class MeetingCore:
             "on_lang_detected": getattr(rec, "on_lang_detected", None),
             "on_source_levels": getattr(rec, "on_source_levels", None),
             "on_chunk_gap": getattr(rec, "on_chunk_gap", None),
+            "on_live_final": getattr(rec, "on_live_final", None),
         }
         self._gap_marked = False
+        # Live speaker labels (live_speakers.py): built off the GUI thread at the first live sentence.
+        self._live_speakers, self._live_speakers_tried = None, False
         rec.on_chunk_gap = self._on_chunk_gap
         rec.on_chunk_complete = self._on_chunk_transcribed
+        rec.on_live_final = self._on_live_final
         rec.on_levels = self._on_audio_levels
         rec.on_partial = lambda *a, **k: None
         rec.on_lang_detected = lambda *a, **k: None
@@ -1464,6 +1472,7 @@ class MeetingCore:
         rec.on_lang_detected = saved.get("on_lang_detected") or (lambda code, name: None)
         rec.on_source_levels = saved.get("on_source_levels")
         rec.on_chunk_gap = saved.get("on_chunk_gap")
+        rec.on_live_final = saved.get("on_live_final")
 
     def _on_audio_levels(self, levels):
         pass  # the dictation bar's 20 bands - unused by meetings
@@ -1511,19 +1520,77 @@ class MeetingCore:
         except (OSError, TypeError):
             pass
         # Hand the text to the GUI thread via signals - never touch widgets
-        # from this thread (that crashed the meeting recorder on Windows).
-        if text:
+        # from this thread (that crashed the meeting recorder on Windows). While the live stream carries the
+        # live view (real time, _on_live_final) a piece is only kept for the transcript and the notes.
+        if text and not self._live_showing():
             try:
                 self.sig_chunk.emit(text)
                 self._piece.emit(text, self._speaker_for(idx))
             except RuntimeError:
                 pass  # session already destroyed
 
+    def _live_showing(self):
+        rec = getattr(self.app, "recorder", None) if self.app else None
+        showing = getattr(rec, "live_showing", None)
+        try:
+            return bool(callable(showing) and showing())
+        except Exception:
+            return False
+
+    def _live_speakers_for(self, two_sources):
+        """This meeting's live speaker labeler (live_speakers.py), or None while it is being built / when the speaker
+        model is not installed (the "You" / "Them" hint stays). The first call builds it on its own thread."""
+        speakers = getattr(self, "_live_speakers", None)
+        if speakers is not None or getattr(self, "_live_speakers_tried", False):
+            return speakers
+        self._live_speakers_tried = True
+
+        def build():
+            try:
+                import live_speakers
+                self._live_speakers = live_speakers.labeler(two_sources=two_sources)
+            except Exception:
+                logger.debug("Live speakers unavailable", exc_info=True)
+        threading.Thread(target=build, daemon=True, name="gusan-live-speakers").start()
+        return None
+
+    def _on_live_final(self, text, lang, start, end):
+        """A sentence the live stream finished (real time, live_stt.py) - about 0.3 s after it was said: the live
+        view and the Live Assistant get it at once, with the "You" / "Them" hint of who was loud meanwhile. The
+        pieces still make the saved transcript and the notes. Runs on the live stream's thread."""
+        text = (text or "").strip()
+        if self.state != STATE_RECORDING or not text:
+            return
+        who = ""
+        rec = getattr(self.app, "recorder", None) if self.app else None
+        two = self._session_audio_mode == "smart_meeting"
+        if two:
+            getter = getattr(rec, "live_source_energy", None)
+            try:
+                who = speaker_hint(getter(start, end)) if callable(getter) else ""
+            except Exception:
+                who = ""
+        # Who is speaking (several people on one mic, many on the call): the voice of this sentence.
+        speakers = self._live_speakers_for(two)
+        audio = getattr(rec, "live_audio", None)
+        if speakers is not None and callable(audio):
+            try:
+                side = {"You": "mic", "Them": "call"}.get(who, "")
+                who = speakers.label(audio(start, end), side) or who
+            except Exception:
+                logger.debug("Live speaker label failed", exc_info=True)
+        self._gap_marked = False
+        try:
+            self.sig_chunk.emit(text)
+            self._piece.emit(text, who)
+        except RuntimeError:
+            pass  # session already destroyed
+
     def _on_chunk_gap(self, idx, kind=""):
         """A piece the cloud could not transcribe in a language local Whisper is poor at
         (the recorder keeps its audio): "[...]" on the live transcript, once for a run of them,
         never stored as words. Runs on a transcription worker thread."""
-        if self.state != STATE_RECORDING or getattr(self, "_gap_marked", False):
+        if self.state != STATE_RECORDING or getattr(self, "_gap_marked", False) or self._live_showing():
             return
         self._gap_marked = True
         try:
@@ -1746,7 +1813,15 @@ class MeetingCore:
                 fields["duration_sec"] = (self._duration_sec()
                                           + int(self._resume_prior_duration or 0))
             fields.update(extra)
-            if meeting_store.update_meta(self._meeting_dir, **fields) is None:
+
+            def change(meta):
+                # A name the notes page saved meanwhile (a rename, or the AI's title from these notes) is not undone
+                # by the session's older copy of it.
+                if (meta.get("title_source") in (meeting_titles.SOURCE_USER, meeting_titles.SOURCE_AUTO)
+                        and not meeting_titles.is_placeholder(meta.get("title"))):
+                    return {k: v for k, v in fields.items() if k != "title"}
+                return fields
+            if meeting_store.edit_meta(self._meeting_dir, change) is None:
                 logger.warning("Could not save meeting details")
         except Exception:
             logger.warning("Could not save meeting details", exc_info=True)
@@ -2381,11 +2456,44 @@ class MeetingCore:
             self._write_meta(**self._result_meta(
                 notes_engine=used, notes_engine_label=engine_label(used), notes_error=None))
             self._notes_saved.set()
+            self._name_meeting(notes, engine, engine_config, used)
             self._save_history_entry(notes)
 
             self.proc_signals.finished.emit(notes, "")
         except Exception as e:
             self.proc_signals.finished.emit("", str(e))
+
+    def _name_meeting(self, notes, engine, engine_config, used):
+        """Worker thread: a meeting that still has the app's placeholder name ("Meeting · Tue 14:30") gets one from the
+        notes just written - one short call to the engine that wrote them (a Free person's cloud note covers it: same
+        note_ref). Waits up to TITLE_WAIT_S so the name is in the History entry and the notes page; a slower engine
+        still saves it, a moment later. A title the person typed or the calendar gave is never touched. Never raises."""
+        try:
+            folder = self._meeting_dir
+            if not folder or used == actions.RULE_BASED_ID or not (notes or "").strip():
+                return                                       # no AI wrote these notes: no AI names them
+            if not meeting_titles.wants_title(meeting_store.load_meta(folder)):
+                return
+            lang, found, done = self._final_lang or "auto", [], threading.Event()
+
+            def work():
+                try:
+                    raw = actions.process(meeting_titles.title_input(notes), actions.ACTION_MEETING_TITLE,
+                                          source_lang=lang, target_lang="en", model=engine, config=engine_config)
+                    title = meeting_titles.clean_title(raw)
+                    if not title:
+                        meeting_store.mark_title_tried(folder)          # it answered, and not with a title: not again
+                    elif meeting_store.set_auto_title(folder, title):
+                        found.append(title)
+                except Exception:
+                    logger.info("Could not name the meeting from its notes", exc_info=True)   # tried again later
+                finally:
+                    done.set()
+            threading.Thread(target=work, daemon=True).start()
+            if done.wait(TITLE_WAIT_S) and found and self._meeting_dir == folder:
+                self._meeting_title = found[0]
+        except Exception:
+            logger.warning("Could not name the meeting", exc_info=True)
 
     def _save_plain_transcript_early(self, prior=""):
         """Worker thread: this run's transcript as it is now (a resumed meeting's

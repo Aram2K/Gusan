@@ -40,6 +40,7 @@ import actions
 import meeting_chat
 import meeting_store
 import rich_text
+from web_sources import sources_html
 from ui import theme
 from ui.components import Button, Card, label, mini_prompt
 from ui.components import clipboard as rich_clipboard
@@ -48,8 +49,8 @@ from ui.pages import meeting_views as views
 logger = logging.getLogger("transcribe")
 
 SYNC_ASK = False               # tests: run a question inline
-STREAM_RENDER_MS = 120         # a streaming answer is drawn at most this often
-PARTIAL_MS = 50                # the worker hands the text over at most this often
+STREAM_RENDER_MS = 120         # a streaming answer is drawn at most this often (the worker hands over every update;
+                               # _on_partial keeps the latest and draws it on a timer: nothing is lost in a pause)
 QUESTION_SHOWN = 600           # a question's bubble shows this many characters (all of it is sent)
 COUNTER_FROM = 3500            # the characters counter shows from here
 INPUT_MIN_H, INPUT_MAX_H = 44, 120
@@ -198,6 +199,11 @@ class _AnswerRow(QWidget):
         self.body.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.body.hide()
         lay.addWidget(self.body)
+        self.sources = QLabel("", self)
+        self.sources.setWordWrap(True)
+        self.sources.setOpenExternalLinks(True)
+        self.sources.hide()
+        lay.addWidget(self.sources)
         self.status = views.tlabel("", 12.5, 400, "muted", parent=self, wrap=True)
         self.status.setTextFormat(Qt.PlainText)                  # a sentence, never markup
         self.status.hide()
@@ -246,6 +252,7 @@ class _AnswerRow(QWidget):
 
     # the states
     def show_thinking(self, text=THINKING):
+        self.sources.hide()
         self.set_text("")
         self.set_status(text)
         self.set_note("")
@@ -265,6 +272,9 @@ class _AnswerRow(QWidget):
         self.msg = msg
         stopped = msg.get("status") != "done"
         self.set_text(msg.get("text") or "", streaming=stopped or bool(msg.get("cut")))
+        html = sources_html(msg.get("sources", []))
+        self.sources.setText(html)
+        self.sources.setVisible(bool(html))
         if stopped:
             self.set_status(meeting_chat.DROPPED if msg.get("why") == "dropped" else STOPPED)
         else:
@@ -829,7 +839,7 @@ class ChatCard(Card):
 
     def _work(self, req, folder, question, history, cfg, pro, signed_in, resolve, me=""):
         """Worker thread: ask, and say how it ended."""
-        last = [0.0]
+        last = [None]
 
         def emit(sig, *args):
             try:
@@ -838,9 +848,12 @@ class ChatCard(Card):
                 pass                                       # the card is gone
 
         def on_text(text):
-            now = time.monotonic()
-            if now - last[0] >= PARTIAL_MS / 1000.0:
-                last[0] = now
+            # Every update goes over, not one in so many milliseconds: a chunk dropped here is never sent again,
+            # and when the model then pauses the card showed older words until the next chunk (a coin flip on
+            # Windows, whose clock ticks every 15 ms). The card draws the latest text at most every
+            # STREAM_RENDER_MS (_on_partial), so this costs nothing on screen.
+            if text != last[0]:
+                last[0] = text
                 emit(self._bridge.partial, req, text)
 
         def cancelled():
@@ -896,7 +909,7 @@ class ChatCard(Card):
             ans = value
             msg = {"role": "assistant", "text": ans.text, "status": "done", "engine": ans.engine_label,
                    "kind": ans.kind, "coverage": ans.coverage.as_dict(), "seconds": ans.seconds,
-                   "ts": int(time.time())}
+                   "ts": int(time.time()), "sources": ans.sources}
             if ans.dropped:                                # the connection ended before the answer did: it is not
                 msg["status"], msg["why"] = "stopped", "dropped"      # kept as a finished one (nor sent back to the model)
             elif ans.cut:

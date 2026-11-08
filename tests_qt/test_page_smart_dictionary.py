@@ -440,7 +440,7 @@ def test_recent_loads_from_history_on_a_worker(qapp, tries, monkeypatch):
 def test_rail_rows_in_order(pages, tries):
     page = pages("smart_actions", live_app("free"))
     # No "Translate into" row: people say the language ("to French").
-    assert [r.label.text() for r in page.rail.rows()] == ["Shortcut", "Transcribes with", "Writes with"]
+    assert [r.label.text() for r in page.rail.rows()] == ["Shortcut", "Transcribes with", "Writes with", "Search the web"]
     assert not hasattr(page, "translate_combo")
     assert page.shortcut_row.pro_tag is None                       # changing the key is not Pro
     assert page.more_button.accessibleName() == "Speech & AI settings"

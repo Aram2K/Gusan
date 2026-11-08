@@ -42,6 +42,13 @@
 //   "best" or "gemini-2.5-pro"    the BEST profile (the app's "Best accuracy" / Audio to text)
 //   "fast", "gemini-2.5-flash",
 //   unknown, missing              the FAST profile
+//   "gladia" ("gladia-fusion")   Solaria-3 (en, fr, de, es, it) then Solaria-1, then the BEST order
+//                                 (2.1.2 test builds asked for "gladia-fusion": Gladia's solaria-fusion is
+//                                 undocumented and our account is refused it, 403)
+// Gladia is told the language: one named language is THE language (no switching), "multi" with a list is that
+// list with code switching, "auto" lets it detect (switching allowed). The request's `vocabulary` (the person's
+// names and terms, Settings > Vocabulary) goes to Gladia as custom_vocabulary (default_intensity 0.5, at most
+// 100 terms of 80 characters); if Gladia refuses it for a model (400/422) the job is started once more without it.
 //   any other catalog id          PINNED: that engine first, then the FAST order
 // Old clients may also send `provider: "mistral"`: Voxtral first when no model is pinned.
 // Apps 2.0.x send no `model` for Audio to text, so their files run the FAST profile (unless the
@@ -58,9 +65,11 @@
 // Secrets: OPENAI_TOKEN (or OPENAI_API_KEY / OPENAI_KEY), MISTRAL_STT_KEY, GOOGLE_STT_KEY (or
 //          GEMINI_KEY), ELEVENLABS_API_KEY (or ELEVENLABS_KEY / ELEVEN_API_KEY / XI_API_KEY, the first
 //          one that is not empty). At least one must be set or the proxy returns 503.
+//          Gladia_STT (or GLADIA_API_KEY / GLADIA_KEY / GLADIA_TOKEN / GLADIA_API_TOKEN, first non-empty).
+//          STT_GLADIA_ORDER (solaria-3,solaria-1): the Gladia profile, followed by the BEST order.
 //          Optional: STT_FAST_ORDER, STT_BEST_ORDER (comma-separated; an entry is a catalog id or
 //          "provider:model" such as openai:gpt-transcribe-2 - provider mistral, openai, gemini or
-//          elevenlabs (elevenlabs:scribe_v3) -
+//          elevenlabs (elevenlabs:scribe_v3) or gladia (gladia:solaria-1) -
 //          so a new model name needs no redeploy; an entry that is neither is dropped and logged;
 //          nothing valid = the default order). Only these secrets can name a model outside the
 //          catalog: a name a client sends is checked against the catalog.
@@ -89,13 +98,15 @@ const OPENAI_URL = "https://api.openai.com/v1/audio/transcriptions";
 const ELEVEN_URL = "https://api.elevenlabs.io/v1/speech-to-text";
 const MISTRAL_MODEL = "voxtral-mini-latest";
 
-type Kind = "mistral" | "openai" | "gemini" | "elevenlabs";
+type Kind = "mistral" | "openai" | "gemini" | "elevenlabs" | "gladia";
 type Engine = { id: string; kind: Kind };
 
 // Every engine a request can end up on, with the company that serves it. A model name a CLIENT
 // sends is only ever used if it is a key here, so nothing a client sends reaches a URL or a request
 // field unchecked. (A server secret may also name "provider:model", see orderFor.)
 const CATALOG: Record<string, Kind> = {
+  "solaria-1": "gladia",
+  "solaria-3": "gladia",
   "scribe_v2": "elevenlabs",
   "voxtral-mini-latest": "mistral",
   "gpt-transcribe": "openai",
@@ -109,7 +120,7 @@ const CATALOG: Record<string, Kind> = {
 };
 const FAST_ORDER = ["scribe_v2", "voxtral-mini-latest", "gpt-transcribe", "gpt-4o-mini-transcribe", "gpt-4o-transcribe"];
 const BEST_ORDER = ["scribe_v2", "gpt-transcribe", "gpt-4o-transcribe", "voxtral-mini-latest", "gpt-4o-mini-transcribe"];
-const KINDS = new Set(["mistral", "openai", "gemini", "elevenlabs"]);
+const KINDS = new Set(["mistral", "openai", "gemini", "elevenlabs", "gladia"]);
 const MODEL_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
 function inCatalog(id: string): boolean {
@@ -122,6 +133,7 @@ function own(table: Record<string, string>, key: string): string | undefined {
 }
 
 function engineKey(provider: string): string {
+  if (provider === "gladia") return env("Gladia_STT") || env("GLADIA_API_KEY") || env("GLADIA_KEY") || env("GLADIA_TOKEN") || env("GLADIA_API_TOKEN");
   if (provider === "openai") return env("OPENAI_TOKEN") || env("OPENAI_API_KEY") || env("OPENAI_KEY");
   if (provider === "mistral") return env("MISTRAL_STT_KEY");
   if (provider === "elevenlabs") {
@@ -160,6 +172,11 @@ function orderFor(secret: string, fallback: string[]): Engine[] {
 
 // The engines to try, in order, for what the client asked.
 function plan(asked: string, provider: string): Engine[] {
+  if (asked === "gladia" || asked === "gladia-fusion") {
+    const head = orderFor("STT_GLADIA_ORDER", ["solaria-3", "solaria-1"]);
+    return [...head, ...orderFor("STT_BEST_ORDER", BEST_ORDER)]
+      .filter((e, i, a) => a.findIndex((x) => x.id === e.id) === i);
+  }
   const best = asked === "best" || asked === "gemini-2.5-pro";
   const pinned = !best && inCatalog(asked) && asked !== "gemini-2.5-flash";
   const head: Engine[] = pinned ? [{ id: asked, kind: CATALOG[asked] }]
@@ -216,7 +233,7 @@ function redact(s: string): string {
     .replace(/key=[^&\s"]+/g, "key=[key]")
     .replace(/\b(org|proj)[-_][A-Za-z0-9_*-]+/g, "$1-***");
   // ... and our own keys, whatever they look like, if a provider's answer repeats one.
-  for (const kind of ["openai", "mistral", "gemini", "elevenlabs"]) {
+  for (const kind of ["openai", "mistral", "gemini", "elevenlabs", "gladia"]) {
     const k = engineKey(kind);
     if (k.length >= 8) out = out.split(k).join("[key]");
   }
@@ -399,7 +416,7 @@ async function transcribeGemini(audioB64: string, language: string, languages: s
 async function transcribeMistral(bytes: Uint8Array, language: string, model: string, timeoutMs: number) {
   const form = new FormData();
   form.append("model", model);
-  form.append("file", new Blob([bytes], { type: "audio/wav" }), "audio.wav");
+  form.append("file", new Blob([bytes as Uint8Array<ArrayBuffer>], { type: "audio/wav" }), "audio.wav");
   if (MISTRAL_LANGS.has(language)) form.append("language", language);
   const r = await fetch("https://api.mistral.ai/v1/audio/transcriptions", {
     method: "POST",
@@ -422,7 +439,7 @@ async function transcribeOpenAI(bytes: Uint8Array, language: string, model: stri
     const form = new FormData();
     form.append("model", model);
     form.append("response_format", "json");
-    form.append("file", new Blob([bytes], { type: "audio/wav" }), "audio.wav");
+    form.append("file", new Blob([bytes as Uint8Array<ArrayBuffer>], { type: "audio/wav" }), "audio.wav");
     if (withLanguage) form.append("language", language);
     return fetch(OPENAI_URL, {
       method: "POST",
@@ -443,6 +460,86 @@ async function transcribeOpenAI(bytes: Uint8Array, language: string, model: stri
   return { ok: true, model, text: (d.text ?? "").trim() };
 }
 
+// Gladia's asynchronous batch API: upload, start, poll inside ONE timer; delete the job afterwards.
+// The person's vocabulary from the request: strings only, trimmed, no repeats, at most 100 of 80 characters.
+const VOCAB_MAX = 100;
+const VOCAB_TERM_MAX = 80;
+function vocabularyOf(body: any): string[] {
+  if (!Array.isArray(body?.vocabulary)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const v of body.vocabulary) {
+    if (typeof v !== "string") continue;
+    const term = v.replace(/\s+/g, " ").trim().slice(0, VOCAB_TERM_MAX);
+    if (!term || seen.has(term.toLowerCase())) continue;
+    seen.add(term.toLowerCase());
+    out.push(term);
+    if (out.length >= VOCAB_MAX) break;
+  }
+  return out;
+}
+
+async function transcribeGladia(bytes: Uint8Array, language: string, languages: string[] | null,
+                               model: string, timeoutMs: number, vocabulary: string[] = []) {
+  const signal = AbortSignal.timeout(timeoutMs);
+  const headers = { "x-gladia-key": engineKey("gladia") };
+  const base = "https://api.gladia.io/v2";
+  const form = new FormData();
+  form.append("audio", new Blob([bytes as Uint8Array<ArrayBuffer>], { type: "audio/wav" }), "audio.wav");
+  const upload = await fetch(`${base}/upload`, {
+    method: "POST", headers, body: form, signal, redirect: "error",
+  });
+  if (!upload.ok) return failed("gladia", model, upload.status, await upload.text());
+  const audio = await upload.json();
+  const explicit = /^[a-z]{2,3}$/.test(language) && language !== "auto" && language !== "multi";
+  const language_config = explicit ? { languages: [language], code_switching: false }
+    : language === "multi" && languages?.length ? { languages, code_switching: true }
+    : { code_switching: true };
+  const start = (withVocabulary: boolean) => fetch(`${base}/pre-recorded`, {
+    method: "POST", headers: { ...headers, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      audio_url: audio.audio_url, model, language_config,
+      ...(withVocabulary
+        ? { custom_vocabulary: true, custom_vocabulary_config: { vocabulary, default_intensity: 0.5 } }
+        : {}),
+    }), signal, redirect: "error",
+  });
+  let init = await start(vocabulary.length > 0);
+  if (!init.ok && vocabulary.length > 0 && (init.status === 400 || init.status === 422)) {
+    failed("gladia", model, init.status, await init.text());     // logged; the job may still run without it
+    init = await start(false);
+  }
+  if (!init.ok) return failed("gladia", model, init.status, await init.text());
+  const job = await init.json();
+  if (typeof job.id !== "string" || !job.id) return failed("gladia", model, 500, "no_job");
+  const url = `${base}/pre-recorded/${encodeURIComponent(job.id)}`;
+  try {
+    while (true) {
+      const poll = await fetch(url, { headers, signal, redirect: "error" });
+      if (!poll.ok) return failed("gladia", model, poll.status, await poll.text());
+      const data = await poll.json();
+      if (data.status === "error") return failed("gladia", model, Number(data.error_code) || 500, "job_error");
+      if (data.status === "done") {
+        const text = data.result?.transcription?.full_transcript;
+        if (typeof text !== "string") return failed("gladia", model, 500, "no_text");
+        return { ok: true, text: text.trim(), model };
+      }
+      await new Promise<void>((resolve, reject) => {
+        const abort = () => { clearTimeout(timer); reject(signal.reason); };
+        const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, 450);
+        if (signal.aborted) abort();
+        else signal.addEventListener("abort", abort, { once: true });
+      });
+    }
+  } finally {
+    void fetch(url, { method: "DELETE", headers, redirect: "error", signal: AbortSignal.timeout(5000) })
+      .then((response) => {
+        if (!response.ok) console.error(JSON.stringify({ stt_cleanup_failed: "gladia", status: response.status }));
+      })
+      .catch(() => { console.error(JSON.stringify({ stt_cleanup_failed: "gladia", status: 0 })); });
+  }
+}
+
 // ElevenLabs Scribe. language_code only for ONE explicit ISO code (else it detects the language); if it
 // refuses the code (a 422 or 400 that talks about the language) the same audio is sent once more
 // without it, inside the SAME timer. No audio-event tags (no "(laughter)" in the text), no speaker
@@ -456,7 +553,7 @@ async function transcribeElevenLabs(bytes: Uint8Array, language: string, model: 
   const once = (withLanguage: boolean) => {
     const form = new FormData();
     form.append("model_id", model);
-    form.append("file", new Blob([bytes], { type: "audio/wav" }), "audio.wav");
+    form.append("file", new Blob([bytes as Uint8Array<ArrayBuffer>], { type: "audio/wav" }), "audio.wav");
     form.append("tag_audio_events", "false");
     if (withLanguage) form.append("language_code", language);
     return fetch(ELEVEN_URL, {
@@ -533,6 +630,7 @@ Deno.serve(async (req) => {
   // What the client asked for: the body field, else the header (the body wins). Only a catalog id
   // or a profile word means anything; the rest is the FAST profile.
   const asked = (typeof body?.model === "string" ? body.model : (req.headers.get("X-Gusan-Model") ?? "")).trim();
+  const vocabulary = vocabularyOf(body);
 
   // The engines to try in order: those with a key (none at all = not configured), then those that
   // can take this language (none left = no engine for it: the 502 stt_failed the app expects, but sent
@@ -541,7 +639,8 @@ Deno.serve(async (req) => {
   if (keyed.length === 0) {
     return json({ error: "stt_not_configured" }, 503);
   }
-  const available = keyed.filter((e) => e.kind !== "mistral" || mistralCovers(language, languages));
+  const available = keyed.filter((e) => (e.kind !== "mistral" || mistralCovers(language, languages))
+    && (e.kind !== "gladia" || e.id !== "solaria-3" || ["en", "fr", "de", "es", "it"].includes(language)));
   if (available.length === 0) {
     return json({ error: "stt_failed", detail: "no engine for this language" }, 502);
   }
@@ -574,10 +673,14 @@ Deno.serve(async (req) => {
     if (kind === "elevenlabs" && !(Number(env("STT_TIMEOUT_MS")) > 0)) {
       t = Math.min(Math.max(t, ELEVEN_MIN_TIMEOUT_MS), Math.max(left, floorMs));
     }
+    if (kind === "gladia" && !(Number(env("STT_TIMEOUT_MS")) > 0)) {
+      t = Math.min(Math.max(t, 10000), Math.max(left, floorMs));
+    }
     try {
       result = kind === "mistral" ? await transcribeMistral(bytes, language, id, t)
         : kind === "openai" ? await transcribeOpenAI(bytes, language, id, t)
         : kind === "elevenlabs" ? await transcribeElevenLabs(bytes, language, id, t)
+        : kind === "gladia" ? await transcribeGladia(bytes, language, languages, id, t, vocabulary)
         : await transcribeGemini(audio, language, languages, id, t);
     } catch (e) {
       // A timeout or a network error: never the error's own text (a URL may carry a key).

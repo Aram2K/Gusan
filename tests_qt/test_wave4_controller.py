@@ -1290,3 +1290,27 @@ def test_the_update_window_never_keeps_gusan_from_quitting(ctl, update_env):
         assert not win.isVisible()                                  # ...but never veto the quit
     finally:
         ctl._quitting = False
+
+
+def test_quitting_to_update_puts_every_window_and_the_tray_icon_away_before_setup_starts(ctl, update_env, monkeypatch):
+    """The update at Quit (2.1.0 -> 2.1.1 on the founder's PC) stood still for 6 s with the window saying "Not
+    responding": Windows was starting a 115 MB Setup, and the window's own thread waited for it. Now the start
+    is made on another thread, with nothing of Gusan left on screen (the real windows here, not stand-ins)."""
+    monkeypatch.setitem(ctl.cfg, "install_updates_on_quit", True)
+    monkeypatch.setattr(ctl, "schedule_config_save", lambda: None)
+    ctl.show_main("home")
+    _spin(60)
+    assert ctl.main_win.isVisible()
+    tray_was_shown = ctl.tray_icon.isVisible()
+    ctl._update_ready = ("v99.0.0", update_env.path)
+    try:
+        ctl._run_update_on_quit()
+        assert len(update_env.launched) == 1
+        assert update_env.launched[0]["all_users"] is False and update_env.launched[0]["relaunch"] is False
+        assert not ctl.main_win.isVisible()
+        assert not [w for w in QApplication.topLevelWidgets() if w.isVisible()]       # nothing at all on screen
+        assert not ctl.tray_icon.isVisible()
+        assert ctl.cfg["update_attempt"]["to"] == "v99.0.0"                        # the result was waited for and kept
+    finally:
+        if tray_was_shown:
+            ctl.tray_icon.show()

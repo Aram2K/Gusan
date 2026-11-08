@@ -11,6 +11,7 @@ from pathlib import Path
 import psutil
 import requests
 
+import meeting_titles
 import notes_prompt
 import smart_prompt
 import storage
@@ -370,6 +371,8 @@ _MAX_TOKENS_BY_MODE = {
     "smart_auto": 1500,
     "make_todo_list": 1000,
     "meeting_chat": 600,        # a short answer: the 8192 window also holds the meeting's text
+    "meeting_title": 40,        # 3-7 words
+    "smart_selection": 1500,
 }
 
 
@@ -673,6 +676,8 @@ def _messages_for(mode, text, source_lang, target_lang, vocab_block="", notes_wo
         return [{"role": "system", "content": _CHAT_SYSTEM}, {"role": "user", "content": text}]
     if mode == "smart_auto":
         return smart_prompt.build_messages(text, vocab_block=vocab_block)
+    if mode == "smart_selection":
+        return smart_prompt.build_selection_messages(text, vocab_block=vocab_block)
     if mode == "write_email":
         instruction = (
             "Turn the user's dictated text into a concise email draft. "
@@ -700,6 +705,8 @@ def _messages_for(mode, text, source_lang, target_lang, vocab_block="", notes_wo
         # A longer meeting also gets a short Discussion (notes_prompt.local_instruction).
         instruction = notes_prompt.local_instruction(notes_prompt.plan_from_words(
             notes_prompt.effective_words(text) if notes_words is None else notes_words))
+    elif mode == "meeting_title":
+        instruction = meeting_titles.LOCAL_TITLE_INSTRUCTION
     elif mode == "live_recap":
         instruction = (
             "Keep a running summary of an ongoing meeting from the transcript so far "

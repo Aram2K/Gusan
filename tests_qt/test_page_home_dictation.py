@@ -1107,7 +1107,7 @@ def test_dictation_model_lists_every_choice_and_follows_settings(dict_page):
     assert box.accessibleName() == "Speech model"
     values = [box.itemData(i) for i in range(box.count()) if not box.is_heading(i)]
     assert values[:len(hardware.SPEECH_MODEL_IDS)] == list(hardware.SPEECH_MODEL_IDS)
-    assert values[-2:] == ["cloud", "cloud:best"]                  # no key saved: no "Your own key" rows
+    assert values[-2:] == ["cloud", "cloud:best"]
     assert box.currentData() == "small"
     assert box.itemData(box.findData("base"), MARK_ROLE) == MARK_DOWNLOAD
     app.cfg["whisper_model"] = "base"
@@ -1141,3 +1141,18 @@ def test_dictation_model_cloud_needs_pro(dict_page):
     _model_pick(page, "cloud")
     assert ("_pro_upsell", "Fast cloud transcription") in app.calls
     assert page.model_combo.currentData() == "small"           # back to what is set
+
+
+def test_a_very_long_recent_item_is_measured_fast(qapp):
+    """A whole translated letter in Recent froze the window at startup (6.6 s): a row is one line, so only its first
+    characters are measured, once."""
+    import time as _time
+    from PySide6.QtGui import QFont
+    from ui.pages.home import Runs
+    long_text = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. " * 400        # ~23,000 characters
+    r = Runs([(long_text, QFont(), "text")])
+    start = _time.perf_counter()
+    for _ in range(200):
+        r.sizeHint()
+    assert _time.perf_counter() - start < 0.5
+    assert r.text() == long_text and r.accessibleName() == long_text

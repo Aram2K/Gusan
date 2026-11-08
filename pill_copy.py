@@ -246,6 +246,16 @@ def writer_line(ctx):
     return writer
 
 
+ON_SELECTION = "On your selection"
+SEARCHING_WEB = "Searching the web"
+RESEARCHING_WEB = "Researching the web"          # a deep search ("do a deep search on...")
+
+
+def web_sources_line(n):
+    """The done line's tail when a Smart Action used the web: "1 web source" / "3 web sources"."""
+    return "1 web source" if n == 1 else "%d web sources" % n
+
+
 def _writing(kind, detail, ctx, elapsed):
     kind = kind if kind in KINDS else None
     title = _WRITING_TITLE[kind]
@@ -256,7 +266,13 @@ def _writing(kind, detail, ctx, elapsed):
         return title, "This computer is working on it"
     if elapsed >= SLOW_S:
         return title, _STILL[kind]
-    return title, writer_line(ctx)
+    line = writer_line(ctx)
+    if ctx.get("web"):                                # Gusan Cloud looks the facts up first (Linkup)
+        what = RESEARCHING_WEB if ctx.get("web") == "deep" else SEARCHING_WEB
+        line = what + (" \u00b7 " + line if line else "")
+    elif ctx.get("on_selection"):                     # the take works on the text selected on screen: say so
+        line = ON_SELECTION + (" \u00b7 " + line if line else "")
+    return title, line
 
 
 def busy(stage, kind=None, detail="", ctx=None):

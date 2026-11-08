@@ -21,6 +21,8 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
 from types import SimpleNamespace
@@ -36,6 +38,8 @@ except ImportError:
 import file_jobs
 import main
 import updater
+
+_REAL_THREAD = threading.Thread        # the harness swaps threading.Thread for one that runs inline
 
 TAG = "v2.0.1"
 OLD = "2.0.0"                      # the running version in these tests
@@ -1062,6 +1066,54 @@ class TestInstallOnQuit(Harness):
         self.app._run_update_on_quit()
         self.launch.assert_not_called()
         self.assertEqual(self.app.tracked, [])
+
+    # Windows takes many seconds to start a ~115 MB Setup (6 s on the founder's PC, 2.1.0 -> 2.1.1). Started from
+    # the window's thread, the window said "Not responding" for all of them, with the app already quitting.
+    def test_quit_puts_the_windows_and_the_tray_icon_away_before_windows_starts_setup(self):
+        self._ready()
+        events = []
+        windows = [SimpleNamespace(hide=lambda name=name: events.append("hide " + name)) for name in ("main", "card")]
+        self.app.qapp = SimpleNamespace(topLevelWidgets=lambda: windows)
+        self.app.tray_icon = SimpleNamespace(hide=lambda: events.append("hide tray"))
+        self.launch.side_effect = lambda *a, **k: (events.append("start Setup"), (True, self.installer))[1]
+        self.app._run_update_on_quit()
+        self.assertEqual(events, ["hide main", "hide card", "hide tray", "start Setup"])
+
+    def test_a_window_that_cannot_be_hidden_never_stops_the_update(self):
+        self._ready()
+
+        def broken():
+            raise RuntimeError("Internal C++ object already deleted")
+
+        self.app.qapp = SimpleNamespace(topLevelWidgets=broken)
+        self.app.tray_icon = SimpleNamespace(hide=broken)
+        self.app._run_update_on_quit()
+        self.launch.assert_called_once()
+        self.assertEqual(self.app.cfg["update_attempt"]["to"], TAG)
+
+    def test_setup_is_started_off_the_thread_the_windows_live_on(self):
+        self._ready()
+        seen = []
+        self.launch.side_effect = lambda *a, **k: (seen.append(threading.current_thread()), (True, self.installer))[1]
+        with mock.patch.object(threading, "Thread", _REAL_THREAD):
+            self.app._run_update_on_quit()
+        self.assertEqual(len(seen), 1)
+        self.assertIsNot(seen[0], threading.current_thread())
+        self.assertEqual(self.app.cfg["update_attempt"]["to"], TAG)       # the result was waited for and kept
+
+    def test_a_start_that_never_comes_back_does_not_hold_quit_for_ever(self):
+        self._ready()
+        release = threading.Event()
+        self.addCleanup(release.set)
+        self.launch.side_effect = lambda *a, **k: (release.wait(10), (True, self.installer))[1]
+        with mock.patch.object(threading, "Thread", _REAL_THREAD), mock.patch.object(updater, "QUIT_START_WAIT_S", 0.2):
+            began = time.monotonic()
+            self.app._run_update_on_quit()
+            waited = time.monotonic() - began
+        self.assertLess(waited, 5)
+        self.assertEqual(self.app.cfg["update_attempt"], {})                # unknown: nothing is claimed
+        self.assertEqual(self.app.cfg["pending_update_version"], TAG)       # the next start finds out
+        self.assertEqual(self.tracked("update_install_result"), [{"manual": False, "ok": False}])
 
     def test_a_release_whose_install_at_quit_stopped_is_not_installed_at_quit_again(self):
         # Setup failing for good (a disk problem, an antivirus) must not mean: a silent attempt at every

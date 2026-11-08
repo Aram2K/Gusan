@@ -6,6 +6,7 @@ need main, which only loads under test_core's PySide6 stand-ins (the whole
 tests/ run); run alone they skip.
 """
 import os
+import re
 import sys
 import unittest
 from types import SimpleNamespace
@@ -205,7 +206,7 @@ class TestAudioToTextModels(unittest.TestCase):
     def test_constants(self):
         self.assertEqual((ec.FILE_KEY, ec.FILE_AUTO, ec.FILE_CLOUD, ec.FILE_OWN_GOOGLE, ec.FILE_OWN_MISTRAL),
                          ("file_model", "auto", "cloud", "own:google", "own:mistral"))
-        self.assertEqual(ec.FILE_CLOUD_VALUES, ("cloud", "own:google", "own:mistral"))
+        self.assertEqual(ec.FILE_CLOUD_VALUES, ("cloud", "cloud:gladia", "own:google", "own:mistral"))
         self.assertFalse(set(ec.FILE_CLOUD_VALUES) & set(ec.SPEECH_MODELS))
 
     def test_session_matrix(self):
@@ -311,23 +312,23 @@ class TestAudioToTextModels(unittest.TestCase):
     def test_choices(self):
         choices = ec.file_choices()
         self.assertEqual(choices[0], ("auto", "Automatic", "Automatic · Local", False))
-        self.assertEqual([c[0] for c in choices[1:-1]], list(ec.SPEECH_MODELS))
+        self.assertEqual([c[0] for c in choices[1:-2]], list(ec.SPEECH_MODELS))
         # a REAL model name and where it runs - never a plain word, never "Gusan Cloud" as a model
         self.assertIn(("small", "Whisper Small", "Whisper Small · Local", False), choices)
-        self.assertTrue(all(not c[3] for c in choices[:-1]))
+        self.assertTrue(all(not c[3] for c in choices[:-2]))
         # Gusan Cloud is a heading and a PROFILE: its server chooses the model
-        self.assertEqual(choices[-1], ("cloud", "Best accuracy", "Best accuracy · Cloud · Pro", True))
+        self.assertEqual(choices[-2], ("cloud", "Best accuracy", "Best accuracy · Cloud · Pro", True))
         self.assertEqual([c[1] for c in choices],
                          ["Automatic", "Whisper Tiny", "Whisper Base", "Whisper Small", "Whisper Medium",
-                          "Whisper Large v3 Turbo", "Whisper Large v3", "Best accuracy"])
-        self.assertEqual(ec.file_choices({"managed_provider": "mistral"})[-1][2],
+                          "Whisper Large v3 Turbo", "Whisper Large v3", "Best accuracy", "Gladia Solaria"])
+        self.assertEqual(ec.file_choices({"managed_provider": "mistral"})[-2][2],
                          "Best accuracy · Cloud · Pro")
 
     def test_rows_group_the_models_and_wear_tags(self):
         rows = ec.file_rows(BOTH)
         self.assertEqual([r["group"] for r in rows],
                          [""] + [ec.GROUP_THIS_COMPUTER] * len(ec.SPEECH_MODELS)
-                         + [ec.GROUP_GUSAN_CLOUD, ec.GROUP_OWN_KEY, ec.GROUP_OWN_KEY])
+                         + [ec.GROUP_GUSAN_CLOUD] * 2 + [ec.GROUP_OWN_KEY, ec.GROUP_OWN_KEY])
         by = {r["value"]: r for r in rows}
         self.assertEqual(by["small"]["tags"], ("local",))
         self.assertEqual(by["small"]["note"], "Balanced")
@@ -385,7 +386,7 @@ class TestAudioToTextModels(unittest.TestCase):
         self.assertEqual(own(GKEY), [google])
         self.assertEqual(own(MKEY), [mistral])
         self.assertEqual(own(BOTH), [google, mistral])
-        self.assertEqual(ec.file_choices(BOTH)[-3][0], "cloud")             # Gusan Cloud, then own keys
+        self.assertEqual(ec.file_choices(BOTH)[-4][0], "cloud")             # Gusan Cloud, then own keys
         # The row names the model that will really run (same names as Dictation's).
         cfg = dict(BOTH, google_stt_model="gemini-2.5-pro", mistral_stt_model="voxtral-mini-2602")
         self.assertEqual([c[2] for c in own(cfg)],
@@ -395,7 +396,7 @@ class TestAudioToTextModels(unittest.TestCase):
                          "Gemini 2.5 Flash · your Google key · Cloud")
         # Privacy mode keeps them listed (the page greys them out), with the real names.
         self.assertEqual(own(dict(BOTH, privacy_mode=True)), [google, mistral])
-        self.assertEqual(ec.file_choices(dict(BOTH, privacy_mode=True))[-3][2],
+        self.assertEqual(ec.file_choices(dict(BOTH, privacy_mode=True))[-4][2],
                          "Best accuracy · Cloud · Pro")
 
     def test_engine_gusan_cloud(self):
@@ -800,7 +801,7 @@ class TestDictationSpeechPicker(unittest.TestCase):
         rows = ec.dictation_speech_rows(self.KEYS, pro=False)
         values = [r["value"] for r in rows]
         self.assertEqual(values[:6], ["tiny", "base", "small", "medium", "large-v3-turbo", "large-v3"])
-        self.assertEqual(values[-3:], ["cloud", "cloud:best", "key:k1"])      # only a key that can transcribe
+        self.assertEqual(values[-3:], ["cloud", "cloud:best", "key:k1"])
         cloud = rows[values.index("cloud:best")]
         self.assertEqual((cloud["group"], cloud["tags"], cloud["title"]),
                          (ec.GROUP_GUSAN_CLOUD, ("cloud", "pro"), "Best accuracy"))
@@ -808,7 +809,8 @@ class TestDictationSpeechPicker(unittest.TestCase):
         self.assertEqual((rows[0]["speed"], rows[0]["accuracy"]), (5, 2))       # the dots of Whisper Tiny
 
     def test_a_source_keeps_its_group_only(self):
-        self.assertEqual([r["value"] for r in ec.dictation_speech_rows({}, source="cloud")], ["cloud", "cloud:best"])
+        self.assertEqual([r["value"] for r in ec.dictation_speech_rows({}, source="cloud")],
+                         ["cloud", "cloud:best"])
         self.assertEqual(ec.dictation_speech_rows({}, source="own_key"), [])   # no saved key: nothing to list
 
     def test_value_follows_the_settings(self):
@@ -875,6 +877,102 @@ class TestWriterPicker(unittest.TestCase):
     def test_the_cloud_writer_is_named(self):
         self.assertEqual(ec.cloud_writer_name({"cloud_writer_model": "openai"}), "OpenAI GPT")
         self.assertEqual(ec.cloud_writer_name({"cloud_writer_model": "nonsense"}), "DeepSeek V4.1 Flash")
+
+
+class TestCloudRowsMatchTheServer(unittest.TestCase):
+    """The second line of a Gusan Cloud row names real engines: providers and models. The server owns the truth
+    (supabase/functions/transcribe-proxy and smart-action), so the text is checked against its source: it cannot
+    drift away from what the server does without this failing."""
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    SPEECH = {"scribe_v2": "ElevenLabs Scribe v2", "voxtral-mini-latest": "Mistral Voxtral",
+              "gpt-transcribe": "OpenAI GPT Transcribe", "gpt-4o-transcribe": "GPT-4o Transcribe",
+              "solaria-3": "Gladia Solaria 3", "solaria-1": "Gladia Solaria 1"}
+
+    def _source(self, function):
+        path = os.path.join(self.ROOT, "supabase", "functions", function, "index.ts")
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    def _order(self, name):
+        found = re.search(r"const %s = \[([^\]]*)\]" % name, self._source("transcribe-proxy"))
+        self.assertTrue(found, name)
+        return re.findall(r'"([^"]+)"', found.group(1))
+
+    def test_the_speech_profiles_name_the_first_three_engines_the_server_tries(self):
+        for profile, order in ((ec.CLOUD_FAST, "FAST_ORDER"), (ec.CLOUD_BEST, "BEST_ORDER")):
+            ids = self._order(order)[:3]
+            self.assertEqual(ec.CLOUD_PROFILE_NOTES[profile], " \u00b7 ".join(self.SPEECH[i] for i in ids), profile)
+
+    def test_the_gladia_profiles_name_their_gladia_models_then_the_best_order(self):
+        source = self._source("transcribe-proxy")
+        for profile, env in ((ec.CLOUD_GLADIA, "STT_GLADIA_ORDER"),):
+            found = re.search(r'orderFor\("%s", \[([^\]]*)\]\)' % env, source)
+            self.assertTrue(found, env)
+            ids = (re.findall(r'"([^"]+)"', found.group(1)) + self._order("BEST_ORDER"))[:3]
+            self.assertEqual(ec.CLOUD_PROFILE_NOTES[profile], " · ".join(self.SPEECH[i] for i in ids), profile)
+
+    def test_every_engine_in_a_profile_note_is_one_the_server_knows(self):
+        for note in ec.CLOUD_PROFILE_NOTES.values():
+            for name in note.split(" \u00b7 "):
+                self.assertIn(name, self.SPEECH.values())
+
+    def test_the_writers_name_the_models_the_server_runs_for_answers(self):
+        source = self._source("smart-action")
+
+        def shown(model_id):
+            gpt = re.fullmatch(r"gpt-([\d.]+)-(\w+)", model_id)
+            if gpt:
+                return "GPT-%s %s" % gpt.groups()
+            claude = re.fullmatch(r"claude-(\w+)-(\d+)-(\d+)", model_id)
+            self.assertTrue(claude, model_id)
+            return "Claude %s %s.%s" % (claude.group(1).capitalize(), claude.group(2), claude.group(3))
+
+        fast = re.search(r'OPENAI_FAST_MODEL"\), "([^"]+)"', source).group(1)
+        live = re.search(r'OPENAI_LIVE_MODEL"\), "([^"]+)"', source).group(1)
+        haiku = re.search(r'CLAUDE_FAST_MODEL = "([^"]+)"', source).group(1)
+        notes = {fam: note for fam, _name, note in ec.CLOUD_WRITERS}
+        self.assertIn(shown(fast), notes["openai"])
+        self.assertIn(shown(live), notes["openai"])
+        self.assertIn(shown(haiku), notes["claude"])
+
+    def test_the_picker_rows_carry_those_lines(self):
+        rows = ec.writer_rows({}, False, choice="cloud")
+        by_value = {r["value"]: r for r in rows}
+        self.assertIn("GPT-5.4 mini", by_value["cloud:openai"]["note"])
+        self.assertIn("Claude Haiku 5.5", by_value["cloud:claude"]["note"])
+        self.assertEqual(by_value["cloud"]["note"], "Gusan's default \u00b7 fastest")
+
+
+class TestRealtimeInTheRows(unittest.TestCase):
+    """A dictation / Smart Action on Gusan Cloud streams to Gladia live first (live_stt.py): its rows name Gladia
+    first, then the profile's backup engines. Live Assistant and files don't stream: their lines stay."""
+
+    def test_dictation_rows_name_gladia_live_first(self):
+        rows = {r["value"]: r["note"] for r in ec.dictation_speech_rows({}, source="cloud")}
+        for value, profile in ec.DICTATION_CLOUD_PROFILES.items():
+            first, *backup = ec.CLOUD_PROFILE_NOTES[profile].split(" \u00b7 ")
+            self.assertEqual(rows[value], " \u00b7 ".join(["Gladia Solaria 1 live", first, backup[0]]))
+        smart = [r for r in ec.smart_speech_rows({}) if r["value"] == ec.SMART_SPEECH_CLOUD][0]
+        self.assertTrue(smart["note"].startswith("Gladia Solaria 1 live \u00b7 "))
+
+    def test_without_real_time_the_profile_line_stays(self):
+        for cfg in ({"live_stt": False}, {"privacy_mode": True}):
+            rows = {r["value"]: r["note"] for r in ec.dictation_speech_rows(cfg, source="cloud")}
+            for value, profile in ec.DICTATION_CLOUD_PROFILES.items():
+                self.assertEqual(rows[value], ec.CLOUD_PROFILE_NOTES[profile])
+
+    def test_armenian_names_openai_live_on_fast_and_scribe_on_best(self):
+        rows = {r["value"]: r["note"] for r in ec.dictation_speech_rows({"language": "hy"}, source="cloud")}
+        self.assertEqual(rows[ec.DICTATION_CLOUD],
+                         "OpenAI GPT Live Transcribe \u00b7 ElevenLabs Scribe v2 \u00b7 OpenAI GPT Transcribe")
+        self.assertEqual(rows[ec.DICTATION_CLOUD_BEST], ec.CLOUD_PROFILE_NOTES[ec.CLOUD_BEST])
+        self.assertTrue(rows[ec.DICTATION_CLOUD_BEST].startswith("ElevenLabs Scribe v2"))
+
+    def test_files_and_live_assistant_do_not_claim_it(self):
+        for row in ec.file_rows({}, pro=True, signed_in=True) + ec.live_speech_rows({}, pro=True, signed_in=True):
+            self.assertNotIn("live", (row.get("note") or "").split(" \u00b7 ")[0].lower().replace("live assist", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

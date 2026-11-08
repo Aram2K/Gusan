@@ -99,6 +99,7 @@ import rich_text
 from ui import hy_model, privacy_prompt, theme
 from ui.components import (Button, Card, IconButton, Keycaps, PageHeader, ProTag, SettingRow,
                            SettingsRail, icons, label)
+from ui.components.controls import Toggle
 from ui.components import clipboard, mini_prompt
 from ui.components.controls import keycap_labels
 from ui.components.hotkey_capture import HotkeyCaptureButton
@@ -178,6 +179,11 @@ def _call(app, method, *args, **kwargs):
     except Exception:
         logger.warning("%s() failed", method, exc_info=True)
         return None
+
+
+WEB_KEY = "smart_actions_web_search"
+WEB_ROW = "Search the web"
+WEB_HINT = 'When you ask ("look up…") or need live figures. Gusan Cloud.'
 
 
 def _set(app, key, value):
@@ -1145,6 +1151,11 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
         wr.setAccessibleName("Writes with")
         self.writer_row = rail.add_row(SettingRow("Writes with", wr, stacked=True))
 
+        # Web search (Gusan Cloud, Linkup): only when you ask for it or the request needs live figures.
+        self.web_toggle = Toggle(WEB_ROW, bool(_cfg(self.app).get(WEB_KEY, False)), rail)
+        self.web_toggle.toggled.connect(self._on_web_toggle)
+        self.web_row = rail.add_row(SettingRow(WEB_ROW, self.web_toggle, hint=WEB_HINT))
+
         foot = QWidget(rail)
         fh = QHBoxLayout(foot)
         fh.setContentsMargins(0, 0, 0, 0)
@@ -1156,10 +1167,22 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
         rail.set_foot(foot)
         return rail
 
+    def _on_web_toggle(self, on):
+        if not _set(self.app, WEB_KEY, bool(on)):
+            self.web_toggle.blockSignals(True)
+            self.web_toggle.setChecked(bool(_cfg(self.app).get(WEB_KEY, False)))
+            self.web_toggle.blockSignals(False)
+
     # ── state ──
     def refresh(self):
         """Redraw everything from cfg + plan (cheap: no network, a stat at most)."""
         cfg = _cfg(self.app)
+        if getattr(self, "web_toggle", None) is not None:
+            # Privacy mode keeps everything on this computer: no web search then (the switch keeps its place).
+            self.web_toggle.blockSignals(True)
+            self.web_toggle.setChecked(bool(cfg.get(WEB_KEY, False)) and not cfg.get("privacy_mode"))
+            self.web_toggle.setEnabled(not cfg.get("privacy_mode"))
+            self.web_toggle.blockSignals(False)
         tier, left, total = plan_state(self.app)
         hk = smart_hotkey(self.app)
         if hk:

@@ -22,6 +22,21 @@ import meeting_store as ms
 
 # ── fakes ────────────────────────────────────────────────────────────────────
 
+def _notes_call(proc):
+    """The meeting-notes call of a fake actions.process (a meeting still called "Meeting · Tue 14:30" gets a second,
+    short call after it: its title, meeting_session._name_meeting)."""
+    for c in reversed(proc.call_args_list):
+        mode = c[0][1] if len(c[0]) > 1 else c[1].get("mode")
+        if mode == msess.actions.ACTION_MEETING_NOTES:
+            return c
+    return proc.call_args
+
+
+def _notes_input(proc):
+    """What the notes were written from."""
+    return _notes_call(proc)[0][0]
+
+
 class _Rec:
     """The AudioRecorder surface the session touches, recording every call."""
 
@@ -449,6 +464,67 @@ class TestPauseAndLive(_Base):
 
 # ── stop → outcome ───────────────────────────────────────────────────────────
 
+class TestRealTimeMeeting(_Base):
+    """Real time in meetings (2026-11-08): every sentence the live stream finished goes to the live view and the
+    Live Assistant at once, with its "You" / "Them" hint; the pieces only make the transcript and the notes - until
+    the stream gives up, then they show again."""
+
+    def test_live_sentences_feed_the_live_view_and_the_pieces_only_the_transcript(self):
+        app = _App(meeting_audio_mode="smart_meeting")
+        app.recorder.live_showing = lambda: True
+        app.recorder.live_source_energy = lambda start, end: (9.0, 1.0) if start < 5 else (0.5, 9.5)
+        s = self.session(app)
+        raw, lines = _Recorder(s.sig_chunk), _Recorder(s.live_line)
+        s.start("x")
+        self.assertEqual(app.recorder.on_live_final, s._on_live_final)
+        s._on_live_final("Where are we on pricing?", "en", 0.4, 2.1)
+        s._on_live_final("Almost done.", "en", 6.0, 7.2)
+        s._on_chunk_transcribed(0, "Where are we on pricing? Almost done.", "en")    # kept, not shown twice
+        self.assertEqual(len(raw.calls), 2)
+        self.assertEqual(lines.calls, [("Where are we on pricing?", "You"), ("Almost done.", "Them")])
+        rows = (s.meeting_dir / "chunks.jsonl").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(rows), 1)
+
+    def test_with_the_speaker_model_each_voice_gets_its_own_label(self):
+        """Several people on one mic or on the call: the sentence's own voice, not just "You" / "Them"."""
+        app = _App(meeting_audio_mode="smart_meeting")
+        app.recorder.live_showing = lambda: True
+        app.recorder.live_source_energy = lambda start, end: (0.5, 9.5)
+        app.recorder.live_audio = lambda start, end: ("audio", start, end)
+        s = self.session(app)
+        lines = _Recorder(s.live_line)
+        s.start("x")
+        asked = []
+
+        class Speakers:
+            def label(self, audio, side):
+                asked.append((audio, side))
+                return "Speaker 2"
+        s._live_speakers, s._live_speakers_tried = Speakers(), True
+        s._on_live_final("Can you hear me?", "en", 3.0, 4.5)
+        self.assertEqual(lines.calls, [("Can you hear me?", "Speaker 2")])
+        self.assertEqual(asked, [(("audio", 3.0, 4.5), "call")])
+
+    def test_when_the_live_stream_gives_up_the_pieces_show_again(self):
+        app = _App(meeting_audio_mode="smart_meeting")
+        app.recorder.live_showing = lambda: False
+        s = self.session(app)
+        raw = _Recorder(s.sig_chunk)
+        s.start("x")
+        s._on_chunk_transcribed(0, "Hello there.", "en")
+        self.assertEqual(len(raw.calls), 1)
+
+    def test_nothing_after_stop_and_nothing_empty(self):
+        app = _App(meeting_audio_mode="smart_meeting")
+        app.recorder.live_showing = lambda: True
+        s = self.session(app)
+        raw = _Recorder(s.sig_chunk)
+        s._on_live_final("Too early.", "en", 0.0, 1.0)                 # not recording yet
+        s.start("x")
+        s._on_live_final("  ", "en", 0.0, 1.0)
+        self.assertEqual(raw.calls, [])
+
+
 class TestOutcome(_Base):
     def _record(self, app=None, notes="## Summary\n- Ship Friday", **start):
         app = app or _App()
@@ -469,7 +545,7 @@ class TestOutcome(_Base):
         self.assertEqual(s._done.calls, [(str(folder), "## Summary\n- Ship Friday", "")])
         self.assertEqual(s.app.recorder.stops, 1)
         self.assertEqual(s.app.released, 1)
-        context = s._proc.call_args[0][0]
+        context = _notes_input(s._proc)
         self.assertIn("my bullet", context)                   # My notes reach the AI
         self.assertEqual((folder / "notes.md").read_text(encoding="utf-8"),
                          "## Summary\n- Ship Friday")
@@ -491,7 +567,7 @@ class TestOutcome(_Base):
     def test_an_engine_that_is_not_set_up_degrades_with_a_notice_outside_the_notes(self):
         app = _App(pro=False, action_model="api_anthropic")       # cloud, no key
         s = self._record(app, notes="## Summary\n- formatter notes")
-        self.assertEqual(s._proc.call_args[1]["model"], "rule_based")
+        self.assertEqual(_notes_call(s._proc)[1]["model"], "rule_based")
         self.assertTrue(s._summary_downgraded)
         notes = (s.meeting_dir / "notes.md").read_text(encoding="utf-8")
         self.assertEqual(notes, "## Summary\n- formatter notes")    # exports stay clean
@@ -565,7 +641,7 @@ class TestOutcome(_Base):
         with patch.object(msess.actions, "process", return_value="new notes") as proc, \
                 patch("history.save_entry", create=True) as hist:
             self.assertTrue(s.retry_notes("qwen_3b", folder=str(folder)))
-        self.assertIn("remember pricing", proc.call_args[0][0])
+        self.assertIn("remember pricing", _notes_input(proc))
         self.assertEqual((folder / "notes.md").read_text(encoding="utf-8"), "new notes")
         meta = ms.load_meta(folder)
         self.assertEqual(meta["duration_sec"], 2520)            # not reset by a rewrite
@@ -675,7 +751,7 @@ class TestInviteReachesTheNotes(_Base):
         return s
 
     def _input(self, s):
-        return s._proc.call_args[0][0]
+        return _notes_input(s._proc)
 
     def test_the_real_recorder_takes_an_agenda(self):
         import inspect
@@ -737,7 +813,7 @@ class TestInviteReachesTheNotes(_Base):
             s.stop("")
         self.assertTrue(ok)
         self.assertEqual(s._meeting_agenda, "")
-        self.assertNotIn("Budget review", proc.call_args[0][0])
+        self.assertNotIn("Budget review", _notes_input(proc))
         self.assertNotIn("agenda", ms.load_meta(s.meeting_dir))
 
     def test_the_agenda_is_clipped_like_the_start_card_does(self):
@@ -770,7 +846,7 @@ class TestInviteReachesTheNotes(_Base):
         s.set_agenda("Only this row")
         with patch.object(msess.actions, "process", return_value="## Notes") as proc:
             s.stop("")
-        text = proc.call_args[0][0]
+        text = _notes_input(proc)
         self.assertIn("- Only this row", text)
         self.assertNotIn("Budget review", text)
 
@@ -782,7 +858,7 @@ class TestInviteReachesTheNotes(_Base):
         with patch.object(msess.actions, "process", return_value="new notes") as proc:
             self.assertTrue(fresh.retry_notes("qwen_3b", folder=str(folder)))
         self.assertEqual(fresh._meeting_agenda, self.AGENDA)
-        again = proc.call_args[0][0]
+        again = _notes_input(proc)
         self.assertEqual(again.split("\n\nTranscript:\n")[0], first.split("\n\nTranscript:\n")[0])
         self.assertIn("- Budget review", again)
         # A meeting saved without an agenda stays without one (and without a stale one).
@@ -793,8 +869,8 @@ class TestInviteReachesTheNotes(_Base):
         with patch.object(msess.actions, "process", return_value="x") as proc:
             self.assertTrue(fresh.retry_notes(folder=str(other)))
         self.assertEqual(fresh._meeting_agenda, "")
-        self.assertNotIn("Budget review", proc.call_args[0][0])
-        self.assertTrue(proc.call_args[0][0].startswith("Meeting Title: Old call\nAttendees: Mariam"))
+        self.assertNotIn("Budget review", _notes_input(proc))
+        self.assertTrue(_notes_input(proc).startswith("Meeting Title: Old call\nAttendees: Mariam"))
 
     def test_a_continued_meeting_keeps_its_own_agenda(self):
         s = self._run(agenda=self.AGENDA)
@@ -1036,8 +1112,8 @@ class TestQuitKeepsTheMeeting(_Base):
         with patch.object(msess.actions, "process", return_value="## Notes\n- pricing") as proc, \
                 patch("history.save_entry", create=True) as hist:
             target(*args)
-        self.assertIn("Follow up on pricing", proc.call_args[0][0])      # My notes reach the AI
-        self.assertIn("Thanks for staying late.", proc.call_args[0][0])
+        self.assertIn("Follow up on pricing", _notes_input(proc))      # My notes reach the AI
+        self.assertIn("Thanks for staying late.", _notes_input(proc))
         self.assertEqual(done.calls, [(folder, "## Notes\n- pricing", "")])
         hist.assert_called_once()                                # first notes: in History
         meta = ms.load_meta(folder)
@@ -1724,7 +1800,7 @@ class TestSpeakerLabelsAtStop(_SpeakerBase):
         self.assertEqual(kw["language"], "en")
         self.assertFalse(kw["privacy"])
         self.assertEqual(s.notices(), [])
-        self.assertIn("You: hi there", s._proc.call_args[0][0])  # the notes are written from it
+        self.assertIn("You: hi there", _notes_input(s._proc))  # the notes are written from it
 
     def test_without_the_two_tracks_the_mix_alone_goes_in(self):
         rec = _SpeakerRec()
@@ -1976,8 +2052,8 @@ class TestFinishingAnInterruptedMeeting(_SavedMeeting):
         self.assertEqual(len(calls[0][0]), 1)                 # the one saved part
         self.assertEqual((d / "transcript.txt").read_text(encoding="utf-8"),
                          "You: rebuilt a\nSpeaker 1: rebuilt b")
-        self.assertIn("rebuilt a", proc.call_args[0][0])      # the notes come from the rebuilt text
-        self.assertNotIn("live one", proc.call_args[0][0])
+        self.assertIn("rebuilt a", _notes_input(proc))      # the notes come from the rebuilt text
+        self.assertNotIn("live one", _notes_input(proc))
         meta = ms.load_meta(d)
         self.assertIn(msess.RECOVERED_NOTICE, meta["notices"])
         self.assertEqual(done.calls, [(str(d), "## Notes", "")])
@@ -1993,7 +2069,7 @@ class TestFinishingAnInterruptedMeeting(_SavedMeeting):
         with patch.object(msess.actions, "process", return_value="## Notes") as proc:
             self.assertTrue(s.retry_notes(None, folder=str(d)))
         self.assertEqual((d / "transcript.txt").read_text(encoding="utf-8"), "live one live two")
-        self.assertIn("live one live two", proc.call_args[0][0])
+        self.assertIn("live one live two", _notes_input(proc))
         notices = ms.load_meta(d)["notices"]
         self.assertIn(msess.RECOVERED_NOTICE, notices)
         self.assertTrue(any("Speaker labels weren't added" in n for n in notices))
@@ -2014,7 +2090,7 @@ class TestFinishingAnInterruptedMeeting(_SavedMeeting):
         with patch.object(msess.actions, "process", return_value="## Notes") as proc:
             self.assertTrue(s.retry_notes(None, folder=str(d)))
         self.assertEqual((d / "transcript.txt").read_text(encoding="utf-8"), "You: all there is")
-        self.assertIn("all there is", proc.call_args[0][0])
+        self.assertIn("all there is", _notes_input(proc))
 
     def test_while_a_dictation_runs_the_notes_use_the_live_pieces_as_before(self):
         d = self._folder()
@@ -2026,7 +2102,7 @@ class TestFinishingAnInterruptedMeeting(_SavedMeeting):
             self.assertTrue(s.retry_notes(None, folder=str(d)))
         self.assertEqual(calls, [])
         self.assertFalse((d / "transcript.txt").exists())
-        self.assertIn("live one live two", proc.call_args[0][0])
+        self.assertIn("live one live two", _notes_input(proc))
         self.assertEqual(s.phase, "done")
 
     def test_a_dictation_blocks_a_recovery_that_has_nothing_else_to_go_on(self):
@@ -2044,7 +2120,7 @@ class TestFinishingAnInterruptedMeeting(_SavedMeeting):
         with patch.object(msess.actions, "process", return_value="## Notes") as proc:
             self.assertTrue(s.retry_notes(None, folder=str(d)))
         self.assertEqual(calls, [])
-        self.assertIn("saved text", proc.call_args[0][0])
+        self.assertIn("saved text", _notes_input(proc))
         self.assertEqual((d / "transcript.txt").read_text(encoding="utf-8"), "Anna: saved text")
 
     def test_a_meeting_without_audio_behaves_as_before(self):
@@ -2758,8 +2834,8 @@ class TestNotesFirstSpeakersAfter(_SpeakerBase):
         folder = self._stop(s)
         with patch.object(msess.actions, "process", return_value="## Rewritten") as proc:
             self.assertTrue(s.retry_notes("qwen_3b"))                 # Rewrite notes on the open meeting
-        self.assertIn(LABELLED, proc.call_args[0][0])                 # written from the names, not You / Them
-        self.assertNotIn("Them:", proc.call_args[0][0])
+        self.assertIn(LABELLED, _notes_input(proc))                 # written from the names, not You / Them
+        self.assertNotIn("Them:", _notes_input(proc))
         self.assertEqual((folder / "notes.md").read_text(encoding="utf-8"), "## Rewritten")
 
     def test_the_names_of_a_continued_meeting_follow_only_its_new_part(self):
@@ -2814,7 +2890,7 @@ class TestNotesFirstSpeakersAfter(_SpeakerBase):
                 target, args = s.spawned.pop(0)
                 with patch.object(msess.actions, "process", return_value="## Rewritten") as proc:
                     target(*args)
-                rewrites.append(proc.call_args[0][0])
+                rewrites.append(_notes_input(proc))
         s, rec, app = self._meeting(_interruptible(hook))
         s._followup._wait = wait
         folder = self._stop(s)
@@ -3616,7 +3692,7 @@ class TestRecoveringACloudSession(_SavedMeeting):
             self.assertTrue(s.retry_notes(None, folder=str(d)))
         self.assertEqual(calls, [])                                  # no local re-read
         self.assertEqual((d / "transcript.txt").read_text(encoding="utf-8"), "live one live two")
-        self.assertIn("live one live two", proc.call_args[0][0])
+        self.assertIn("live one live two", _notes_input(proc))
         notices = ms.load_meta(d)["notices"]
         self.assertIn(msess.RECOVERED_CLOUD_NOTICE, notices)
         self.assertNotIn(msess.RECOVERED_NOTICE, notices)

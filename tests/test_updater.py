@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
@@ -908,6 +909,68 @@ class TestLaunchForReal(unittest.TestCase):
         self.assertEqual(got, " ".join(updater.INSTALL_ARGS) + ' /LOG="%s" /CURRENTUSER /relaunch=1' % log)
         with open(cwd, "r", encoding="ascii", errors="ignore") as f:
             self.assertEqual(os.path.normcase(f.read().strip()), os.path.normcase(folder))   # the installer's folder
+
+
+class TestLaunchWaiting(unittest.TestCase):
+    """launch_installer_waiting: Setup is started off the caller's thread, and waited for no longer than
+    QUIT_START_WAIT_S (starting a ~115 MB program can take many seconds; made from the window's thread it
+    left the window "Not responding" - the 2.1.0 to 2.1.1 update at Quit stood still for 6 s)."""
+
+    SETUP = "C:/t/setup.exe"
+
+    def test_it_returns_what_the_start_returned_and_starts_off_the_calling_thread(self):
+        threads = []
+
+        def fake(path, **kw):
+            threads.append(threading.current_thread())
+            return True, path
+
+        with mock.patch.object(updater, "launch_installer", side_effect=fake) as launch, \
+                self.assertLogs("transcribe", level="INFO") as logs:
+            result = updater.launch_installer_waiting(self.SETUP, all_users=False, log_path="C:/t/x.log", relaunch=False)
+        self.assertEqual(result, (True, self.SETUP))
+        self.assertTrue(any("to start the installer" in line for line in logs.output), logs.output)   # the real time is logged
+        launch.assert_called_once_with(self.SETUP, all_users=False, log_path="C:/t/x.log", relaunch=False)
+        self.assertIsNot(threads[0], threading.current_thread())
+        self.assertTrue(threads[0].daemon)                          # it never keeps the app alive
+
+    def test_a_refusal_comes_back_as_it_was(self):
+        with mock.patch.object(updater, "launch_installer", return_value=(False, updater.MSG_BLOCKED)):
+            self.assertEqual(updater.launch_installer_waiting(self.SETUP), (False, updater.MSG_BLOCKED))
+
+    def test_a_start_that_raises_is_a_failed_start_not_a_crash(self):
+        with mock.patch.object(updater, "launch_installer", side_effect=OSError("boom")), \
+                self.assertLogs("transcribe", level="WARNING"):
+            self.assertEqual(updater.launch_installer_waiting(self.SETUP), (False, updater.MSG_NO_START))
+
+    def test_a_start_that_takes_too_long_is_not_waited_for_but_is_not_stopped(self):
+        gate, returned = threading.Event(), threading.Event()
+
+        def slow(path, **kw):
+            gate.wait(10)
+            returned.set()
+            return True, path
+
+        self.addCleanup(gate.set)
+        with mock.patch.object(updater, "launch_installer", side_effect=slow):
+            began = time.monotonic()
+            with self.assertLogs("transcribe", level="WARNING"):
+                result = updater.launch_installer_waiting(self.SETUP, wait=0.2)
+            waited = time.monotonic() - began
+            self.assertEqual(result, (False, updater.MSG_STILL_STARTING))
+            self.assertLess(waited, 5)                              # not the 10 s the start would have taken
+            self.assertFalse(returned.is_set())
+            gate.set()                                              # Windows gets there in the end
+            self.assertTrue(returned.wait(5))
+
+    def test_the_wait_defaults_to_QUIT_START_WAIT_S(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        self.assertGreaterEqual(updater.QUIT_START_WAIT_S, 20)      # slow disks and antivirus: tens of seconds
+        with mock.patch.object(updater, "QUIT_START_WAIT_S", 0.1), \
+                mock.patch.object(updater, "launch_installer", side_effect=lambda p, **kw: gate.wait(10) or (True, p)), \
+                self.assertLogs("transcribe", level="WARNING"):
+            self.assertEqual(updater.launch_installer_waiting(self.SETUP), (False, updater.MSG_STILL_STARTING))
 
 
 @unittest.skipUnless(os.name == "nt", "needs Windows (file sharing)")

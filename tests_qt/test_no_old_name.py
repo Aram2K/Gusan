@@ -30,7 +30,7 @@ from tests_qt.conftest import make_stub_app
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OLD = re.compile(r"\bTranscribe\b")
 # OpenAI's own model names (what Gusan Cloud's server answers with) end in the word: not our old name.
-_MODEL_NAMES = re.compile(r"\bGPT(?:-4o(?: mini)?)? Transcribe\b")
+_MODEL_NAMES = re.compile(r"\bGPT(?:-4o(?: mini)?| Live)? Transcribe\b")
 _SENTENCE_START = (".", ":", "!", "?", "•", "\n", "(", "\"", "“", "'")
 
 
@@ -55,7 +55,8 @@ def test_the_rule():
         assert old_names(shown) == shown, shown
     for fine in ("Transcribe a file", "Transcribe only", "Done. Transcribe another one?",
                  "TranscribeApp-Windows-Setup.exe", "Transcribed on this computer", "Gusan", "",
-                 "GPT Transcribe", "GPT-4o Transcribe", "GPT-4o mini Transcribe", "Fast · GPT Transcribe · Cloud"):
+                 "GPT Transcribe", "GPT-4o Transcribe", "GPT-4o mini Transcribe", "Fast · GPT Transcribe · Cloud",
+                 "OpenAI GPT Live Transcribe · ElevenLabs Scribe v2 · OpenAI GPT Transcribe"):
         assert old_names(fine) is None, fine
 
 

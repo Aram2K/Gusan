@@ -24,7 +24,9 @@ meta.json keys (all optional - older builds wrote only the first four):
   (the names of people read off the call's screen during a Live Assistant
   session, a part of attendees_list: people_from_screen.py), attendees_removed
   (names the user took off the People card: the screen is never trusted for
-  them again, not in a continued meeting either).
+  them again, not in a continued meeting either), title_source ("user", "calendar" or "auto": who named
+  the meeting; none = the app's placeholder name), title_tried (True: asking the AI for a name came back
+  empty - see meeting_titles.py).
 Meta is only ever changed through ``update_meta`` (read, merge, atomic
 write), so keys written by one step survive every other step.
 """
@@ -36,8 +38,10 @@ import tempfile
 import threading
 import time
 import wave
+from urllib.parse import urlsplit
 from pathlib import Path
 
+import meeting_titles
 import storage
 
 _PART_RE = re.compile(r"^audio_part(\d+)\.wav$", re.I)
@@ -265,6 +269,21 @@ def clean_chat(messages):
         if ts is not None:
             row["ts"] = ts
         if m["role"] == "assistant":
+            sources = []
+            for source in m.get("sources", []) if isinstance(m.get("sources"), list) else []:
+                if not isinstance(source, dict):
+                    continue
+                try:
+                    url = str(source.get("url") or "").strip()[:4000]
+                    parsed = urlsplit(url)
+                    if parsed.scheme in ("http", "https") and parsed.netloc:
+                        sources.append({"title": str(source.get("title") or "").strip()[:200], "url": url})
+                except ValueError:
+                    continue
+                if len(sources) == 5:
+                    break
+            if sources:
+                row["sources"] = sources
             row["status"] = m.get("status") if m.get("status") in CHAT_STATUSES else "stopped"
             if m.get("why") in CHAT_WHYS and row["status"] == "stopped":
                 row["why"] = m["why"]                      # the connection dropped: the answer may be cut short
@@ -589,11 +608,23 @@ def summary_preview(notes, limit=140):
     return ""
 
 
-def list_meetings():
+def notes_preview(folder, limit=meeting_titles.PREVIEW_CHARS):
+    """The first line of a meeting's notes for a list (read from the top of notes.md only), or ""."""
+    try:
+        with open(Path(folder) / "notes.md", "r", encoding="utf-8", errors="replace") as f:
+            head = f.read(4000)
+    except OSError:
+        return ""
+    return summary_preview(head, limit)
+
+
+def list_meetings(preview=False):
     """Newest first. Every folder that holds any of a meeting is listed -
     including one with only its recording or live chunks (transcription or
     notes failed, or the app closed mid-meeting), so a saved recording is
-    always reachable. Empty and discarded folders are skipped."""
+    always reachable. Empty and discarded folders are skipped.
+    ``preview`` adds each meeting's first notes line as "preview" (a list's second line, and the name of a
+    meeting nobody named: meeting_titles.display_title); it reads a little of every notes file."""
     root = meetings_dir()
     out = []
     try:
@@ -645,7 +676,12 @@ def list_meetings():
             "seen": meta.get("seen") is not False,
             "source": str(meta.get("source") or ""),
             "calendar_event_id": str(meta.get("calendar_event_id") or ""),
+            # who named it (meeting_titles.SOURCE_*) and whether a try at naming it came back empty
+            "title_source": str(meta.get("title_source") or ""),
+            "title_tried": bool(meta.get("title_tried")),
         })
+        if preview:
+            out[-1]["preview"] = notes_preview(folder) if has_notes else ""
     return out
 
 
@@ -695,12 +731,37 @@ def search(query, meetings=None, transcripts=False):
 
 
 def set_title(folder, title):
-    """Rename a meeting (the title pen). Blank becomes "Untitled Meeting".
-    True when saved."""
-    title = " ".join(str(title or "").split()) or "Untitled Meeting"
+    """Rename a meeting (the title pen). Blank becomes "Untitled Meeting" - and the app may name it again
+    (meeting_titles.wants_title); a title the person typed is theirs for good. True when saved."""
+    title = " ".join(str(title or "").split())
     if not Path(folder).is_dir():
         return False
-    return update_meta(folder, title=title) is not None
+    if not title:
+        return update_meta(folder, title=meeting_titles.UNTITLED, title_source=None, title_tried=None) is not None
+    return update_meta(folder, title=title, title_source=meeting_titles.SOURCE_USER, title_tried=None) is not None
+
+
+def set_auto_title(folder, title):
+    """Name a meeting from its notes (the AI's title), unless it has been named meanwhile: only a meeting whose
+    title is still a placeholder takes it. True when saved."""
+    title = meeting_titles.clean_title(title)
+    if not title or not Path(folder).is_dir():
+        return False
+    saved = []
+
+    def change(meta):
+        if not meeting_titles.wants_title(meta):
+            return {}
+        saved.append(title)
+        return {"title": title, "title_source": meeting_titles.SOURCE_AUTO, "title_tried": None}
+    return edit_meta(folder, change) is not None and bool(saved)
+
+
+def mark_title_tried(folder):
+    """A try at naming this meeting came back empty: do not ask again (a failed call does not count - it is retried)."""
+    if not Path(folder).is_dir():
+        return False
+    return update_meta(folder, title_tried=True) is not None
 
 
 def mark_seen(folder, seen=True):

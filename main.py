@@ -37,6 +37,7 @@ if __name__ == "__main__":
     # `from main import ...` (file jobs, model checks): they
     # must get THIS module - a second copy would load its own config.
     sys.modules.setdefault("main", sys.modules["__main__"])
+import collections
 import threading
 import time
 import json
@@ -71,6 +72,8 @@ import history as hist
 import actions
 import action_api
 import local_llm
+import smart_prompt
+import web_sources
 import telemetry
 import auth
 import entitlements
@@ -264,6 +267,7 @@ DEFAULT = {
     # 1.9.0 stored "live_assist_auto": false (its periodic refresh, off by
     # default) in every config.json, which would keep this off after updating.
     "live_assist_auto_answer": True,
+    "live_assist_web_search": False,   # Linkup web search for Gusan Cloud answers: the person turns it on
     "live_assist_pos": None,
     # Transcription language of a Live Assistant session ("" = the dictation
     # language) and of its answers ("" = the call's language). 1.9.x saved
@@ -318,6 +322,7 @@ DEFAULT = {
     # What transcribes a Smart Action: "" = same as Dictation | "cloud" =
     # Gusan Cloud (Pro, never in Privacy mode) | a Whisper id (hardware.MODEL_INFO).
     "smart_actions_speech_model": "",
+    "smart_actions_web_search": False,      # Smart Actions may look current facts up (Gusan Cloud, Linkup) - off until turned on
     "app_theme": "system",               # Settings > General > App look (row hidden in 2.0: light only)
     "install_updates_on_quit": True,      # download a found update, run it at Quit
     # One quiet line on Home for 1.x upgraders ("Transcribe is now Gusan…"):
@@ -557,6 +562,9 @@ def load_config():
                  for key in ("hotkey", "live_assist_hotkey", "smart_actions_hotkey")}
         if settings_apply.norm_hotkey(loaded["screen_chat_hotkey"]) in taken:
             loaded["screen_chat_hotkey"] = ""
+    # Every load (not a schema step: a current file must be healed too) - the 2.1.2 test builds' Gladia picks.
+    import engine_choice
+    engine_choice.heal_speech_settings(loaded)
     # Keep initial_prompt in step with the structured vocabulary list, so a
     # hand-edited or older config self-heals on load.
     vocabulary.sync_config(loaded)
@@ -1264,6 +1272,16 @@ class AudioRecorder:
         self.on_chunk_gap = None
         self._capture_mode = None     # smart_meeting/system_only/default_mic; None = dictation
         self.fast_live_chunks = False  # Live Assistance session: short pieces (see _record_loop)
+        # Real-time (live_stt.py): the take's live session; the words while speaking (dictation's pill); every
+        # finished sentence of a meeting (on_live_final(text, language, start, end) - meeting_session).
+        self._live_session = None
+        self.on_live_text = None
+        self.on_live_final = None
+        self._live_fed_s = 0.0
+        self._live_energy_t, self._live_energy_v = [], []
+        # A meeting's live audio, the last LIVE_RING_S of it: a finished sentence's own sound (live_audio) for its
+        # speaker label (live_speakers.py).
+        self._live_ring, self._live_ring_s = collections.deque(), 0.0
         self._loopback_peak = 0.0     # loudest loopback sample this session (0 = no system audio)
         # Meeting Pause (set_paused): the record thread keeps reading - and so
         # draining - the streams, but keeps nothing while this is set.
@@ -2073,6 +2091,8 @@ class AudioRecorder:
                 self._tracks = recorder_tracks.DualTrackBuffer(self._full_audio_max)
 
         self.stop_requested = False
+        # A dictation on Gusan Cloud also streams to Gladia live: words while speaking, the text at Stop at once.
+        AudioRecorder._start_live(self, capture_mode)
         # The recording thread OWNS the streams: it is the only reader and the
         # only closer. Stream handles are passed as locals so a later
         # start_recording can never make an old thread close the new streams.
@@ -2448,6 +2468,12 @@ class AudioRecorder:
                 was_paused = False
 
                 arr = np.frombuffer(data, dtype=np.float32)
+                live = self._live_session
+                if live is not None and len(arr):
+                    live.feed(arr)                     # never blocks: real-time (live_stt.py)
+                    if meeting_cadence:
+                        AudioRecorder._live_keep(self, arr)
+                    self._live_fed_s += len(arr) / float(sr)
                 this_dur = (len(arr) / sr) if len(arr) > 0 else frame_dur
                 buffered_sec += this_dur
                 if len(arr) > 0:
@@ -2468,6 +2494,10 @@ class AudioRecorder:
                     if two_sources:
                         src_mic_e += mic_rms * mic_rms * len(m_part)
                         src_call_e += call_rms * call_rms * (len(c_part) if c_part is not None else 0)
+                        if live is not None:
+                            AudioRecorder._note_live_energy(
+                                self, mic_rms * mic_rms * len(m_part),
+                                call_rms * call_rms * (len(c_part) if c_part is not None else 0))
                     act = getattr(self, "_activity", None)
                     if act is not None:
                         # Loudness per minute of recording (who delivered sound).
@@ -2633,6 +2663,9 @@ class AudioRecorder:
         of blocking on a slow/stuck local transcription."""
         self._abort = True
         self.stop_requested = True
+        live, self._live_session = getattr(self, "_live_session", None), None
+        if live is not None:
+            live.cancel()             # the take's real-time session ends now (nothing is waited for)
         pipe = getattr(self, "_chunk_pipeline", None)
         if pipe is not None:
             pipe.abort()              # a meeting's waiting pieces are discarded
@@ -2655,9 +2688,209 @@ class AudioRecorder:
         pipe = getattr(self, "_chunk_pipeline", None)
         if pipe is not None:
             pipe.close()              # the recording is over: the worker drains the queue, then ends
+            # A meeting's live stream ends with it (its sentences were the live view; the pieces make the notes).
+            live, self._live_session = getattr(self, "_live_session", None), None
+            if live is not None:
+                threading.Thread(target=live.stop, kwargs={"timeout": 3.0}, daemon=True,
+                                 name="gusan-live-stop").start()
+
+    def _live_keep(self, arr):
+        """The meeting's live audio from this point of the stream on, the last LIVE_RING_S kept. Record thread."""
+        ring = self._live_ring
+        ring.append((self._live_fed_s, arr))
+        self._live_ring_s += len(arr) / float(cfg["sample_rate"])
+        while ring and self._live_ring_s > LIVE_RING_S:
+            _t, old = ring.popleft()
+            self._live_ring_s -= len(old) / float(cfg["sample_rate"])
+
+    def live_audio(self, start, end):
+        """The meeting's sound between two points of its live stream (seconds), or None when it is no longer kept:
+        one sentence's audio for its voice print (live_speakers.py)."""
+        sr = float(cfg["sample_rate"])
+        parts = []
+        for t0, a in list(self._live_ring):
+            t1 = t0 + len(a) / sr
+            if t1 <= start or t0 >= end:
+                continue
+            i0, i1 = max(0, int((start - t0) * sr)), min(len(a), int((end - t0) * sr))
+            if i1 > i0:
+                parts.append(a[i0:i1])
+        return np.concatenate(parts).astype(np.float32) if parts else None
+
+    def _note_live_energy(self, mic_e, call_e):
+        """A meeting with mic + system sound: how loud each source was up to this point of the live stream
+        (live_source_energy gives a sentence its "You" / "Them" hint). Record thread."""
+        t, v = self._live_energy_t, self._live_energy_v
+        t.append(self._live_fed_s)
+        v.append((mic_e, call_e))
+        if len(t) > 250000:                      # about 4 hours: keep the newer half
+            del t[:125000], v[:125000]
+
+    def live_source_energy(self, start, end):
+        """(mic energy, call energy) over a stretch of the live stream (seconds since it began), or None: the same
+        shape as chunk_source_energy (meeting_session.speaker_hint)."""
+        import bisect
+        t, v = list(self._live_energy_t), list(self._live_energy_v)
+        if not t:
+            return None
+        lo, hi = bisect.bisect_left(t, float(start)), bisect.bisect_right(t, float(end) + 0.15)
+        if hi <= lo:
+            return None
+        return (sum(m for m, _c in v[lo:hi]), sum(c for _m, c in v[lo:hi]))
+
+    def live_showing(self):
+        """True while a meeting's live stream carries its live view (the pieces then only make the transcript and
+        the notes); False when there is none or it gave up - the pieces show their text again."""
+        s = getattr(self, "_live_session", None)
+        return s is not None and not getattr(s, "failed", "") and not getattr(s, "_stopping", False)
+
+    @staticmethod
+    def _is_meeting(rec, capture_mode):
+        return capture_mode is not None or bool(getattr(rec, "fast_live_chunks", False))
+
+    def _live_wanted(self, capture_mode):
+        """Real-time for this take - dictation, Smart Actions, meetings and the Live Assistant - on Gusan Cloud,
+        signed in, not Privacy mode, the setting not turned off (cfg live_stt)."""
+        if not callable(getattr(self, "get_auth_token", None)) or cfg.get("privacy_mode"):
+            return False
+        if not cfg.get("live_stt", True):
+            return False
+        return AudioRecorder._backend(self) == "managed"
+
+    def _live_engine(self, capture_mode):
+        """The real-time engine of this take (live_stt.ENGINE_*), or None (the pieces only). A language Gladia writes
+        poorly (speech_langs.LIVE_POOR: Armenian) on Fast streams to OpenAI gpt-live-transcribe; on Best accuracy it
+        does not stream (ElevenLabs Scribe v2, the most accurate - the founder's pick, 2026-11-07). Every other
+        language streams to Gladia."""
+        if not AudioRecorder._live_wanted(self, capture_mode):
+            return None
+        import live_stt
+        if AudioRecorder._is_meeting(self, capture_mode):
+            # A meeting's live view (the notes come from the pieces whatever it is): OpenAI's live model for a
+            # language Gladia writes poorly, else Gladia.
+            poor = AudioRecorder._lang_setting(self) in speech_langs.LIVE_POOR
+            return live_stt.ENGINE_OPENAI if poor else live_stt.ENGINE_GLADIA
+        if AudioRecorder._lang_setting(self) in speech_langs.LIVE_POOR:
+            import engine_choice
+            profile = engine_choice.cloud_profile(cfg.get(engine_choice.SPEECH_PROFILE_KEY))
+            return live_stt.ENGINE_OPENAI if profile == engine_choice.CLOUD_FAST else None
+        return live_stt.ENGINE_GLADIA
+
+    def _start_live(self, capture_mode):
+        """Open this take's live session on its own thread (the audio waits in its queue meanwhile). Never raises:
+        no session means the pieces carry the take, as before."""
+        self._live_session = None
+        self._backup_detects = False
+        self._live_fed_s = 0.0
+        self._live_energy_t, self._live_energy_v = [], []
+        self._live_ring, self._live_ring_s = collections.deque(), 0.0
+        try:
+            engine = AudioRecorder._live_engine(self, capture_mode)
+            if engine is None:
+                return
+            meeting = AudioRecorder._is_meeting(self, capture_mode)
+            # A set language with an alphabet of its own (Armenian): real-time writes the take in it, the backup
+            # pieces detect the language themselves - so a take spoken in another language shows at Stop
+            # (_spoke_other_language) and comes out as spoken, not forced into the set language (founder, 2026-11-07).
+            self._backup_detects = (not meeting) and speech_langs.has_distinct_script(AudioRecorder._lang_setting(self))
+            import live_stt
+            terms = ()
+            try:
+                terms = tuple(vocabulary.cloud_terms(cfg))
+            except Exception:
+                terms = ()
+            committed = []
+
+            def on_final(text, _lang):
+                committed.append(text)
+                cb = self.on_live_text
+                if cb is not None:
+                    cb(" ".join(committed))
+
+            def on_partial(text):
+                cb = self.on_live_text
+                if cb is not None:
+                    cb(" ".join(committed + [text]))
+            # Auto-detect: each sentence in its own language, among the person's languages (speech_langs).
+            language, languages = speech_langs.live_languages(AudioRecorder._lang_setting(self), cfg)
+            def on_utterance(text, lang, start, end):
+                cb = getattr(self, "on_live_final", None)
+                if cb is not None:
+                    cb(text, lang, start, end)
+            if meeting:
+                # Every finished sentence to the meeting (its live view, the Live Assistant); never the pill.
+                session = live_stt.LiveSession(self.get_auth_token, language, languages, terms, purpose="meeting",
+                                               on_utterance=on_utterance, engine=engine)
+            else:
+                session = live_stt.LiveSession(self.get_auth_token, language, languages, terms, purpose="dictation",
+                                               on_partial=on_partial, on_final=on_final, engine=engine)
+            self._live_session = session
+
+            def opener():
+                try:
+                    session.start()
+                except Exception as e:
+                    logger.info("Real-time transcription not available for this take: %s", getattr(e, "code", e))
+                    session.failed = "unavailable"
+                    if self._live_session is session:
+                        self._live_session = None
+            threading.Thread(target=opener, daemon=True, name="gusan-live-open").start()
+        except Exception:
+            logger.debug("Real-time transcription could not start", exc_info=True)
+            self._live_session = None
+
+    def _finish_live(self):
+        """At the end of a dictation: the live session's final text when it was clean (no drop, nothing lost), else
+        None - the pieces' text is used. Waits at most LIVE_STOP_S for Gladia's last sentence."""
+        session, self._live_session = getattr(self, "_live_session", None), None
+        if session is None:
+            return None
+        started = time.monotonic()
+        text = session.stop(timeout=LIVE_STOP_S)
+        if session.failed or session.dropped_audio or not text:
+            logger.info("Real-time transcript not used (%s): the pieces' text instead",
+                        session.failed or ("audio missing" if session.dropped_audio else "empty"))
+            return None
+        engine = getattr(session, "engine", "gladia")
+        poor = [speech_langs.LIVE_POOR[c] for c in (getattr(session, "languages", None) or ())
+                if c in speech_langs.LIVE_POOR] if engine == "gladia" else []
+        if poor:
+            logger.info("Real-time transcript not used (%s heard: Gusan Cloud's engines write it better): the "
+                        "pieces' text instead", poor[0])
+            return None
+        if AudioRecorder._spoke_other_language(self):
+            logger.info("Real-time transcript not used (another language than the one set was spoken): the "
+                        "pieces' text instead, as spoken")
+            return None
+        logger.info("Real-time transcript (%s): %d characters, final %d ms after Stop", engine, len(text),
+                    int((time.monotonic() - started) * 1000))
+        AudioRecorder._note_cloud_ran(self, "gpt-live-transcribe" if engine == "openai" else "solaria-1")
+        return text, session.language
+
+    def _spoke_other_language(self):
+        """The backup pieces already back (never waited for) were written clearly in another alphabet than the set
+        language's: the person spoke another language. Only when the backup detected the language itself
+        (_backup_detects); a few foreign words inside the language's own text are not that."""
+        if not getattr(self, "_backup_detects", False):
+            return False
+        try:
+            with self._chunk_lock:
+                done = " ".join(t for t in self._chunk_results.values() if isinstance(t, str) and t.strip())
+        except Exception:
+            return False
+        letters = sum(1 for ch in done if ch.isalpha())
+        return (letters >= speech_langs.SCRIPT_MIN_LETTERS
+                and not speech_langs.script_matches(done, AudioRecorder._lang_setting(self)))
 
     def transcribe(self):
         pipe = getattr(self, "_chunk_pipeline", None)
+        # A dictation that streamed to Gladia live: its text is ready the moment the last sentence is closed.
+        if pipe is None and getattr(self, "_live_session", None) is not None:
+            got = AudioRecorder._finish_live(self)
+            if got is not None:
+                text, lang = got
+                if not self._abort:
+                    return text.strip(), lang or AudioRecorder._final_language(self)
         if pipe is not None:
             pipe.close()                  # a meeting: no more pieces - the worker drains the queue and ends
         pending = list(self._chunk_threads)
@@ -3623,14 +3856,21 @@ class AudioRecorder:
             # picked in Settings › Speech & AI (Fast / Best accuracy).
             asked_model = engine_choice.cloud_profile(
                 live_model if live_model is not None else cfg.get(engine_choice.SPEECH_PROFILE_KEY))
+            if asked_model not in (engine_choice.CLOUD_FAST, engine_choice.CLOUD_BEST):
+                # Dictation, Smart Actions and meetings never run on Gladia's file API (2-5 s a piece).
+                asked_model = engine_choice.CLOUD_FAST
             if live_model is not None or provider not in ("gemini", "mistral"):
                 provider = "gemini"
-            if asked_model == engine_choice.CLOUD_BEST:
+            if asked_model != engine_choice.CLOUD_FAST:
                 provider = "gemini"
             # Custom vocabulary for the proxy to fold into its prompt. Older
             # proxy deployments ignore unknown fields, so this is a no-op until
             # the server side ships - never an error.
             lang_setting = self._lang_setting()
+            if getattr(self, "_backup_detects", False) and live_model is None:
+                # Real-time carries this dictation in the set language: the backup detects the language itself,
+                # so a take spoken in another one is noticed at Stop (_spoke_other_language).
+                lang_setting = "auto"
             mix = speech_langs.mix_languages(cfg)
             body = {
                 "audio": b64_data,
@@ -3867,6 +4107,22 @@ PENDING_NOTES_RETRY_MS = 60_000
 # A meeting started right after launch may run for hours: keep waiting for it
 # (one check a minute) rather than leave the notes for the launch after.
 PENDING_NOTES_MAX_TRIES = 240
+# Meetings saved before meetings were named ("Meeting · Tue 14:30") get a name from their notes, once a launch,
+# a minute after startup and only while nothing records or answers (meeting_title_pass.py).
+TITLE_PASS_DELAY_MS = 60_000
+TITLE_PASS_RETRY_MS = 120_000
+TITLE_PASS_MAX_TRIES = 30
+# Real-time dictation (live_stt.py, Gladia live): how long Stop waits for Gladia's last sentence (Gladia: finals
+# ~0.3 s after the speech ends) before the pieces' text is used instead.
+LIVE_STOP_S = 2.5
+# A meeting's live audio kept for its sentences' speaker labels (a sentence is finished ~0.3 s after it is said and
+# Gladia closes one after 15 s at most).
+LIVE_RING_S = 90.0
+# Smart Actions on the selected text (selection_reader.py, docs/redesign/selected-text-spec.md): how long a take waits,
+# after the person stops speaking, for a selection still being read; an on-computer model reads at most this much of
+# a long selection (its whole window is 8192 tokens).
+SELECTION_WAIT_S = 1.5
+LOCAL_SELECTION_CHARS = 8000
 
 
 # ── Main PySide6 Application Controller ───────────────────────────────────────
@@ -3982,6 +4238,8 @@ class AppController(QObject):
         self.recorder.on_levels = self._on_levels
         self.recorder.on_lang_detected = self._on_lang
         self.recorder.on_partial = self._on_partial
+        # Real-time dictation: the words so far, while speaking (the pill's live line)
+        self.recorder.on_live_text = lambda text: self.overlay.call_soon(self.overlay.set_partial, text)
         from pynput.keyboard import Controller
         self.kbd = Controller()
         self.is_rec = False
@@ -4147,6 +4405,7 @@ class AppController(QObject):
         # Meeting notes a Quit left for later: written once startup work is done.
         self._pending_notes_queue = []
         QTimer.singleShot(PENDING_NOTES_DELAY_MS, self._write_pending_notes)
+        QTimer.singleShot(TITLE_PASS_DELAY_MS, self._name_old_meetings)
 
         # Setup System Tray
         self._setup_tray()
@@ -5635,7 +5894,16 @@ class AppController(QObject):
             return
         self.track("update_install_started", {"manual": False, "to": tag})
         log = updater.new_log_path()
-        ok, info = updater.launch_installer(path, all_users=False, log_path=log, relaunch=False)
+        # The person chose to quit, so nothing of Gusan stays on screen while Windows starts Setup. That
+        # takes many seconds (it checks a ~115 MB program first); a window left up would show "Not
+        # responding" for all of them. Setup's own small window follows.
+        for put_away in (lambda: [w.hide() for w in self.qapp.topLevelWidgets()],
+                         lambda: self.tray_icon.hide()):
+            try:
+                put_away()
+            except Exception:
+                logger.debug("Could not put a window away before the update", exc_info=True)
+        ok, info = updater.launch_installer_waiting(path, all_users=False, log_path=log, relaunch=False)
         self.track("update_install_result", {"manual": False, "ok": bool(ok)})
         if ok:
             # A failed install is said at the next start; pending_update_version stays until then.
@@ -6917,6 +7185,17 @@ class AppController(QObject):
         try:
             self.is_rec = True
             self._oneshot_action = actions.ACTION_SMART_AUTO if smart else None
+            # A Smart Action reads the text selected on screen now, while the person speaks (selection_reader.py).
+            self._take_selection = None
+            if smart:
+                AppController._hide_answer_card(self)
+                if (getattr(self, "cfg", None) or {}).get("smart_selection", True):
+                    try:
+                        import selection_reader
+                        if selection_reader.enabled():
+                            self._take_selection = selection_reader.SelectionJob()
+                    except Exception:
+                        logger.debug("Could not start reading the selection", exc_info=True)
             dictation_model = self.cfg.get("whisper_model") or "base"
             # Dictation's model is loaded again after a take that used
             # another one (or the cloud): _restore_dictation_speech.
@@ -7265,6 +7544,10 @@ class AppController(QObject):
         oneshot = getattr(self, "_oneshot_action", None)
         if oneshot != actions.ACTION_SMART_AUTO:
             oneshot = None
+        # ...and the selection it read when the shortcut was pressed (None: not a Smart Action, or none started).
+        sel_job = getattr(self, "_take_selection", None) if oneshot else None
+        sel_kind = None
+        sources = []                     # the web pages a Smart Action used (title + address), when it searched
         # What THIS take transcribes with (a Smart Action may use its own;
         # a cloud pick stays on this computer once Privacy mode is on, as
         # AudioRecorder._backend decides).
@@ -7418,15 +7701,37 @@ class AppController(QObject):
             self.overlay.call_soon(self.overlay.set_state, PROCESSING)
             # Pick the engine + inject the auth token for Pro managed actions.
             action_model, action_config = self._resolve_action_engine()
+            # Text selected on screen: the spoken words are the instruction, the selection what they are about.
+            action_input = text
+            sel = None
+            if sel_job is not None and action_mode == actions.ACTION_SMART_AUTO:
+                sel = AppController._selection_for_take(self, sel_job, action_model, action_config)
+                if sel:
+                    action_mode = actions.ACTION_SMART_SELECTION
+                    action_input = smart_prompt.selection_input(sel.text, text)
+                    # the pill says the take works on the selection ("On your selection · Gusan Cloud")
+                    self.overlay.call_soon(self.overlay.set_task, pill_kind, pill_detail,
+                                           dict(pill_info or {}, on_selection=True))
+            # The web (Linkup, through Gusan Cloud), when the person turned it on: the server searches only when the
+            # request asks for it or needs live figures (web_sources.smart_search_wanted - the pill says so ahead).
+            action_config, web_info = AppController._smart_web(self, text, action_mode, action_model, action_config)
+            if web_info is not None and web_sources.smart_search_wanted(text):
+                depth = web_sources.search_depth(text, action_mode)
+                self.overlay.call_soon(self.overlay.set_task, pill_kind, pill_detail,
+                                       dict(pill_info or {}, on_selection=bool(sel), web="deep" if depth == "deep" else True))
             try:
                 output_text = actions.process(
-                    text,
+                    action_input,
                     action_mode,
                     source_lang=lang or "auto",
                     target_lang=self.cfg.get("translate_target", "en"),
                     model=action_model,
                     config=action_config,
                 )
+                if action_mode == actions.ACTION_SMART_SELECTION:
+                    # "<answer>" first: something to read (a card, never pasted); else the changed text.
+                    sel_kind, output_text = smart_prompt.split_selection_result(output_text)
+                sources = list((web_info or {}).get("sources") or [])
                 telemetry.track(
                     "action_completed",
                     {
@@ -7459,6 +7764,11 @@ class AppController(QObject):
             # one that really transcribed this take.
             extra = ({"action": action_mode, "said": text}
                      if action_mode != actions.ACTION_TRANSCRIBE_ONLY else {})
+            if action_mode == actions.ACTION_SMART_SELECTION:
+                # The pages know Smart Actions by their mode; the selected text itself is never kept.
+                extra = {"action": actions.ACTION_SMART_AUTO, "said": text, "on_selection": True}
+            if sources and extra:
+                extra["sources"] = sources              # the web pages it used (title + address)
             hist.save_entry(output_text, lang, used_backend, **extra)
             self.notify_history_changed()
 
@@ -7476,7 +7786,12 @@ class AppController(QObject):
         )
 
         self._wait_keys_released(0.35)
-        if action_mode != actions.ACTION_TRANSCRIBE_ONLY:
+        if action_mode == actions.ACTION_SMART_SELECTION:
+            AppController._deliver_selection_result(self, sel_kind, output_text, pill_kind, sources)
+        elif action_mode != actions.ACTION_TRANSCRIBE_ONLY and sources:
+            pasted = self._paste_via_clipboard(output_text, rich=True)
+            self.overlay.call_soon(self.overlay.show_done, pasted, kind=pill_kind, web_sources=len(sources))
+        elif action_mode != actions.ACTION_TRANSCRIBE_ONLY:
             # A Smart Action's Markdown: real lists / bold / headings where
             # the app takes HTML, nice plain text everywhere else.
             pasted = self._paste_via_clipboard(output_text, rich=True)
@@ -7488,6 +7803,91 @@ class AppController(QObject):
         # A pending update: one quiet notice a run (not after every dictation),
         # shown after the "done" pill - the next dictation never waits for it.
         self._nudge_update_after_dictation()
+
+    def _selection_for_take(self, job, engine, config):
+        """The selection read at the shortcut press, when the AI that will run can read it - else None: nothing
+        selected, the built-in formatter, a cloud engine without its key or token, Privacy mode with a cloud engine,
+        an on-computer model that is not downloaded. Worker thread."""
+        config = config or {}
+        kind = actions.ACTION_MODELS.get(engine, {}).get("kind")
+        if kind in ("cloud", "managed") and config.get("privacy_mode"):
+            logger.info("Selected text not used: Privacy mode keeps Smart Actions on this computer")
+            return None
+        if ((kind == "managed" and not config.get("_managed_token"))
+                or (kind == "cloud" and not actions.engine_has_key(engine, config))
+                or (kind == "local_llm" and not local_llm.model_downloaded(engine))
+                or kind not in ("managed", "cloud", "local_llm")):
+            logger.info("Selected text not used: Smart Actions run on %s, which can't read it", engine)
+            return None
+        sel = job.result(SELECTION_WAIT_S)
+        if not sel:
+            return None
+        if kind == "local_llm" and len(sel.text) > LOCAL_SELECTION_CHARS:
+            sel.text, sel.cut = sel.text[:LOCAL_SELECTION_CHARS], True
+        if sel.cut:
+            logger.info("The selection was long: the AI read the first %d characters", len(sel.text))
+        return sel
+
+    def _copy_result(self, text):
+        """A Smart Action's result on the clipboard (rich, as a paste would put it), not pasted."""
+        try:
+            put = AppController._rich_copy(text)
+        except Exception:
+            put = None
+        if put is None:
+            pyperclip.copy(text)
+
+    def _smart_web(self, text, action_mode, engine, config):
+        """(config, info): a Smart Action's config with the web search asked for, and the dict the answer's sources
+        land in - or (config, None) when it can't search: the setting is off, Privacy mode, not Gusan Cloud with a
+        Pro token. Worker thread."""
+        cfg = getattr(self, "cfg", None) or {}
+        if (not cfg.get("smart_actions_web_search") or cfg.get("privacy_mode")
+                or action_mode not in (actions.ACTION_SMART_AUTO, actions.ACTION_SMART_SELECTION)
+                or actions.ACTION_MODELS.get(engine, {}).get("kind") != "managed"
+                or not (config or {}).get("_managed_token")):
+            return config, None
+        info = {}
+        return dict(config or {}, _web_search=True, _web_query=str(text or ""), _answer_info=info), info
+
+    def _deliver_selection_result(self, kind, text, pill_kind=None, sources=()):
+        """Worker thread. An answer about the selection: a card, and copied - never pasted. A changed text: pasted
+        where the cursor is (over the selection when it is still selected in a box you can type in) and left on the
+        clipboard; when the cursor is somewhere nothing can be typed (a web page), copied and shown instead."""
+        import selection_reader
+        n = len(sources or ())
+        if kind == smart_prompt.KIND_ANSWER:
+            AppController._copy_result(self, text)
+            self.overlay.call_soon(self.overlay.show_done, False, web_sources=n)
+            self._run_on_gui(AppController._show_answer_card, self, text, "answer", sources)
+            return
+        if selection_reader.focus_editable() is False:
+            AppController._copy_result(self, text)
+            self.overlay.call_soon(self.overlay.show_done, False, kind=pill_kind, web_sources=n)
+            self._run_on_gui(AppController._show_answer_card, self, text, "copied", sources)
+            return
+        pasted = self._paste_via_clipboard(text, restore=False, rich=True)
+        self.overlay.call_soon(self.overlay.show_done, pasted, kind=pill_kind, web_sources=n)
+
+    def _show_answer_card(self, text, kind="answer", sources=()):
+        """GUI thread: the small card above the pill (ui/answer_card.py); ``kind``: "answer" or "copied"; ``sources``:
+        the web pages the answer used."""
+        try:
+            card = getattr(self, "_answer_card", None)
+            if card is None:
+                from ui.answer_card import AnswerCard
+                card = self._answer_card = AnswerCard()
+            card.show_text(text, kind, near=getattr(self, "overlay", None), sources=sources)
+        except Exception:
+            logger.warning("Could not show the answer card", exc_info=True)
+
+    def _hide_answer_card(self):
+        card = getattr(self, "_answer_card", None)
+        if card is not None:
+            try:
+                card.hide()
+            except Exception:
+                pass
 
     def paste_text(self, text, rich=False):
         # Triggers cursor paste for clicked history logs. ``rich``: a Smart
@@ -7854,6 +8254,59 @@ class AppController(QObject):
             if folders:
                 self._run_on_gui(self._start_pending_notes, folders)
         threading.Thread(target=_scan, daemon=True, name="gusan-pending-notes").start()
+
+    def _title_pass_busy(self):
+        """Something the person is doing (or the app is ending) that the quiet naming of old meetings gives way to."""
+        s = getattr(self, "meeting_session", None)
+        return bool(getattr(self, "_quitting", False) or self.is_rec or getattr(self, "_busy", False) is True
+                    or getattr(self, "_file_job_running", False) is True or getattr(self, "_live_session_id", None)
+                    or (s is not None and s.is_busy))
+
+    def _name_old_meetings(self, tries=0):
+        """Startup (+60 s): meetings saved before meetings were named get a name from their notes - one short call
+        each, newest first, up to 25 a launch, one pass at a time (meeting_title_pass.py says when it never runs: Privacy
+        mode, a Free person, a model on this computer). Waits while something records or converts, as the pending notes
+        do."""
+        if getattr(self, "_quitting", False) or getattr(self, "_title_pass_running", False):
+            return
+        s = getattr(self, "meeting_session", None)
+        if s is None:
+            return
+        if self._title_pass_busy():
+            if tries < TITLE_PASS_MAX_TRIES:
+                QTimer.singleShot(TITLE_PASS_RETRY_MS, lambda t=tries + 1: self._name_old_meetings(t))
+            return
+        try:
+            import meeting_session
+            import meeting_title_pass
+            engine, config = self._resolve_action_engine(action_model=meeting_session.effective_notes_engine(self))
+            if not meeting_title_pass.allowed_engine(engine, config):
+                return
+        except Exception:
+            logger.debug("Naming old meetings: could not pick an engine", exc_info=True)
+            return
+        self._title_pass_running = True
+
+        def work():
+            try:
+                named = meeting_title_pass.run(engine, config, should_stop=self._title_pass_busy)
+            finally:
+                self._title_pass_running = False
+            if named:
+                self._run_on_gui(self._old_meetings_named)
+        threading.Thread(target=work, daemon=True, name="gusan-title-pass").start()
+
+    def _old_meetings_named(self):
+        """GUI thread: some old meetings have names now - the Meetings list and Past sessions read the library again."""
+        mw = getattr(self, "main_win", None)
+        try:
+            for route, hook in (("meetings", "list_changed"), ("live_assistant", "reload_sessions")):
+                page = mw.page(route) if mw is not None else None
+                fn = getattr(page, hook, None)
+                if callable(fn):
+                    fn()
+        except Exception:
+            logger.debug("Refreshing the lists after naming old meetings failed", exc_info=True)
 
     def _start_pending_notes(self, folders):
         self._pending_notes_queue = list(folders)

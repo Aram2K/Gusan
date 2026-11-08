@@ -155,8 +155,8 @@ class Spec:
     api_key: str = field(default="", repr=False)
     token_fn: Optional[Callable] = field(default=None, repr=False)
     cfg: Optional[dict] = field(default=None, repr=False, compare=False)   # the live cfg
-    # Gusan Cloud only: the profile sent in the request's "model" field - "fast" or "best"
-    # (engine_choice.CLOUD_FAST / CLOUD_BEST). The server picks the engine and says which one ran.
+    # Gusan Cloud only: the profile sent in the request's "model" field (engine_choice.CLOUD_PROFILES).
+    # The server picks the engine and says which one ran.
     # (An older proxy ignores the field and runs its default.)
     request_model: str = ""
 

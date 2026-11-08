@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (QBoxLayout, QCheckBox, QFileDialog, QFrame, QGrap
                                QLabel, QMenu, QPlainTextEdit, QProgressBar, QScrollArea,
                                QSizePolicy, QStackedWidget, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
+import meeting_titles
 import rich_text
 from app_info import APP_NAME
 from ui import privacy_prompt, theme
@@ -1773,7 +1774,7 @@ class NotesView(QWidget):
             self.tabs.set_index(0)
             self.stack.setCurrentIndex(0)
         if item:
-            self.title_label.setText(item.get("title") or "Meeting")
+            self.title_label.setText(meeting_titles.display_title(item, me=self.page.me()))
         self._load_token += 1
         token = self._load_token
         folder = self.folder
@@ -1855,7 +1856,10 @@ class NotesView(QWidget):
     def render(self):
         d = self.data
         meta = d.get("meta") or {}
-        title = d.get("title") or "Meeting"
+        # the list's name for it ("Meeting with Anna" while it still has the app's "Meeting · Tue 14:30")
+        title = meeting_titles.display_title({"title": d.get("title"), "attendees_list": d.get("people") or [],
+                                              "source": meta.get("source")}, me=self.page.me())
+        d["display_title"] = title                     # (the delete question says the same)
         self.title_label.setText(title)
         self.title_label.setAccessibleName(title)
         clear_layout(self._meta)
@@ -2301,7 +2305,10 @@ class NotesView(QWidget):
         def done(ok, err):
             if ok and err is None:
                 self.data["title"] = " ".join(str(text or "").split()) or "Untitled Meeting"
-                self.title_label.setText(self.data["title"])
+                self.data["display_title"] = meeting_titles.display_title(
+                    {"title": self.data["title"], "attendees_list": self.data.get("people") or [],
+                     "source": (self.data.get("meta") or {}).get("source")}, me=self.page.me())
+                self.title_label.setText(self.data["display_title"])
                 self.page.list_changed()
             else:
                 self.flash("Couldn't rename this meeting.", "red")
@@ -2455,7 +2462,9 @@ def read_meeting(folder):
     # segments and the call's sound)? Two small files read here, off the window's thread: the page
     # offers "Identify speakers" for a meeting that still says "Them" only when it can.
     can_name_call = bool(meeting_speakers.refinable(folder)) if "Them:" in transcript else False
-    return {"folder": str(folder), "meta": meta, "title": str(meta.get("title") or "Untitled Meeting"),
+    # "title" is the stored one (the rename box, exports); render() shows the list's name for it.
+    title = str(meta.get("title") or "Untitled Meeting")
+    return {"folder": str(folder), "meta": meta, "title": title,
             "notes": notes, "transcript": transcript, "my_notes": my_notes, "parts": parts,
             "people": list(people), "screen_people": meeting_store.screen_people(meta),
             "started": started, "duration_sec": duration,

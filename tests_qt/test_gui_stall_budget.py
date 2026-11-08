@@ -226,7 +226,7 @@ def test_opening_a_45_minute_meeting_keeps_the_window_alive(qapp, meetings_root,
             pump(0.6)
         pump(0.5)
     view = page.notes_view
-    assert view.title_label.text() == "Live session 10:31"
+    assert view.title_label.text() == "Meeting with Anna and David"   # until the AI names it (meeting_titles)
     assert "Speaker 1" in view.transcript.toPlainText()
     assert len(view.my_notes.toPlainText()) > 500
     assert abs(view.audio_player.duration_ms - 45 * 60 * 1000) < 2000
@@ -387,6 +387,10 @@ def test_a_long_library_is_drawn_in_slices_not_in_one_freeze(qapp, meetings_root
     win.show()
     page = win.open("meetings")
     pump(1.0)
+    # The page reads the library on a worker: let that land first, or (on a busy machine) it lands in the middle
+    # of the list drawn below and replaces it.
+    assert pump(until=lambda: len(page.list_view.items()) == 80, limit=30)
+    pump(0.2)
     items = meeting_store.list_meetings()
     assert len(items) == 80
     ml = page.list_view.meetings
@@ -411,6 +415,8 @@ def test_a_newer_list_replaces_one_still_being_drawn(qapp, meetings_root, window
     win.show()
     page = win.open("meetings")
     pump(1.0)
+    assert pump(until=lambda: len(page.list_view.items()) == 60, limit=30)   # the page's own read first
+    pump(0.2)
     items = meeting_store.list_meetings()
     ml = page.list_view.meetings
     ml.set_items(items)

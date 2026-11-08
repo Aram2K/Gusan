@@ -92,7 +92,6 @@ import json
 import logging
 import math
 import os
-import re
 
 from PySide6.QtCore import (QEasingCurve, QEvent, QPointF, QRectF, QSize, Qt, QTimer, QVariantAnimation,
                             Signal)
@@ -104,6 +103,7 @@ from PySide6.QtWidgets import (QBoxLayout, QButtonGroup, QComboBox, QFrame, QGra
 
 import hotkeys
 import live_context
+import meeting_titles
 from ui import live_docs_ui, theme
 from ui.components import (Button, Card, Chip, IconButton, PageHeader, ProTag, Segmented,
                            SettingRow, SettingsRail, Toggle, icons, label, row_actions)
@@ -145,7 +145,6 @@ CONTEXT_SAVE_MS = 700
 CONTEXT_MIN_H = 66                          # Context: two lines tall...
 CONTEXT_MAX_LINES = 5                       # ...growing to five as the text needs
 
-_GENERIC_TITLE = re.compile(r"^Live session \d{1,2}:\d{2}$")
 _DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
@@ -276,18 +275,13 @@ def load_sessions():
     for m in meeting_store.list_live_sessions():
         folder = str(m.get("dir") or "")
         question, answers = _answers_log(folder)
-        if question:
-            text = "“%s”" % question
+        title = " ".join(str(m.get("title") or "").split())
+        if title and not meeting_titles.is_placeholder(title):
+            text = title                     # its title: the person's, or the AI's from the notes
+        elif question:
+            text = "“%s”" % question         # what was asked tells the session apart
         else:
-            title = str(m.get("title") or "").strip()
-            if title and not _GENERIC_TITLE.match(title) and title != "Untitled Meeting":
-                text = title
-            else:
-                try:
-                    text = meeting_store.summary_preview(meeting_store.load_notes(folder))
-                except Exception:
-                    text = ""
-                text = text or "Live session"
+            text = meeting_titles.people_title(m.get("attendees_list") or []) or "Live session"
         out.append({"dir": folder, "id": m.get("id", ""),
                     "started": str(m.get("started") or m.get("timestamp") or ""),
                     "duration_sec": m.get("duration_sec") or 0,
@@ -1761,6 +1755,9 @@ class LiveAssistantPage(QWidget):
         self.auto_toggle = Toggle("Answer questions by itself", bool(cfg.get("live_assist_auto_answer", True)))
         self.auto_toggle.toggled.connect(lambda on: self._apply_bool("live_assist_auto_answer", on, self.auto_toggle))
         rail.add_row(SettingRow("Answer questions by itself", self.auto_toggle))
+        self.web_toggle = Toggle("Search the web for answers (Gusan Cloud)", bool(cfg.get("live_assist_web_search", False)))
+        self.web_toggle.toggled.connect(lambda on: self._apply_bool("live_assist_web_search", on, self.web_toggle))
+        rail.add_row(SettingRow("Search the web for answers (Gusan Cloud)", self.web_toggle))
 
         self.screen_toggle = Toggle("Let it see my screen", bool(cfg.get("live_assist_screen_auto", True)))
         self.screen_toggle.toggled.connect(lambda on: self._apply_bool("live_assist_screen_auto", on, self.screen_toggle))
@@ -1978,7 +1975,7 @@ class LiveAssistantPage(QWidget):
         self._wanted_private = bool(cfg.get("live_assist_private", True))
         self.picture.set_owner(_first_name(self.app))
         for key in ("live_assist_private", "live_assist_hotkey", "live_assist_auto_answer",
-                    "live_assist_screen_auto", "live_assist_language", "live_assist_output_language",
+                    "live_assist_screen_auto", "live_assist_web_search", "live_assist_language", "live_assist_output_language",
                     "live_assist_theme", "live_assist_opacity", "live_assist_context",
                     live_rules.RULES_KEY, live_rules.DECLINED_KEY):
             self._sync_key(key, refresh_writer=False)
@@ -2011,6 +2008,10 @@ class LiveAssistantPage(QWidget):
             self.or_label.setVisible(has)
         elif key == "live_assist_auto_answer":
             self._set_checked(self.auto_toggle, bool(val(True)))
+        elif key == "live_assist_web_search":
+            privacy = bool(self._cfg_dict().get("privacy_mode"))
+            self.web_toggle.setEnabled(not privacy)
+            self._set_checked(self.web_toggle, not privacy and bool(val(False)))
         elif key == "live_assist_screen_auto":
             self._set_checked(self.screen_toggle, bool(val(True)))
         elif key == "live_assist_language":
@@ -2044,6 +2045,8 @@ class LiveAssistantPage(QWidget):
         elif key == live_rules.DECLINED_KEY:
             self.context_card.refresh_rules(declined=str(val("") or ""))
         elif refresh_writer and not key.startswith("live_assist_") or key == "live_assist_writer":
+            if key == "privacy_mode":
+                self._sync_key("live_assist_web_search", refresh_writer=False)
             # privacy_mode, action_model, keys, plan...: who writes the answers may have changed.
             self._refresh_writer()
 

@@ -355,7 +355,8 @@ def test_the_cloud_item_is_the_fast_profile_whatever_the_old_provider_says(page_
     page = page_for(app)
     combo = page.speech_combo
     assert combo.itemText(combo.findData("cloud")) == "Fast · Cloud · Pro"
-    assert combo.row_note(combo.findData("cloud")) == "Quick answers · Gusan chooses the model"
+    # real-time first (live_stt.py), then the Fast profile's backup engines
+    assert combo.row_note(combo.findData("cloud")) == "Gladia Solaria 1 live · ElevenLabs Scribe v2 · Mistral Voxtral"
     app.cfg["managed_provider"] = "mistral"
     page.on_setting_changed("managed_provider")
     assert combo.itemText(combo.findData("cloud")) == "Fast · Cloud · Pro"   # the server chooses the model
@@ -479,3 +480,15 @@ def test_greying_a_choice_out_leaves_no_wrapper_behind(qapp):
     assert box.choice_enabled(0) and box.choice_enabled(7)    # out of range: not greyed
     box.set_choice_enabled(7, False)                          # out of range: nothing happens
     box.deleteLater()
+
+
+def test_search_the_web_is_a_switch_on_the_page_off_by_default(page_for):
+    app = live_app("pro")
+    page = page_for(app)
+    assert page.web_row.isVisibleTo(page)
+    assert not page.web_toggle.isChecked()
+    page.web_toggle.click()
+    assert settings(app, "smart_actions_web_search") == [("set_setting", "smart_actions_web_search", True)]
+    app.cfg["privacy_mode"] = True
+    page.refresh()
+    assert not page.web_toggle.isEnabled() and not page.web_toggle.isChecked()   # Privacy mode: never the web
