@@ -1,6 +1,11 @@
 import UIKit
 import GusanKit
 
+@objc private protocol KeyboardApplicationOpening {
+    @objc(openURL:options:completionHandler:)
+    func openKeyboardURL(_ url: URL, options: [AnyHashable: Any], completionHandler: ((Bool) -> Void)?)
+}
+
 final class VoiceWaveform: UIView {
     private var animation: CADisplayLink?
     private var idleAnimating = false
@@ -275,16 +280,16 @@ final class VoiceKeyController: NSObject {
         guard let parent = host?.parent, parent.responds(to: selector), let value = parent.perform(selector)?.takeUnretainedValue() as? String, !value.isEmpty, value != "<null>" else { return nil }
         return value
     }
-    /// Keyboard extensions have no UIApplication API; the host application object is found through the responder
-    /// chain and asked with the plain `openURL:` selector. No IMP casting: a mismatch there traps in Release.
     private func open(_ url: URL) {
-        let selector = NSSelectorFromString("openURL:")
+        let selector = #selector(KeyboardApplicationOpening.openKeyboardURL(_:options:completionHandler:))
         guard let applicationClass = NSClassFromString("UIApplication") else { fallbackOpen(url); return }
         var responder: UIResponder? = host
         while let current = responder {
             if current.isKind(of: applicationClass), current.responds(to: selector) {
-                // `openURL:` returns a BOOL, surfaced here only as a nil/non-nil raw value; never dereferenced.
-                if current.perform(selector, with: url) == nil { fallbackOpen(url) }
+                let application: AnyObject = current
+                application.openKeyboardURL?(url, options: [:], completionHandler: { [weak self] success in
+                    DispatchQueue.main.async { if !success { self?.fallbackOpen(url) } }
+                })
                 return
             }
             responder = current.next
