@@ -868,10 +868,11 @@ function sourceURL(value: unknown) {
     (/(^|\.)(bing\.com|search\.yahoo\.com|search\.brave\.com|ecosia\.org|yandex\.[a-z.]+)$/.test(host) && path.startsWith("/search")) ||
     (/(^|\.)duckduckgo\.com$/.test(host) && ["/", "/html", "/html/", "/lite", "/lite/"].includes(path)) ||
     (/(^|\.)baidu\.com$/.test(host) && path === "/s")) return null;
-  const params = new URL(value).searchParams;
-  for (const key of [...params.keys()]) {
-    if (/^utm_|^(?:fbclid|gclid)$|token|session|auth|key|sig|signature|code|password|email/i.test(key)) {
-      params.delete(key);
+  const params = new URLSearchParams();
+  for (const [key, item] of new URL(value).searchParams) {
+    if (/^(?:id|item|item_id|itemid|product|product_id|productid|pid|sku|asin|ad|ad_id|listing|listing_id|offer|offer_id|ref_id)$/i.test(key) &&
+      item.length <= 64 && /^[A-Za-z0-9._-]+$/.test(item)) {
+      params.append(key, item);
     }
   }
   params.sort();

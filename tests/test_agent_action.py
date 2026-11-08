@@ -1229,10 +1229,23 @@ def test_source_links_keep_item_query_ids_and_dedupe_after_removing_sensitive_pa
         "access_token=secret&session_id=s&auth=a&api_key=k&sig=z&signature=z&code=c&password=p&email=e#fragment"
     out, = run({"change": {**answered({"markdown": "Found product"}), "new_events": [
         source_observation(private), source_observation("https://shop.example/product?variant=blue&id=42&utm_medium=social")]}})
-    assert out["row"]["result"]["links"][0]["url"] == "https://shop.example/product?id=42&variant=blue"
+    assert out["row"]["result"]["links"][0]["url"] == "https://shop.example/product?id=42"
     visits = out["run"]["plan"]["source_visits"]
     assert len(visits) == 1 and visits[0]["count"] == 2
     assert "secret" not in json.dumps(visits) and "fragment" not in json.dumps(visits)
+
+
+@pytest.mark.parametrize("query,kept", [
+    ("id=42", "?id=42"), ("secret=x", ""), ("ticket=x", ""),
+    ("id=42&token=y", "?id=42"), ("id=42&secret=x&ticket=x", "?id=42"),
+    ("item_id=abc-12_3.4", "?item_id=abc-12_3.4"), ("id=" + "a" * 64, "?id=" + "a" * 64),
+    ("id=" + "a" * 65, ""), ("id=has%20spaces", ""), ("id=alice%40example.com", ""),
+    ("id=", ""), ("id=abc%2Fdef", ""),
+])
+def test_source_queries_only_allow_short_safe_item_ids(run, query, kept):
+    out, = run({"change": {**answered("Found"), "new_events": [
+        source_observation("https://shop.example/product?" + query + "#fragment")]}})
+    assert out["row"]["result"]["links"][0]["url"] == "https://shop.example/product" + kept
 
 
 def test_source_links_include_navigation_tool_urls_and_preserve_authored_links(run):
@@ -1242,7 +1255,7 @@ def test_source_links_include_navigation_tool_urls_and_preserve_authored_links(r
     fallback, authored = run({"change": {**answered("Result"), "new_events": [event]}},
         {"change": {**answered({"markdown": "See https://cited.example/page"}), "new_events": [event]}})
     assert [link["url"] for link in fallback["row"]["result"]["links"]] == [
-        "https://apple.com/mac/?private=yes", "https://apple.com/ipad/"]
+        "https://apple.com/mac/", "https://apple.com/ipad/"]
     assert [link["url"] for link in authored["row"]["result"]["links"]] == ["https://cited.example/page"]
 
 
