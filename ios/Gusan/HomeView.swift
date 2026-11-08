@@ -6,7 +6,7 @@ struct HomeView: View {
     @EnvironmentObject private var agent: AgentCenter
     @EnvironmentObject private var screen: ScreenMonitor
     @EnvironmentObject private var voice: VoiceSession
-    @AppStorage("gusan.home.mode") private var mode = "smart"
+    @State private var mode: StripMode = .smart
     @AppStorage("gusan.setup.dismissed") private var setupDismissed = false
     @State private var instruction = ""
     @State private var starting = false
@@ -24,14 +24,14 @@ struct HomeView: View {
         List {
             Section {
                 Picker("Mode", selection: $mode) {
-                    Text("Smart").tag("smart")
-                    Text("Agent").tag("agent")
+                    Text("Smart").tag(StripMode.smart)
+                    Text("Agent").tag(StripMode.agent)
                 }.pickerStyle(.segmented)
             } header: { Text("Mode") } footer: {
                 Text("The strip opens in this mode. You can also switch from the chip in the strip.")
             }
             if !setupDismissed && !setupComplete { setupChecklist }
-            if mode == "agent" { agentSections } else { smartSections }
+            if mode == .agent { agentSections } else { smartSections }
             Section {
                 NavigationLink { KeyboardSetupView() } label: {
                     HStack {
@@ -61,10 +61,12 @@ struct HomeView: View {
         .toolbar { ToolbarItem(placement: .navigationBarTrailing) { BrandMark() } }
         .navigationDestination(isPresented: $showScreen) { ScreenView() }
         .onAppear {
+            model.settings.refresh(); mode = model.settings.stripMode
             model.refreshDiagnostics(); voice.refreshPermission()
             lastResult = SmartHistory(group: model.store.resolution.chosen).entries.last
             if model.openScreenPage { showScreen = true; model.openScreenPage = false }
         }
+        .onChange(of: mode) { model.settings.stripMode = $0 }
         .onChange(of: model.openScreenPage) { if $0 { showScreen = true; model.openScreenPage = false } }
         .task { await agent.refreshNotificationStatus() }
     }

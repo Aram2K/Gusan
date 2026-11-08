@@ -45,6 +45,40 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(keyboard.keyboardAction, .smartAuto)
         app.translateTarget = "unknown"; XCTAssertEqual(keyboard.translateTarget, "en")
     }
+    func testStripModeDefaultsPersistsAndRejectsInvalidValues() {
+        let group = "Gusan.stripMode.tests." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: group)!
+        defer { defaults.removePersistentDomain(forName: group) }
+        let app = SettingsStore(group: group), keyboard = SettingsStore(group: group)
+        XCTAssertEqual(app.stripMode, .smart)
+        app.stripMode = .agent
+        XCTAssertEqual(defaults.string(forKey: "stripMode"), "agent")
+        XCTAssertEqual(keyboard.stripMode, .agent)
+        XCTAssertEqual(SettingsStore(group: group).stripMode, .agent)
+        keyboard.stripMode = .smart
+        app.refresh(); XCTAssertEqual(app.stripMode, .smart)
+        defaults.set("unknown", forKey: "stripMode")
+        XCTAssertEqual(app.stripMode, .smart)
+        defaults.set(42, forKey: "stripMode")
+        XCTAssertEqual(app.stripMode, .smart)
+    }
+    func testStripModeMirrorsBetweenSeparatePrivateStores() {
+        let appName = "Gusan.stripMode.app." + UUID().uuidString, keyboardName = "Gusan.stripMode.keyboard." + UUID().uuidString
+        let appDefaults = UserDefaults(suiteName: appName)!, keyboardDefaults = UserDefaults(suiteName: keyboardName)!
+        defer { appDefaults.removePersistentDomain(forName: appName); keyboardDefaults.removePersistentDomain(forName: keyboardName) }
+        let shared = Shared(), app = SettingsStore(defaults: appDefaults, shared: shared), keyboard = SettingsStore(defaults: keyboardDefaults, shared: shared)
+        XCTAssertEqual(keyboard.stripMode, .smart)
+        app.stripMode = .agent
+        keyboard.refresh(); XCTAssertEqual(keyboard.stripMode, .agent)
+        keyboard.keyClicks = false
+        app.refresh(); XCTAssertEqual(app.stripMode, .agent)
+        keyboard.stripMode = .smart
+        app.refresh(); XCTAssertEqual(app.stripMode, .smart)
+        shared.writable = false
+        app.stripMode = .agent
+        shared.data = Data("corrupt".utf8)
+        app.refresh(); XCTAssertEqual(app.stripMode, .agent)
+    }
     func testLegacyHeartbeatDecodesWithoutFullAccess() throws {
         let data = Data(#"{"role":"keyboard","timestamp":0,"stores":[]}"#.utf8)
         let report = try JSONDecoder().decode(SessionReport.self, from: data)

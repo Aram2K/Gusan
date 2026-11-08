@@ -352,7 +352,7 @@ public final class SettingsStore {
     private let lock = NSLock()
     private var cached: [String: Any] = [:]
     private var lastRead = Date.distantPast
-    private let keys = ["defaultAction", "translateTarget", "keyClicks", "autoCapitalization", "doubleSpacePeriod", "haptics", "pasteboardFallback", "privacyMode"]
+    private let keys = ["defaultAction", "translateTarget", "keyClicks", "autoCapitalization", "doubleSpacePeriod", "haptics", "pasteboardFallback", "privacyMode", "stripMode"]
     public init(group: String?, pasteboardAccessAllowed: @escaping () -> Bool = { true }) {
         defaults = group.flatMap(UserDefaults.init(suiteName:)) ?? .standard
         shared = NamedSessionPasteboard(namespace: "com.aram2k.gusan.settings", accessAllowed: pasteboardAccessAllowed)
@@ -396,6 +396,10 @@ public final class SettingsStore {
             if let data = try? JSONSerialization.data(withJSONObject: values) { _ = shared.write(data, key: "session") }
         }
     }
+    public var stripMode: StripMode {
+        get { (preference("stripMode") as? String).flatMap(StripMode.init(rawValue:)) ?? .smart }
+        set { setPreference(newValue.rawValue, key: "stripMode") }
+    }
     public var defaultAction: SmartActionMode {
         get { (preference("defaultAction") as? String).flatMap(SmartActionMode.init(rawValue:)) ?? .smartAuto }
         set { setPreference(newValue.rawValue, key: "defaultAction") }
@@ -433,6 +437,10 @@ public final class SettingsStore {
         get { false }
         set {}
     }
+}
+
+public enum StripMode: String, CaseIterable {
+    case smart, agent
 }
 
 public enum KeyboardDefaultAction: String, CaseIterable, Identifiable {
