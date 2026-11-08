@@ -144,7 +144,10 @@ for (let i=0; i<scenarios.length; i++) {
    s.stopDuringMessages=false;
    await handler(new Request('https://edge.test/',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer aaa.bbb.ccc'},body:JSON.stringify({action,task_id:id})}));
   }
-  if((url.endsWith('/sessions') || url.endsWith('/messages')) && createFailure){const code=createFailure;createFailure=null;return new Response('failure',{status:code});}
+  if((url.endsWith('/sessions') || url.endsWith('/messages')) && createFailure){
+   if(s.originalSessionDuringCreate){run.h_session_id='original-session';row.status='running';}
+   const code=createFailure;createFailure=null;return new Response('failure',{status:code});
+  }
   if(url.endsWith('/messages')){
    if(s.messageNetworkFailure){s.messageNetworkFailure=false;throw new TypeError('private network failure');}
    return new Response(null,{status:202});
@@ -752,6 +755,17 @@ def test_concurrent_continue_with_same_id_sends_and_charges_once(run):
     assert all(r["status"] == 200 for r in out["replies"])
     assert out["ledgerEntries"] == 1
     assert len([c for c in out["calls"] if c["url"].endswith("/messages")]) == 1
+
+
+def test_continue_retry_failure_preserves_concurrent_original_session(run):
+    out, = run(finished_research(reservedChild=True, createFailure=429,
+        originalSessionDuringCreate=True, body={"action": "continue", "task_id": ID,
+        "message": "Next", "client_message_id": "followup-reserved"}))
+    assert out["replies"][0]["status"] == 503
+    assert out["row"]["status"] == "running"
+    assert out["run"]["h_session_id"] == "original-session"
+    assert not [c for c in out["calls"] if c["method"] == "DELETE"]
+    assert out["ledgerEntries"] == 1
 
 
 def test_continue_retry_starts_reserved_queued_child_without_extra_charge(run):

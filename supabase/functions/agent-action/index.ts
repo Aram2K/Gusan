@@ -534,7 +534,7 @@ function taskRPCResult(data: Obj, error: Obj) {
   }
   return Array.isArray(data) ? data[0] : data;
 }
-async function startTask(db: any, userId: string, body: Obj, reservedRow?: Obj, continuationClaim?: string) {
+async function startTask(db: any, userId: string, body: Obj, reservedRow?: Obj, continuationClaim?: string, restarting = false) {
   const instruction = body.instruction.trim();
   const mode = body.mode ?? "research";
   let row: Obj;
@@ -557,7 +557,7 @@ async function startTask(db: any, userId: string, body: Obj, reservedRow?: Obj, 
     if (typeof session?.id !== "string" || !session.id) throw new Failure("upstream_error");
   } catch (e) {
     const busy = e instanceof Failure && e.code === "agent_busy";
-    await save(db, row, {
+    if (!restarting) await save(db, row, {
       status: "failed", error_code: busy ? "agent_capacity" : "upstream_error",
       finished_at: new Date().toISOString(),
     }, true);
@@ -578,8 +578,8 @@ async function continueTask(db: any, row: Obj, run: Obj, message: string, client
   const response = (current: Obj, status = 200) => json({
     ...task(current), ...(current.id !== row.id ? { continued_from: row.id } : {}),
   }, status);
-  const fresh = async (reservedRow: Obj) => response(
-    await startTask(db, row.user_id, body, reservedRow, marker), 201,
+  const fresh = async (reservedRow: Obj, restarting = false) => response(
+    await startTask(db, row.user_id, body, reservedRow, marker, restarting), 201,
   );
   const claim = async (operation: string) => {
     const { data, error } = await db.rpc("continue_agent_task", {
@@ -600,7 +600,7 @@ async function continueTask(db: any, row: Obj, run: Obj, message: string, client
   }
   const claimedRun = await loadRun(db, resumed);
   if (resumed.id !== row.id && resumed.status === "queued" && !claimedRun.h_session_id) {
-    return fresh(resumed);
+    return fresh(resumed, true);
   }
   if (claimedRun.plan?.continuation_claim !== marker) return response(resumed);
   if (resumed.id !== row.id) return fresh(resumed);
