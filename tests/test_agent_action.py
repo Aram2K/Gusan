@@ -810,14 +810,25 @@ def test_refusal_bullets_are_not_salvaged_as_a_plan(run, text):
     assert out["row"]["confirmation"] is None
 
 
-@pytest.mark.parametrize("instruction", ["Submit it", "Submit https://other.example.com"])
-def test_structured_plan_uses_markdown_url_before_instruction(run, instruction):
+def test_structured_plan_uses_markdown_url_when_instruction_has_none(run):
     answer = {k: v for k, v in PLAN.items() if k != "start_url"}
     answer["markdown"] = "Plan for https://example.com/send"
-    out, = run({"row": {"mode": "do"}, "run": {"plan": {"instruction": instruction}},
+    out, = run({"row": {"mode": "do"}, "run": {"plan": {"instruction": "Submit it"}},
                 "change": answered(answer)})
     assert out["row"]["status"] == "awaiting_confirmation"
     assert out["row"]["confirmation"] == PLAN
+
+
+@pytest.mark.parametrize("prose", [False, True])
+def test_instruction_url_wins_over_cited_markdown_url(run, prose):
+    markdown = "Source: https://example.com/reference\nPlan:\n1. Open page\n2. Fill name\n3. Submit"
+    answer = markdown if prose else {
+        **{k: v for k, v in PLAN.items() if k != "start_url"}, "markdown": markdown}
+    out, = run({"row": {"mode": "do"},
+        "run": {"plan": {"instruction": "Submit https://httpbin.org/forms/post"}},
+        "change": answered(answer)})
+    assert out["row"]["status"] == "awaiting_confirmation"
+    assert out["row"]["confirmation"]["start_url"] == "https://httpbin.org/forms/post"
 
 
 @pytest.mark.parametrize("prose", [False, True])

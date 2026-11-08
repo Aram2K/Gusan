@@ -361,9 +361,8 @@ function preparePlan(
       return validPlan({
         summary: p.summary ?? p.title,
         action_kind: p.action_kind ?? "other",
-        start_url: p.start_url ?? p.site ??
-          (typeof object?.markdown === "string" ? planURL(object.markdown) : undefined) ??
-          planURL(instruction),
+        start_url: p.start_url ?? p.site ?? planURL(instruction) ??
+          (typeof object?.markdown === "string" ? planURL(object.markdown) : undefined),
         steps: planSteps(p.steps),
       });
     }
@@ -388,8 +387,8 @@ function preparePlan(
     const plan = validPlan({
       summary: object?.summary ?? object?.title ?? instruction,
       action_kind: object?.action_kind ?? "other",
-      start_url: object?.start_url ?? object?.site ?? planURL(text) ??
-        planURL(instruction),
+      start_url: object?.start_url ?? object?.site ?? planURL(instruction) ??
+        planURL(text),
       steps,
     });
     if (plan) return plan;
