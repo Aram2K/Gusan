@@ -1159,7 +1159,7 @@ def test_listing_search_links_are_downgraded_and_markdown_relabelled(run, href):
     markdown = "\n".join(f"{i}. [Voir l'annonce]({href})" for i in range(1, 4))
     out, = run({"change": answered({"markdown": markdown, "links": [
         {"title": "Voir l'annonce", "url": href}] * 3})})
-    assert out["row"]["result"]["links"] == [{"title": "Voir l'annonce", "url": href, "kind": "search"}]
+    assert out["row"]["result"]["links"] == [{"title": "Voir l'annonce (search results)", "url": href, "kind": "search"}]
     assert out["row"]["result"]["markdown"].count("(search results)") == 3
 
 
@@ -1169,6 +1169,16 @@ def test_distinct_item_links_remain_listings_without_double_counting_markdown(ru
     out, = run({"change": answered({"markdown": markdown, "links": links})})
     assert [link["kind"] for link in out["row"]["result"]["links"]] == ["listing"] * 3
     assert out["row"]["result"]["markdown"] == markdown
+
+
+@pytest.mark.parametrize("title", ["View listing", "Search results (search results)", "x" * 200])
+def test_search_link_titles_are_honest_bounded_and_relabelled_only_once(run, title):
+    out, = run({"change": answered({"markdown": "Found", "links": [
+        {"title": title, "url": "https://market.example/search?q=phone"}]})})
+    link, = out["row"]["result"]["links"]
+    assert link["kind"] == "search"
+    assert link["title"].count("(search results)") == 1
+    assert len(link["title"]) <= 200
 
 
 def test_duplicate_item_urls_presented_as_different_listings_are_search(run):
@@ -1232,7 +1242,7 @@ def test_source_links_include_navigation_tool_urls_and_preserve_authored_links(r
     fallback, authored = run({"change": {**answered("Result"), "new_events": [event]}},
         {"change": {**answered({"markdown": "See https://cited.example/page"}), "new_events": [event]}})
     assert [link["url"] for link in fallback["row"]["result"]["links"]] == [
-        "https://apple.com/mac/", "https://apple.com/ipad/"]
+        "https://apple.com/mac/?private=yes", "https://apple.com/ipad/"]
     assert [link["url"] for link in authored["row"]["result"]["links"]] == ["https://cited.example/page"]
 
 

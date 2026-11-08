@@ -269,7 +269,11 @@ function classifyResultLinks(result: Obj, answer: unknown) {
       return counts.has(href) || item ? "listing" : "source";
     } catch { return "source"; }
   };
-  result.links = result.links.map((link: Obj) => ({ ...link, kind: kind(link.url) }));
+  result.links = result.links.map((link: Obj) => {
+    const linkKind = kind(link.url);
+    return { ...link, kind: linkKind, title: linkKind === "search" && !link.title.includes("(search results)")
+      ? `${link.title.slice(0, 183)} (search results)` : link.title };
+  });
   result.markdown = result.markdown.replace(markdownLink, (match: string, title: string, href: string) =>
     counts.has(href) && kind(href) === "search" && !title.includes("(search results)")
       ? `[${title} (search results)](${href})` : match);
