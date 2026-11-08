@@ -8,6 +8,8 @@ struct VaultView: View {
     @StateObject private var vault = VaultController()
     @State private var adding = false
     @State private var deleting: VaultLogin?
+    @State private var approving: UUID?
+    @State private var denying: UUID?
     private var available: Bool { vault.isDemo || (model.session != nil && model.isPro && !model.settings.privacyMode) }
 
     init() {}
@@ -114,17 +116,27 @@ struct VaultView: View {
                     .font(.footnote).foregroundStyle(Theme.danger)
             }
             if request.pageMatches {
-                PrimaryButton(title: "Use login with Face ID", icon: "faceid", busy: vault.busy) {
-                    Task { await vault.approve(request) }
+                PrimaryButton(title: "Use login with Face ID", icon: "faceid", busy: approving == request.id) {
+                    guard approving == nil, denying == nil, !vault.busy else { return }
+                    approving = request.id
+                    Task { defer { approving = nil }; await vault.approve(request) }
                 }.disabled(request.expiresAt <= Date())
             }
             HStack {
-                Button("Deny", role: .destructive) { Task { await vault.deny(request) } }
-                    .frame(minHeight: 44).disabled(vault.busy)
+                Button(role: .destructive) {
+                    guard approving == nil, denying == nil, !vault.busy else { return }
+                    denying = request.id
+                    Task { defer { denying = nil }; await vault.deny(request) }
+                } label: {
+                    HStack {
+                        if denying == request.id { ProgressView() }
+                        Text("Deny")
+                    }.frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                }.buttonStyle(.borderless)
                 Spacer()
                 Text("Expires \(request.expiresAt, style: .time)").font(.caption).foregroundStyle(.secondary)
             }
-        }.padding(.vertical, 8)
+        }.padding(.vertical, 8).disabled(vault.busy || approving != nil || denying != nil)
     }
 
     private func loginRow(_ login: VaultLogin) -> some View {
