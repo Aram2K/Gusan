@@ -130,6 +130,10 @@ final class KeyboardViewController: UIInputViewController {
     }
     private func process(_ text: String, context: VoiceContext) {
         if agentTake {
+            guard !settings.privacyMode else {
+                voice.show("Agent needs Gusan Cloud — off in Privacy Mode")
+                return
+            }
             let intent = AgentIntent.detect(text) ?? AgentIntent(mode: .research, instruction: text)
             agent.start(intent, context: context.selected)
             collapse?.invalidate()
