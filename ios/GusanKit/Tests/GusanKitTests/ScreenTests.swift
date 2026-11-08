@@ -264,16 +264,15 @@ final class ScreenSettingsTests: XCTestCase {
         let board = MemoryBackend()
         let settings = ScreenSettings(defaults: defaults, shared: board)
         XCTAssertEqual(settings.idleMinutes, 10)
-        XCTAssertFalse(settings.explained)
-        settings.idleMinutes = 20; settings.explained = true
-        XCTAssertEqual(settings.idleMinutes, 20); XCTAssertTrue(settings.explained)
+        settings.idleMinutes = 20
+        XCTAssertEqual(settings.idleMinutes, 20)
         settings.idleMinutes = 7
         XCTAssertEqual(settings.idleMinutes, 10, "unknown values fall back to the default")
         // A second process with its own defaults (broken App Group) sees the pasteboard copy.
         let other = UserDefaults(suiteName: suite + ".other")!
         defer { other.removePersistentDomain(forName: suite + ".other") }
         let peer = ScreenSettings(defaults: other, shared: board)
-        XCTAssertTrue(peer.explained); XCTAssertEqual(peer.idleMinutes, 10)
+        XCTAssertEqual(peer.idleMinutes, 10)
         peer.idleMinutes = 5
         XCTAssertEqual(settings.idleMinutes, 5)
     }
@@ -410,41 +409,5 @@ final class ScreenPromptSelectionTests: XCTestCase {
         XCTAssertFalse(try userText(selected: "Bonjour", text: "Hi. Bonjour. Bye").contains("Bye"), "only the selection is sent when there is one")
         XCTAssertTrue(try userText(selected: "", text: "Hi there").contains("nothing is selected; \"this\" in the instruction means the screen"))
         XCTAssertTrue(try userText(selected: "", text: "").contains("The field is empty"))
-    }
-}
-
-final class ScreenConsentTests: XCTestCase {
-    func testConsentExpiresAndFollowsTheVersion() {
-        let suite = "ScreenConsentTests." + UUID().uuidString
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
-        var clock = Date()
-        let board = MemoryBackend()
-        let settings = ScreenSettings(defaults: defaults, shared: board, version: "1.2", now: { clock })
-        XCTAssertFalse(settings.explained); XCTAssertNil(settings.explainedAt)
-        settings.explained = true
-        XCTAssertTrue(settings.explained); XCTAssertEqual(settings.explainedAt!.timeIntervalSince(clock), 0, accuracy: 0.001)
-        clock = clock.addingTimeInterval(ScreenSettings.consentValidity - 1)
-        XCTAssertTrue(settings.explained)
-        clock = clock.addingTimeInterval(2)
-        XCTAssertFalse(settings.explained, "re-shown after 30 days")
-        XCTAssertNotNil(settings.explainedAt, "the page can say it is a repeat")
-        settings.explained = true
-        XCTAssertTrue(settings.explained)
-        let updated = ScreenSettings(defaults: defaults, shared: board, version: "1.3", now: { clock })
-        XCTAssertFalse(updated.explained, "re-shown after an app update")
-        XCTAssertFalse(settings.armReminderShown)
-        settings.armReminderShown = true
-        XCTAssertTrue(ScreenSettings(defaults: defaults, shared: board, version: "1.2", now: { clock }).armReminderShown)
-        XCTAssertNil(settings.lastIdleStop)
-        settings.recordIdleStop(minutes: 10)
-        XCTAssertEqual(settings.lastIdleStop?.minutes, 10); XCTAssertEqual(settings.lastIdleStop!.at.timeIntervalSince(clock), 0, accuracy: 0.001)
-        // The extension's record is visible to the app through the shared copy.
-        let other = UserDefaults(suiteName: suite + ".other")!
-        defer { other.removePersistentDomain(forName: suite + ".other") }
-        XCTAssertEqual(ScreenSettings(defaults: other, shared: board, version: "1.2", now: { clock }).lastIdleStop?.minutes, 10)
-        settings.clearIdleStop()
-        XCTAssertNil(settings.lastIdleStop)
-        XCTAssertNil(ScreenSettings(defaults: other, shared: board, version: "1.2", now: { clock }).lastIdleStop)
     }
 }

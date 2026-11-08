@@ -20,7 +20,6 @@ final class SampleHandler: RPBroadcastSampleHandler {
     private let ciContext = CIContext(options: [.cacheIntermediates: false, .priorityRequestLow: true])
     private let lanczos = CIFilter.lanczosScaleTransform()
     private var channel: ScreenChannel?
-    private var settings: ScreenSettings?
     private var idle = ScreenIdleTimer(timeout: TimeInterval(ScreenIdleTimer.defaultMinutes * 60))
     private var startedAt = Date()
     private var requests = 0
@@ -37,7 +36,6 @@ final class SampleHandler: RPBroadcastSampleHandler {
     override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
         let resolution = AppGroupResolver.resolve()
         let settings = ScreenSettings(group: resolution.chosen)
-        self.settings = settings
         idle = ScreenIdleTimer(timeout: TimeInterval(settings.idleMinutes * 60))
         startedAt = Date(); requests = 0; pending = nil
         endLock.lock(); finished = false; endLock.unlock()
@@ -45,7 +43,6 @@ final class SampleHandler: RPBroadcastSampleHandler {
         let channel = ScreenChannel(container: resolution.container, pasteboardAllowed: { keyboardSettings.refresh(); return keyboardSettings.pasteboardFallback })
         self.channel = channel
         channel.clear()
-        settings.clearIdleStop()
         frames.boost(until: Date().addingTimeInterval(Self.fastWindow))
         logMemory("start")
         publishStatus()
@@ -88,7 +85,6 @@ final class SampleHandler: RPBroadcastSampleHandler {
         guard !isFinished else { return }
         if idle.expired() {
             let minutes = Int(idle.timeout / 60)
-            settings?.recordIdleStop(minutes: minutes)
             end()
             finishBroadcastWithError(NSError(domain: "com.aram2k.gusan.screen", code: 1, userInfo: [NSLocalizedDescriptionKey: "Gusan Screen stopped: \(minutes) minutes without a question."]))
             return
