@@ -160,19 +160,28 @@ final class KeyboardViewController: UIInputViewController {
         let message = screen.feedback ?? (!hasFullAccess && !active && voice.message == nil ? "Allow Full Access" : working ? voice.message ?? "Working…" : pendingInsert != nil ? "Result ready" : attention?.text ?? voice.message ?? agentMessage)
         strip.update(agent: preferences.keyboardMode == .agent, screenOn: preferences.keyboardScreenEnabled, live: screen.live && !secure, context: title, phase: working ? .thinking : voice.phase, level: voice.level, message: message, action: pendingInsert != nil && !active ? "Insert" : actionTitle, theme: theme, pendingInsert: pendingInsert != nil && !active, agentStatus: agentStatus)
     }
+    /// Strip taps click and tap like keys do; both follow the app's Keyboard sounds / haptics settings.
+    private func stripFeedback() {
+        if preferences.keyClicks { UIDevice.current.playInputClick() }
+        if hasFullAccess, (sharedDefaults.object(forKey: "haptics") as? Bool ?? true) {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        }
+    }
     @objc private func toggleMode() {
+        stripFeedback()
         guard !working, ![.recording, .transcribing, .thinking].contains(voice.phase) else { return }
         settings.keyboardMode = preferences.keyboardMode == .smart ? .agent : .smart
         preferences = KeyboardSettingsSnapshot(defaults: sharedDefaults); scheduleUpdate()
     }
     @objc private func toggleScreen() {
+        stripFeedback()
         guard hasFullAccess else { openContainingApp(URL(string: "gusan://open-settings")!); return }
         if preferences.keyboardScreenEnabled && !screen.live { openContainingApp(URL(string: "gusan://screen")!); return }
         settings.keyboardScreenEnabled = !preferences.keyboardScreenEnabled
         preferences = KeyboardSettingsSnapshot(defaults: sharedDefaults); scheduleUpdate()
         if preferences.keyboardScreenEnabled && !screen.live { openContainingApp(URL(string: "gusan://screen")!) }
     }
-    @objc private func startVoice() { onVoice?() }
+    @objc private func startVoice() { stripFeedback(); onVoice?() }
     @objc private func cancelVoice() {
         if pendingInsert != nil {
             VoicePendingInsert.clear(in: sharedDefaults); pendingInsert = nil; scheduleUpdate(); return
