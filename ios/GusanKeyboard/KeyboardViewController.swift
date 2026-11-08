@@ -33,8 +33,10 @@ final class KeyboardViewController: UIInputViewController {
     }
     override func viewDidLoad() {
         super.viewDidLoad()
+        inputView?.allowsSelfSizing = true
         height = view.heightAnchor.constraint(equalToConstant: 262)
-        height.priority = .defaultHigh; height.isActive = true
+        height.identifier = "Gusan.keyboardHeight"
+        height.isActive = true
         [strip, keyArea, agent.card].forEach { view.addSubview($0) }
         strip.mode.addTarget(self, action: #selector(toggleMode), for: .touchUpInside)
         strip.screen.addTarget(self, action: #selector(toggleScreen), for: .touchUpInside)
@@ -113,7 +115,11 @@ final class KeyboardViewController: UIInputViewController {
     }
     override func textDidChange(_ textInput: UITextInput?) { super.textDidChange(textInput); if voice.tracksUndo { voice.documentDidChange() }; scheduleUpdate() }
     override func selectionDidChange(_ textInput: UITextInput?) { super.selectionDidChange(textInput); scheduleUpdate() }
-    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) { super.traitCollectionDidChange(previousTraitCollection); scheduleUpdate() }
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        if previousTraitCollection?.verticalSizeClass != traitCollection.verticalSizeClass { view.setNeedsLayout() }
+        scheduleUpdate()
+    }
     private func scheduleUpdate() {
         guard !updateScheduled else { return }
         updateScheduled = true

@@ -101,6 +101,17 @@ targets:
         GusanAppGroup: group.com.aram2k.gusan
     dependencies:
       - package: GusanKit
+  GusanKeyboardTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources: [GusanKeyboardTests]
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        SUPPORTED_PLATFORMS: iphonesimulator
+    dependencies:
+      - target: GusanKeyboardPreview
   GusanScreen:
     type: app-extension
     platform: iOS
@@ -152,3 +163,10 @@ schemes:
     build:
       targets:
         Gusan: all
+  GusanKeyboardTests:
+    build:
+      targets:
+        GusanKeyboardPreview: all
+        GusanKeyboardTests: [test]
+    test:
+      targets: [GusanKeyboardTests]
