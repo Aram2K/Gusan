@@ -2,6 +2,7 @@ import SwiftUI
 import AVFoundation
 import AudioToolbox
 import UIKit
+import UserNotifications
 import GusanKit
 
 private final class VoiceAudioBuffer {
@@ -238,6 +239,14 @@ final class VoiceSession: ObservableObject {
     /// No text field to write into: the result goes to the clipboard and the Live Activity says "Copied".
     private func deliverToClipboard(_ text: String, id: UUID) {
         UIPasteboard.general.string = text
+        // The keyboard offers "Insert" the next time a field is focused; a notification says where the text went.
+        if let data = try? JSONSerialization.data(withJSONObject: ["text": text, "at": Date().timeIntervalSince1970]) {
+            UserDefaults(suiteName: store.resolution.chosen)?.set(data, forKey: "pendingInsert")
+        }
+        let note = UNMutableNotificationContent()
+        note.title = "Copied to clipboard"
+        note.body = String(text.prefix(180))
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "gusan.voice.copied", content: note, trigger: nil))
         activity.update(status, heard: nil, copied: true)
         systemRequestID = nil
         execute(machine.handle(.acknowledged(id)))
