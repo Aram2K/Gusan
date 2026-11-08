@@ -30,6 +30,14 @@ final class AgentLiveActivityController {
     func synchronize(_ tasks: [AgentTask], sessions: AgentSessionStore) {
         for task in tasks {
             let state = Self.state(for: task)
+            if task.status.isTerminal {
+                if let activity = activities[task.id] { end(activity, state: state) }
+                if startedIDs.contains(task.id.uuidString) {
+                    startedIDs.removeAll { $0 == task.id.uuidString }
+                    defaults.set(startedIDs, forKey: startedKey)
+                }
+                continue
+            }
             if activities[task.id] == nil {
                 guard !task.status.isTerminal,
                       !startedIDs.contains(task.id.uuidString),
@@ -61,6 +69,10 @@ final class AgentLiveActivityController {
 
     func dismissAll() {
         for activity in Array(activities.values) { end(activity, state: pending[activity.attributes.taskID] ?? Self.currentState(activity)) }
+    }
+
+    func dismissTask(_ id: UUID) {
+        if let activity = activities[id] { end(activity, state: pending[id] ?? Self.currentState(activity)) }
     }
 
     private func attach(_ activity: AgentActivity) {

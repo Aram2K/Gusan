@@ -37,6 +37,7 @@ struct AgentSessionView: View {
                     if let error = error ?? agent.error { Text(error).foregroundStyle(Theme.danger) }
                 }.padding(20).frame(maxWidth: 680).frame(maxWidth: .infinity)
             }
+            .scrollDismissesKeyboard(.interactively)
             .onChange(of: tasks.map(\.id)) { ids in
                 if let last = ids.last { proxy.scrollTo(last, anchor: .bottom) }
             }
@@ -66,7 +67,10 @@ struct AgentSessionView: View {
             if message.count > 4_000 { Text("Keep follow-ups under 4,000 characters.").font(.caption).foregroundStyle(Theme.danger) }
             HStack(alignment: .bottom) {
                 TextField("Message the agent…", text: $message, axis: .vertical)
-                    .lineLimit(1...5).textFieldStyle(.roundedBorder)
+                    .lineLimit(1...5)
+                    .padding(.horizontal, 12).padding(.vertical, 10)
+                    .frame(minHeight: 44)
+                    .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 20))
                 Button {
                     guard canSend, let latest else { return }
                     let text = message.trimmingCharacters(in: .whitespacesAndNewlines)

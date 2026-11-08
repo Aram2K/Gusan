@@ -2,6 +2,76 @@ import XCTest
 @testable import GusanKit
 
 final class AgentTests: XCTestCase {
+    func testElapsedFreezesAtFinishedThenUpdatedTimestamp() {
+        let start = Date(timeIntervalSince1970: 100)
+        for status in [AgentStatus.completed, .failed, .cancelled, .timedOut] {
+            var task = AgentTask(mode: .research, status: status, title: "Task", createdAt: start,
+                                 updatedAt: start.addingTimeInterval(30), finishedAt: start.addingTimeInterval(20))
+            XCTAssertFalse(task.elapsedIsRunning)
+            XCTAssertEqual(task.elapsed(at: start.addingTimeInterval(500)), 20)
+            task.finishedAt = nil
+            XCTAssertEqual(task.elapsed(at: start.addingTimeInterval(900)), 30)
+            task.updatedAt = nil
+            XCTAssertEqual(task.elapsed(), 0)
+        }
+        var task = AgentTask(mode: .research, status: .queued, title: "Task", createdAt: start)
+        for status in ["queued", "running", "awaiting_confirmation"] {
+            task.setServerStatus(status)
+            XCTAssertTrue(task.elapsedIsRunning)
+            XCTAssertEqual(task.elapsed(at: start.addingTimeInterval(50)), 50)
+        }
+        for status in ["awaiting_login", "awaiting_code", "stopped", "expired", "interrupted"] {
+            task.setServerStatus(status)
+            XCTAssertFalse(task.elapsedIsRunning)
+        }
+        task.setServerStatus("stopped"); XCTAssertTrue(task.status.isTerminal)
+        task.setServerStatus("expired"); XCTAssertTrue(task.status.isTerminal)
+    }
+
+    func testRemovingIndividualHistoriesAndStubTask() async throws {
+        let suite = "AgentHistoryRemoveTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let history = SmartHistory(defaults: defaults), sessions = AgentSessionStore(defaults: defaults)
+        history.append(instruction: "First", result: "One")
+        history.append(instruction: "Second", result: "Two")
+        let first = try XCTUnwrap(history.entries.first)
+        history.remove(first.id); history.remove(UUID())
+        XCTAssertEqual(history.entries.map(\.result), ["Two"])
+        let task = AgentTask(mode: .research, status: .running, title: "Active")
+        sessions.record(taskID: task.id, message: "First")
+        let other = UUID(); sessions.record(taskID: other, message: "Second")
+        sessions.remove(task.id); sessions.remove(UUID())
+        XCTAssertEqual(sessions.records.map(\.id), [other])
+        let service = StubAgentService(seeded: [task])
+        try await service.delete(task.id)
+        try await service.delete(task.id)
+        let remaining = try await service.list(limit: 100)
+        XCTAssertTrue(remaining.isEmpty)
+    }
+
+    func testDeleteClientRequestAndErrors() async throws {
+        final class Transport: HTTPTransport {
+            var seen: URLRequest?
+            var status = 200
+            func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+                seen = request
+                return (Data("{}".utf8), HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
+            }
+        }
+        let transport = Transport(), client = AgentClient(tokenProvider: { "jwt" }, transport: transport)
+        let id = UUID()
+        try await client.delete(id)
+        let request = try XCTUnwrap(transport.seen)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: String])
+        XCTAssertEqual(body, ["action": "delete", "task_id": id.uuidString.lowercased()])
+        transport.status = 404
+        try await client.delete(id)
+        transport.status = 500
+        do { try await client.delete(id); XCTFail("Expected delete failure") }
+        catch { XCTAssertTrue(error is AgentError) }
+    }
+
     func testClearingHistoriesRemovesPersistedPrivateData() throws {
         let suite = "AgentHistoryClearTests." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -560,6 +630,7 @@ final class AgentJobTests: XCTestCase {
             func cancel(_ id: UUID) async throws -> AgentTask { task }
             func continueTask(_ id: UUID, message: String) async throws -> AgentTask { task }
             func stop(_ id: UUID) async throws -> AgentTask { task }
+            func delete(_ id: UUID) async throws {}
             func list(limit: Int) async throws -> [AgentTask] { [task] }
             func markSeen(_ id: UUID) async throws {}
         }

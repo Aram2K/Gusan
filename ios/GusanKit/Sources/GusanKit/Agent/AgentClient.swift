@@ -10,6 +10,7 @@ public protocol AgentService: AnyObject {
     func cancel(_ id: UUID) async throws -> AgentTask
     func continueTask(_ id: UUID, message: String) async throws -> AgentTask
     func stop(_ id: UUID) async throws -> AgentTask
+    func delete(_ id: UUID) async throws
     /// Newest first, straight from the `agent_tasks` table (owner RLS).
     func list(limit: Int) async throws -> [AgentTask]
     func markSeen(_ id: UUID) async throws
@@ -108,6 +109,13 @@ public final class AgentClient: AgentService {
         let (data, response) = try await transport.data(for: request)
         try Self.check(data, response)
         return try AgentTask.dateDecoder.decode([AgentTask].self, from: data)
+    }
+
+    public func delete(_ id: UUID) async throws {
+        let request = try Self.actionRequest(["action": "delete", "task_id": id.uuidString.lowercased()], token: await token())
+        let (data, response) = try await transport.data(for: request)
+        if (response as? HTTPURLResponse)?.statusCode == 404 { return }
+        try Self.check(data, response)
     }
 
     public func markSeen(_ id: UUID) async throws {
@@ -262,6 +270,11 @@ public final class StubAgentService: AgentService {
 
     public func markSeen(_ id: UUID) async throws {
         locked { tasks[id]?.seenAt = Date() }
+    }
+
+    public func delete(_ id: UUID) async throws {
+        try await sleep()
+        locked { tasks[id] = nil; order.removeAll { $0 == id }; parentTaskIDs[id] = nil }
     }
 
     private func locked<T>(_ body: () throws -> T) rethrows -> T { lock.lock(); defer { lock.unlock() }; return try body() }

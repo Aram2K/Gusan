@@ -648,7 +648,10 @@ async function stopTask(db: any, row: Obj) {
     try {
       await h(`/sessions/${encodeURIComponent(id)}`, "DELETE");
     } catch (error) {
-      if (!(error instanceof HFailure && [404, 410].includes(error.httpStatus))) throw error;
+      if (!(error instanceof HFailure && [404, 410].includes(error.httpStatus))) {
+        await saveRun(db, row, { session_cleanup_pending: true });
+        throw error;
+      }
     }
   };
   let failure;
@@ -1296,7 +1299,8 @@ Deno.serve(async (req: Request) => {
       userId = data.user.id;
       const pro = await supa.rpc("is_pro");
       if (pro.error) return json({ error: "entitlement_check_failed" }, 500);
-      if (!pro.data) return json({ error: "pro_required" }, 403);
+      // Deleting your own sessions must keep working after Pro ends.
+      if (!pro.data && body.action !== "delete") return json({ error: "pro_required" }, 403);
     }
     if (!KEY) return json({ error: "agent_not_configured" }, 503);
     const db = createClient(
@@ -1344,7 +1348,7 @@ Deno.serve(async (req: Request) => {
       }
       return json(task(await startTask(db, userId, body)), 201);
     }
-    if (!["status", "confirm", "cancel", "continue", "stop"].includes(body.action)) {
+    if (!["status", "confirm", "cancel", "continue", "stop", "delete"].includes(body.action)) {
       return bad("action");
     }
     if (typeof body.task_id !== "string" || !uuid.test(body.task_id)) {
@@ -1364,6 +1368,13 @@ Deno.serve(async (req: Request) => {
       .eq("user_id", userId).maybeSingle();
     if (loaded.error) throw new Failure("storage_error", 500);
     if (!loaded.data) return json({ error: "not_found" }, 404);
+    if (body.action === "delete") {
+      await stopTask(db, loaded.data);
+      const removed = await db.from("agent_tasks").delete().eq("id", body.task_id)
+        .eq("user_id", userId).select("id").maybeSingle();
+      if (removed.error) throw new Failure("storage_error", 500);
+      return json({ deleted: true });
+    }
     if (body.action === "stop") return json(task(await stopTask(db, loaded.data)));
     const run = await loadRun(db, loaded.data);
     if (body.action === "continue") return await continueTask(db, loaded.data, run, body.message.trim(), body.client_message_id);

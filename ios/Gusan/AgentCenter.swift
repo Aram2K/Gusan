@@ -224,6 +224,34 @@ final class AgentCenter: NSObject, ObservableObject {
 
     func stop(_ id: UUID) async { await mutate(id) { try await $0.stop(id) } }
 
+    func deleteTasks(_ ids: Set<UUID>) async {
+        guard let service = currentService() else { error = AgentError.unauthorized.localizedDescription; return }
+        let removed = tasks.filter { ids.contains($0.id) }
+        guard !removed.isEmpty else { return }
+        var remaining = Dictionary(uniqueKeysWithValues: removed.map { ($0.id, $0) })
+        let userID = activityUserID
+        mutating += 1; revision += 1; error = nil
+        tasks.removeAll { ids.contains($0.id) }
+        defer { mutating -= 1; revision += 1 }
+        do {
+            for task in removed {
+                guard userID == activityUserID else { return }
+                if !task.status.isTerminal { remaining[task.id] = try await service.stop(task.id) }
+                try await service.delete(task.id)
+                guard userID == activityUserID else { return }
+                remaining[task.id] = nil
+                sessionStore.remove(task.id); instructions[task.id] = nil; confirmedIDs.remove(task.id)
+                UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [task.id.uuidString])
+                if #available(iOS 16.1, *) { (liveActivities as? AgentLiveActivityController)?.dismissTask(task.id) }
+            }
+        } catch {
+            guard userID == activityUserID else { return }
+            let existing = Set(tasks.map(\.id))
+            tasks = (tasks + remaining.values.filter { !existing.contains($0.id) }).sorted { $0.createdAt > $1.createdAt }
+            self.error = "Couldn't delete the session. " + error.localizedDescription
+        }
+    }
+
     func loadSession(_ id: UUID) async {
         let root = sessionStore.sessionID(for: id)
         let ids = Set(sessionStore.tasks(in: root).map(\.id) + [root, id])

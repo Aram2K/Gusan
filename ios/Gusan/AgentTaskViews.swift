@@ -14,7 +14,11 @@ struct TaskRow: View {
                 HStack {
                     Text(phaseLabel)
                     Text("·")
-                    Text(task.createdAt, style: .relative)
+                    if task.elapsedIsRunning {
+                        Text(task.createdAt, style: .timer).monospacedDigit()
+                    } else {
+                        Text(Duration.seconds(task.elapsed()).formatted(.time(pattern: .minuteSecond))).monospacedDigit()
+                    }
                 }.font(.caption).foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
