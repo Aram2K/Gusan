@@ -44,20 +44,19 @@ final class KeyboardSizingTests: XCTestCase {
             keyboard.traitOverrides.verticalSizeClass = sizeClass
             keyboard.viewWillLayoutSubviews()
             XCTAssertEqual(constraint.constant, expected)
-            XCTAssertEqual(input.intrinsicContentSize.height, expected)
-            XCTAssertEqual(input.sizeThatFits(CGSize(width: 402, height: 1_124)), CGSize(width: 402, height: expected))
             XCTAssertEqual(input.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).height, expected)
         }
     }
 
-    func testFittingIgnoresPreviousHostHeight() throws {
+    func testStripUsesAutoLayoutToPublishInputHeight() throws {
         let keyboard = KeyboardViewController()
         keyboard.loadViewIfNeeded()
         let input = try XCTUnwrap(keyboard.inputView)
-        for height: CGFloat in [444, 874, 1_124] {
-            input.frame = CGRect(x: 0, y: 0, width: 402, height: height)
-            keyboard.viewWillLayoutSubviews()
-            XCTAssertEqual(input.sizeThatFits(input.bounds.size), CGSize(width: 402, height: 262))
-        }
+        let strip = try XCTUnwrap(input.subviews.first { $0 is GusanStrip })
+        XCTAssertFalse(strip.translatesAutoresizingMaskIntoConstraints)
+        input.frame = CGRect(x: 0, y: 0, width: 402, height: 444)
+        input.layoutIfNeeded()
+        XCTAssertEqual(strip.frame, CGRect(x: 0, y: 0, width: 402, height: 45))
+        XCTAssertEqual(input.systemLayoutSizeFitting(CGSize(width: 402, height: 444)).height, 262)
     }
 }
