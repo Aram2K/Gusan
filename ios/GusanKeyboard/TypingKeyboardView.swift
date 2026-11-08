@@ -269,7 +269,11 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
             previews.removeValue(forKey: touch)?.removeFromSuperview()
             let key = slots[index].key
             let wasCommitted = committed.remove(touch) != nil
-            if key == .delete { deleteTimer?.invalidate() }
+            if key == .delete {
+                deleteTimer?.invalidate()
+                // A touch that began on another key and slid onto Delete deletes once on release.
+                if inputEnabled && !wasCommitted { deleteOnce() }
+            }
             else if inputEnabled && !wasCommitted { press(key) }
         }
         updateHighlights()
