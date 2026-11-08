@@ -605,6 +605,9 @@ async function continueTask(db: any, row: Obj, run: Obj, message: string, client
   const claimedRun = await loadRun(db, resumed);
   if (resumed.id !== row.id && resumed.status === "queued" && !claimedRun.h_session_id &&
       claimedRun.plan?.continuation_claim !== marker) {
+    if (!(Date.parse(resumed.deadline_at) > Date.now())) {
+      return response(await expire(db, resumed, claimedRun));
+    }
     return fresh(resumed, true, claimedRun.plan);
   }
   if (claimedRun.plan?.continuation_claim !== marker) return response(resumed);

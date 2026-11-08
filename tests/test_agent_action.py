@@ -47,6 +47,7 @@ for (let i=0; i<scenarios.length; i++) {
  };
  if(s.reservedChild){
   createTask(row.mode,'Next');
+  if(s.expiredChild)row.deadline_at=new Date(Date.now()-1000).toISOString();
   run.plan={instruction:'Next',continuation_claim:'previous-worker'};
   continuations.set(id+':id:followup-reserved',row.id);
   ledgerEntries=1;
@@ -778,6 +779,15 @@ def test_continue_retry_starts_reserved_queued_child_without_extra_charge(run):
     created, = [c for c in out["calls"] if c["url"].endswith("/sessions")]
     assert created["method"] == "POST" and created["headers"]["Idempotency-Key"] == child_id
     assert out["run"]["h_session_id"] == "session1"
+    assert out["ledgerEntries"] == 1
+
+
+def test_continue_retry_does_not_start_expired_reserved_child(run):
+    out, = run(finished_research(reservedChild=True, expiredChild=True,
+        body={"action": "continue", "task_id": ID, "message": "Next",
+              "client_message_id": "followup-reserved"}))
+    assert out["replies"][0]["body"]["status"] == "timed_out"
+    assert not [c for c in out["calls"] if c["url"].endswith("/sessions")]
     assert out["ledgerEntries"] == 1
 
 
