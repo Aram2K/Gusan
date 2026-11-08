@@ -59,8 +59,12 @@ def run_turn(history, question, *, cfg, model, image_b64, on_token,
                               else "Allow Screen Recording to use Screen chat.")
     if not question or not question.strip():
         raise ScreenChatError("empty_question", "Type a message first.")
+    selected_kind = actions.ACTION_MODELS.get(model, {}).get("kind")
+    if selected_kind == "local_llm" or cfg.get("live_assist_writer") == "local":
+        raise ScreenChatError("needs_vision", NEEDS_VISION)
     engine = actions.usable_engine(model, cfg)
-    if actions.ACTION_MODELS.get(engine, {}).get("kind") not in ("cloud", "managed") and cfg.get("_managed_token"):
+    if (actions.ACTION_MODELS.get(engine, {}).get("kind") not in ("cloud", "managed")
+            and selected_kind in ("cloud", "rules", "managed") and cfg.get("_managed_token")):
         engine = actions.API_MANAGED_ID
     if actions.ACTION_MODELS.get(engine, {}).get("kind") not in ("cloud", "managed"):
         raise ScreenChatError("needs_vision", NEEDS_VISION)
