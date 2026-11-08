@@ -4,6 +4,10 @@ import EventKit
 import GusanKit
 import SwiftUI
 
+enum CalendarFeatures {
+    static let googleEnabled = false
+}
+
 private actor CalendarEventReader {
     private let events = EKEventStore()
 
@@ -72,6 +76,7 @@ final class CalendarConnections: NSObject, ObservableObject, ASWebAuthentication
     init(group: String?, client: CalendarClient, signedIn: Bool) {
         store = CalendarSnapshotStore(group: group)
         google = client; self.signedIn = signedIn
+        if !CalendarFeatures.googleEnabled, store.calendarGoogleEnabled { store.calendarGoogleEnabled = false }
         includeTitles = store.calendarIncludeTitles
         lastUpdated = store.snapshot?.generatedAt
         super.init()
@@ -172,6 +177,7 @@ final class CalendarConnections: NSObject, ObservableObject, ASWebAuthentication
     }
 
     func refresh() async {
+        guard CalendarFeatures.googleEnabled else { await refreshIPhone(); return }
         async let googleWork: Void = refreshGoogle()
         await refreshIPhone()
         await googleWork
@@ -225,7 +231,7 @@ final class CalendarConnections: NSObject, ObservableObject, ASWebAuthentication
     }
 
     private func scheduleBackgroundRefresh() {
-        guard store.calendarIPhoneEnabled || store.calendarGoogleEnabled else {
+        guard store.calendarIPhoneEnabled || (CalendarFeatures.googleEnabled && store.calendarGoogleEnabled) else {
             BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.refreshTaskID)
             return
         }
@@ -235,6 +241,7 @@ final class CalendarConnections: NSObject, ObservableObject, ASWebAuthentication
     }
 
     func connectGoogle() {
+        guard CalendarFeatures.googleEnabled else { return }
         guard !googleBusy else { return }
         guard signedIn else { error = "Sign in to connect Google Calendar."; return }
         googleBusy = true; error = nil
@@ -265,6 +272,7 @@ final class CalendarConnections: NSObject, ObservableObject, ASWebAuthentication
     }
 
     func handleGoogleCallback(_ url: URL) {
+        guard CalendarFeatures.googleEnabled else { return }
         guard url.scheme == "gusan", url.host == "calendar" else { return }
         guard googleBusy else { return }
         if !CalendarClient.callbackConnected(url) {
@@ -283,6 +291,7 @@ final class CalendarConnections: NSObject, ObservableObject, ASWebAuthentication
     }
 
     func disconnectGoogle() {
+        guard CalendarFeatures.googleEnabled else { return }
         guard !googleBusy else { return }
         invalidate()
         googleBusy = true; error = nil
@@ -302,6 +311,7 @@ final class CalendarConnections: NSObject, ObservableObject, ASWebAuthentication
     }
 
     private func refreshGoogle(force: Bool = false) async {
+        guard CalendarFeatures.googleEnabled else { return }
         guard signedIn, force || !googleBusy else { return }
         if googleRefreshing { googleRefreshAgain = true; return }
         googleRefreshing = true

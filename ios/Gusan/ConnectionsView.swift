@@ -23,22 +23,24 @@ struct ConnectionsView: View {
                         Text("Open Settings").frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
                     }
                 }
-                Button {
-                    if connections.googleState == .connected { connections.disconnectGoogle() }
-                    else { connections.connectGoogle() }
-                } label: {
-                    HStack {
-                        Label {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Google Calendar").foregroundStyle(.primary)
-                                Text(connections.googleState.rawValue).font(.subheadline).foregroundStyle(.secondary)
-                            }
-                        } icon: { Image(systemName: "calendar") }
-                        Spacer()
-                        if connections.googleBusy { ProgressView() }
-                        else { Text(connections.googleState == .connected ? "Disconnect" : connections.googleState == .reconnect ? "Reconnect" : "Connect") }
-                    }.frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
-                }.disabled(connections.googleBusy)
+                if CalendarFeatures.googleEnabled {
+                    Button {
+                        if connections.googleState == .connected { connections.disconnectGoogle() }
+                        else { connections.connectGoogle() }
+                    } label: {
+                        HStack {
+                            Label {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Google Calendar").foregroundStyle(.primary)
+                                    Text(connections.googleState.rawValue).font(.subheadline).foregroundStyle(.secondary)
+                                }
+                            } icon: { Image(systemName: "calendar") }
+                            Spacer()
+                            if connections.googleBusy { ProgressView() }
+                            else { Text(connections.googleState == .connected ? "Disconnect" : connections.googleState == .reconnect ? "Reconnect" : "Connect") }
+                        }.frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
+                    }.disabled(connections.googleBusy)
+                }
             } footer: {
                 Text("Gusan reads busy times to help Smart answer availability questions and Agent plan around your schedule. It never creates or changes events.")
             }
