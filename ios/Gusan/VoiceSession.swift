@@ -243,10 +243,15 @@ final class VoiceSession: ObservableObject {
         if let data = try? JSONSerialization.data(withJSONObject: ["text": text, "at": Date().timeIntervalSince1970]) {
             UserDefaults(suiteName: store.resolution.chosen)?.set(data, forKey: "pendingInsert")
         }
+        // No result text in the notice: lock-screen previews would show it.
         let note = UNMutableNotificationContent()
         note.title = "Copied to clipboard"
-        note.body = String(text.prefix(180))
-        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "gusan.voice.copied", content: note, trigger: nil))
+        note.body = "Open a text field and tap Insert, or paste."
+        let center = UNUserNotificationCenter.current()
+        // Provisional: delivered quietly to Notification Center without a permission prompt for voice-only users.
+        center.requestAuthorization(options: [.alert, .sound, .provisional]) { _, _ in
+            center.add(UNNotificationRequest(identifier: "gusan.voice.copied", content: note, trigger: nil))
+        }
         activity.update(status, heard: nil, copied: true)
         systemRequestID = nil
         execute(machine.handle(.acknowledged(id)))
