@@ -203,8 +203,13 @@ final class AgentCenter: NSObject, ObservableObject {
     @discardableResult
     func continueTask(_ id: UUID, message: String) async throws -> AgentTask {
         guard let service = currentService() else { throw AgentError.unauthorized }
+        let previous: AgentTask
+        if let loaded = task(id) { previous = loaded }
+        else { previous = try await service.status(id, waitSeconds: 0) }
+        mutating += 1; revision += 1
+        defer { mutating -= 1; revision += 1 }
         let task = try await service.continueTask(id, message: message)
-        sessionStore.record(taskID: task.id, message: message, continuing: id, date: task.createdAt)
+        sessionStore.recordContinuation(previous: previous, task: task, message: message)
         tracker.markNotified(task)
         if let index = tasks.firstIndex(where: { $0.id == task.id }) { tasks[index] = task }
         else { tasks.insert(task, at: 0) }

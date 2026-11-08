@@ -6,6 +6,13 @@ public final class AgentSessionStore {
         public let sessionID: UUID
         public let message: String
         public let date: Date
+        public let previousTurns: [Turn]?
+    }
+    public struct Turn: Codable, Equatable, Identifiable {
+        public let id: UUID
+        public let message: String
+        public let date: Date
+        public let task: AgentTask
     }
     private let defaults: UserDefaults
     private let key = "gusan.agent.sessions"
@@ -20,7 +27,23 @@ public final class AgentSessionStore {
         var all = records
         if let existing = all.first(where: { $0.id == taskID }) { return existing.sessionID }
         let root = parentID.flatMap { parent in all.first { $0.id == parent }?.sessionID ?? parent } ?? taskID
-        all.append(Record(id: taskID, sessionID: root, message: String(message.prefix(4_000)), date: date))
+        all.append(Record(id: taskID, sessionID: root, message: String(message.prefix(4_000)), date: date, previousTurns: nil))
+        if let data = try? JSONEncoder().encode(Array(all.suffix(200))) { defaults.set(data, forKey: key) }
+        return root
+    }
+    @discardableResult
+    public func recordContinuation(previous: AgentTask, task: AgentTask, message: String, date: Date = Date()) -> UUID {
+        guard previous.id == task.id else {
+            return record(taskID: task.id, message: message, continuing: previous.id, date: date)
+        }
+        var all = records
+        let index = all.firstIndex { $0.id == task.id }
+        let existing = index.map { all[$0] }
+        let root = existing?.sessionID ?? previous.id
+        let turn = Turn(id: UUID(), message: existing?.message ?? previous.title, date: existing?.date ?? previous.createdAt, task: previous)
+        let history = Array(((existing?.previousTurns ?? []) + [turn]).suffix(50))
+        let updated = Record(id: task.id, sessionID: root, message: String(message.prefix(4_000)), date: date, previousTurns: history)
+        if let index { all[index] = updated } else { all.append(updated) }
         if let data = try? JSONEncoder().encode(Array(all.suffix(200))) { defaults.set(data, forKey: key) }
         return root
     }

@@ -8,6 +8,7 @@ struct AgentSessionView: View {
     @State private var sending = false
     @State private var loading = true
     @State private var error: String?
+    @State private var sentCount = 0
 
     private var tasks: [AgentTask] {
         agent.threads.first { $0.id == agent.sessionStore.sessionID(for: id) }?.tasks ?? []
@@ -28,6 +29,9 @@ struct AgentSessionView: View {
                         Button("Try again") { Task { await agent.loadSession(id) } }
                     }
                     ForEach(tasks) { task in
+                        ForEach(agent.sessionStore.records.first { $0.id == task.id }?.previousTurns ?? []) { turn in
+                            AgentSessionTurn(task: turn.task, message: turn.message, date: turn.date, archived: true).id(turn.id)
+                        }
                         AgentSessionTurn(task: task).id(task.id)
                     }
                     if let error = error ?? agent.error { Text(error).foregroundStyle(Theme.danger) }
@@ -35,6 +39,9 @@ struct AgentSessionView: View {
             }
             .onChange(of: tasks.map(\.id)) { ids in
                 if let last = ids.last { proxy.scrollTo(last, anchor: .bottom) }
+            }
+            .onChange(of: sentCount) { _ in
+                if let latest { proxy.scrollTo(latest.id, anchor: .bottom) }
             }
         }
         .background(Theme.surface)
@@ -66,7 +73,7 @@ struct AgentSessionView: View {
                     sending = true; error = nil
                     Task {
                         defer { sending = false }
-                        do { try await agent.continueTask(latest.id, message: text); message = "" }
+                        do { try await agent.continueTask(latest.id, message: text); message = ""; sentCount += 1 }
                         catch { self.error = error.localizedDescription }
                     }
                 } label: {
@@ -87,6 +94,9 @@ struct AgentSessionView: View {
 
 private struct AgentSessionTurn: View {
     let task: AgentTask
+    var message: String? = nil
+    var date: Date? = nil
+    var archived = false
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var agent: AgentCenter
     @State private var working = false
@@ -98,8 +108,8 @@ private struct AgentSessionTurn: View {
             HStack {
                 Spacer(minLength: 36)
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(agent.message(for: task)).textSelection(.enabled)
-                    Text(task.createdAt.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.secondary)
+                    Text(message ?? agent.message(for: task)).textSelection(.enabled)
+                    Text((date ?? agent.sessionStore.records.first { $0.id == task.id }?.date ?? task.createdAt).formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.secondary)
                 }.padding(14).background(Theme.agent.opacity(0.12), in: RoundedRectangle(cornerRadius: 16))
             }
             if !task.steps.isEmpty {
@@ -184,11 +194,11 @@ private struct AgentSessionTurn: View {
             AppCard {
                 Label(task.phase.label, systemImage: "exclamationmark.triangle").foregroundStyle(Theme.danger)
                 Text(task.summaryLine)
-                if agent.canRunAgain(task) {
+                if !archived && agent.canRunAgain(task) {
                     Button {
                         perform("Try again") { do { try await agent.runAgain(task) } catch { self.error = error.localizedDescription } }
                     } label: { actionLabel("Try again") }.disabled(agent.atActiveLimit)
-                } else {
+                } else if !archived {
                     Text("The original input is no longer available. Start again from Home.").font(.footnote).foregroundStyle(.secondary)
                 }
             }
