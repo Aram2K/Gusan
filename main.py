@@ -1268,6 +1268,9 @@ class AudioRecorder:
         self._live_session = None
         self.on_live_text = None
         self.on_live_final = None
+        # Whether this take got any audio at all, and what to call when it got none (NO_SOUND_S).
+        self._got_audio = False
+        self.on_no_sound = None
         self._live_fed_s = 0.0
         self._live_energy_t, self._live_energy_v = [], []
         # A meeting's live audio, the last LIVE_RING_S of it: a finished sentence's own sound (live_audio) for its
@@ -2082,6 +2085,9 @@ class AudioRecorder:
                 self._tracks = recorder_tracks.DualTrackBuffer(self._full_audio_max)
 
         self.stop_requested = False
+        self._got_audio = False
+        if capture_mode is None and not getattr(self, "fast_live_chunks", False):
+            AudioRecorder._watch_for_sound(self)
         # A dictation on Gusan Cloud also streams to Gladia live: words while speaking, the text at Stop at once.
         AudioRecorder._start_live(self, capture_mode)
         # The recording thread OWNS the streams: it is the only reader and the
@@ -2459,6 +2465,8 @@ class AudioRecorder:
                 was_paused = False
 
                 arr = np.frombuffer(data, dtype=np.float32)
+                if len(arr):
+                    self._got_audio = True
                 live = self._live_session
                 if live is not None and len(arr):
                     live.feed(arr)                     # never blocks: real-time (live_stt.py)
@@ -2670,9 +2678,14 @@ class AudioRecorder:
         # flight is a native PortAudio crash - the meeting-stop crash.
         t = getattr(self, "_record_thread", None)
         if t is not None:
-            t.join(timeout=5.0)
+            # No audio at all so far: the read is stuck in the driver - no point waiting the full 5 s.
+            t.join(timeout=5.0 if getattr(self, "_got_audio", True) else 0.5)
             if t.is_alive():
                 logger.warning("Recording thread still busy; it will close its streams itself.")
+                if not getattr(self, "_got_audio", True) and not self._record_error:
+                    # Not one block of audio came: the microphone sends nothing (its driver is stuck) -
+                    # transcribe() says so instead of ending the take without a word.
+                    self._record_error = MIC_SILENT_MAC if sys.platform == "darwin" else MIC_SILENT
 
         self.recording = False
         self.mic_stream = None
@@ -2684,6 +2697,26 @@ class AudioRecorder:
             if live is not None:
                 threading.Thread(target=live.stop, kwargs={"timeout": 3.0}, daemon=True,
                                  name="gusan-live-stop").start()
+
+    def _watch_for_sound(self):
+        """A dictation or Smart Action: when not one block of audio has come after NO_SOUND_S, the microphone sends
+        nothing (a stuck driver) - on_no_sound() stops the take and the pill says so (stop_recording sets the
+        message). A newer take replaces the watch."""
+        token = object()
+        self._sound_watch = token
+
+        def run():
+            time.sleep(NO_SOUND_S)
+            if (getattr(self, "_sound_watch", None) is token and self.recording and not self.stop_requested
+                    and not self._got_audio):
+                logger.warning("The microphone sent no sound for %.1f s: stopping the take", NO_SOUND_S)
+                cb = getattr(self, "on_no_sound", None)
+                if cb is not None:
+                    try:
+                        cb()
+                    except Exception:
+                        logger.debug("on_no_sound failed", exc_info=True)
+        threading.Thread(target=run, daemon=True, name="gusan-sound-watch").start()
 
     def _live_keep(self, arr):
         """The meeting's live audio from this point of the stream on, the last LIVE_RING_S kept. Record thread."""
@@ -4106,6 +4139,13 @@ TITLE_PASS_MAX_TRIES = 30
 # Real-time dictation (live_stt.py, Gladia live): how long Stop waits for Gladia's last sentence (Gladia: finals
 # ~0.3 s after the speech ends) before the pieces' text is used instead.
 LIVE_STOP_S = 2.5
+# A microphone that sends no sound at all (a stuck driver, often after the computer slept): a dictation or Smart
+# Action with no audio this long is stopped and the pill says so, instead of waiting for sound that never comes.
+NO_SOUND_S = 2.5
+MIC_SILENT = ("!mic:Your microphone isn't sending any sound. Check it in Windows Sound settings "
+              "(or restart the computer), then try again.")
+MIC_SILENT_MAC = ("!mic:Your microphone isn't sending any sound. Check it in System Settings > Sound, "
+                  "then try again.")
 # A meeting's live audio kept for its sentences' speaker labels (a sentence is finished ~0.3 s after it is said and
 # Gladia closes one after 15 s at most).
 LIVE_RING_S = 90.0
@@ -4230,6 +4270,8 @@ class AppController(QObject):
         self.recorder.on_partial = self._on_partial
         # Real-time dictation: the words so far, while speaking (the pill's live line)
         self.recorder.on_live_text = lambda text: self.overlay.call_soon(self.overlay.set_partial, text)
+        # A microphone that sends no sound: the take is stopped (the pill then says why: MIC_SILENT).
+        self.recorder.on_no_sound = lambda: self.overlay.call_soon(self._stop_without_sound)
         from pynput.keyboard import Controller
         self.kbd = Controller()
         self.is_rec = False
@@ -6814,6 +6856,12 @@ class AppController(QObject):
                 return
             self._start()
         else:
+            threading.Thread(target=self._stop, daemon=True).start()
+
+    def _stop_without_sound(self):
+        """GUI thread: the microphone sent no sound (AudioRecorder._watch_for_sound) - stop the take the way the
+        shortcut does; its Stop finds no audio and the pill says the microphone sends nothing."""
+        if self.is_rec and not getattr(self, "_busy", False):
             threading.Thread(target=self._stop, daemon=True).start()
 
     def _is_meeting_busy(self):
