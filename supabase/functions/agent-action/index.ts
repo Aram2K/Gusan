@@ -20,6 +20,9 @@
 // with agent_busy (429) or upstream_error. No automatic second retry.
 // Restart completion waits for an answer after its matching user message_event;
 // stale terminal status stays running until that answer or the deadline.
+// Prepare output is flat: markdown, summary, action_kind, start_url, steps.
+// Legacy JSON and explicit prose step lists are salvaged before plan_missing;
+// H answer_validation failures follow the same salvage/one-retry flow.
 // Plans contain 1–30 steps of at most 2000 characters; oversized steps fail.
 // Errors: bad_request (400, field), unauthorized (401), privacy_mode and
 // pro_required (403), not_found (404), not_awaiting_confirmation (409),
@@ -218,7 +221,7 @@ function instructions(mode: string, phase = "prepare") {
   } Answer in the user's language, in markdown. Cite specific source page URLs, the exact page each fact came from, not homepages, and list them in links.`;
 }
 const PLANNING_ONLY =
-  "PLANNING-ONLY phase. You cannot and must not act. Do NOT try to perform the task, submit forms, or use GET requests or URL/query tricks to perform actions. Do NOT tell the user to do it manually. A separate interactive browser session will carry out the plan after the user approves. Your ONLY job is to inspect the relevant pages, fields, options and buttons and return the structured plan in the answer schema. Always set needs_action true and provide summary, action_kind, start_url and 1–30 exact steps (at most 2000 characters each) specifying fields, values and buttons, with the final step being the irreversible action. Read-only restrictions are intentional, not a reason to refuse planning.";
+  "PLANNING-ONLY phase. You cannot and must not act. Do NOT try to perform the task, submit forms, or use GET requests or URL/query tricks to perform actions. Do NOT tell the user to do it manually. A separate interactive browser session will carry out the plan after the user approves. Your ONLY job is to inspect the relevant pages, fields, options and buttons and return the structured plan in the answer schema. All fields are plain top-level values: markdown, summary, action_kind, start_url are strings; steps is a list of strings. Do not use a nested plan object or nest JSON inside strings. Provide 1–30 exact steps (at most 2000 characters each) specifying fields, values and buttons, with the final step being the irreversible action. Read-only restrictions are intentional, not a reason to refuse planning.";
 const IMAGE_URI =
   /^data:image\/(png|jpeg|webp);base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 function validImages(images: unknown) {
@@ -249,39 +252,33 @@ const ANSWER_FORMAT = {
   required: ["markdown"],
 };
 const PREPARE_FORMAT = {
-  ...ANSWER_FORMAT,
+  type: "object",
   properties: {
-    ...ANSWER_FORMAT.properties,
     markdown: {
       type: "string",
       description:
-        "Describe the proposed plan, not a completed action or instructions for the user to do it manually. This is PLANNING-ONLY; another interactive session executes after approval.",
+        "PLANNING-ONLY explanation, not a completed action or manual handoff.",
     },
-    needs_action: {
-      type: "boolean",
-      const: true,
-      description:
-        "Always true in this PLANNING-ONLY phase. Inspect pages and return a plan; never attempt the task or use GET tricks to act.",
+    summary: {
+      type: "string",
+      description: "Exact proposed action for approval.",
     },
-    plan: {
-      type: "object",
+    action_kind: {
+      type: "string",
       description:
-        "Exact proposed action for a separate interactive browser session after user approval. Inspect fields, options and buttons only; do not perform the action or ask the user to do it manually.",
-      properties: {
-        summary: { type: "string" },
-        action_kind: { type: "string", enum: kinds },
-        start_url: { type: "string" },
-        steps: {
-          type: "array",
-          minItems: 1,
-          maxItems: 30,
-          items: { type: "string", maxLength: 2000 },
-        },
-      },
-      required: ["summary", "action_kind", "start_url", "steps"],
+        "Use submit, purchase, send, delete, account_change, or other.",
+    },
+    start_url: {
+      type: "string",
+      description: "HTTP(S) page where the interactive session starts.",
+    },
+    steps: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        "Exact fields, values and buttons, ending with the irreversible action. Plain strings, never nested JSON.",
     },
   },
-  required: ["markdown", "needs_action", "plan"],
 };
 function validPlan(value: unknown) {
   if (!value || typeof value !== "object") return null;
@@ -310,6 +307,90 @@ function validPlan(value: unknown) {
     start_url: p.start_url,
     steps: [...p.steps],
   };
+}
+function decodePlanJSON(value: unknown): unknown {
+  for (let depth = 0; depth < 4 && typeof value === "string"; depth++) {
+    const text = value.trim();
+    try {
+      value = JSON.parse(text);
+    } catch {
+      const block = text.match(
+        /\x60\x60\x60(?:json)?\s*([\s\S]*?)\x60\x60\x60/i,
+      )?.[1];
+      const first = text.indexOf("{"), last = text.lastIndexOf("}");
+      const candidate = block ??
+        (first >= 0 && last > first ? text.slice(first, last + 1) : "");
+      try {
+        value = JSON.parse(candidate);
+      } catch {
+        return value;
+      }
+    }
+  }
+  return value;
+}
+function planSteps(value: unknown) {
+  const decoded = decodePlanJSON(value);
+  if (typeof decoded !== "string") return decoded;
+  return decoded.replace(/\s+(?=\d+[.)]\s+)/g, "\n").split(/\r?\n/)
+    .map((line) => line.trim().replace(/^(?:[-*•]|\d+[.)])\s+/, ""))
+    .filter(Boolean);
+}
+function planURL(text: string) {
+  return text.match(/https?:\/\/[^\s<>"'\x60]+/i)?.[0].replace(
+    /[.,;!?)]+$/,
+    "",
+  );
+}
+function preparePlan(
+  answer: unknown,
+  instruction: string,
+  depth = 0,
+): ReturnType<typeof validPlan> {
+  const decoded = decodePlanJSON(answer);
+  const object =
+    decoded && typeof decoded === "object" && !Array.isArray(decoded)
+      ? decoded as Obj
+      : null;
+  const nested = object?.plan === undefined
+    ? object
+    : decodePlanJSON(object.plan);
+  if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+    const p = nested as Obj;
+    if (p.steps !== undefined) {
+      return validPlan({
+        summary: p.summary ?? p.title,
+        action_kind: p.action_kind ?? "other",
+        start_url: p.start_url ?? p.site ?? planURL(instruction),
+        steps: planSteps(p.steps),
+      });
+    }
+  }
+  const texts = [decoded, object?.markdown, object?.plan].filter((text) =>
+    typeof text === "string"
+  ) as string[];
+  for (const text of texts) {
+    const json = decodePlanJSON(text);
+    if (depth < 3 && json && typeof json === "object") {
+      const plan = preparePlan(json, instruction, depth + 1);
+      if (plan) return plan;
+    }
+    // Only an explicit step list can become a prose-derived approval plan.
+    const lines = text.replace(/\s+(?=\d+[.)]\s+)/g, "\n");
+    const steps = [
+      ...lines.matchAll(/(?:^|\n)[ \t]*(?:[-*•]|\d+[.)])[ \t]+([^\r\n]+)/g),
+    ]
+      .map((match) => match[1].trim());
+    const plan = validPlan({
+      summary: object?.summary ?? object?.title ?? instruction,
+      action_kind: object?.action_kind ?? "other",
+      start_url: object?.start_url ?? object?.site ?? planURL(text) ??
+        planURL(instruction),
+      steps,
+    });
+    if (plan) return plan;
+  }
+  return null;
 }
 function executePrompt(plan: Obj) {
   const { instruction, ...approved } = plan;
@@ -425,7 +506,7 @@ async function retryPrepare(db: any, row: Obj, run: Obj, patch: Obj) {
   let failure: string | null = null;
   try {
     const message = `[${plan.prepare_retry_marker}]\n` +
-      "Your previous preparation failed to return a valid plan. This is a mandatory correction: return ONLY the structured planning answer, never prose-only refusal or needs_action false.\n\n" +
+      "Your previous preparation failed to return a valid plan. This is a mandatory correction: return ONLY plain top-level strings markdown, summary, action_kind, start_url and steps as an array of strings. Do not nest a plan object or encode JSON in strings. Never return a prose-only refusal.\n\n" +
       PLANNING_ONLY;
     await h(
       `/sessions/${encodeURIComponent(run.h_session_id)}/messages`,
@@ -548,11 +629,17 @@ async function sync(db: any, row: Obj, wait = 0) {
     run.plan?.prepare_retry === "running"
   ) {
     let messageIndex = run.plan.prepare_retry_message_index;
+    let retryFailed = run.plan.prepare_retry_failed === true;
     for (const [offset, event] of events.entries()) {
       const index = row.event_index + offset;
+      if (index < run.plan.prepare_retry_from_index) continue;
       if (
-        index < run.plan.prepare_retry_from_index || event.type !== "AgentEvent"
-      ) continue;
+        event.type === "AgentErrorEvent" && Number.isInteger(messageIndex) &&
+        index > messageIndex
+      ) {
+        retryFailed = true;
+      }
+      if (event.type !== "AgentEvent") continue;
       const data = event.data;
       const content = Array.isArray(data?.content)
         ? data.content
@@ -575,12 +662,14 @@ async function sync(db: any, row: Obj, wait = 0) {
     }
     if (
       messageIndex !== run.plan.prepare_retry_message_index ||
-      retryAnswer !== run.plan.prepare_retry_answer
+      retryAnswer !== run.plan.prepare_retry_answer ||
+      retryFailed !== (run.plan.prepare_retry_failed === true)
     ) {
       await saveRun(db, row, {
         plan: {
           ...run.plan,
           prepare_retry_message_index: messageIndex,
+          prepare_retry_failed: retryFailed,
           ...(retryAnswer ? { prepare_retry_answer: retryAnswer } : {}),
         },
       });
@@ -589,7 +678,9 @@ async function sync(db: any, row: Obj, wait = 0) {
       ["completed", "failed", "cancelled", "timed_out"].includes(
         patch.status,
       ) &&
-      !retryAnswer
+      !retryAnswer &&
+      !(retryFailed && patch.status === "failed" &&
+        change.error_code === "answer_validation")
     ) {
       patch.status = "running";
       return save(db, row, patch, true);
@@ -609,13 +700,22 @@ async function sync(db: any, row: Obj, wait = 0) {
   if (
     ["completed", "failed", "cancelled", "timed_out"].includes(patch.status)
   ) {
+    const prepareResult = row.mode === "do" && run.phase === "prepare" &&
+      (patch.status === "completed" ||
+        (patch.status === "failed" &&
+          change.error_code === "answer_validation"));
     // /changes may report completion before the page containing the answer.
-    const final = patch.status === "completed" && retryAnswer
+    const answerEvent = run.plan?.prepare_retry
+      ? retryAnswer
+      : events.findLast((event: Obj) =>
+        event.type === "AgentEvent" && event.data?.kind === "answer_event"
+      )?.data;
+    const final = prepareResult && answerEvent
       ? {
-        ...retryAnswer,
-        answer: retryAnswer.answer ?? (await h(path)).latest_answer,
+        ...answerEvent,
+        answer: answerEvent.answer ?? (await h(path)).latest_answer,
       }
-      : patch.status === "completed" && change.answer == null
+      : (patch.status === "completed" || prepareResult) && change.answer == null
       ? await h(path)
       : change;
     patch.result = patch.status === "completed"
@@ -629,22 +729,12 @@ async function sync(db: any, row: Obj, wait = 0) {
       ? (errors.includes(change.error_code) ? change.error_code : "internal")
       : null;
     patch.finished_at = new Date().toISOString();
-    if (
-      patch.status === "completed" && row.mode === "do" &&
-      run.phase === "prepare"
-    ) {
-      let answer = final.answer ?? final.latest_answer;
-      if (typeof answer === "string") {
-        try {
-          answer = JSON.parse(answer);
-        } catch {
-          answer = null;
-        }
-      }
+    if (prepareResult) {
       {
-        const plan = answer?.needs_action === true
-          ? validPlan(answer.plan)
-          : null;
+        const plan = preparePlan(
+          final.answer ?? final.latest_answer,
+          run.plan?.instruction ?? "",
+        );
         patch.result = null;
         patch.outcome = null;
         if (!plan || typeof run.plan?.instruction !== "string") {
@@ -665,6 +755,7 @@ async function sync(db: any, row: Obj, wait = 0) {
             },
           });
           patch.status = "awaiting_confirmation";
+          patch.error_code = null;
           patch.confirmation = plan;
           patch.confirmation_at = new Date().toISOString();
           patch.deadline_at = new Date(Date.now() + (900 + 180) * 1000)

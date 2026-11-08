@@ -320,13 +320,18 @@ def test_do_prepare_request_is_structurally_read_only(run):
     overrides = body["overrides"]
     assert overrides["agent.environments[kind=web].mode"] == {"type": "text", "chunk_size": 20000}
     assert "agent.tools" not in overrides
-    assert "needs_action" in overrides["agent.answer_format"]["properties"]
+    schema = overrides["agent.answer_format"]
+    assert set(schema["properties"]) == {"markdown", "summary", "action_kind", "start_url", "steps"}
+    assert "required" not in schema
+    assert all(field.get("type") != "object" and "enum" not in field
+               for field in schema["properties"].values())
+    assert schema["properties"]["steps"]["items"] == {"type": "string"}
     assert "cannot and must not act" in overrides["agent.instructions"]
     assert "PLANNING-ONLY" in body["messages"][0]["message"]
     assert "GET requests or URL/query tricks" in overrides["agent.instructions"]
     assert "Do NOT tell the user to do it manually" in overrides["agent.instructions"]
     assert "separate interactive browser session" in body["messages"][0]["message"]
-    assert overrides["agent.answer_format"]["properties"]["needs_action"]["const"] is True
+    assert "plain top-level values" in overrides["agent.instructions"]
     assert out["run"]["plan"]["instruction"] == "Send it"
 
 
@@ -696,3 +701,96 @@ def test_only_matching_user_retry_message_unlocks_answer(run, message):
             **answered("Still refusing"), "new_events": [message, *answered("Still refusing")["new_events"]]}}]})
     assert out["row"]["status"] == "running"
     assert "prepare_retry_answer" not in out["run"]["plan"]
+
+
+@pytest.mark.parametrize("answer", [
+    {**PLAN, "markdown": "Plan"},
+    {"plan": json.dumps(PLAN), "markdown": "Plan"},
+    {"plan": PLAN},
+    "Plan:\n```json\n" + json.dumps(PLAN) + "\n```",
+    json.dumps(json.dumps(PLAN)),
+    {"markdown": "```json\n" + json.dumps(PLAN) + "\n```"},
+])
+def test_flat_and_legacy_encoded_plans_are_accepted(run, answer):
+    out, = run({"row": {"mode": "do"}, "change": {"status": "completed", "answer": answer}})
+    assert out["row"]["status"] == "awaiting_confirmation"
+    assert out["row"]["confirmation"] == PLAN
+    assert out["row"]["error_code"] is None
+    assert not any(c["url"].endswith("/messages") for c in out["calls"])
+
+
+@pytest.mark.parametrize("steps", ["1. Recipient Alice\n2. Amount $10\n3. Click Send",
+                                  "1. Recipient Alice 2. Amount $10 3. Click Send",
+                                  "Recipient Alice\nAmount $10\nClick Send"])
+def test_string_steps_are_normalized(run, steps):
+    out, = run({"row": {"mode": "do"}, "change": {
+        "status": "completed", "answer": {**PLAN, "steps": steps}}})
+    assert out["row"]["confirmation"] == PLAN
+
+
+@pytest.mark.parametrize("source", ["answer", "latest", "event"])
+def test_answer_validation_failure_salvages_raw_text(run, source):
+    text = "Proposed action at https://example.com/send\n1. Recipient Alice\n2. Amount $10\n3. Click Send"
+    change = {"status": "failed", "error_code": "answer_validation", "answer": None}
+    scenario = {"row": {"mode": "do"}, "change": change}
+    if source == "answer":
+        change["answer"] = {"markdown": text}
+    elif source == "latest":
+        scenario["latest"] = text
+    else:
+        change["new_events"] = answered(text)["new_events"]
+    out, = run(scenario)
+    assert out["row"]["status"] == "awaiting_confirmation"
+    assert out["row"]["confirmation"] == {**PLAN, "summary": "SECRET instruction", "action_kind": "other"}
+    assert out["row"]["error_code"] is None
+
+
+def test_answer_validation_without_salvage_retries_then_plan_missing(run):
+    failure = {**answered("No actionable plan"), "status": "failed", "error_code": "answer_validation"}
+    retry_failure = {**answered("Still no plan", retry=True), "status": "failed", "error_code": "answer_validation"}
+    out, = run({"row": {"mode": "do"}, "requests": [
+        {"body": {"action": "status", "task_id": ID}, "change": failure},
+        {"body": {"action": "status", "task_id": ID}, "change": retry_failure}]})
+    assert [r["body"]["status"] for r in out["replies"]] == ["running", "failed"]
+    assert out["row"]["error_code"] == "plan_missing"
+    message = next(c["body"]["message"] for c in out["calls"] if c["url"].endswith("/messages"))
+    assert "plain top-level strings" in message and "array of strings" in message
+
+
+def test_retry_validation_failure_can_also_be_salvaged(run):
+    text = "- Recipient Alice\n- Amount $10\n- Click Send"
+    out, = run({"row": {"mode": "do"}, "run": {"plan": {"instruction": "Send at https://example.com/send"}},
+        "requests": [
+            {"body": {"action": "status", "task_id": ID}, "change": answered("Cannot act")},
+            {"body": {"action": "status", "task_id": ID}, "change": {
+                **answered(text, retry=True), "status": "failed", "error_code": "answer_validation"}}]})
+    assert out["row"]["status"] == "awaiting_confirmation" and out["row"]["error_code"] is None
+    assert out["row"]["confirmation"]["steps"] == PLAN["steps"]
+    assert out["row"]["confirmation"]["start_url"] == PLAN["start_url"]
+
+
+@pytest.mark.parametrize("steps", ["x" * 2001, "1. " + "x" * 2001])
+def test_string_steps_still_reject_oversized_values(run, steps):
+    answer = {**PLAN, "steps": steps}
+    out, = run({"row": {"mode": "do"}, "requests": [
+        {"body": {"action": "status", "task_id": ID}, "change": answered(answer)},
+        {"body": {"action": "status", "task_id": ID}, "change": answered(answer, retry=True)}]})
+    assert out["row"]["status"] == "failed" and out["row"]["error_code"] == "plan_missing"
+
+
+@pytest.mark.parametrize("latest,expected", [
+    (None, "failed"),
+    ("https://example.com/send\n1. Recipient Alice\n2. Amount $10\n3. Click Send", "awaiting_confirmation"),
+])
+def test_retry_validation_failure_without_answer_event(run, latest, expected):
+    out, = run({"row": {"mode": "do"}, "latest": latest, "requests": [
+        {"body": {"action": "status", "task_id": ID}, "change": answered("Cannot act")},
+        {"body": {"action": "status", "task_id": ID}, "change": {
+            "status": "running", "new_events": [
+                {"type": "AgentEvent", "data": {"kind": "message_event", "caller_id": "user",
+                                               "content": ["__RETRY_MESSAGE__"]}},
+                {"type": "AgentErrorEvent", "data": {"error": "Answer failed validation"}}]}},
+        {"body": {"action": "status", "task_id": ID}, "change": {
+            "status": "failed", "error_code": "answer_validation", "answer": None}}]})
+    assert out["row"]["status"] == expected
+    assert out["row"]["error_code"] == ("plan_missing" if expected == "failed" else None)
