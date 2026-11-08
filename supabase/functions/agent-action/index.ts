@@ -599,6 +599,9 @@ async function continueTask(db: any, row: Obj, run: Obj, message: string, client
     else throw error;
   }
   const claimedRun = await loadRun(db, resumed);
+  if (resumed.id !== row.id && resumed.status === "queued" && !claimedRun.h_session_id) {
+    return fresh(resumed);
+  }
   if (claimedRun.plan?.continuation_claim !== marker) return response(resumed);
   if (resumed.id !== row.id) return fresh(resumed);
   const path = `/sessions/${encodeURIComponent(claimedRun.h_session_id)}`;

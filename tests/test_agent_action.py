@@ -45,6 +45,12 @@ for (let i=0; i<scenarios.length; i++) {
   run={task_id:row.id,phase:'prepare',h_session_id:null,plan:{}};
   return structuredClone(row);
  };
+ if(s.reservedChild){
+  createTask(row.mode,'Next');
+  run.plan={instruction:'Next',continuation_claim:'previous-worker'};
+  continuations.set(id+':id:followup-reserved',row.id);
+  ledgerEntries=1;
+ }
  globalThis.__db={
   auth:{getUser:async()=>({data:{user:s.noUser?null:{id:'u1'}},error:null})},
   rpc:async(name,args)=>{
@@ -746,6 +752,19 @@ def test_concurrent_continue_with_same_id_sends_and_charges_once(run):
     assert all(r["status"] == 200 for r in out["replies"])
     assert out["ledgerEntries"] == 1
     assert len([c for c in out["calls"] if c["url"].endswith("/messages")]) == 1
+
+
+def test_continue_retry_starts_reserved_queued_child_without_extra_charge(run):
+    out, = run(finished_research(reservedChild=True, body={"action": "continue", "task_id": ID,
+        "message": "Next", "client_message_id": "followup-reserved"}))
+    child_id = "22222222-2222-2222-2222-222222222222"
+    assert out["replies"][0]["status"] == 201
+    assert out["replies"][0]["body"]["task_id"] == child_id
+    assert out["replies"][0]["body"]["continued_from"] == ID
+    created, = [c for c in out["calls"] if c["url"].endswith("/sessions")]
+    assert created["method"] == "POST" and created["headers"]["Idempotency-Key"] == child_id
+    assert out["run"]["h_session_id"] == "session1"
+    assert out["ledgerEntries"] == 1
 
 
 @pytest.mark.parametrize("client_id", ["", "a" * 65, None, 7, "has spaces", "a/b", "é"])
