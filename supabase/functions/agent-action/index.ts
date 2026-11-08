@@ -548,7 +548,8 @@ async function startTask(db: any, userId: string, body: Obj, reservedRow?: Obj, 
   }
   await saveRun(db, row, {
     phase: "prepare",
-    plan: { instruction, ...(body.timezone ? { timezone: body.timezone } : {}),
+    plan: { instruction, ...(body.context ? { context: body.context } : {}),
+      ...(body.timezone ? { timezone: body.timezone } : {}),
       ...(continuationClaim ? { continuation_claim: continuationClaim } : {}) },
   });
   let session;
@@ -578,8 +579,12 @@ async function continueTask(db: any, row: Obj, run: Obj, message: string, client
   const response = (current: Obj, status = 200) => json({
     ...task(current), ...(current.id !== row.id ? { continued_from: row.id } : {}),
   }, status);
-  const fresh = async (reservedRow: Obj, restarting = false) => response(
-    await startTask(db, row.user_id, body, reservedRow, marker, restarting), 201,
+  const fresh = async (reservedRow: Obj, restarting = false, storedPlan?: Obj) => response(
+    await startTask(db, row.user_id, storedPlan ? {
+      instruction: storedPlan.instruction, mode: reservedRow.mode,
+      context: storedPlan.context ?? body.context,
+      ...(storedPlan.timezone ? { timezone: storedPlan.timezone } : {}),
+    } : body, reservedRow, marker, restarting), 201,
   );
   const claim = async (operation: string) => {
     const { data, error } = await db.rpc("continue_agent_task", {
@@ -600,7 +605,7 @@ async function continueTask(db: any, row: Obj, run: Obj, message: string, client
   }
   const claimedRun = await loadRun(db, resumed);
   if (resumed.id !== row.id && resumed.status === "queued" && !claimedRun.h_session_id) {
-    return fresh(resumed, true);
+    return fresh(resumed, true, claimedRun.plan);
   }
   if (claimedRun.plan?.continuation_claim !== marker) return response(resumed);
   if (resumed.id !== row.id) return fresh(resumed);

@@ -781,6 +781,17 @@ def test_continue_retry_starts_reserved_queued_child_without_extra_charge(run):
     assert out["ledgerEntries"] == 1
 
 
+def test_continue_retry_uses_reserved_instruction_not_changed_message(run):
+    out, = run(finished_research(reservedChild=True, body={"action": "continue", "task_id": ID,
+        "message": "Changed retry instruction", "client_message_id": "followup-reserved"}))
+    created, = [c for c in out["calls"] if c["url"].endswith("/sessions")]
+    assert "Next" in str(created["body"])
+    assert "Changed retry instruction" not in str(created["body"])
+    assert out["run"]["plan"]["instruction"] == "Next"
+    assert out["replies"][0]["status"] == 201
+    assert out["ledgerEntries"] == 1
+
+
 @pytest.mark.parametrize("client_id", ["", "a" * 65, None, 7, "has spaces", "a/b", "é"])
 def test_continue_client_message_id_validation(run, client_id):
     out, = run({"body": {"action": "continue", "task_id": ID, "message": "Next", "client_message_id": client_id}})
