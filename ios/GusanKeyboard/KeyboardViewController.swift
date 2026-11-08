@@ -9,24 +9,7 @@ final class KeyboardViewController: UIInputViewController {
     private lazy var screen = ScreenKeyboardController(host: self, store: store, pasteboardAllowed: { [weak self] in self?.hasFullAccess == true && self?.preferences.pasteboardFallback == true })
     private lazy var auth = AuthClient(store: store)
     private lazy var agent = AgentKeyboardController(store: store, auth: auth, host: self)
-    private struct Preferences {
-        var keyboardMode = KeyboardMode.smart
-        var keyboardScreenEnabled = true
-        var keyClicks = true
-        var doubleSpacePeriod = true
-        var autoCapitalization = true
-        var pasteboardFallback = true
-        init() {}
-        init(defaults: UserDefaults) {
-            keyboardMode = (defaults.string(forKey: "keyboardMode") ?? defaults.string(forKey: "stripMode")).flatMap(KeyboardMode.init(rawValue:)) ?? .smart
-            keyboardScreenEnabled = defaults.object(forKey: "keyboardScreenEnabled") as? Bool ?? true
-            keyClicks = defaults.object(forKey: "keyClicks") as? Bool ?? true
-            doubleSpacePeriod = defaults.object(forKey: "doubleSpacePeriod") as? Bool ?? true
-            autoCapitalization = defaults.object(forKey: "autoCapitalization") as? Bool ?? true
-            pasteboardFallback = defaults.object(forKey: "pasteboardFallback") as? Bool ?? true
-        }
-    }
-    private var preferences = Preferences()
+    private var preferences = KeyboardSettingsSnapshot()
     private var updateScheduled = false
     private var appliedDark: Bool?
     private var appeared = false
@@ -85,7 +68,7 @@ final class KeyboardViewController: UIInputViewController {
     }
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        preferences = Preferences(defaults: sharedDefaults)
+        preferences = KeyboardSettingsSnapshot(defaults: sharedDefaults)
         scheduleUpdate()
     }
     override func viewDidAppear(_ animated: Bool) {
@@ -99,7 +82,7 @@ final class KeyboardViewController: UIInputViewController {
         view.window?.gestureRecognizers?.forEach { $0.delaysTouchesBegan = false }
         DispatchQueue.main.async { [weak self] in
             guard let self, appeared else { return }
-            settings.refresh(); preferences = Preferences(defaults: sharedDefaults)
+            settings.refresh(); preferences = KeyboardSettingsSnapshot(defaults: sharedDefaults)
             pendingInsert = hasFullAccess ? VoicePendingInsert.read(from: sharedDefaults, account: store.read().flatMap { $0.userID ?? $0.email }) : nil
             screen.appear(); voice.appear(); agent.appear(); scheduleUpdate()
         }
@@ -154,10 +137,10 @@ final class KeyboardViewController: UIInputViewController {
     @objc private func toggleMode() {
         guard !working, ![.recording, .transcribing, .thinking].contains(voice.phase) else { return }
         settings.keyboardMode = preferences.keyboardMode == .smart ? .agent : .smart
-        preferences = Preferences(defaults: sharedDefaults); scheduleUpdate()
+        preferences = KeyboardSettingsSnapshot(defaults: sharedDefaults); scheduleUpdate()
     }
     @objc private func toggleScreen() { settings.keyboardScreenEnabled = !preferences.keyboardScreenEnabled
-        preferences = Preferences(defaults: sharedDefaults); screenHint = preferences.keyboardScreenEnabled && !screen.live; scheduleUpdate() }
+        preferences = KeyboardSettingsSnapshot(defaults: sharedDefaults); screenHint = preferences.keyboardScreenEnabled && !screen.live; scheduleUpdate() }
     @objc private func startVoice() { onVoice?() }
     @objc private func cancelVoice() {
         if pendingInsert != nil {
