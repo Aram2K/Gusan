@@ -27,7 +27,10 @@ struct HomeView: View {
             } header: { Text("Mode") } footer: {
                 Text("The strip opens in this mode. You can also switch from the chip in the strip.")
             }
-            if !model.restoringSession && !setupDismissed && !setupCompleted && !setupComplete { setupChecklist }
+            if !model.restoringSession && !setupDismissed && !setupCompleted && !setupComplete {
+                setupChecklist
+                MakeGusanKeyboardSection(compact: true)
+            }
             if mode == .agent { agentSections } else { smartSections }
             Section {
                 NavigationLink { KeyboardSetupView() } label: {
