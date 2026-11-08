@@ -134,18 +134,26 @@ public struct ScreenChannelFrameProvider: ScreenFrameProvider {
     public let keyboardShownAt: Date?
     public let maxAge: TimeInterval
     public let phase: ScreenRequest.Phase
-    public init(channel: ScreenChannel, pollInterval: TimeInterval = 0.2, keyboardShownAt: Date? = nil, maxAge: TimeInterval = ScreenFrame.maxAge, phase: ScreenRequest.Phase = .start) {
+    private let accessAllowed: () -> Bool
+    public init(channel: ScreenChannel, pollInterval: TimeInterval = 0.2, keyboardShownAt: Date? = nil, maxAge: TimeInterval = ScreenFrame.maxAge, phase: ScreenRequest.Phase = .start, accessAllowed: @escaping () -> Bool = { true }) {
         self.channel = channel; self.pollInterval = pollInterval; self.keyboardShownAt = keyboardShownAt; self.maxAge = maxAge; self.phase = phase
+        self.accessAllowed = accessAllowed
     }
     public func frame(timeout: TimeInterval = 5) async throws -> ScreenFrame {
+        guard accessAllowed() else { throw ScreenError.channelUnavailable }
         guard channel.isLive() else { throw ScreenError.notLive }
         let request = ScreenRequest(phase: phase)
         channel.clearFrame()
         guard channel.write(request: request) else { throw ScreenError.channelUnavailable }
+        defer {
+            if channel.readRequest()?.id == request.id { _ = channel.consumeRequest() }
+            if channel.readFrame()?.requestID == request.id { channel.clearFrame() }
+        }
         channel.post(.request)
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             try Task.checkCancellation()
+            guard accessAllowed() else { throw ScreenError.channelUnavailable }
             if let frame = channel.consumeFrame(requestID: request.id) {
                 guard frame.phase == nil || frame.phase == phase else { continue }
                 guard frame.isFresh(keyboardShownAt: keyboardShownAt, maxAge: maxAge) else { throw ScreenError.noFrame }
@@ -153,21 +161,18 @@ public struct ScreenChannelFrameProvider: ScreenFrameProvider {
             }
             try await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
         }
-        _ = channel.consumeRequest()
-        channel.clearFrame()
         throw channel.isLive() ? ScreenError.noFrame : ScreenError.notLive
     }
 }
 
 public enum ScreenError: Error, LocalizedError, Equatable {
-    case notLive, channelUnavailable, noFrame, secureField, notExplained
+    case notLive, channelUnavailable, noFrame, secureField
     public var errorDescription: String? {
         switch self {
         case .notLive: return "Gusan Screen isn't running. Start it in the Gusan app or from Control Center."
         case .channelUnavailable: return "The keyboard can't reach Gusan Screen. Check Diagnostics in the Gusan app."
         case .noFrame: return "Gusan Screen didn't send a current picture in time. Try again."
         case .secureField: return "Gusan never offers the screen while you type in a password field."
-        case .notExplained: return "Open Gusan Screen in the Gusan app once to read what is shared."
         }
     }
 }
