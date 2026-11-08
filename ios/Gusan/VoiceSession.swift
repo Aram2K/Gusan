@@ -113,6 +113,7 @@ final class VoiceSession: ObservableObject {
     func start(pendingWithin: TimeInterval = 15) {
         if machine.phase != .off { receive(); return }
         guard startup == nil else { return }
+        let pendingStart = KeyboardVoiceStartup.validatedStart(channel.readCommand(), within: pendingWithin)
         starting = true
         error = ""
         status = VoiceStatus()
@@ -121,6 +122,10 @@ final class VoiceSession: ObservableObject {
             do {
                 if let error = store.sessionState(fullAccess: store.diagnostics().peer?.fullAccess).voiceError { throw error }
                 guard let session = store.read() else { throw VoiceError.notSignedIn }
+                if let pendingStart {
+                    try channel.write(status: VoiceStatus(phase: .ready, requestID: pendingStart.requestID))
+                    channel.post(.status)
+                }
                 let allowed = await requestMicrophonePermission().value
                 refreshPermission()
                 try Task.checkCancellation()
@@ -140,8 +145,13 @@ final class VoiceSession: ObservableObject {
                         if self.machine.phase != .off { self.publish() }
                     }
                 }
-                if let command = channel.readCommand(), Date().timeIntervalSince(command.sentAt) <= pendingWithin {
-                    receive(acceptPendingStart: pendingWithin > 15)
+                if let pendingStart, channel.readCommand()?.id == pendingStart.id {
+                    _ = channel.consumeCommand()
+                    let command = KeyboardVoiceStartup.afterPermission(pendingStart)
+                    consumed = command.id; systemRequestID = nil; machine.action = command.action ?? settings.defaultAction
+                    execute(machine.handle(.command(command, Date())))
+                } else {
+                    receive()
                 }
             } catch is CancellationError {} catch {
                 self.error = error.localizedDescription
@@ -295,6 +305,7 @@ final class VoiceSession: ObservableObject {
         let updated = VoiceStatus(phase: machine.phase, requestID: machine.requestID, sessionEndsAt: machine.phase == .recording ? machine.recordingStarted?.addingTimeInterval(machine.maxRecording) : readyUntil, level: level ?? status.level, message: machine.message, result: machine.result, replacesSelection: machine.replacesSelection, resultKind: machine.resultKind)
         var presentation = updated
         presentation.heartbeat = status.heartbeat
+        presentation.writtenAt = status.writtenAt
         if presentation != status { status = presentation }
         try? channel.write(status: updated); channel.post(.status)
         if !(status.phase == .done && status.requestID == systemRequestID) {
