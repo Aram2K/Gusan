@@ -13,12 +13,14 @@ public struct ScreenFrame: Codable, Equatable {
     public let width: Int
     public let height: Int
     public let jpeg: Data
+    public var phase: ScreenRequest.Phase?
     /// Captured just before the Gusan keyboard came up, so the keyboard is not in the picture.
     public var frozen: Bool
     /// The keyboard's band was cut off the bottom because no pre-keyboard picture existed.
     public var cropped: Bool
-    public init(requestID: UUID, capturedAt: Date, width: Int, height: Int, jpeg: Data, frozen: Bool = false, cropped: Bool = false) {
+    public init(requestID: UUID, capturedAt: Date, width: Int, height: Int, jpeg: Data, frozen: Bool = false, cropped: Bool = false, phase: ScreenRequest.Phase? = nil) {
         self.requestID = requestID; self.capturedAt = capturedAt; self.width = width; self.height = height; self.jpeg = jpeg; self.frozen = frozen; self.cropped = cropped
+        self.phase = phase
     }
     public var dataURL: String { "data:image/jpeg;base64," + jpeg.base64EncodedString() }
     /// How long a picture may be trusted to show what the user is asking about.
@@ -57,8 +59,7 @@ public enum ScreenFrameGeometry {
     }
 }
 
-/// Where the Gusan keyboard is on screen, published by the keyboard while it is up
-/// so the extension can hand over a picture from before it appeared, or crop it out.
+/// Where the Gusan keyboard is on screen, so its band can be cropped out.
 public struct ScreenKeyboardState: Codable, Equatable {
     public let shownAt: Date
     public let keyboardHeight: Double
@@ -69,20 +70,20 @@ public struct ScreenKeyboardState: Codable, Equatable {
     public var bottomFraction: Double { screenHeight > 0 ? min(ScreenFrameGeometry.maxBottomCrop, max(0, keyboardHeight / screenHeight)) : 0 }
 }
 
-/// Holds the last few pictures (newest first, a second or two of history) and
-/// rate-limits how often a new one is accepted so the extension doesn't scale
-/// 60 frames a second. While the keyboard is up it also keeps one frozen copy
-/// taken before the keyboard appeared, which is what requests get.
+/// Keeps bounded recent pictures and rate-limits scaling of broadcast frames.
 public final class ScreenFrameStore {
     public struct Snapshot: Equatable {
-        public let image: CGImage
+        public let jpeg: Data
         public let capturedAt: Date
+        public var image: CGImage? {
+            guard let source = CGImageSourceCreateWithData(jpeg as CFData, nil) else { return nil }
+            return CGImageSourceCreateImageAtIndex(source, 0, nil)
+        }
     }
     public let fastInterval: TimeInterval
     public let idleInterval: TimeInterval
     public let capacity: Int
     private var recent: [Snapshot] = []
-    private var frozenSnapshot: Snapshot?
     private var lastAccepted: Date?
     private var fastUntil = Date.distantPast
     private var count = 0
@@ -94,7 +95,6 @@ public final class ScreenFrameStore {
     public var latest: CGImage? { lock.lock(); defer { lock.unlock() }; return recent.first?.image }
     public var capturedAt: Date? { lock.lock(); defer { lock.unlock() }; return recent.first?.capturedAt }
     public var accepted: Int { lock.lock(); defer { lock.unlock() }; return count }
-    public var frozen: Snapshot? { lock.lock(); defer { lock.unlock() }; return frozenSnapshot }
     /// The interval in force at `now`: fast right after the keyboard or a request showed up, idle otherwise.
     public func minimumInterval(at now: Date = Date()) -> TimeInterval { lock.lock(); defer { lock.unlock() }; return now < fastUntil ? fastInterval : idleInterval }
     /// Accept frames at the fast rate until `until`.
@@ -106,59 +106,53 @@ public final class ScreenFrameStore {
         return now.timeIntervalSince(lastAccepted) >= (now < fastUntil ? fastInterval : idleInterval)
     }
     public func store(_ image: CGImage, at now: Date = Date()) {
+        guard let jpeg = ScreenFrameEncoder.jpeg(image, budgetBytes: ScreenFrameEncoder.defaultBudget),
+              jpeg.count <= ScreenFrameEncoder.defaultBudget else { return }
         lock.lock(); defer { lock.unlock() }
-        recent.insert(Snapshot(image: image, capturedAt: now), at: 0)
+        recent.insert(Snapshot(jpeg: jpeg, capturedAt: now), at: 0)
         if recent.count > capacity { recent.removeLast(recent.count - capacity) }
         lastAccepted = now; count += 1
     }
     /// Drops every kept picture (pause, end).
-    public func clear() { lock.lock(); defer { lock.unlock() }; recent = []; frozenSnapshot = nil; lastAccepted = nil }
+    public func clear() { lock.lock(); defer { lock.unlock() }; recent = []; lastAccepted = nil }
     /// The newest picture captured at or before `instant`, or nil when nothing that old is left.
     public func snapshot(before instant: Date) -> Snapshot? { lock.lock(); defer { lock.unlock() }; return recent.first { $0.capturedAt <= instant } }
-    /// Keeps the newest picture from before the keyboard appeared. Returns false
-    /// when none is left, in which case requests fall back to cropping.
-    @discardableResult public func freeze(before instant: Date) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        if let frozenSnapshot, frozenSnapshot.capturedAt <= instant { return true }
-        guard let match = recent.first(where: { $0.capturedAt <= instant }) else { return false }
-        frozenSnapshot = match; return true
-    }
-    public func unfreeze() { lock.lock(); defer { lock.unlock() }; frozenSnapshot = nil }
     /// The latest picture as a frame for `requestID`, or nil when nothing was captured yet.
     public func frame(for requestID: UUID, budgetBytes: Int = ScreenFrameEncoder.defaultBudget) -> ScreenFrame? {
         frame(for: requestID, keyboard: nil, budgetBytes: budgetBytes)
     }
-    /// The frame answering a request while the keyboard described by `keyboard`
-    /// is up: the frozen pre-keyboard picture when there is one, otherwise the
-    /// latest picture with the keyboard's band cropped off.
+    /// The newest picture, with the keyboard's band cropped off.
     public func frame(for requestID: UUID, keyboard: ScreenKeyboardState?, budgetBytes: Int = ScreenFrameEncoder.defaultBudget) -> ScreenFrame? {
-        if let keyboard {
-            if freeze(before: keyboard.shownAt), let snapshot = frozen {
-                return Self.encode(snapshot, requestID: requestID, frozen: true, cropBottom: 0, budgetBytes: budgetBytes)
-            }
-            lock.lock(); let newest = recent.first; lock.unlock()
-            guard let newest else { return nil }
-            return Self.encode(newest, requestID: requestID, frozen: false, cropBottom: keyboard.bottomFraction, budgetBytes: budgetBytes)
-        }
         lock.lock(); let newest = recent.first; lock.unlock()
         guard let newest else { return nil }
-        return Self.encode(newest, requestID: requestID, frozen: false, cropBottom: 0, budgetBytes: budgetBytes)
+        return Self.encode(newest, requestID: requestID, frozen: false, cropBottom: keyboard?.bottomFraction ?? 0, budgetBytes: budgetBytes)
+    }
+    public func frame(for request: ScreenRequest, keyboard: ScreenKeyboardState?, allowFallback: Bool = false, budgetBytes: Int = ScreenFrameEncoder.defaultBudget) -> ScreenFrame? {
+        lock.lock()
+        let match = recent.filter { $0.capturedAt >= request.targetAt }.min { $0.capturedAt < $1.capturedAt }
+            ?? (allowFallback ? recent.first : nil)
+        lock.unlock()
+        guard let match else { return nil }
+        var frame = Self.encode(match, requestID: request.id, frozen: false, cropBottom: keyboard?.bottomFraction ?? 0, budgetBytes: budgetBytes)
+        frame?.phase = request.phase
+        return frame
     }
     static func encode(_ snapshot: Snapshot, requestID: UUID, frozen: Bool, cropBottom: Double, budgetBytes: Int) -> ScreenFrame? {
-        var image = snapshot.image
+        guard var image = snapshot.image else { return nil }
         var cropped = false
         if cropBottom > 0 {
             let rect = ScreenFrameGeometry.cropRect(width: image.width, height: image.height, bottomFraction: cropBottom)
             if rect.height < CGFloat(image.height), let cut = image.cropping(to: rect) { image = cut; cropped = true }
         }
-        guard let jpeg = ScreenFrameEncoder.jpeg(image, budgetBytes: budgetBytes) else { return nil }
-        return ScreenFrame(requestID: requestID, capturedAt: snapshot.capturedAt, width: image.width, height: image.height, jpeg: jpeg, frozen: frozen, cropped: cropped)
+        guard let encoded = ScreenFrameEncoder.encodedJPEG(image, budgetBytes: budgetBytes) else { return nil }
+        return ScreenFrame(requestID: requestID, capturedAt: snapshot.capturedAt, width: encoded.width, height: encoded.height, jpeg: encoded.data, frozen: frozen, cropped: cropped)
     }
 }
 
 public enum ScreenFrameEncoder {
     /// Smart-action bodies may be 8 MB; one frame stays far below that, also on a named pasteboard.
     public static let defaultBudget = 450_000
+    public static let minimumLongEdge = 480
     public static let qualities: [Double] = [0.75, 0.6, 0.45, 0.3]
     public static func jpeg(_ image: CGImage, quality: Double) -> Data? {
         let data = NSMutableData()
@@ -172,15 +166,29 @@ public enum ScreenFrameEncoder {
         guard CGImageDestinationFinalize(destination) else { return nil }
         return data as Data
     }
-    /// The first quality whose JPEG fits the budget; the lowest quality when none does.
+    /// Lowers quality first, then resolution, until the JPEG fits the budget.
     public static func jpeg(_ image: CGImage, budgetBytes: Int = defaultBudget) -> Data? {
-        var smallest: Data?
-        for quality in qualities {
-            guard let data = jpeg(image, quality: quality) else { continue }
-            if data.count <= budgetBytes { return data }
-            smallest = data
+        encodedJPEG(image, budgetBytes: budgetBytes)?.data
+    }
+    static func encodedJPEG(_ image: CGImage, budgetBytes: Int) -> (data: Data, width: Int, height: Int)? {
+        guard budgetBytes > 0 else { return nil }
+        var image = image
+        while true {
+            for quality in qualities {
+                if let data = jpeg(image, quality: quality), data.count <= budgetBytes {
+                    return (data, image.width, image.height)
+                }
+            }
+            let longEdge = max(image.width, image.height)
+            guard longEdge > minimumLongEdge else { return nil }
+            let nextEdge = max(minimumLongEdge, Int(Double(longEdge) * 0.75))
+            let size = ScreenFrameGeometry.scaledSize(width: image.width, height: image.height, longEdge: nextEdge)
+            guard let context = CGContext(data: nil, width: size.width, height: size.height, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+            context.interpolationQuality = .high
+            context.draw(image, in: CGRect(x: 0, y: 0, width: size.width, height: size.height))
+            guard let scaled = context.makeImage() else { return nil }
+            image = scaled
         }
-        return smallest
     }
 }
 

@@ -40,7 +40,7 @@ public enum ScreenPrompts {
     }
     public static func uniqueFrames(_ frames: [ScreenFrame]) -> [ScreenFrame] {
         var hashes = Set<[UInt8]>()
-        return Array(frames.filter { hashes.insert(SHA256.digest(Array($0.jpeg))).inserted }.prefix(2))
+        return Array(frames.filter { $0.phase != nil || hashes.insert(SHA256.digest(Array($0.jpeg))).inserted }.prefix(2))
     }
     public static func messages(instruction: String, text: String, selected: String = "", frames: [ScreenFrame]) throws -> [ScreenChatMessage] {
         let instruction = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -53,9 +53,14 @@ public enum ScreenPrompts {
         if !selected.isEmpty { field = "Selected text in the field (\"this\" in the instruction means this selection unless it clearly means the screen):\n\(selected)" }
         else if text.isEmpty { field = "(The field is empty - write the text from the instruction and the screen.)" }
         else { field = "Text near the cursor in the field, for context only (nothing is selected; \"this\" in the instruction means the screen):\n\(text)" }
+        let pictures = frames.enumerated().flatMap { index, frame -> [ScreenContentPart] in
+            let phase = frame.phase ?? (index == 0 ? .start : .finish)
+            let label = phase == .start ? "Screen at start of voice instruction" : "Screen at finish"
+            return [.text(label + (frames.count == 1 ? " (only frame available)" : "")), .imageURL(frame.dataURL)]
+        }
         return [
             ScreenChatMessage(role: "system", content: .text(system)),
-            ScreenChatMessage(role: "user", content: .parts([.text("Instruction: \(instruction)\n\n\(field)")] + frames.map { .imageURL($0.dataURL) }))
+            ScreenChatMessage(role: "user", content: .parts([.text("Instruction: \(instruction)\n\n\(field)")] + pictures))
         ]
     }
 }

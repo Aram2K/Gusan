@@ -11,8 +11,8 @@ final class ScreenTakeTests: XCTestCase {
         XCTAssertEqual(ScreenPrompts.uniqueFrames([first, last, frame([5])]), [first, last])
         let messages = try ScreenPrompts.messages(instruction: "Reply", text: "Around cursor", selected: "Selected draft", frames: [first, duplicate, last])
         guard let message = messages.last, case .parts(let parts) = message.content else { return XCTFail("Expected image content") }
-        XCTAssertEqual(parts.count, 3)
-        XCTAssertEqual(Array(parts.suffix(2)), [.imageURL(first.dataURL), .imageURL(last.dataURL)])
+        XCTAssertEqual(parts.count, 5)
+        XCTAssertEqual(parts.filter { if case .imageURL = $0 { return true }; return false }, [.imageURL(first.dataURL), .imageURL(last.dataURL)])
         guard let part = parts.first, case .text(let text) = part else { return XCTFail("Expected instruction") }
         XCTAssertTrue(text.contains("Selected draft"))
     }

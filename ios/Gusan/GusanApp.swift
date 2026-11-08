@@ -27,7 +27,6 @@ struct GusanApp: App {
         _connections = StateObject(wrappedValue: connections)
         CalendarConnections.registerBackgroundRefresh(connections)
     }
-    @StateObject private var screen = ScreenMonitor()
     @State private var voiceSignInRequested = false
     var body: some Scene {
         WindowGroup {
@@ -38,7 +37,7 @@ struct GusanApp: App {
                         model.handleURL(URL(string: "gusan://signin")!)
                     })
                 } else { AppRootView() }
-            }.environmentObject(model).environmentObject(voice).environmentObject(agent).environmentObject(screen).environmentObject(connections).tint(Theme.accent)
+            }.environmentObject(model).environmentObject(voice).environmentObject(agent).environmentObject(connections).tint(Theme.accent)
                 .background(KeyboardDismissal())
                 .onAppear { voice.agentHandoff = { intent, context in try await agent.start(intent, context: context) } }
                 .onChange(of: scenePhase) { agent.setActive($0 == .active); connections.sceneChanged($0) }
@@ -46,6 +45,7 @@ struct GusanApp: App {
                 .overlay(alignment: .bottom) { AgentCardPreview() }
                 #endif
                 .onOpenURL { if $0.host == "voice" { voice.handleURL($0) } else if $0.host == "calendar" { connections.handleGoogleCallback($0) } else { model.handleURL($0) } }
+                .sheet(isPresented: $model.showingScreenBroadcast) { ScreenBroadcastSheet() }
                 .sheet(isPresented: Binding(get: { voice.presented && !voice.keyboardActivation }, set: { voice.presented = $0 }), onDismiss: {
                     if voiceSignInRequested {
                         voiceSignInRequested = false
