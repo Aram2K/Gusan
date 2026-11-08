@@ -135,6 +135,7 @@ final class VaultController: ObservableObject {
     }
 
     static func message(_ error: Error) -> String {
+        if error as? GusanError == .unauthorized { return "Sign in again to use Vault." }
         if let error = error as? VaultValidationError { return error.localizedDescription }
         if let error = error as? VaultStoreError { return error.localizedDescription }
         if let error = error as? VaultLoginChangeError { return error.localizedDescription }
