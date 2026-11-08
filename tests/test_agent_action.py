@@ -942,6 +942,15 @@ def waiting(**extra):
             "run": {"plan": {**PLAN, "instruction": "SECRET instruction"}}, **extra}
 
 
+def test_research_marketplace_guidance_requires_item_urls_and_ui_sort(run):
+    out, = run({"body": {"action": "start", "instruction": "Compare used phones"}})
+    text = out["calls"][0]["body"]["overrides"]["agent.instructions"]
+    assert "open every listing you recommend" in text
+    assert "exact item URL, never a search or category page" in text
+    assert "sort by price through the site's UI" in text
+    assert "sort links in text mode" in text
+
+
 def test_do_prepare_request_is_structurally_read_only(run):
     out, = run({"body": {"action": "start", "mode": "do", "instruction": "Send it"}})
     body = out["calls"][0]["body"]
