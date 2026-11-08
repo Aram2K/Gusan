@@ -260,10 +260,26 @@ def test_sweep_auth_and_scope(run):
 
 def test_sweep_pagination_missing_and_old(run):
     out, = run({"body": {"action": "sweep"}, "headers": {"X-Gusan-Sweep-Secret": "sweep-test"},
+                "row": {"deadline_at": "2000-01-01T00:00:00Z"},
                 "pages": [{"total": 101, "vaults": [{"id": "old", "name": f"gusan-task-{ID}", "created_at": "2000-01-01T00:00:00Z"}] * 100},
                           {"total": 101, "vaults": [{"id": "missing", "name": f"gusan-task-{LOGIN}", "created_at": "2099-01-01T00:00:00Z"}]}]})
     assert out["replies"][0]["body"]["deleted"] == 101
     assert "offset=100" in out["calls"][1]["url"]
+
+
+def test_sweep_keeps_old_vault_of_task_within_deadline(run):
+    out, = run({"body": {"action": "sweep"}, "headers": {"X-Gusan-Sweep-Secret": "sweep-test"},
+                "row": {"status": "running", "deadline_at": "2099-01-01T00:00:00Z"},
+                "pages": [{"total": 1, "vaults": [{"id": "old", "name": f"gusan-task-{ID}", "created_at": "2000-01-01T00:00:00Z"}]}]})
+    assert out["replies"][0]["body"]["deleted"] == 0
+    assert not any(c["method"] == "DELETE" for c in out["calls"])
+
+
+def test_add_without_optional_fields_keeps_metadata(run):
+    rows = [{"id": LOGIN, "user_id": "u1", "hostname": "example.com", "username_hint": "a•••@x.com", "has_totp": True}]
+    out, = run({"logins": rows, "body": {"action": "add", "hostname": "example.com"}})
+    body = out["replies"][0]["body"]
+    assert body["username_hint"] == "a•••@x.com" and body["has_totp"] is True
 
 
 def test_static_security_contract():

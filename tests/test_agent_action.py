@@ -212,7 +212,7 @@ def test_vault_cleanup_failure_is_best_effort(run):
     out, = run({"run": {"h_vault_id": "vault1"}, "upstream": 500,
                 "body": {"action": "cancel", "task_id": ID}})
     assert out["replies"][0]["body"]["status"] == "cancelled"
-    assert out["run"]["h_vault_id"] is None
+    assert out["run"]["h_vault_id"] == "vault1"  # kept so a later cleanup or the sweeper retries
     assert any(c.get("patch", {}).get("event") == "vault_delete_failed" for c in out["dbCalls"] if c.get("patch"))
 
 

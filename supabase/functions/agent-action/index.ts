@@ -561,7 +561,7 @@ async function cleanupVault(db: any, row: Obj, run: Obj) {
   try { await h(`/vaults/${encodeURIComponent(run.h_vault_id)}`, "DELETE"); }
   catch { event = "vault_delete_failed"; }
   try {
-    await saveRun(db, row, { h_vault_id: null, release_nonce: null, release_nonce_expires_at: null });
+    await saveRun(db, row, { ...(event === "vault_deleted" ? { h_vault_id: null } : {}), release_nonce: null, release_nonce_expires_at: null });
     await vaultEvent(db, row, event);
   } catch { console.log("agent-action", "vault_cleanup_failed"); }
 }

@@ -66,7 +66,8 @@ async function cleanup(db: any, row: Obj, run: Obj) {
   try { await h(`/vaults/${encodeURIComponent(run.h_vault_id)}`, "DELETE"); }
   catch { event = "vault_delete_failed"; }
   try {
-    checked(await db.from("agent_task_runs").update({ h_vault_id: null, release_nonce: null, release_nonce_expires_at: null }).eq("task_id", row.id));
+    // Keep the vault id after a failed delete so later cleanups and the sweeper retry it.
+    checked(await db.from("agent_task_runs").update({ ...(event === "vault_deleted" ? { h_vault_id: null } : {}), release_nonce: null, release_nonce_expires_at: null }).eq("task_id", row.id));
     await audit(db, row, event);
   } catch { console.log("agent-vault", "cleanup_failed"); }
 }
@@ -93,12 +94,12 @@ async function sweep(db: any) {
     const id = typeof vault.name === "string" ? vault.name.slice("gusan-task-".length) : "";
     if (!vault.name?.startsWith("gusan-task-") || !uuid.test(id)) continue;
     const row = checked(await db.from("agent_tasks").select().eq("id", id).maybeSingle());
-    if (row && !terminal(row) && !(Date.now() - Date.parse(vault.created_at) > 1500000)) continue;
+    if (row && !terminal(row) && !(Date.now() > Date.parse(row.deadline_at) + 900000)) continue;
     let event = "vault_deleted";
     try { await h(`/vaults/${encodeURIComponent(vault.id)}`, "DELETE"); deleted++; }
     catch { event = "vault_delete_failed"; failed++; }
     if (row) {
-      checked(await db.from("agent_task_runs").update({ h_vault_id: null, release_nonce: null, release_nonce_expires_at: null }).eq("task_id", row.id).eq("h_vault_id", vault.id));
+      if (event === "vault_deleted") checked(await db.from("agent_task_runs").update({ h_vault_id: null, release_nonce: null, release_nonce_expires_at: null }).eq("task_id", row.id).eq("h_vault_id", vault.id));
       await audit(db, row, event);
     }
     // Deleted tasks have no remaining owner to associate with an audit event.
@@ -163,7 +164,7 @@ Deno.serve(async (req: Request) => {
       if (body.has_totp !== undefined && typeof body.has_totp !== "boolean") throw new Failure("bad_request");
       const rows = checked(await db.from("vault_logins").select("id,hostname").eq("user_id", userId));
       if (rows.length >= 50 && !rows.some((r: Obj) => r.hostname === host)) throw new Failure("login_limit", 409);
-      const saved = await db.from("vault_logins").upsert({ user_id: userId, hostname: host, username_hint: body.username_hint ?? null, has_totp: body.has_totp ?? false }, { onConflict: "user_id,hostname" }).select().single();
+      const saved = await db.from("vault_logins").upsert({ user_id: userId, hostname: host, ...(body.username_hint !== undefined ? { username_hint: body.username_hint } : {}), ...(body.has_totp !== undefined ? { has_totp: body.has_totp } : {}) }, { onConflict: "user_id,hostname" }).select().single();
       if (saved.error?.code === "P0001") throw new Failure("login_limit", 409);
       const login = checked(saved);
       await audit(db, { user_id: userId }, "added", host, login.id);
