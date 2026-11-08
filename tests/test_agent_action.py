@@ -829,3 +829,14 @@ def test_numbered_option_is_preserved_within_a_step(run, prose):
         "change": answered(answer)})
     assert out["row"]["status"] == "awaiting_confirmation"
     assert out["row"]["confirmation"]["steps"] == ["Open page", "Choose 2. Express shipping", "Submit"]
+
+
+@pytest.mark.parametrize("separator", ["\n\n", "\r\n \r\n"])
+@pytest.mark.parametrize("suffix", ["", "\n\nNotes:\n- Not an action step"])
+def test_blank_lines_do_not_truncate_prose_plan(run, separator, suffix):
+    text = "Plan:\n" + separator.join(["1. Open X", "2. Fill name", "3. Submit"]) + suffix
+    out, = run({"row": {"mode": "do"},
+        "run": {"plan": {"instruction": "Submit https://example.com/send"}},
+        "change": answered(text)})
+    assert out["row"]["status"] == "awaiting_confirmation"
+    assert out["row"]["confirmation"]["steps"] == ["Open X", "Fill name", "Submit"]

@@ -379,7 +379,7 @@ function preparePlan(
     }
     // Only an explicit step list can become a prose-derived approval plan.
     const list = text.match(
-      /(?:^|\n)[ \t]*(?:#{1,6}[ \t]+)?(?:proposed[ \t]+)?(?:plan|steps)[ \t]*:?[ \t]*\r?\n((?:[ \t]*(?:[-*•]|\d+[.)])[ \t]+[^\r\n]+(?:\r?\n|$))+)/i,
+      /(?:^|\n)[ \t]*(?:#{1,6}[ \t]+)?(?:proposed[ \t]+)?(?:plan|steps)[ \t]*:?[ \t]*\r?\n((?:[ \t]*(?:[-*•]|\d+[.)])[ \t]+[^\r\n]+(?:\r?\n|$)|[ \t]*\r?\n)+)/i,
     )?.[1] ?? "";
     const steps = [
       ...list.matchAll(/(?:^|\n)[ \t]*(?:[-*•]|\d+[.)])[ \t]+([^\r\n]+)/g),
