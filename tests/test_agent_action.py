@@ -809,3 +809,13 @@ def test_refusal_bullets_are_not_salvaged_as_a_plan(run, text):
     assert [r["body"]["status"] for r in out["replies"]] == ["running", "failed"]
     assert out["row"]["error_code"] == "plan_missing"
     assert out["row"]["confirmation"] is None
+
+
+@pytest.mark.parametrize("instruction", ["Submit it", "Submit https://other.example.com"])
+def test_structured_plan_uses_markdown_url_before_instruction(run, instruction):
+    answer = {k: v for k, v in PLAN.items() if k != "start_url"}
+    answer["markdown"] = "Plan for https://example.com/send"
+    out, = run({"row": {"mode": "do"}, "run": {"plan": {"instruction": instruction}},
+                "change": answered(answer)})
+    assert out["row"]["status"] == "awaiting_confirmation"
+    assert out["row"]["confirmation"] == PLAN
