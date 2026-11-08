@@ -152,6 +152,7 @@ public final class ScreenFrameStore {
 public enum ScreenFrameEncoder {
     /// Smart-action bodies may be 8 MB; one frame stays far below that, also on a named pasteboard.
     public static let defaultBudget = 450_000
+    public static let minimumLongEdge = 480
     public static let qualities: [Double] = [0.75, 0.6, 0.45, 0.3]
     public static func jpeg(_ image: CGImage, quality: Double) -> Data? {
         let data = NSMutableData()
@@ -165,15 +166,24 @@ public enum ScreenFrameEncoder {
         guard CGImageDestinationFinalize(destination) else { return nil }
         return data as Data
     }
-    /// The first quality whose JPEG fits the budget; the lowest quality when none does.
+    /// Lowers quality first, then resolution, until the JPEG fits the budget.
     public static func jpeg(_ image: CGImage, budgetBytes: Int = defaultBudget) -> Data? {
-        var smallest: Data?
-        for quality in qualities {
-            guard let data = jpeg(image, quality: quality) else { continue }
-            if data.count <= budgetBytes { return data }
-            smallest = data
+        guard budgetBytes > 0 else { return nil }
+        var image = image
+        while true {
+            for quality in qualities {
+                if let data = jpeg(image, quality: quality), data.count <= budgetBytes { return data }
+            }
+            let longEdge = max(image.width, image.height)
+            guard longEdge > minimumLongEdge else { return nil }
+            let nextEdge = max(minimumLongEdge, Int(Double(longEdge) * 0.75))
+            let size = ScreenFrameGeometry.scaledSize(width: image.width, height: image.height, longEdge: nextEdge)
+            guard let context = CGContext(data: nil, width: size.width, height: size.height, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+            context.interpolationQuality = .high
+            context.draw(image, in: CGRect(x: 0, y: 0, width: size.width, height: size.height))
+            guard let scaled = context.makeImage() else { return nil }
+            image = scaled
         }
-        return smallest
     }
 }
 

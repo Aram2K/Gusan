@@ -58,9 +58,36 @@ final class ScreenFrameTests: XCTestCase {
         let budgeted = try XCTUnwrap(ScreenFrameEncoder.jpeg(image, budgetBytes: full.count / 2))
         XCTAssertLessThan(budgeted.count, full.count)
         XCTAssertEqual(ScreenFrameEncoder.jpeg(image, budgetBytes: 10_000_000), full)
-        let floor = try XCTUnwrap(ScreenFrameEncoder.jpeg(image, quality: ScreenFrameEncoder.qualities.last!))
-        XCTAssertEqual(ScreenFrameEncoder.jpeg(image, budgetBytes: 1), floor)
+        XCTAssertNil(ScreenFrameEncoder.jpeg(image, budgetBytes: 1))
+        XCTAssertNil(ScreenFrameEncoder.jpeg(image, budgetBytes: 0))
         XCTAssertTrue(ScreenFrame(requestID: UUID(), capturedAt: Date(), width: 1, height: 1, jpeg: Data([1, 2, 3])).dataURL.hasPrefix("data:image/jpeg;base64,AQID"))
+    }
+
+    func testHighEntropyFrameIsDownscaledAndStoredWithinBudget() throws {
+        let edge = 2048
+        var bytes = [UInt8](repeating: 255, count: edge * edge * 4)
+        var random: UInt64 = 42
+        for index in stride(from: 0, to: bytes.count, by: 4) {
+            for component in 0..<3 {
+                random = random &* 6364136223846793005 &+ 1
+                bytes[index + component] = UInt8(truncatingIfNeeded: random >> 32)
+            }
+        }
+        let provider = try XCTUnwrap(CGDataProvider(data: Data(bytes) as CFData))
+        let image = try XCTUnwrap(CGImage(width: edge, height: edge, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: edge * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue), provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent))
+        let lowest = try XCTUnwrap(ScreenFrameEncoder.jpeg(image, quality: ScreenFrameEncoder.qualities.last!))
+        XCTAssertGreaterThan(lowest.count, ScreenFrameEncoder.defaultBudget)
+        let store = ScreenFrameStore()
+        let capturedAt = Date()
+        store.store(image, at: capturedAt)
+        XCTAssertEqual(store.accepted, 1)
+        let snapshot = try XCTUnwrap(store.snapshot(before: capturedAt))
+        XCTAssertLessThanOrEqual(snapshot.jpeg.count, ScreenFrameEncoder.defaultBudget)
+        let stored = try XCTUnwrap(snapshot.image)
+        XCTAssertLessThan(stored.width, edge)
+        XCTAssertGreaterThanOrEqual(stored.width, ScreenFrameEncoder.minimumLongEdge)
+        let frame = try XCTUnwrap(store.frame(for: UUID()))
+        XCTAssertLessThanOrEqual(frame.jpeg.count, ScreenFrameEncoder.defaultBudget)
     }
 
     func testIdleTimer() {
