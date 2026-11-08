@@ -21,6 +21,7 @@ final class KeyboardViewController: UIInputViewController {
     private var agentMessage: String?
     private var collapse: Timer?
     private var screenHint = false
+    private var retryTake: (text: String, context: VoiceContext)?
     private var context: VoiceContext {
         VoiceContext(selected: textDocumentProxy.selectedText ?? "", before: textDocumentProxy.documentContextBeforeInput ?? "", after: textDocumentProxy.documentContextAfterInput ?? "", documentID: textDocumentProxy.documentID.uuidString)
     }
@@ -107,12 +108,14 @@ final class KeyboardViewController: UIInputViewController {
         firstFrame = nil; lastFrame = nil; working = false; voice.cancel()
     }
     @objc private func actionPressed() {
-        if screenHint && voice.message == nil { openContainingApp(URL(string: "gusan://screen")!) }
+        if voice.actionTitle == "Retry", let retryTake { process(retryTake.text, context: retryTake.context) }
+        else if screenHint && voice.message == nil { openContainingApp(URL(string: "gusan://screen")!) }
         else { voice.performAction() }
     }
     @objc private func statusPressed() { if agent.isActive { agent.show() } }
     @objc private func hideAgent() { agent.hide() }
     private func beginTake() -> VoiceAction? {
+        retryTake = nil
         agentTake = settings.keyboardMode == .agent
         screenTake = !agentTake && settings.keyboardScreenEnabled && screen.live && !screen.secureField
         screenHint = settings.keyboardScreenEnabled && !screen.live
@@ -129,6 +132,7 @@ final class KeyboardViewController: UIInputViewController {
         lastFrame = Task { try? await provider.frame(timeout: 3) }
     }
     private func process(_ text: String, context: VoiceContext) {
+        retryTake = (text, context)
         if agentTake {
             guard !settings.privacyMode else {
                 voice.show("Agent needs Gusan Cloud — off in Privacy Mode")
