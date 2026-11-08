@@ -34,6 +34,8 @@ final class VoiceSession: ObservableObject {
     @Published private(set) var status = VoiceStatus()
     @Published private(set) var error = ""
     @Published private(set) var permission = AVAudioSession.sharedInstance().recordPermission
+    @Published private(set) var requestingMicrophone = false
+    private var microphoneRequest: Task<Bool, Never>?
     @Published var presented = false
     @Published private(set) var keyboardActivation = false
     let store: SessionStore
@@ -82,7 +84,28 @@ final class VoiceSession: ObservableObject {
             start(pendingWithin: 60)
         } else { hostBundleID = nil }
     }
-    func refreshPermission() { permission = AVAudioSession.sharedInstance().recordPermission }
+    func refreshPermission() {
+        let current = AVAudioSession.sharedInstance().recordPermission
+        if permission != current { permission = current }
+    }
+    @discardableResult
+    func requestMicrophonePermission() -> Task<Bool, Never> {
+        if let microphoneRequest { return microphoneRequest }
+        refreshPermission()
+        guard permission == .undetermined else { return Task { permission == .granted } }
+        requestingMicrophone = true
+        let request = Task { @MainActor in
+            defer { requestingMicrophone = false; microphoneRequest = nil }
+            let allowed = await withCheckedContinuation { continuation in
+                if #available(iOS 17.0, *) { AVAudioApplication.requestRecordPermission { continuation.resume(returning: $0) } }
+                else { AVAudioSession.sharedInstance().requestRecordPermission { continuation.resume(returning: $0) } }
+            }
+            refreshPermission()
+            return allowed
+        }
+        microphoneRequest = request
+        return request
+    }
     func start(pendingWithin: TimeInterval = 15) {
         if machine.phase != .off { receive(); scheduleReturn(); return }
         guard startup == nil else { return }
@@ -93,10 +116,7 @@ final class VoiceSession: ObservableObject {
             do {
                 if let error = store.sessionState(fullAccess: store.diagnostics().peer?.fullAccess).voiceError { throw error }
                 guard let session = store.read() else { throw VoiceError.notSignedIn }
-                let allowed = await withCheckedContinuation { continuation in
-                    if #available(iOS 17.0, *) { AVAudioApplication.requestRecordPermission { continuation.resume(returning: $0) } }
-                    else { AVAudioSession.sharedInstance().requestRecordPermission { continuation.resume(returning: $0) } }
-                }
+                let allowed = await requestMicrophonePermission().value
                 refreshPermission()
                 try Task.checkCancellation()
                 guard allowed else { throw VoiceError.micPermissionDenied }
