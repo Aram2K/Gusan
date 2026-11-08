@@ -17,9 +17,16 @@ for(let index=0;index<scenarios.length;index++) {
  const s=scenarios[index], logs=[], calls=[], tables={calendar_connections:[],calendar_oauth_states:[]}, responses=[];
  console.log=(...x)=>logs.push(x.join(' '));
  const env={SUPABASE_URL:'https://project.supabase.co',SUPABASE_SERVICE_ROLE_KEY:'service',GOOGLE_CALENDAR_CLIENT_ID:'client',GOOGLE_CALENDAR_CLIENT_SECRET:'secret',CALENDAR_ENCRYPTION_KEY:'ab'.repeat(32),...s.env};
- let handler, authURL;
+ let handler, authURL, cutoff;
  globalThis.Deno={env:{get:k=>env[k]},serve:h=>handler=h};
- globalThis.__db={auth:{getUser:async()=>({data:{user:s.noUser?null:{id:'u1'}},error:null})},from:table=>{
+ globalThis.__db={auth:{getUser:async()=>({data:{user:s.noUser?null:{id:'u1'}},error:null})},rpc:async(name,args)=>{
+  if(name==='disconnect_calendar_google'){cutoff=new Date().toISOString();tables.calendar_connections=[];tables.calendar_oauth_states=[];return {data:null,error:null}}
+  if(name==='save_calendar_google_connection'){
+   if(cutoff&&args.p_state_created_at<=cutoff)return {data:false,error:null};
+   tables.calendar_connections=[{user_id:args.p_user_id,provider:'google',encrypted_refresh_token:args.p_encrypted_refresh_token,granted_scope:args.p_scope}];return {data:true,error:null};
+  }
+  throw Error('unknown RPC');
+ },from:table=>{
   let op='select', payload, filters=[];
   const q={select:()=>q,eq:(k,v)=>{filters.push(r=>r[k]===v);return q},gt:(k,v)=>{filters.push(r=>r[k]>v);return q},
    insert:p=>{op='insert';payload=p;return q},upsert:p=>{op='upsert';payload=p;return q},delete:()=>{op='delete';return q},
@@ -28,7 +35,7 @@ for(let index=0;index<scenarios.length;index++) {
    if(s.storageError)return {data:null,error:{}};
    let rows=tables[table], selected=rows.filter(r=>filters.every(f=>f(r)));
    if(op==='delete')tables[table]=rows.filter(r=>!selected.includes(r));
-   if(op==='insert')rows.push(structuredClone(payload));
+   if(op==='insert')rows.push({created_at:new Date().toISOString(),...structuredClone(payload)});
    if(op==='upsert'){tables[table]=rows.filter(r=>r.user_id!==payload.user_id);tables[table].push(structuredClone(payload));}
    return {data:structuredClone(selected),error:null};
   }
@@ -40,6 +47,7 @@ for(let index=0;index<scenarios.length;index++) {
   if(url.endsWith('/token')){
    const body=Object.fromEntries(init.body);
    if(body.grant_type==='authorization_code') {
+    if(s.disconnectRace){cutoff=new Date().toISOString();tables.calendar_connections=[];tables.calendar_oauth_states=[];}
     const challenge=Buffer.from(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(body.code_verifier))).toString('base64url');
     if(challenge!==new URL(authURL).searchParams.get('code_challenge'))throw Error('PKCE mismatch');
     return Response.json(s.exchangeFail?{error:'bad_code'}:{access_token:'ACCESS_PRIVATE',refresh_token:'REFRESH_PRIVATE',scope:s.scopeMissing?'openid':'https://www.googleapis.com/auth/calendar.readonly'},{status:s.exchangeFail?400:200});
@@ -126,6 +134,14 @@ def test_busy_private_and_clamped(run):
     call = next(c for c in result["calls"] if c["url"].endswith("/freeBusy"))
     assert call["body"]["timeMax"] == "2026-11-23T00:00:00.000Z"
     assert not any("/events?" in c["url"] for c in result["calls"])
+
+
+def test_disconnect_wins_over_callback_already_exchanging(run):
+    result, = run({"disconnectRace": True, "steps": ["google_start", "callback", "status"]})
+    assert result["responses"][1]["location"].endswith("reason=cancelled")
+    assert result["responses"][-1]["data"] == {"google": {"connected": False}}
+    assert any(c["url"].endswith("/revoke") for c in result["calls"])
+    assert result["tables"]["calendar_connections"] == []
 
 
 def test_busy_titles_skips_free_declined_cancelled(run):

@@ -104,7 +104,11 @@ Deno.serve(async req => {
       } catch { return redirect("exchange"); }
       if (typeof result.scope !== "string" || !result.scope.split(/\s+/).includes(scope)) return redirect("scope");
       if (typeof result.refresh_token !== "string" || !result.refresh_token) return redirect("exchange");
-      checked(await db.from("calendar_connections").upsert({ user_id: row.user_id, provider: "google", encrypted_refresh_token: await seal(result.refresh_token, `google:${row.user_id}`), granted_scope: result.scope, updated_at: new Date().toISOString() }, { onConflict: "user_id,provider" }));
+      const stored = checked(await db.rpc("save_calendar_google_connection", { p_user_id: row.user_id, p_state_created_at: row.created_at, p_encrypted_refresh_token: await seal(result.refresh_token, `google:${row.user_id}`), p_scope: result.scope }));
+      if (!stored) {
+        try { await fetch("https://oauth2.googleapis.com/revoke", { method: "POST", body: new URLSearchParams({ token: result.refresh_token }), redirect: "error", signal: AbortSignal.timeout(5000) }); } catch {}
+        return redirect("cancelled");
+      }
       return redirect();
     }
     const authorization = req.headers.get("Authorization") ?? "";
@@ -132,8 +136,7 @@ Deno.serve(async req => {
           await fetch("https://oauth2.googleapis.com/revoke", { method: "POST", body: new URLSearchParams({ token: refresh }), redirect: "error", signal: AbortSignal.timeout(5000) });
         } catch { /* Revocation is best effort; local deletion is mandatory. */ }
       }
-      await remove();
-      checked(await db.from("calendar_oauth_states").delete().eq("user_id", user));
+      checked(await db.rpc("disconnect_calendar_google", { p_user_id: user }));
       return json({ ok: true });
     }
     if (body.action !== "busy") throw new Failure("bad_request");
