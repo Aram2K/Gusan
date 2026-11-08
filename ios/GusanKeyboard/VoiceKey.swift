@@ -177,11 +177,12 @@ final class VoiceKeyController: NSObject {
     func insert(_ result: JobResult, context: VoiceContext) {
         guard let current = currentContext(), let proxy = host?.textDocumentProxy else { return }
         let edit = VoiceEdit.plan(result: result, context: context)
-        if current == context, let edit {
+        let destination = VoiceInsertionDestination.resolve(snapshot: context, current: current)
+        if destination == .planned, let edit {
             if edit.advanceUTF16 != 0 { proxy.adjustTextPosition(byCharacterOffset: edit.advanceUTF16) }
             for _ in 0..<edit.deleteCount { proxy.deleteBackward() }
             original = edit.original; restoreUTF16 = edit.restoreUTF16
-        } else if current.documentID == context.documentID {
+        } else if destination == .cursor {
             original = ""; restoreUTF16 = 0
         } else {
             if host?.hasFullAccess == true { UIPasteboard.general.string = result.text; show("Couldn't insert here · Copied") }
