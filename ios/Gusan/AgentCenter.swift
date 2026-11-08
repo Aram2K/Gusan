@@ -211,6 +211,7 @@ final class AgentCenter: NSObject, ObservableObject {
         defer { mutating -= 1; revision += 1 }
         let task = try await service.continueTask(id, message: message)
         sessionStore.recordContinuation(previous: previous, task: task, message: message)
+        instructions[task.id] = nil
         tracker.markNotified(task)
         if let index = tasks.firstIndex(where: { $0.id == task.id }) { tasks[index] = task }
         else { tasks.insert(task, at: 0) }
