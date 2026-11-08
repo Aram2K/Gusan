@@ -21,6 +21,7 @@ public struct VaultClientError: LocalizedError {
         case "login_mismatch": return "This login doesn't match the requested site. Deny the request and try again."
         case "login_limit": return "You can save up to 50 logins. Delete one to add another."
         case "vault_error": return "The secure login couldn't be shared. Refresh Vault and try again."
+        case "storage_error", "internal", "entitlement_check_failed": return "Vault is temporarily unavailable. Try again in a moment."
         default: return "Couldn't update Vault. Check your connection and try again."
         }
     }
@@ -64,7 +65,7 @@ public final class VaultClient: VaultService {
         guard let http = response as? HTTPURLResponse else { throw VaultClientError(code: "bad_response", status: 0) }
         if !(200...299).contains(http.statusCode) {
             let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-            let allowed = ["unauthorized", "pro_required", "invalid_nonce", "not_awaiting_login", "not_found", "login_mismatch", "login_limit", "vault_error"]
+            let allowed = ["unauthorized", "pro_required", "invalid_nonce", "not_awaiting_login", "not_found", "login_mismatch", "login_limit", "vault_error", "storage_error", "internal", "entitlement_check_failed"]
             let code = object?["error"] as? String ?? "unknown"
             throw VaultClientError(code: allowed.contains(code) ? code : "unknown", status: http.statusCode)
         }

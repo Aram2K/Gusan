@@ -366,3 +366,8 @@ def test_static_security_contract():
     assert "grant insert on public.vault_events to service_role" in sql
     assert not re.search(r"grant (?:all|update|delete).*vault_events", sql)
     assert "'awaiting_login'" in sql and "add column release_nonce uuid" in sql
+
+
+def test_vault_events_service_select_migration():
+    sql = (ROOT / "supabase/migrations/202611080004_vault_events_service_select.sql").read_text()
+    assert sql.strip().lower() == "grant select on public.vault_events to service_role;"

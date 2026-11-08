@@ -4,6 +4,28 @@ import Security
 @testable import GusanKit
 
 final class VaultTests: XCTestCase {
+    func testServerErrorsHaveActionableMessages() async throws {
+        struct Transport: HTTPTransport {
+            let code: String
+            func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+                let data = try JSONSerialization.data(withJSONObject: ["error": code])
+                return (data, HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!)
+            }
+        }
+        for code in ["storage_error", "internal", "entitlement_check_failed", "unknown", ""] {
+            let client = VaultClient(tokenProvider: { "jwt" }, transport: Transport(code: code))
+            do {
+                _ = try await client.list()
+                XCTFail("Expected server error")
+            } catch let error as VaultClientError {
+                let known = ["storage_error", "internal", "entitlement_check_failed"].contains(code)
+                XCTAssertEqual(error.code, known ? code : "unknown")
+                XCTAssertEqual(error.status, 500)
+                XCTAssertEqual(error.localizedDescription, known ? "Vault is temporarily unavailable. Try again in a moment." : "Couldn't update Vault. Check your connection and try again.")
+            }
+        }
+    }
+
     final class Keychain: VaultKeychain {
         var added: [String: Any] = [:]
         var read: [String: Any] = [:]
