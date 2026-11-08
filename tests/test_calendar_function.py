@@ -54,9 +54,10 @@ for(let index=0;index<scenarios.length;index++) {
    }
    return Response.json(s.invalidGrant?{error:'invalid_grant'}:{access_token:'ACCESS_PRIVATE'},{status:s.invalidGrant?400:200});
   }
-  if(url.endsWith('/freeBusy'))return Response.json({calendars:{primary:{busy:[{start:'2026-11-09T10:00:00Z',end:'2026-11-09T11:00:00Z'}]}}});
+  if(url.includes('/calendarList?'))return Response.json({items:s.manyCalendars?Array.from({length:30},(_,i)=>({id:'cal'+i,selected:true,accessRole:'reader'})):[{id:'primary',selected:true,accessRole:'owner'},{id:'work',selected:true,accessRole:'reader'},{id:'free',selected:true,accessRole:'freeBusyReader'},{id:'hidden',selected:true,hidden:true},{id:'unselected',selected:false}]});
+  if(url.endsWith('/freeBusy'))return Response.json({calendars:Object.fromEntries(JSON.parse(init.body).items.map(({id})=>[id,{busy:[{start:'2026-11-09T10:00:00Z',end:'2026-11-09T11:00:00Z'}]}]))});
   if(url.includes('/events?'))return Response.json({items:[
-   {start:{dateTime:'2026-11-09T10:00:00Z'},end:{dateTime:'2026-11-09T11:00:00Z'},summary:'PRIVATE_EVENT'},
+   {start:{dateTime:'2026-11-09T10:00:00Z'},end:{dateTime:'2026-11-09T11:00:00Z'},summary:url.includes('/work/')?'SECOND_EVENT':'PRIVATE_EVENT'},
    {start:{date:'2026-11-10'},end:{date:'2026-11-11'},summary:'All day'},
    ...['transparent','declined','cancelled'].map(x=>({start:{date:'2026-11-10'},end:{date:'2026-11-11'},summary:x,transparency:x,status:x,attendees:[{self:true,responseStatus:x}]}))
   ]});
@@ -130,9 +131,10 @@ def test_callback_rejections(run, option, step, reason):
 def test_busy_private_and_clamped(run):
     result, = run({"longWindow": True})
     busy = result["responses"][-1]["data"]["blocks"]
-    assert busy == [{"start": "2026-11-09T10:00:00Z", "end": "2026-11-09T11:00:00Z", "all_day": False}]
+    assert busy == [{"start": "2026-11-09T10:00:00Z", "end": "2026-11-09T11:00:00Z", "all_day": False}] * 3
     call = next(c for c in result["calls"] if c["url"].endswith("/freeBusy"))
     assert call["body"]["timeMax"] == "2026-11-23T00:00:00.000Z"
+    assert call["body"]["items"] == [{"id": "primary"}, {"id": "work"}, {"id": "free"}]
     assert not any("/events?" in c["url"] for c in result["calls"])
 
 
@@ -147,11 +149,19 @@ def test_disconnect_wins_over_callback_already_exchanging(run):
 def test_busy_titles_skips_free_declined_cancelled(run):
     result, = run({"titles": True})
     blocks = result["responses"][-1]["data"]["blocks"]
-    assert [b["title"] for b in blocks] == ["PRIVATE_EVENT", "All day"]
-    assert blocks[1]["all_day"] is True
+    assert sorted(b["title"] for b in blocks) == ["All day", "All day", "PRIVATE_EVENT", "SECOND_EVENT"]
+    assert sum(b["all_day"] for b in blocks) == 2
+    assert len([c for c in result["calls"] if "/events?" in c["url"]]) == 2
+    assert not any("/free/events?" in c["url"] for c in result["calls"])
     call = next(c for c in result["calls"] if "/events?" in c["url"])
     assert "singleEvents=true" in call["url"] and "maxResults=250" in call["url"]
     assert result["logs"] == []
+
+
+def test_calendar_count_is_capped(run):
+    result, = run({"manyCalendars": True})
+    call = next(c for c in result["calls"] if c["url"].endswith("/freeBusy"))
+    assert len(call["body"]["items"]) == 20
 
 
 def test_invalid_grant_disconnect_and_empty_status(run):

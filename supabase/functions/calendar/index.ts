@@ -151,28 +151,57 @@ Deno.serve(async req => {
     if (typeof access.access_token !== "string" || !access.access_token) throw new Failure("google_error", 502);
     const auth = { Authorization: `Bearer ${access.access_token}`, "Content-Type": "application/json" };
     const from = new Date(start).toISOString(), to = new Date(end).toISOString();
+    const calendars: string[] = [];
+    let calendarPage: string | undefined;
+    for (let count = 0; count < 4; count++) {
+      const query = new URLSearchParams({ maxResults: "250", showHidden: "false", ...(calendarPage ? { pageToken: calendarPage } : {}) });
+      const list = await google("https://www.googleapis.com/calendar/v3/users/me/calendarList?" + query, { headers: auth });
+      if (!Array.isArray(list.items)) throw new Failure("google_error", 502);
+      for (const calendar of list.items) {
+        if (calendar.hidden || calendar.deleted || calendar.selected === false || (body.include_titles && calendar.accessRole === "freeBusyReader")) continue;
+        if (typeof calendar.id === "string" && !calendars.includes(calendar.id)) calendars.push(calendar.id);
+        if (calendars.length === 20) break;
+      }
+      calendarPage = list.nextPageToken;
+      if (calendars.length === 20 || !calendarPage) break;
+      if (count === 3) throw new Failure("google_error", 502);
+    }
+    if (!calendars.length) return json({ blocks: [] });
     if (!body.include_titles) {
-      const result = await google("https://www.googleapis.com/calendar/v3/freeBusy", { method: "POST", headers: auth, body: JSON.stringify({ timeMin: from, timeMax: to, items: [{ id: "primary" }] }) });
-      const primary = result.calendars?.primary;
-      if (!Array.isArray(primary?.busy) || primary.errors?.length) throw new Failure("google_error", 502);
-      return json({ blocks: primary.busy.map((b: Obj) => ({ start: b.start, end: b.end, all_day: false })) });
+      const result = await google("https://www.googleapis.com/calendar/v3/freeBusy", { method: "POST", headers: auth, body: JSON.stringify({ timeMin: from, timeMax: to, items: calendars.map(id => ({ id })) }) });
+      const blocks = calendars.flatMap(id => {
+        const calendar = result.calendars?.[id];
+        if (!Array.isArray(calendar?.busy) || calendar.errors?.length) throw new Failure("google_error", 502);
+        return calendar.busy.map((b: Obj) => ({ start: b.start, end: b.end, all_day: false }));
+      });
+      if (blocks.length > 2000) throw new Failure("google_error", 502);
+      return json({ blocks });
     }
     const blocks: Obj[] = [];
-    let page: string | undefined;
-    for (let count = 0; count < 20; count++) {
+    async function events(id: string) {
+      let page: string | undefined;
+      for (let count = 0; count < 4; count++) {
       const query = new URLSearchParams({ timeMin: from, timeMax: to, singleEvents: "true", orderBy: "startTime", maxResults: "250", ...(page ? { pageToken: page } : {}) });
-      const result = await google("https://www.googleapis.com/calendar/v3/calendars/primary/events?" + query, { headers: auth });
+      const result = await google("https://www.googleapis.com/calendar/v3/calendars/" + encodeURIComponent(id) + "/events?" + query, { headers: auth });
       if (!Array.isArray(result.items)) throw new Failure("google_error", 502);
       for (const event of result.items) {
         if (event.status === "cancelled" || event.transparency === "transparent" || event.attendees?.some((a: Obj) => a.self && a.responseStatus === "declined")) continue;
         const start = event.start?.dateTime ?? event.start?.date, end = event.end?.dateTime ?? event.end?.date;
         if (typeof start !== "string" || typeof end !== "string") continue;
         blocks.push({ start, end, all_day: !!event.start.date, ...(typeof event.summary === "string" ? { title: Array.from(event.summary).slice(0, 256).join("") } : {}) });
+        if (blocks.length > 2000) throw new Failure("google_error", 502);
       }
       page = result.nextPageToken;
-      if (!page) return json({ blocks });
+      if (!page) return;
+      }
+      throw new Failure("google_error", 502);
     }
-    throw new Failure("google_error", 502);
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(4, calendars.length) }, async () => {
+      while (next < calendars.length) await events(calendars[next++]);
+    }));
+    blocks.sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
+    return json({ blocks });
   } catch (error) {
     const failure = error instanceof Failure ? error : new Failure("calendar_error", 500);
     if (callback) return redirect(failure.code === "google_not_configured" ? "config" : "exchange");
