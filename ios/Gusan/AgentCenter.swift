@@ -17,7 +17,6 @@ final class AgentCenter: NSObject, ObservableObject {
     @Published private(set) var loading = false
     @Published var error: String?
     @Published private(set) var notificationStatus: UNAuthorizationStatus = .notDetermined
-    @Published var openTaskID: UUID?
     @Published var lastRefresh: Date?
 
     private unowned let model: AppModel
@@ -86,6 +85,10 @@ final class AgentCenter: NSObject, ObservableObject {
         defer { loading = false }
         do {
             var fetched = try await service.list(limit: 100)
+            let listedIDs = Set(fetched.map(\.id))
+            for task in tasks where !listedIDs.contains(task.id) && !task.status.isTerminal {
+                fetched.append(try await service.status(task.id, waitSeconds: 0))
+            }
             // The table hides the pending confirmation text; ask the function for it.
             for index in fetched.indices where fetched[index].status == .awaitingConfirmation && fetched[index].confirmation == nil {
                 if let full = try? await service.status(fetched[index].id, waitSeconds: 0) { fetched[index] = full }
@@ -115,7 +118,10 @@ final class AgentCenter: NSObject, ObservableObject {
         }
     }
 
-    func sessionChanged() { service = nil; Task { await refresh() } }
+    func sessionChanged() {
+        service = nil; tasks = []; instructions = [:]; confirmedIDs = []
+        Task { await refresh() }
+    }
 
     // MARK: Actions
 
