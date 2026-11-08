@@ -154,6 +154,21 @@ private struct AgentSessionTurn: View {
                 }
                 if let result = task.result {
                     Text(result.plainText).textSelection(.enabled)
+                    ForEach(result.images, id: \.self) { url in
+                        Link(destination: url) {
+                            AsyncImage(url: url) { phase in
+                                switch phase {
+                                case .success(let image):
+                                    image.resizable().scaledToFit().frame(maxHeight: 180)
+                                case .failure:
+                                    Label("Open image", systemImage: "photo")
+                                default:
+                                    ProgressView().frame(maxWidth: .infinity, minHeight: 100)
+                                }
+                            }
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                        }.accessibilityLabel("Open full-size result image")
+                    }
                     ForEach(result.links, id: \.self) { link in
                         Link(link.title ?? link.url.host ?? link.url.absoluteString, destination: link.url)
                     }
