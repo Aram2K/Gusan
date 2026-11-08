@@ -16,8 +16,8 @@ final class GusanStrip: UIView {
     let screen = ToolbarButton(type: .system)
     let mic = ToolbarButton(type: .system)
     let cancel = ToolbarButton(type: .system)
-    let action = UIButton(type: .system)
-    let status = UIButton(type: .system)
+    let action = ToolbarButton(type: .system)
+    let status = ToolbarButton(type: .system)
     private let dot = UIView()
     private let waveform = VoiceWaveform()
     private let context = UILabel()
@@ -26,6 +26,19 @@ final class GusanStrip: UIView {
     private var working = false
     private var agentPill = false
     private var pendingOffer = false
+    private struct Presentation: Equatable {
+        let agent: Bool
+        let screenOn: Bool
+        let live: Bool
+        let context: String
+        let phase: VoicePhase
+        let message: String?
+        let action: String?
+        let dark: Bool
+        let pending: Bool
+    }
+    private var presentation: Presentation?
+    private var waveformLevel: Float?
     override init(frame: CGRect) {
         super.init(frame: frame)
         mode.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
@@ -42,10 +55,18 @@ final class GusanStrip: UIView {
         context.font = .systemFont(ofSize: 10, weight: .medium)
         action.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
         dot.layer.cornerRadius = 4
+        [waveform, context, dot, spinner].forEach { $0.isUserInteractionEnabled = false }
         [waveform, mode, context, status, dot, spinner, screen, cancel, mic, action].forEach { addSubview($0) }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func update(agent: Bool, screenOn: Bool, live: Bool, context title: String, phase: VoicePhase, level: Float, message: String?, action titleAction: String?, theme: KeyboardTheme, pendingInsert: Bool = false) {
+        if phase == .recording && (waveformLevel != level || presentation?.phase != phase) {
+            waveformLevel = level; waveform.update(level: level, animated: true)
+        }
+        let value = Presentation(agent: agent, screenOn: screenOn, live: live, context: title, phase: phase, message: message, action: titleAction, dark: theme.dark, pending: pendingInsert)
+        guard value != presentation else { return }
+        let previous = presentation
+        presentation = value
         listening = phase == .recording; working = phase == .thinking || phase == .transcribing
         pendingOffer = pendingInsert
         agentPill = agent && !listening && !working && message != nil && titleAction == nil && !pendingInsert
@@ -53,12 +74,12 @@ final class GusanStrip: UIView {
         let indigo = UIColor(red: 94/255, green: 92/255, blue: 230/255, alpha: 1)
         let indigoText = theme.dark ? UIColor(red: 132/255, green: 130/255, blue: 1, alpha: 1) : indigo
         dot.backgroundColor = agent ? indigo : accent
-        mode.setTitle(agent ? "Agent" : "Smart", for: .normal)
+        if previous?.agent != agent { mode.setTitle(agent ? "Agent" : "Smart", for: .normal) }
         mode.setTitleColor(agent ? indigoText : theme.foreground, for: .normal)
         mode.backgroundColor = agent ? indigo.withAlphaComponent(0.12) : theme.letter.withAlphaComponent(0.6)
         mode.accessibilityLabel = "Mode: " + (agent ? "Agent" : "Smart")
         mode.accessibilityHint = "Switches between Smart and Agent"
-        screen.setImage(UIImage(systemName: screenOn ? "iphone" : "iphone.slash"), for: .normal)
+        if previous?.screenOn != screenOn { screen.setImage(UIImage(systemName: screenOn ? "iphone" : "iphone.slash"), for: .normal) }
         screen.tintColor = screenOn ? accent : .secondaryLabel
         screen.backgroundColor = screenOn ? accent.withAlphaComponent(0.16) : .clear
         screen.accessibilityValue = screenOn ? "On" : "Off"
@@ -67,9 +88,10 @@ final class GusanStrip: UIView {
         context.isHidden = title.isEmpty || working || (!listening && message != nil)
         mode.isHidden = listening || working || (message != nil && !agentPill)
         waveform.isHidden = !listening
-        waveform.update(level: level, animated: listening)
+        if !listening { waveform.update(level: 0, animated: false); waveformLevel = nil }
         status.isHidden = listening || message == nil
-        status.setTitle(message, for: .normal); status.setTitleColor(message == "Inserted" || pendingInsert ? .systemGreen : agent ? indigoText : theme.foreground, for: .normal)
+        if status.title(for: .normal) != message { status.setTitle(message, for: .normal) }
+        status.setTitleColor(message == "Inserted" || pendingInsert ? .systemGreen : agent ? indigoText : theme.foreground, for: .normal)
         status.backgroundColor = agentPill ? indigo.withAlphaComponent(0.12) : .clear
         status.layer.cornerRadius = 12
         cancel.isHidden = !listening && !working && !pendingInsert; cancel.tintColor = theme.foreground; cancel.backgroundColor = theme.special
@@ -77,8 +99,9 @@ final class GusanStrip: UIView {
         screen.isHidden = listening || working || titleAction != nil
         mic.isHidden = working || pendingInsert
         mic.accessibilityLabel = listening ? "Finish and send voice instruction" : "Start voice instruction"
-        action.setTitle(titleAction, for: .normal); action.tintColor = pendingInsert ? .systemGreen : accent; action.isHidden = titleAction == nil || listening || working
-        working ? spinner.startAnimating() : spinner.stopAnimating()
+        if action.title(for: .normal) != titleAction { action.setTitle(titleAction, for: .normal) }
+        action.tintColor = pendingInsert ? .systemGreen : accent; action.isHidden = titleAction == nil || listening || working
+        if working != spinner.isAnimating { working ? spinner.startAnimating() : spinner.stopAnimating() }
         setNeedsLayout()
     }
     override func layoutSubviews() {
@@ -94,7 +117,7 @@ final class GusanStrip: UIView {
         action.frame = CGRect(x: w - 48 - actionWidth, y: 1, width: actionWidth, height: 44)
         let end = working ? w - 50 : action.isHidden ? w - 96 : action.frame.minX - 4
         let start: CGFloat = working ? 48 : agentPill ? 90 : 22
-        status.frame = CGRect(x: start, y: agentPill ? 9 : 0.5, width: max(0, end - start), height: agentPill ? 27 : 44)
+        status.frame = CGRect(x: start, y: 0.5, width: max(0, end - start), height: 44)
         context.frame = CGRect(x: listening ? 22 : 90, y: listening ? 29 : 1, width: max(0, w - (listening ? 120 : 186)), height: listening ? 14 : 44)
         waveform.frame = CGRect(x: 22, y: 3, width: max(0, w - 120), height: 24)
     }

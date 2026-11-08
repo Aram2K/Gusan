@@ -6,9 +6,30 @@ final class KeyboardViewController: UIInputViewController {
     private lazy var store = SessionStore(role: .keyboard, pasteboardAccessAllowed: { [weak self] in self?.hasFullAccess == true })
     private lazy var settings = SettingsStore(group: store.resolution.chosen, pasteboardAccessAllowed: { [weak self] in self?.hasFullAccess == true })
     private lazy var voice = VoiceKeyController(host: self, store: store)
-    private lazy var screen = ScreenKeyboardController(host: self, store: store, pasteboardAllowed: { [weak self] in self?.hasFullAccess == true && self?.settings.pasteboardFallback == true })
+    private lazy var screen = ScreenKeyboardController(host: self, store: store, pasteboardAllowed: { [weak self] in self?.hasFullAccess == true && self?.preferences.pasteboardFallback == true })
     private lazy var auth = AuthClient(store: store)
     private lazy var agent = AgentKeyboardController(store: store, auth: auth, host: self)
+    private struct Preferences {
+        var keyboardMode = KeyboardMode.smart
+        var keyboardScreenEnabled = true
+        var keyClicks = true
+        var doubleSpacePeriod = true
+        var autoCapitalization = true
+        var pasteboardFallback = true
+        init() {}
+        init(defaults: UserDefaults) {
+            keyboardMode = (defaults.string(forKey: "keyboardMode") ?? defaults.string(forKey: "stripMode")).flatMap(KeyboardMode.init(rawValue:)) ?? .smart
+            keyboardScreenEnabled = defaults.object(forKey: "keyboardScreenEnabled") as? Bool ?? true
+            keyClicks = defaults.object(forKey: "keyClicks") as? Bool ?? true
+            doubleSpacePeriod = defaults.object(forKey: "doubleSpacePeriod") as? Bool ?? true
+            autoCapitalization = defaults.object(forKey: "autoCapitalization") as? Bool ?? true
+            pasteboardFallback = defaults.object(forKey: "pasteboardFallback") as? Bool ?? true
+        }
+    }
+    private var preferences = Preferences()
+    private var updateScheduled = false
+    private var appliedDark: Bool?
+    private var appeared = false
     private let strip = GusanStrip()
     private let keyArea = TypingKeyboardView()
     private var height: NSLayoutConstraint!
@@ -39,40 +60,54 @@ final class KeyboardViewController: UIInputViewController {
         strip.action.addTarget(self, action: #selector(actionPressed), for: .touchUpInside)
         strip.status.addTarget(self, action: #selector(statusPressed), for: .touchUpInside)
         onVoice = { [weak self] in self?.voice.toggle() }
-        voice.onChange = { [weak self] in self?.update() }
+        voice.onChange = { [weak self] in self?.scheduleUpdate() }
         voice.onStart = { [weak self] in self?.beginTake() }
         voice.onFinish = { [weak self] in self?.finishTake() }
         voice.onTranscript = { [weak self] text, context in self?.process(text, context: context) }
-        screen.onChange = { [weak self] in self?.update() }
+        screen.onChange = { [weak self] in self?.scheduleUpdate() }
         screen.onLost = { [weak self] in
             self?.firstFrame?.cancel(); self?.lastFrame?.cancel()
             self?.firstFrame = nil; self?.lastFrame = nil
-            self?.update()
+            self?.scheduleUpdate()
         }
-        agent.onSurfaceChange = { [weak self] in self?.view.setNeedsLayout(); self?.update() }
+        agent.onSurfaceChange = { [weak self] in self?.view.setNeedsLayout(); self?.scheduleUpdate() }
         agent.onOpenApp = { [weak self] in self?.openContainingApp($0) }
-        agent.onStatus = { [weak self] text, _ in self?.agentMessage = text; self?.update() }
+        agent.onStatus = { [weak self] text, _ in self?.agentMessage = text; self?.scheduleUpdate() }
         let swipe = UISwipeGestureRecognizer(target: self, action: #selector(hideAgent))
+        swipe.cancelsTouchesInView = false; swipe.delaysTouchesBegan = false
         swipe.direction = .down; agent.card.addGestureRecognizer(swipe)
         keyArea.globeButton.addTarget(self, action: #selector(handleInputModeList(from:with:)), for: .allTouchEvents)
         keyArea.onInsert = { [weak self] in self?.insert($0) }
         keyArea.onDelete = { [weak self] in self?.deleteOnce() }
         keyArea.onReturn = { [weak self] in self?.insert("\n") }
         keyArea.onDoubleSpace = { [weak self] in self?.deleteOnce(); self?.insert(". ") }
-        update()
+        scheduleUpdate()
     }
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        settings.refresh()
-        pendingInsert = hasFullAccess ? VoicePendingInsert.read(from: sharedDefaults, account: store.read().flatMap { $0.userID ?? $0.email }) : nil
-        screen.appear(); voice.appear(); agent.appear(); update()
+        preferences = Preferences(defaults: sharedDefaults)
+        scheduleUpdate()
     }
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        appeared = true
+        var ancestor: UIView? = view
+        while let current = ancestor {
+            current.gestureRecognizers?.forEach { $0.delaysTouchesBegan = false }
+            ancestor = current.superview
+        }
+        view.window?.gestureRecognizers?.forEach { $0.delaysTouchesBegan = false }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, appeared else { return }
+            settings.refresh(); preferences = Preferences(defaults: sharedDefaults)
+            pendingInsert = hasFullAccess ? VoicePendingInsert.read(from: sharedDefaults, account: store.read().flatMap { $0.userID ?? $0.email }) : nil
+            screen.appear(); voice.appear(); agent.appear(); scheduleUpdate()
+        }
         screen.publishKeyboard(height: Double(view.bounds.height), screenHeight: Double(view.window?.windowScene?.screen.bounds.height ?? UIScreen.main.bounds.height))
     }
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        appeared = false
         keyArea.cancelTouches(); voice.disappear(); screen.disappear(); agent.disappear()
         collapse?.invalidate()
     }
@@ -85,32 +120,48 @@ final class KeyboardViewController: UIInputViewController {
         agent.card.frame = CGRect(x: 0, y: 45, width: view.bounds.width, height: max(0, keyArea.bounds.height - 54))
         view.bringSubviewToFront(agent.card)
     }
-    override func textDidChange(_ textInput: UITextInput?) { super.textDidChange(textInput); voice.documentDidChange(); update() }
-    override func selectionDidChange(_ textInput: UITextInput?) { super.selectionDidChange(textInput); update() }
-    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) { super.traitCollectionDidChange(previousTraitCollection); update() }
+    override func textDidChange(_ textInput: UITextInput?) { super.textDidChange(textInput); if voice.tracksUndo { voice.documentDidChange() }; scheduleUpdate() }
+    override func selectionDidChange(_ textInput: UITextInput?) { super.selectionDidChange(textInput); scheduleUpdate() }
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) { super.traitCollectionDidChange(previousTraitCollection); scheduleUpdate() }
+    private func scheduleUpdate() {
+        guard !updateScheduled else { return }
+        updateScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            updateScheduled = false; update()
+        }
+    }
     private func update() {
         guard isViewLoaded else { return }
-        let theme = KeyboardTheme(appearance: textDocumentProxy.keyboardAppearance, traits: traitCollection)
+        let proxy = textDocumentProxy
+        let snapshot = VoiceContext(selected: proxy.selectedText ?? "", before: proxy.documentContextBeforeInput ?? "", after: proxy.documentContextAfterInput ?? "", documentID: proxy.documentID.uuidString)
+        let appearance = proxy.keyboardAppearance
+        let capitalization = proxy.autocapitalizationType
+        let returnType = proxy.returnKeyType
+        let secure = proxy.isSecureTextEntry == true
+        let theme = KeyboardTheme(appearance: appearance, traits: traitCollection)
         view.backgroundColor = theme.background
-        keyArea.keyClicks = settings.keyClicks; keyArea.doubleSpacePeriod = settings.doubleSpacePeriod
-        keyArea.updateContext(before: textDocumentProxy.documentContextBeforeInput, capitalization: settings.autoCapitalization ? textDocumentProxy.autocapitalizationType : UITextAutocapitalizationType.none, returnType: textDocumentProxy.returnKeyType, appearance: textDocumentProxy.keyboardAppearance, needsGlobe: needsInputModeSwitchKey)
-        agent.apply(theme)
-        let selected = context.selected
-        let title = selected.isEmpty ? (settings.keyboardScreenEnabled ? "Near cursor" : "") : "Selected · \(selected.split(whereSeparator: { $0.isWhitespace }).count) words"
+        keyArea.keyClicks = preferences.keyClicks; keyArea.doubleSpacePeriod = preferences.doubleSpacePeriod
+        keyArea.updateContext(before: snapshot.before, capitalization: preferences.autoCapitalization ? capitalization : UITextAutocapitalizationType.none, returnType: returnType, appearance: appearance, needsGlobe: needsInputModeSwitchKey)
+        if appliedDark != theme.dark { appliedDark = theme.dark; agent.apply(theme) }
+        let selected = snapshot.selected
+        let title = selected.isEmpty ? (preferences.keyboardScreenEnabled ? "Near cursor" : "") : "Selected · \(selected.split(whereSeparator: { $0.isWhitespace }).count) words"
         let active = working || [.recording, .transcribing, .thinking].contains(voice.phase)
         let hint = screenHint && !active && voice.message == nil
-        let actionTitle = voice.canUndo ? "Undo" : hint ? "Open" : voice.actionTitle == "Undo" ? nil : voice.actionTitle
-        strip.update(agent: settings.keyboardMode == .agent, screenOn: settings.keyboardScreenEnabled, live: screen.live && !screen.secureField, context: title, phase: working ? .thinking : voice.phase, level: voice.level, message: working ? voice.message ?? "Working…" : pendingInsert != nil ? "Result ready" : voice.message ?? agentMessage ?? (hint ? "Gusan Screen is off" : nil), action: pendingInsert != nil && !active ? "Insert" : actionTitle, theme: theme, pendingInsert: pendingInsert != nil && !active)
+        let actionTitle = voice.canUndo(in: snapshot) ? "Undo" : hint ? "Open" : voice.actionTitle == "Undo" ? nil : voice.actionTitle
+        strip.update(agent: preferences.keyboardMode == .agent, screenOn: preferences.keyboardScreenEnabled, live: screen.live && !secure, context: title, phase: working ? .thinking : voice.phase, level: voice.level, message: working ? voice.message ?? "Working…" : pendingInsert != nil ? "Result ready" : voice.message ?? agentMessage ?? (hint ? "Gusan Screen is off" : nil), action: pendingInsert != nil && !active ? "Insert" : actionTitle, theme: theme, pendingInsert: pendingInsert != nil && !active)
     }
     @objc private func toggleMode() {
         guard !working, ![.recording, .transcribing, .thinking].contains(voice.phase) else { return }
-        settings.keyboardMode = settings.keyboardMode == .smart ? .agent : .smart; update()
+        settings.keyboardMode = preferences.keyboardMode == .smart ? .agent : .smart
+        preferences = Preferences(defaults: sharedDefaults); scheduleUpdate()
     }
-    @objc private func toggleScreen() { settings.keyboardScreenEnabled.toggle(); screenHint = settings.keyboardScreenEnabled && !screen.live; update() }
+    @objc private func toggleScreen() { settings.keyboardScreenEnabled = !preferences.keyboardScreenEnabled
+        preferences = Preferences(defaults: sharedDefaults); screenHint = preferences.keyboardScreenEnabled && !screen.live; scheduleUpdate() }
     @objc private func startVoice() { onVoice?() }
     @objc private func cancelVoice() {
         if pendingInsert != nil {
-            VoicePendingInsert.clear(in: sharedDefaults); pendingInsert = nil; update(); return
+            VoicePendingInsert.clear(in: sharedDefaults); pendingInsert = nil; scheduleUpdate(); return
         }
         job?.cancel(); firstFrame?.cancel(); lastFrame?.cancel()
         firstFrame = nil; lastFrame = nil; working = false; voice.cancel()
@@ -118,11 +169,11 @@ final class KeyboardViewController: UIInputViewController {
     @objc private func actionPressed() {
         if let pendingInsert {
             guard hasFullAccess, VoicePendingInsert.read(from: sharedDefaults, account: store.read().flatMap { $0.userID ?? $0.email }) == pendingInsert else {
-                self.pendingInsert = nil; update(); return
+                self.pendingInsert = nil; scheduleUpdate(); return
             }
             let snapshot = context
             voice.insert(JobResult(text: pendingInsert.text, kind: snapshot.selected.isEmpty ? .insert : .replaceSelection), context: snapshot)
-            VoicePendingInsert.clear(in: sharedDefaults); self.pendingInsert = nil; update()
+            VoicePendingInsert.clear(in: sharedDefaults); self.pendingInsert = nil; scheduleUpdate()
         }
         else if voice.actionTitle == "Retry" {
             if let retryTake { process(retryTake.text, context: retryTake.context) }
@@ -135,9 +186,9 @@ final class KeyboardViewController: UIInputViewController {
     @objc private func hideAgent() { agent.hide() }
     private func beginTake() -> VoiceAction? {
         retryTake = nil
-        agentTake = settings.keyboardMode == .agent
-        screenTake = !agentTake && settings.keyboardScreenEnabled && screen.live && !screen.secureField
-        screenHint = settings.keyboardScreenEnabled && !screen.live
+        agentTake = preferences.keyboardMode == .agent
+        screenTake = !agentTake && preferences.keyboardScreenEnabled && screen.live && !screen.secureField
+        screenHint = preferences.keyboardScreenEnabled && !screen.live
         lastFrame = nil; firstFrame = nil
         if screenTake {
             let provider = screen.frames
@@ -163,7 +214,7 @@ final class KeyboardViewController: UIInputViewController {
         let first = firstFrame, last = lastFrame
         job = Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { working = false; update() }
+            defer { working = false; scheduleUpdate() }
             do {
                 let start = await first?.value
                 let finish = await last?.value
@@ -186,12 +237,12 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
     private func insert(_ text: String) {
-        voice.insertedText(text, hasSelection: !context.selected.isEmpty)
-        textDocumentProxy.insertText(text); update()
+        if voice.tracksUndo { voice.insertedText(text, hasSelection: textDocumentProxy.selectedText?.isEmpty == false) }
+        textDocumentProxy.insertText(text); scheduleUpdate()
     }
     private func deleteOnce() {
-        voice.deletedText(hasSelection: !context.selected.isEmpty)
-        textDocumentProxy.deleteBackward(); update()
+        if voice.tracksUndo { voice.deletedText(hasSelection: textDocumentProxy.selectedText?.isEmpty == false) }
+        textDocumentProxy.deleteBackward(); scheduleUpdate()
     }
     func openContainingApp(_ url: URL) {
         let selector = NSSelectorFromString("openURL:options:completionHandler:")
