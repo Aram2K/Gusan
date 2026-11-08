@@ -111,6 +111,7 @@ function task(row: Obj) {
       "updated_at",
       "finished_at",
       "deadline_at",
+      "login_request",
     ]
   ) out[k] = row[k] ?? null;
   out.task_id = row.id;
@@ -423,11 +424,25 @@ function sessionRequest(
     queue: false,
     max_time_s: execute ? 600 : 300,
     max_steps: execute ? 120 : 60,
-    delete_after_min: 1440,
-    delete_screenshot_after_min: 60,
+    delete_after_min: body.vault_id ? 60 : 1440,
+    delete_screenshot_after_min: body.vault_id ? 10 : 60,
     ...(body.timezone ? { timezone: body.timezone } : {}),
     overrides: {
-      "agent.instructions": instructions(mode, phase),
+      "agent.instructions": instructions(mode, phase) + (body.vault_id
+        ? " When a sign-in form for the user's site needs credentials, call request_login with the site hostname, then use fill_secret_at; never ask the user for or type a password."
+        : ""),
+      ...(body.vault_id ? {
+        "agent.environments[kind=web].vault_id": body.vault_id,
+        "agent.environments[kind=web].mode": { type: "visual", markdown: false },
+        "agent.tools": [{
+          name: "request_login",
+          description: "Request the user's saved login for a site.",
+          input_schema: {
+            type: "object", properties: { hostname: { type: "string" } },
+            required: ["hostname"], additionalProperties: false,
+          },
+        }],
+      } : {}),
       "agent.answer_format": mode === "do" && !execute
         ? PREPARE_FORMAT
         : ANSWER_FORMAT,
@@ -451,7 +466,7 @@ async function save(db: any, row: Obj, patch: Obj, activeOnly = false) {
     row.updated_at,
   );
   if (activeOnly) {
-    query = query.in("status", ["queued", "running", "awaiting_confirmation"]);
+    query = query.in("status", ["queued", "running", "awaiting_confirmation", "awaiting_login"]);
   }
   const { data, error } = await query.select().maybeSingle();
   if (error) throw new Failure("storage_error", 500);
@@ -536,12 +551,45 @@ async function retryPrepare(db: any, row: Obj, run: Obj, patch: Obj) {
   await saveRun(db, row, { plan: { ...plan, prepare_retry: "running" } });
   return row;
 }
+async function vaultEvent(db: any, row: Obj, event: string, hostname = "", login_id: string | null = null) {
+  const { error } = await db.from("vault_events").insert({ user_id: row.user_id, task_id: row.id, login_id, event, hostname });
+  if (error) throw new Failure("storage_error", 500);
+}
+async function cleanupVault(db: any, row: Obj, run: Obj) {
+  if (!run.h_vault_id) return;
+  let event = "vault_deleted";
+  try { await h(`/vaults/${encodeURIComponent(run.h_vault_id)}`, "DELETE"); }
+  catch { event = "vault_delete_failed"; }
+  try {
+    await saveRun(db, row, { h_vault_id: null, release_nonce: null, release_nonce_expires_at: null });
+    await vaultEvent(db, row, event);
+  } catch { console.log("agent-action", "vault_cleanup_failed"); }
+}
+function hostname(value: unknown) {
+  if (typeof value !== "string" || value.length > 2048) return null;
+  try {
+    const u = new URL(value.includes("://") ? value : `https://${value}`);
+    const host = u.hostname.toLowerCase().replace(/\.$/, "");
+    if (!["http:", "https:"].includes(u.protocol) || u.port || u.username || u.password ||
+      !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(host)) return null;
+    return host;
+  } catch { return null; }
+}
+function pageURL(value: unknown) {
+  try {
+    const u = new URL(String(value));
+    return ["https:", "http:"].includes(u.protocol) ? u.origin + u.pathname : null;
+  } catch { return null; }
+}
 async function expire(db: any, row: Obj, run: Obj) {
-  if (terminal(row)) return row;
+  if (terminal(row)) { await cleanupVault(db, row, run); return row; }
+  const loginExpired = row.status === "awaiting_login" &&
+    Date.now() >= Date.parse(run.release_nonce_expires_at ?? row.login_request?.requested_at) +
+      (run.release_nonce_expires_at ? 0 : 900000);
   const expired = row.status === "awaiting_confirmation" &&
     row.confirmation_at &&
     Date.now() >= Date.parse(row.confirmation_at) + 900000;
-  if (expired || Date.now() > Date.parse(row.deadline_at)) {
+  if (loginExpired || expired || (row.status !== "awaiting_login" && Date.now() > Date.parse(row.deadline_at))) {
     if (run.h_session_id && row.status !== "awaiting_confirmation") {
       // The local deadline is authoritative even if H is unavailable.
       try {
@@ -550,13 +598,17 @@ async function expire(db: any, row: Obj, run: Obj) {
         console.log("agent-action", row.id, "expiry_cancel_failed");
       }
     }
-    return save(db, row, {
-      status: expired ? "cancelled" : "timed_out",
-      error_code: expired ? "confirmation_expired" : "timeout",
+    row = await save(db, row, {
+      status: loginExpired ? "failed" : expired ? "cancelled" : "timed_out",
+      error_code: loginExpired ? "login_expired" : expired ? "confirmation_expired" : "timeout",
+      login_request: null,
       confirmation: null,
       confirmation_at: null,
       finished_at: new Date().toISOString(),
     });
+    if (loginExpired) await vaultEvent(db, row, "expired", run.tool_req?.hostname ?? "", run.tool_req?.login_id ?? null);
+    await cleanupVault(db, row, run);
+    return row;
   }
   return row;
 }
@@ -576,7 +628,7 @@ function stepText(data: Obj) {
   return clean(
     calls.map((call: Obj) =>
       typeof call.args?.url === "string"
-        ? `Opening ${call.args.url}`
+        ? `Opening ${pageURL(call.args.url) ?? "page"}`
         : clean(call.tool_name)
     ).filter(Boolean).join("; "),
   ).slice(0, 200);
@@ -585,7 +637,7 @@ async function sync(db: any, row: Obj, wait = 0) {
   const run = await loadRun(db, row);
   row = await expire(db, row, run);
   if (
-    terminal(row) || row.status === "awaiting_confirmation" ||
+    terminal(row) || row.status === "awaiting_confirmation" || row.status === "awaiting_login" ||
     !run.h_session_id ||
     run.plan?.prepare_retry === "creating"
   ) return row;
@@ -691,12 +743,34 @@ async function sync(db: any, row: Obj, wait = 0) {
   }
   if (change.status === "awaiting_tool_results") {
     for (const call of change.pending_tool_calls ?? []) {
-      // No phase supports custom tools; approval is a new session, not a tool.
+      if (call.tool_name === "request_login" && run.phase === "execute" && run.h_vault_id) {
+        if (run.tool_req?.call?.id === call.id) return row;
+        const host = hostname(call.args?.hostname);
+        const logins = await db.from("vault_logins").select().eq("user_id", row.user_id);
+        if (logins.error) throw new Failure("storage_error", 500);
+        const login = host && (logins.data ?? []).find((l: Obj) => host === l.hostname || host.endsWith(`.${l.hostname}`));
+        if (login && (run.release_count ?? 0) < 3) {
+          const requested_at = new Date().toISOString();
+          const page_url = events.flatMap((e: Obj) => {
+            const d = e.data ?? {};
+            return [d.url, d.page_url, d.observation?.url, ...(d.tool_reqs ?? []).map((c: Obj) => c.args?.url)];
+          }).map(pageURL).filter(Boolean).at(-1) ?? null;
+          // Store the canonical saved host, so release can enforce exact equality.
+          const login_request = { hostname: login.hostname, page_url, requested_at };
+          await saveRun(db, row, {
+            tool_req: { call, ...login_request, login_id: login.id },
+            release_nonce: crypto.randomUUID(),
+            release_nonce_expires_at: new Date(Date.now() + 900000).toISOString(),
+          });
+          await vaultEvent(db, row, "release_requested", login.hostname, login.id);
+          return save(db, row, { status: "awaiting_login", login_request, event_index: patch.event_index }, true);
+        }
+      }
       await h(`${path}/tool_results`, "POST", {
         kind: "error_event",
         origin: "custom_tools",
         tool_req: call,
-        error: "Custom tools are not allowed; do not take this action.",
+        error: "No saved login for that site.",
       });
     }
   }
@@ -768,7 +842,9 @@ async function sync(db: any, row: Obj, wait = 0) {
       }
     }
   }
-  return save(db, row, patch);
+  row = await save(db, row, patch);
+  if (terminal(row)) await cleanupVault(db, row, run);
+  return row;
 }
 async function verifyWebhook(req: Request, raw: string) {
   const timestamp = req.headers.get("X-H-Webhook-Timestamp") ?? "";
@@ -994,11 +1070,28 @@ Deno.serve(async (req: Request) => {
       }
       // Session creation supports idempotency: concurrent confirms and retries
       // use an identical request/key, never a second executable session.
+      const logins = await db.from("vault_logins").select("id").eq("user_id", userId).limit(1);
+      if (logins.error) throw new Failure("storage_error", 500);
+      if (logins.data?.length && !run.h_vault_id) {
+        try {
+          const vault = await h("/vaults", "POST", { name: `gusan-task-${row.id}`, provider_config: { provider: "internal" } }, `${row.id}:vault`);
+          if (!vault?.id || typeof vault.id !== "string") throw new Failure("vault_error");
+          run.h_vault_id = vault.id;
+          await saveRun(db, row, { h_vault_id: vault.id });
+          await vaultEvent(db, row, "vault_created");
+        } catch {
+          row = await save(db, row, { status: "failed", error_code: "vault_error", finished_at: new Date().toISOString() });
+          await cleanupVault(db, row, run);
+          return json(task(row));
+        }
+      }
+      try {
       const session = await h(
         "/sessions",
         "POST",
         sessionRequest(
           {
+            ...(run.h_vault_id ? { vault_id: run.h_vault_id } : {}),
             plan: { ...plan, instruction: run.plan.instruction },
             ...(run.plan.timezone ? { timezone: run.plan.timezone } : {}),
           },
@@ -1019,19 +1112,28 @@ Deno.serve(async (req: Request) => {
         event_index: 0,
         deadline_at: new Date(Date.now() + (600 + 180) * 1000).toISOString(),
       });
+      } catch (error) {
+        if (!run.h_vault_id) throw error;
+        row = await save(db, row, { status: "failed", error_code: "vault_error", finished_at: new Date().toISOString() });
+        await cleanupVault(db, row, run);
+      }
     } else if (!terminal(row)) {
       const currentRun = await loadRun(db, row);
       const awaiting = row.status === "awaiting_confirmation";
       if (currentRun.h_session_id && !awaiting) {
+        try {
         await h(
           `/sessions/${encodeURIComponent(currentRun.h_session_id)}`,
           "DELETE",
         );
+        } finally { await cleanupVault(db, row, currentRun); }
       }
+      await cleanupVault(db, row, { ...currentRun, h_vault_id: awaiting ? currentRun.h_vault_id : null });
       row = await save(db, row, {
         status: "cancelled",
         confirmation: null,
         confirmation_at: null,
+        login_request: null,
         finished_at: new Date().toISOString(),
       });
       if (!awaiting && row.status === "cancelled") {

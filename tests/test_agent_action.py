@@ -35,9 +35,11 @@ for (let i=0; i<scenarios.length; i++) {
   rpc:async(name,args)=>{dbCalls.push({name,args});return name==='is_pro'?{data:s.pro??true,error:s.proError?{}:null}:{data:{...row,status:'queued',mode:args.p_mode,title:args.p_title},error:s.quota?{code:s.quota}:null}},
   from:(table)=>{
    let patch=null, filters=[], allowedStatuses=null;
-   const q={select:()=>q,update:p=>{patch=p;return q},eq:(k,v)=>{filters.push([k,v]);return q},
+   const q={select:()=>q,limit:()=>q,insert:p=>{patch=p;return q},update:p=>{patch=p;return q},eq:(k,v)=>{filters.push([k,v]);return q},
     in:(k,v)=>{filters.push([k,v]);allowedStatuses=v;return q},maybeSingle:async()=>{
     dbCalls.push({table,patch,filters});
+    if(table==='vault_logins')return {data:s.logins??[],error:null};
+    if(table==='vault_events')return {data:null,error:null};
     if(s.notFound)return {data:null,error:null};
     if(table==='agent_tasks' && patch && allowedStatuses){
      if(s.cancelBeforeRetrySave){s.cancelBeforeRetrySave=false;row={...row,status:'cancelled'};}
@@ -60,6 +62,7 @@ for (let i=0; i<scenarios.length; i++) {
  globalThis.fetch=async(url,init)=>{
   calls.push({url,method:init.method,headers:init.headers,body:init.body?JSON.parse(init.body):null});
   if(s.upstream) return new Response('untrusted error text',{status:s.upstream});
+  if(url.endsWith('/vaults'))return s.vaultFailure?new Response('failure',{status:500}):new Response(JSON.stringify({id:'vault1'}));
   if(url.endsWith('/messages') && s.cancelDuringMessages){
    s.cancelDuringMessages=false;
    await handler(new Request('https://edge.test/',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer aaa.bbb.ccc'},body:JSON.stringify({action:'cancel',task_id:id})}));
@@ -128,7 +131,61 @@ def run():
 
 
 ID = "11111111-1111-1111-1111-111111111111"
+LOGIN = {"id": "22222222-2222-2222-2222-222222222222", "hostname": "example.com"}
+LOGIN_CALL = {"tool_name": "request_login", "args": {"hostname": "EXAMPLE.com"}, "id": "login1"}
 CALL = {"tool_name": "request_confirmation", "args": {"summary": "Send $10 to Alice", "action_kind": "send"}, "id": "call1"}
+
+
+def test_vault_confirm(run):
+    saved, empty, failure = run(
+        waiting(logins=[LOGIN], body={"action": "confirm", "task_id": ID}),
+        waiting(body={"action": "confirm", "task_id": ID}),
+        waiting(logins=[LOGIN], vaultFailure=True, body={"action": "confirm", "task_id": ID}))
+    request = next(c["body"] for c in saved["calls"] if c["url"].endswith("/sessions"))
+    assert request["overrides"]["agent.environments[kind=web].vault_id"] == "vault1"
+    assert request["overrides"]["agent.tools"][0]["name"] == "request_login"
+    assert request["overrides"]["agent.environments[kind=web].mode"] == {"type": "visual", "markdown": False}
+    assert request["delete_after_min"] == 60 and request["delete_screenshot_after_min"] == 10
+    assert saved["run"]["h_vault_id"] == "vault1"
+    assert not any("/vaults" in c["url"] for c in empty["calls"])
+    assert failure["row"]["error_code"] == "vault_error"
+    assert not any(c["url"].endswith("/sessions") for c in failure["calls"])
+
+
+def test_login_parking_and_missing(run):
+    scenario = {"row": {"mode": "do"}, "run": {"phase": "execute", "h_vault_id": "vault1"},
+                "change": {"status": "awaiting_tool_results", "pending_tool_calls": [LOGIN_CALL],
+                           "new_events": [{"data": {"url": "https://example.com/login?private=yes#secret"}}]}}
+    parked, missing = run({**scenario, "logins": [LOGIN], "requests": [{"body": {"action": "status", "task_id": ID}}] * 2}, scenario)
+    assert parked["row"]["status"] == "awaiting_login"
+    assert parked["run"]["release_nonce"]
+    assert "release_nonce" not in json.dumps(parked["row"])
+    assert "release_nonce" not in json.dumps(parked["replies"])
+    assert parked["row"]["login_request"]["page_url"] == "https://example.com/login"
+    assert len(parked["calls"]) == 1
+    assert missing["calls"][-1]["body"]["kind"] == "error_event"
+
+
+@pytest.mark.parametrize("action,status,extra", [
+    ("status", "running", {"change": {"status": "completed", "answer": "Done"}}),
+    ("cancel", "running", {}),
+    ("status", "running", {"row": {"deadline_at": "2000-01-01T00:00:00Z"}}),
+    ("status", "awaiting_login", {"run": {"release_nonce_expires_at": "2000-01-01T00:00:00Z"}}),
+])
+def test_vault_terminal_cleanup(run, action, status, extra):
+    out, = run({**extra, "row": {"status": status, **extra.get("row", {})},
+                "run": {"h_vault_id": "vault1", **extra.get("run", {})},
+                "body": {"action": action, "task_id": ID}})
+    assert any(c["url"].endswith("/vaults/vault1") and c["method"] == "DELETE" for c in out["calls"])
+    assert out["run"]["h_vault_id"] is None
+    if status == "awaiting_login":
+        assert out["row"]["error_code"] == "login_expired"
+
+
+def test_opening_redacts_query(run):
+    out, = run({"change": {"status": "running", "new_events": [{"type": "AgentEvent", "data": {
+        "kind": "policy_event", "tool_reqs": [{"args": {"url": "https://example.com/login?token=secret#private"}}]}}]}})
+    assert out["row"]["steps"][0]["text"] == "Opening https://example.com/login"
 
 
 @pytest.mark.parametrize("scenario,status,error", [
@@ -444,7 +501,7 @@ def test_progress_fallbacks_persist_on_two_running_polls(run):
     events = [{"type": "AgentEvent", "timestamp": "now", "data": {"kind": "policy_event", **d}} for d in data]
     out, = run({"requests": [{"body": {"action": "status", "task_id": ID}, "change": {"status": "running", "new_events": events}},
                              {"body": {"action": "status", "task_id": ID}, "change": {"status": "running", "new_events": []}}]})
-    expected = ["First step", "Read the source.", "Opening https://source.test", "read_page"]
+    expected = ["First step", "Read the source.", "Opening https://source.test/", "read_page"]
     assert [s["text"] for s in out["snapshots"][0]["row"]["steps"]] == expected
     assert [s["text"] for s in out["replies"][1]["body"]["steps"]] == expected
     assert out["row"]["status"] == "running" and out["row"]["event_index"] == 5
@@ -622,7 +679,7 @@ def test_retry_cannot_overwrite_terminal_row_before_restart(run):
     assert out["row"]["status"] == "cancelled"
     assert not any(c["method"] == "POST" for c in out["calls"])
     guarded = next(c for c in out["dbCalls"] if c.get("table") == "agent_tasks" and c.get("patch"))
-    assert ["status", ["queued", "running", "awaiting_confirmation"]] in guarded["filters"]
+    assert ["status", ["queued", "running", "awaiting_confirmation", "awaiting_login"]] in guarded["filters"]
 
 
 def test_cancel_reloads_current_session_before_delete(run):
