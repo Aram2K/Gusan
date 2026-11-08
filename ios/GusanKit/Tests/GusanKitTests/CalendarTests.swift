@@ -60,6 +60,16 @@ final class CalendarTests: XCTestCase {
         XCTAssertLessThanOrEqual(result.count, 1200)
     }
 
+    func testUTF16LimitsPreserveWholeCharacters() throws {
+        XCTAssertEqual(CalendarContext.limitedUTF16("a👨‍👩‍👧‍👦b", limit: 11), "a")
+        XCTAssertEqual(CalendarContext.limitedUTF16("a😀b", limit: 3), "a😀")
+        XCTAssertEqual(CalendarContext.limitedUTF16("a😀b", limit: -1), "")
+        let result = try XCTUnwrap(CalendarContext.prepending("Busy", to: String(repeating: "😀", count: 20000)))
+        XCTAssertLessThanOrEqual(result.utf16.count, 20000)
+        XCTAssertTrue(result.hasSuffix("😀"))
+        XCTAssertEqual(CalendarContext.prepending(nil, to: ""), nil)
+    }
+
     func testUnavailableAndCorruptStorage() throws {
         let unavailable = CalendarSnapshotStore(defaults: nil)
         unavailable.calendarIPhoneEnabled = true; unavailable.write(snapshot())
