@@ -12,6 +12,11 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "supabase/functions/agent-action/index.ts"
 
+
+def parse_iso(value):
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
 HARNESS = r'''
 import {readFileSync} from 'node:fs';
 import {createHmac} from 'node:crypto';
@@ -442,8 +447,8 @@ def test_prepare_waits_with_private_plan(run):
     assert "plan" not in out["row"] and "SECRET instruction" not in json.dumps(out["row"])
     assert out["run"]["plan"] == {**PLAN, "instruction": "SECRET instruction"}
     assert len(out["calls"]) == 1
-    assert (datetime.fromisoformat(out["row"]["deadline_at"]) -
-            datetime.fromisoformat(out["row"]["confirmation_at"])).total_seconds() == pytest.approx(1080, abs=1)
+    assert (parse_iso(out["row"]["deadline_at"]) -
+            parse_iso(out["row"]["confirmation_at"])).total_seconds() == pytest.approx(1080, abs=1)
 
 
 def test_prepare_no_action_retries_then_fails(run):
@@ -665,8 +670,8 @@ def test_prose_prepare_retries_once_then_fails(run, answer):
     assert out["run"]["h_session_id"] == "session1"
     assert "/sessions/session1/changes" in out["calls"][-1]["url"]
     retry_row = out["snapshots"][0]["row"]
-    assert (datetime.fromisoformat(retry_row["deadline_at"]) -
-            datetime.fromisoformat(retry_row["updated_at"])).total_seconds() == pytest.approx(480, abs=1)
+    assert (parse_iso(retry_row["deadline_at"]) -
+            parse_iso(retry_row["updated_at"])).total_seconds() == pytest.approx(480, abs=1)
 
 
 def test_prose_then_valid_plan_awaits_approval(run):
@@ -991,13 +996,16 @@ def test_execute_duplicate_submit_cancels_even_on_completed_status(run, delete_f
 @pytest.mark.parametrize("delete_failure", [None, 500])
 @pytest.mark.parametrize("change_status", ["running", "completed"])
 def test_execute_kill_switch_cleans_vault(run, violation, delete_failure, change_status):
-    events = ([execute_policy("first"), execute_policy("second")] if violation == "duplicate_action" else
+    events = ([execute_policy("first"), execute_observation("https://example.com/success"),
+               execute_policy("second"), execute_observation("https://example.com/receipt")] if violation == "duplicate_action" else
               [execute_policy("navigate", "Open page", "go_to_web", {"url": "https://unapproved.test"})])
     out, = run({"row": {"mode": "do"}, "run": {"phase": "execute", "plan": PLAN,
         "h_vault_id": "vault1", "release_nonce": ID}, "deleteFailure": delete_failure,
         "change": {"status": change_status, "new_events": events}})
     assert out["row"]["status"] == "failed" and out["row"]["error_code"] == violation
     assert out["replies"][0]["body"]["status"] == "failed"
+    if violation == "duplicate_action":
+        assert out["run"]["plan"]["execute_submission_count"] == 2
     assert out["run"]["release_nonce"] is None
     assert out["run"]["h_vault_id"] == ("vault1" if delete_failure else None)
     assert len([c for c in out["calls"] if c["method"] == "DELETE" and "/sessions/" in c["url"]]) == 1

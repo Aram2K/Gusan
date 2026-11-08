@@ -285,7 +285,7 @@ def parse_when(value):
         except ValueError:
             pass
     try:
-        dt = datetime.fromisoformat(s)
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
     except ValueError:
         return None
     if dt.tzinfo is not None:
