@@ -26,6 +26,7 @@ final class AgentCenter: NSObject, ObservableObject {
     private var poller: Task<Void, Never>?
     private var active = false
     private lazy var tracker = AgentTaskTracker(defaults: UserDefaults(suiteName: model.store.resolution.chosen) ?? .standard)
+    lazy var sessionStore = AgentSessionStore(defaults: UserDefaults(suiteName: model.store.resolution.chosen) ?? .standard)
 
     init(model: AppModel) {
         self.model = model
@@ -49,7 +50,9 @@ final class AgentCenter: NSObject, ObservableObject {
     /// Full instructions of tasks started on this device (the server keeps only a 120-char title).
     private var instructions: [UUID: (instruction: String, context: String?)] = [:]
     /// Whether "Run again" can reproduce the original request faithfully.
-    func canRunAgain(_ task: AgentTask) -> Bool { instructions[task.id] != nil || task.title.count < 120 }
+    func canRunAgain(_ task: AgentTask) -> Bool { sessionStore.records.contains { $0.id == task.id } || instructions[task.id] != nil || task.title.count < 120 }
+    var threads: [AgentSessionStore.Thread] { sessionStore.threads(for: tasks) }
+    func message(for task: AgentTask) -> String { sessionStore.records.first { $0.id == task.id }?.message ?? task.title }
     func needsReconfirm(_ task: AgentTask) -> Bool { task.status == .awaitingConfirmation && confirmedIDs.contains(task.id) }
 
     var unseenCount: Int { tasks.filter(\.needsAttention).count }
@@ -87,7 +90,8 @@ final class AgentCenter: NSObject, ObservableObject {
             for index in fetched.indices where fetched[index].status == .awaitingConfirmation && fetched[index].confirmation == nil {
                 if let full = try? await service.status(fetched[index].id, waitSeconds: 0) { fetched[index] = full }
             }
-            tasks = fetched
+            let fetchedIDs = Set(fetched.map(\.id))
+            tasks = (fetched + tasks.filter { !fetchedIDs.contains($0.id) }).sorted { $0.createdAt > $1.createdAt }
             lastRefresh = Date()
             error = nil
             await deliver(tracker.consumeEvents(from: fetched))
@@ -116,10 +120,11 @@ final class AgentCenter: NSObject, ObservableObject {
     // MARK: Actions
 
     @discardableResult
-    func start(_ intent: AgentIntent, context: String? = nil) async throws -> AgentTask {
+    func start(_ intent: AgentIntent, context: String? = nil, continuing parentID: UUID? = nil) async throws -> AgentTask {
         guard let service = currentService() else { throw AgentError.unauthorized }
         let task = try await service.start(intent, context: context)
         instructions[task.id] = (intent.instruction, context)
+        sessionStore.record(taskID: task.id, message: intent.instruction, continuing: parentID, date: task.createdAt)
         tracker.markNotified(task)
         tasks.insert(task, at: 0)
         if notificationStatus == .notDetermined { await requestNotifications() }
@@ -134,7 +139,27 @@ final class AgentCenter: NSObject, ObservableObject {
     /// Starts the same request again (e.g. after a confirmation expired), with the original wording when known.
     func runAgain(_ task: AgentTask) async throws -> AgentTask {
         let original = instructions[task.id]
-        return try await start(AgentIntent(mode: task.mode, instruction: original?.instruction ?? task.title), context: original?.context)
+        return try await start(AgentIntent(mode: task.mode, instruction: original?.instruction ?? message(for: task)), context: original?.context, continuing: task.id)
+    }
+
+    @discardableResult
+    func continueTask(_ id: UUID, message: String) async throws -> AgentTask {
+        guard let service = currentService() else { throw AgentError.unauthorized }
+        let task = try await service.continueTask(id, message: message)
+        sessionStore.record(taskID: task.id, message: message, continuing: id, date: task.createdAt)
+        instructions[task.id] = (message, nil)
+        tracker.markNotified(task)
+        if let index = tasks.firstIndex(where: { $0.id == task.id }) { tasks[index] = task }
+        else { tasks.insert(task, at: 0) }
+        return task
+    }
+
+    func stop(_ id: UUID) async { await mutate(id) { try await $0.stop(id) } }
+
+    func loadSession(_ id: UUID) async {
+        let root = sessionStore.sessionID(for: id)
+        let ids = Set(sessionStore.tasks(in: root).map(\.id) + [root, id])
+        for taskID in ids { await load(taskID) }
     }
 
     func cancel(_ id: UUID) async {

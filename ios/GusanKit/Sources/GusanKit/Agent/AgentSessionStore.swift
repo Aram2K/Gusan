@@ -26,4 +26,19 @@ public final class AgentSessionStore {
     public func tasks(in sessionID: UUID) -> [Record] {
         records.filter { $0.sessionID == sessionID }.sorted { $0.date < $1.date }
     }
+    public func sessionID(for id: UUID) -> UUID {
+        records.first { $0.id == id }?.sessionID ?? id
+    }
+    public func threads(for tasks: [AgentTask]) -> [Thread] {
+        let all = records
+        let roots = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0.sessionID) })
+        return Dictionary(grouping: tasks, by: { roots[$0.id] ?? $0.id }).map { id, tasks in
+            Thread(id: id, tasks: tasks.sorted { $0.createdAt < $1.createdAt })
+        }.sorted { ($0.tasks.last?.createdAt ?? .distantPast) > ($1.tasks.last?.createdAt ?? .distantPast) }
+    }
+    public struct Thread: Identifiable {
+        public let id: UUID
+        public let tasks: [AgentTask]
+        public var needsAttention: Bool { tasks.contains(where: \.needsAttention) }
+    }
 }

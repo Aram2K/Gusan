@@ -2,6 +2,29 @@ import XCTest
 @testable import GusanKit
 
 final class AgentTests: XCTestCase {
+    func testSessionThreadResolutionAndGrouping() throws {
+        let suite = "AgentThreadTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = AgentSessionStore(defaults: defaults)
+        let root = AgentTask(mode: .research, status: .completed, title: "First", createdAt: Date(timeIntervalSince1970: 1))
+        let next = AgentTask(mode: .research, status: .running, title: "Next", createdAt: Date(timeIntervalSince1970: 2))
+        let legacy = AgentTask(mode: .do, status: .failed, title: "Legacy", createdAt: Date(timeIntervalSince1970: 3))
+        XCTAssertTrue(store.threads(for: []).isEmpty)
+        store.record(taskID: root.id, message: "Full original instruction")
+        store.record(taskID: next.id, message: "Follow up", continuing: root.id)
+        let restored = AgentSessionStore(defaults: defaults)
+        XCTAssertEqual(restored.sessionID(for: next.id), root.id)
+        XCTAssertEqual(restored.sessionID(for: root.id), root.id)
+        XCTAssertEqual(restored.sessionID(for: legacy.id), legacy.id)
+        let threads = restored.threads(for: [next, legacy, root])
+        XCTAssertEqual(threads.map(\.id), [legacy.id, root.id])
+        XCTAssertEqual(threads.last?.tasks.map(\.id), [root.id, next.id])
+        XCTAssertEqual(threads.last?.needsAttention, true)
+        defaults.set(Data("corrupt".utf8), forKey: "gusan.agent.sessions")
+        XCTAssertEqual(restored.sessionID(for: next.id), next.id)
+        XCTAssertEqual(restored.threads(for: [root, next]).count, 2)
+    }
     func testRichPhasesRoundTripWithoutChangingKeyboardStatus() throws {
         let cases: [(String, AgentStatus, AgentPhase)] = [
             ("awaiting_login", .running, .needsLogin), ("awaiting_code", .running, .needsCode),
