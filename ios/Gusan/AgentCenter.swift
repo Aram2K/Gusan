@@ -49,7 +49,7 @@ final class AgentCenter: NSObject, ObservableObject {
     /// Full instructions of tasks started on this device (the server keeps only a 120-char title).
     private var instructions: [UUID: (instruction: String, context: String?)] = [:]
     /// Whether "Run again" can reproduce the original request faithfully.
-    func canRunAgain(_ task: AgentTask) -> Bool { sessionStore.records.contains { $0.id == task.id } || instructions[task.id] != nil || task.title.count < 120 }
+    func canRunAgain(_ task: AgentTask) -> Bool { instructions[task.id] != nil }
     var threads: [AgentSessionStore.Thread] { sessionStore.threads(for: tasks) }
     func message(for task: AgentTask) -> String { sessionStore.records.first { $0.id == task.id }?.message ?? task.title }
     func needsReconfirm(_ task: AgentTask) -> Bool { task.status == .awaitingConfirmation && confirmedIDs.contains(task.id) }
@@ -144,8 +144,10 @@ final class AgentCenter: NSObject, ObservableObject {
 
     /// Starts the same request again (e.g. after a confirmation expired), with the original wording when known.
     func runAgain(_ task: AgentTask) async throws -> AgentTask {
-        let original = instructions[task.id]
-        return try await start(AgentIntent(mode: task.mode, instruction: original?.instruction ?? message(for: task)), context: original?.context, continuing: task.id)
+        guard let original = instructions[task.id] else {
+            throw NSError(domain: "Gusan.AgentRetry", code: 1, userInfo: [NSLocalizedDescriptionKey: "The original input is no longer available. Start again from Home."])
+        }
+        return try await start(AgentIntent(mode: task.mode, instruction: original.instruction), context: original.context, continuing: task.id)
     }
 
     @discardableResult
@@ -153,7 +155,6 @@ final class AgentCenter: NSObject, ObservableObject {
         guard let service = currentService() else { throw AgentError.unauthorized }
         let task = try await service.continueTask(id, message: message)
         sessionStore.record(taskID: task.id, message: message, continuing: id, date: task.createdAt)
-        instructions[task.id] = (message, nil)
         tracker.markNotified(task)
         if let index = tasks.firstIndex(where: { $0.id == task.id }) { tasks[index] = task }
         else { tasks.insert(task, at: 0) }

@@ -163,10 +163,13 @@ private struct AgentSessionTurn: View {
             AppCard {
                 Label(task.phase.label, systemImage: "exclamationmark.triangle").foregroundStyle(Theme.danger)
                 Text(task.summaryLine)
-                Button("Try again") {
-                    perform { do { try await agent.runAgain(task) } catch { self.error = error.localizedDescription } }
-                }.disabled(agent.atActiveLimit || !agent.canRunAgain(task))
-                if !agent.canRunAgain(task) { Text("The full instruction isn't stored on this device. Start again from Home.").font(.footnote).foregroundStyle(.secondary) }
+                if agent.canRunAgain(task) {
+                    Button("Try again") {
+                        perform { do { try await agent.runAgain(task) } catch { self.error = error.localizedDescription } }
+                    }.disabled(agent.atActiveLimit)
+                } else {
+                    Text("The original input is no longer available. Start again from Home.").font(.footnote).foregroundStyle(.secondary)
+                }
             }
         case .stopped, .cancelled:
             Label("Stopped", systemImage: "stop.circle").foregroundStyle(.secondary)
