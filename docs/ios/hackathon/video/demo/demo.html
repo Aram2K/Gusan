@@ -54,7 +54,7 @@ body.portrait #dots{position:absolute;left:0;top:366px;margin:0}
 /* ---------- HUD (live playback only) ---------- */
 #hud{position:absolute;left:0;right:0;bottom:0;height:76px;background:linear-gradient(to top,rgba(0,0,0,.85),rgba(0,0,0,0));z-index:50;display:flex;align-items:flex-end;padding:0 64px 16px;gap:22px;font-size:15px;color:#c8c8d0;opacity:0;transition:opacity .25s}
 #hud.show{opacity:1}
-#hud .bar{flex:1;height:6px;border-radius:3px;background:rgba(255,255,255,.18);position:relative;cursor:pointer;margin-bottom:5px}
+#hud .bar{flex:1;height:6px;touch-action:none;border-radius:3px;background:rgba(255,255,255,.18);position:relative;cursor:pointer;margin-bottom:5px}
 #hud .bar i{position:absolute;left:0;top:0;bottom:0;border-radius:3px;background:var(--blue)}
 #hud .bar b{position:absolute;top:-3px;width:2px;height:12px;background:rgba(255,255,255,.5)}
 #hud .tm{font-variant-numeric:tabular-nums;width:92px}
