@@ -752,6 +752,8 @@ async function devinAction(db: any, row: Obj, body: Obj) {
       await devinRequest(run.devin_api === "v3" ? `${devinPath(run)}/messages`
         : `/v1/session/${encodeURIComponent(run.devin_session_id)}/message`, "POST", { message: body.message.trim() });
     } catch (error) {
+      // Delivery is ambiguous after a timeout: stop the paid session rather than leave it untracked.
+      await terminateDevin(run);
       await save(db, row, { status: "failed", error_code: "devin_error", finished_at: new Date().toISOString() }, true);
       throw error;
     }

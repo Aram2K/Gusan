@@ -19,7 +19,7 @@ begin
   if task.id is null then
     raise exception using errcode = 'P0004', message = 'not_found';
   end if;
-  if task.status not in ('queued', 'running', 'awaiting_confirmation', 'awaiting_login')
+  if not (task.status in ('queued', 'running', 'awaiting_confirmation', 'awaiting_login') and task.deadline_at > now())
      and (select count(*) from public.agent_tasks where user_id = p_user_id and deadline_at > now() and status in ('queued', 'running', 'awaiting_confirmation', 'awaiting_login')) >= p_max_active then
     raise exception using errcode = 'P0001', message = 'too_many_active';
   end if;
@@ -34,3 +34,4 @@ begin
 end;
 $$;
 revoke all on function public.claim_agent_follow_up(uuid, uuid, integer, integer, integer) from public, anon, authenticated;
+grant execute on function public.claim_agent_follow_up(uuid, uuid, integer, integer, integer) to service_role;
