@@ -144,7 +144,6 @@ struct HomeView: View {
                         let intent = AgentIntent.detect(text) ?? AgentIntent(mode: .research, instruction: text)
                         let task = try await agent.start(intent)
                         instruction = ""; model.openSessionID = task.id; model.selectedTab = .sessions
-                        agent.requestNotifications()
                     } catch { self.error = error.localizedDescription }
                 }
             } label: {

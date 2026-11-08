@@ -184,6 +184,7 @@ final class AgentCenter: NSObject, ObservableObject {
         sessionStore.record(taskID: task.id, message: intent.instruction, continuing: parentID, date: task.createdAt)
         tracker.markNotified(task)
         tasks.insert(task, at: 0)
+        Task { @MainActor [weak self] in self?.requestNotifications() }
         return task
     }
 
@@ -213,6 +214,7 @@ final class AgentCenter: NSObject, ObservableObject {
         tracker.markNotified(task)
         if let index = tasks.firstIndex(where: { $0.id == task.id }) { tasks[index] = task }
         else { tasks.insert(task, at: 0) }
+        Task { @MainActor [weak self] in self?.requestNotifications() }
         return task
     }
 
