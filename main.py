@@ -37,6 +37,7 @@ if __name__ == "__main__":
     # `from main import ...` (file jobs, model checks): they
     # must get THIS module - a second copy would load its own config.
     sys.modules.setdefault("main", sys.modules["__main__"])
+import collections
 import threading
 import time
 import json
@@ -1262,9 +1263,16 @@ class AudioRecorder:
         self.on_chunk_gap = None
         self._capture_mode = None     # smart_meeting/system_only/default_mic; None = dictation
         self.fast_live_chunks = False  # Live Assistance session: short pieces (see _record_loop)
-        # Real-time dictation (live_stt.py): the take's live Gladia session, and the words while speaking.
+        # Real-time (live_stt.py): the take's live session; the words while speaking (dictation's pill); every
+        # finished sentence of a meeting (on_live_final(text, language, start, end) - meeting_session).
         self._live_session = None
         self.on_live_text = None
+        self.on_live_final = None
+        self._live_fed_s = 0.0
+        self._live_energy_t, self._live_energy_v = [], []
+        # A meeting's live audio, the last LIVE_RING_S of it: a finished sentence's own sound (live_audio) for its
+        # speaker label (live_speakers.py).
+        self._live_ring, self._live_ring_s = collections.deque(), 0.0
         self._loopback_peak = 0.0     # loudest loopback sample this session (0 = no system audio)
         # Meeting Pause (set_paused): the record thread keeps reading - and so
         # draining - the streams, but keeps nothing while this is set.
@@ -2453,7 +2461,10 @@ class AudioRecorder:
                 arr = np.frombuffer(data, dtype=np.float32)
                 live = self._live_session
                 if live is not None and len(arr):
-                    live.feed(arr)                     # never blocks: real-time dictation (live_stt.py)
+                    live.feed(arr)                     # never blocks: real-time (live_stt.py)
+                    if meeting_cadence:
+                        AudioRecorder._live_keep(self, arr)
+                    self._live_fed_s += len(arr) / float(sr)
                 this_dur = (len(arr) / sr) if len(arr) > 0 else frame_dur
                 buffered_sec += this_dur
                 if len(arr) > 0:
@@ -2474,6 +2485,10 @@ class AudioRecorder:
                     if two_sources:
                         src_mic_e += mic_rms * mic_rms * len(m_part)
                         src_call_e += call_rms * call_rms * (len(c_part) if c_part is not None else 0)
+                        if live is not None:
+                            AudioRecorder._note_live_energy(
+                                self, mic_rms * mic_rms * len(m_part),
+                                call_rms * call_rms * (len(c_part) if c_part is not None else 0))
                     act = getattr(self, "_activity", None)
                     if act is not None:
                         # Loudness per minute of recording (who delivered sound).
@@ -2664,12 +2679,69 @@ class AudioRecorder:
         pipe = getattr(self, "_chunk_pipeline", None)
         if pipe is not None:
             pipe.close()              # the recording is over: the worker drains the queue, then ends
+            # A meeting's live stream ends with it (its sentences were the live view; the pieces make the notes).
+            live, self._live_session = getattr(self, "_live_session", None), None
+            if live is not None:
+                threading.Thread(target=live.stop, kwargs={"timeout": 3.0}, daemon=True,
+                                 name="gusan-live-stop").start()
+
+    def _live_keep(self, arr):
+        """The meeting's live audio from this point of the stream on, the last LIVE_RING_S kept. Record thread."""
+        ring = self._live_ring
+        ring.append((self._live_fed_s, arr))
+        self._live_ring_s += len(arr) / float(cfg["sample_rate"])
+        while ring and self._live_ring_s > LIVE_RING_S:
+            _t, old = ring.popleft()
+            self._live_ring_s -= len(old) / float(cfg["sample_rate"])
+
+    def live_audio(self, start, end):
+        """The meeting's sound between two points of its live stream (seconds), or None when it is no longer kept:
+        one sentence's audio for its voice print (live_speakers.py)."""
+        sr = float(cfg["sample_rate"])
+        parts = []
+        for t0, a in list(self._live_ring):
+            t1 = t0 + len(a) / sr
+            if t1 <= start or t0 >= end:
+                continue
+            i0, i1 = max(0, int((start - t0) * sr)), min(len(a), int((end - t0) * sr))
+            if i1 > i0:
+                parts.append(a[i0:i1])
+        return np.concatenate(parts).astype(np.float32) if parts else None
+
+    def _note_live_energy(self, mic_e, call_e):
+        """A meeting with mic + system sound: how loud each source was up to this point of the live stream
+        (live_source_energy gives a sentence its "You" / "Them" hint). Record thread."""
+        t, v = self._live_energy_t, self._live_energy_v
+        t.append(self._live_fed_s)
+        v.append((mic_e, call_e))
+        if len(t) > 250000:                      # about 4 hours: keep the newer half
+            del t[:125000], v[:125000]
+
+    def live_source_energy(self, start, end):
+        """(mic energy, call energy) over a stretch of the live stream (seconds since it began), or None: the same
+        shape as chunk_source_energy (meeting_session.speaker_hint)."""
+        import bisect
+        t, v = list(self._live_energy_t), list(self._live_energy_v)
+        if not t:
+            return None
+        lo, hi = bisect.bisect_left(t, float(start)), bisect.bisect_right(t, float(end) + 0.15)
+        if hi <= lo:
+            return None
+        return (sum(m for m, _c in v[lo:hi]), sum(c for _m, c in v[lo:hi]))
+
+    def live_showing(self):
+        """True while a meeting's live stream carries its live view (the pieces then only make the transcript and
+        the notes); False when there is none or it gave up - the pieces show their text again."""
+        s = getattr(self, "_live_session", None)
+        return s is not None and not getattr(s, "failed", "") and not getattr(s, "_stopping", False)
+
+    @staticmethod
+    def _is_meeting(rec, capture_mode):
+        return capture_mode is not None or bool(getattr(rec, "fast_live_chunks", False))
 
     def _live_wanted(self, capture_mode):
-        """Real-time for this take: a dictation (not a meeting) on Gusan Cloud, signed in, not Privacy mode, the
-        setting not turned off (cfg live_stt)."""
-        if capture_mode is not None or getattr(self, "fast_live_chunks", False):
-            return False
+        """Real-time for this take - dictation, Smart Actions, meetings and the Live Assistant - on Gusan Cloud,
+        signed in, not Privacy mode, the setting not turned off (cfg live_stt)."""
         if not callable(getattr(self, "get_auth_token", None)) or cfg.get("privacy_mode"):
             return False
         if not cfg.get("live_stt", True):
@@ -2684,6 +2756,11 @@ class AudioRecorder:
         if not AudioRecorder._live_wanted(self, capture_mode):
             return None
         import live_stt
+        if AudioRecorder._is_meeting(self, capture_mode):
+            # A meeting's live view (the notes come from the pieces whatever it is): OpenAI's live model for a
+            # language Gladia writes poorly, else Gladia.
+            poor = AudioRecorder._lang_setting(self) in speech_langs.LIVE_POOR
+            return live_stt.ENGINE_OPENAI if poor else live_stt.ENGINE_GLADIA
         if AudioRecorder._lang_setting(self) in speech_langs.LIVE_POOR:
             import engine_choice
             profile = engine_choice.cloud_profile(cfg.get(engine_choice.SPEECH_PROFILE_KEY))
@@ -2695,14 +2772,18 @@ class AudioRecorder:
         no session means the pieces carry the take, as before."""
         self._live_session = None
         self._backup_detects = False
+        self._live_fed_s = 0.0
+        self._live_energy_t, self._live_energy_v = [], []
+        self._live_ring, self._live_ring_s = collections.deque(), 0.0
         try:
             engine = AudioRecorder._live_engine(self, capture_mode)
             if engine is None:
                 return
+            meeting = AudioRecorder._is_meeting(self, capture_mode)
             # A set language with an alphabet of its own (Armenian): real-time writes the take in it, the backup
             # pieces detect the language themselves - so a take spoken in another language shows at Stop
             # (_spoke_other_language) and comes out as spoken, not forced into the set language (founder, 2026-11-07).
-            self._backup_detects = speech_langs.has_distinct_script(AudioRecorder._lang_setting(self))
+            self._backup_detects = (not meeting) and speech_langs.has_distinct_script(AudioRecorder._lang_setting(self))
             import live_stt
             terms = ()
             try:
@@ -2723,8 +2804,17 @@ class AudioRecorder:
                     cb(" ".join(committed + [text]))
             # Auto-detect: each sentence in its own language, among the person's languages (speech_langs).
             language, languages = speech_langs.live_languages(AudioRecorder._lang_setting(self), cfg)
-            session = live_stt.LiveSession(self.get_auth_token, language, languages, terms, purpose="dictation",
-                                           on_partial=on_partial, on_final=on_final, engine=engine)
+            def on_utterance(text, lang, start, end):
+                cb = getattr(self, "on_live_final", None)
+                if cb is not None:
+                    cb(text, lang, start, end)
+            if meeting:
+                # Every finished sentence to the meeting (its live view, the Live Assistant); never the pill.
+                session = live_stt.LiveSession(self.get_auth_token, language, languages, terms, purpose="meeting",
+                                               on_utterance=on_utterance, engine=engine)
+            else:
+                session = live_stt.LiveSession(self.get_auth_token, language, languages, terms, purpose="dictation",
+                                               on_partial=on_partial, on_final=on_final, engine=engine)
             self._live_session = session
 
             def opener():
@@ -4016,6 +4106,9 @@ TITLE_PASS_MAX_TRIES = 30
 # Real-time dictation (live_stt.py, Gladia live): how long Stop waits for Gladia's last sentence (Gladia: finals
 # ~0.3 s after the speech ends) before the pieces' text is used instead.
 LIVE_STOP_S = 2.5
+# A meeting's live audio kept for its sentences' speaker labels (a sentence is finished ~0.3 s after it is said and
+# Gladia closes one after 15 s at most).
+LIVE_RING_S = 90.0
 # Smart Actions on the selected text (selection_reader.py, docs/redesign/selected-text-spec.md): how long a take waits,
 # after the person stops speaking, for a selection still being read; an on-computer model reads at most this much of
 # a long selection (its whole window is 8192 tokens).

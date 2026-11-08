@@ -58,7 +58,7 @@ def _send(conn, opcode, payload):
 class FakeGladia:
     """One connection at a time. ``script(conn, audio)`` runs after each handshake: it gets the bytes received so far."""
 
-    def __init__(self, on_audio=None, drop_after=None):
+    def __init__(self, on_audio=None, drop_after=None, end_after=None):
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(4)
@@ -68,6 +68,7 @@ class FakeGladia:
         self.connections = 0
         self.on_audio = on_audio
         self.drop_after = drop_after          # close the FIRST connection after this many audio frames
+        self.end_after = end_after            # end the FIRST session (a close frame 1000) after this many frames
         self.final_delay = 0.0                # stop_recording -> the last final
         self.close_delay = 0.0                # the last final -> the close (post-processing)
         threading.Thread(target=self._serve, daemon=True).start()
@@ -105,6 +106,10 @@ class FakeGladia:
                         self.on_audio(lambda msg: _send(conn, 0x1, json.dumps(msg).encode()), frames)
                     if number == 1 and self.drop_after and frames >= self.drop_after:
                         conn.close()                       # the line drops (no close frame)
+                        return
+                    if number == 1 and self.end_after and frames >= self.end_after:
+                        _send(conn, 0x8, struct.pack("!H", 1000))     # the server ended the session
+                        conn.close()
                         return
                 elif op == 0x1:
                     self.texts.append(payload.decode())
@@ -421,6 +426,96 @@ class TestOpenAISession(unittest.TestCase):
                     {"url": live_stt.OPENAI_WSS, "token": "ek_a\r\nX-Evil: 1"}):
             with self.assertRaises(live_stt.LiveUnavailable):
                 live_stt.open_session("tok", "hy", post=lambda *a, b=bad, **k: Resp(b), engine="openai")
+
+
+class TestMeetingStream(unittest.TestCase):
+    """A meeting's stream: every finished sentence with its span; a dropped or ended session is opened again (a
+    meeting goes on), and the sentences' times keep counting from where the new one began."""
+
+    def setUp(self):
+        patcher = mock.patch.object(live_stt, "pcm16", lambda samples: bytes(samples))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _run(self, **server_kw):
+        spans, opened = [], []
+
+        def script(send, frames):
+            if server.connections == 1 and frames == 2:
+                send(_final("u1", "First words.", 0.0))
+            if server.connections >= 2 and frames == 1:
+                send(_final("u1", "After the drop.", 0.1))
+        server = FakeGladia(on_audio=script, **server_kw)
+        self.addCleanup(server.close)
+
+        def opener(*a, **k):
+            opened.append(1)
+            return (server.url, "sess-%d" % len(opened))
+        s = live_stt.LiveSession(lambda: "tok", "en", purpose="meeting", opener=opener,
+                                 on_utterance=lambda *a: spans.append(a))
+        s.start()
+        end = time.monotonic() + 6
+        while len(spans) < 2 and time.monotonic() < end:
+            s.feed(_audio(0.1))
+            time.sleep(0.05)
+        s.cancel()
+        self.assertEqual([x[0] for x in spans], ["First words.", "After the drop."])
+        self.assertEqual(spans[0][2:], (0.0, 1.0))
+        self.assertEqual(s.failed, "")
+        return spans, opened
+
+    def test_a_dropped_line_resumes_the_same_session_and_its_clock(self):
+        spans, opened = self._run(drop_after=3)
+        self.assertEqual(len(opened), 1)
+        self.assertEqual(spans[1][2], 0.1)
+
+    def test_an_ended_session_is_followed_by_a_new_one_whose_times_count_on(self):
+        spans, opened = self._run(end_after=3)
+        self.assertEqual(len(opened), 2)
+        self.assertGreaterEqual(spans[1][2], 0.3)                  # the new session's clock starts later
+
+
+class TestOpenAIMeetingTurns(unittest.TestCase):
+    def test_turns_are_committed_at_a_pause_and_every_15_seconds(self):
+        s = live_stt.LiveSession(lambda: "tok", "hy", engine="openai", purpose="meeting")
+        sent = []
+        s._send_control = sent.append
+        loud, quiet = struct.pack("<2400h", *([3000, -3000] * 1200)), bytes(4800)
+        for _ in range(10):                                        # 1 s of speech: too short for a turn
+            s._sent_s += 0.1
+            s._maybe_commit(loud)
+        s._sent_s += 0.1
+        s._maybe_commit(quiet)
+        self.assertEqual(sent, [])
+        for _ in range(20):                                        # 2 s more, then a pause
+            s._sent_s += 0.1
+            s._maybe_commit(loud)
+        s._sent_s += 0.1
+        s._maybe_commit(quiet)
+        self.assertEqual(sent, [{"type": "input_audio_buffer.commit"}])
+        self.assertEqual(len(s._commit_spans), 1)
+        for _ in range(151):                                       # 15 s without a pause: a turn anyway
+            s._sent_s += 0.1
+            s._maybe_commit(loud)
+        self.assertEqual(len(sent), 2)
+
+    def test_a_committed_turn_comes_back_with_its_span(self):
+        got = []
+        s = live_stt.LiveSession(lambda: "tok", "hy", engine="openai", purpose="meeting",
+                                 on_utterance=lambda *a: got.append(a))
+        s._commit_spans = [(0.0, 3.2)]
+        s._handle(json.dumps({"type": "input_audio_buffer.committed", "item_id": "i7"}))
+        s._handle(json.dumps({"type": "conversation.item.input_audio_transcription.completed", "item_id": "i7",
+                              "transcript": "Բարեւ ձեզ"}))
+        self.assertEqual(got, [("Բարեւ ձեզ", "hy", 0.0, 3.2)])
+
+    def test_an_empty_turn_at_stop_is_not_a_failure(self):
+        s = live_stt.LiveSession(lambda: "tok", "hy", engine="openai", purpose="meeting")
+        s._stopping, s._commit_spans = True, [(5.0, 5.0)]
+        s._handle(json.dumps({"type": "error", "error": {"type": "invalid_request_error",
+                                                         "code": "input_audio_buffer_commit_empty"}}))
+        self.assertEqual(s.failed, "")
+        self.assertTrue(s._done.is_set())
 
 
 class TestGladiaCleanup(unittest.TestCase):

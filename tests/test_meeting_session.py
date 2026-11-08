@@ -464,6 +464,67 @@ class TestPauseAndLive(_Base):
 
 # ── stop → outcome ───────────────────────────────────────────────────────────
 
+class TestRealTimeMeeting(_Base):
+    """Real time in meetings (2026-11-08): every sentence the live stream finished goes to the live view and the
+    Live Assistant at once, with its "You" / "Them" hint; the pieces only make the transcript and the notes - until
+    the stream gives up, then they show again."""
+
+    def test_live_sentences_feed_the_live_view_and_the_pieces_only_the_transcript(self):
+        app = _App(meeting_audio_mode="smart_meeting")
+        app.recorder.live_showing = lambda: True
+        app.recorder.live_source_energy = lambda start, end: (9.0, 1.0) if start < 5 else (0.5, 9.5)
+        s = self.session(app)
+        raw, lines = _Recorder(s.sig_chunk), _Recorder(s.live_line)
+        s.start("x")
+        self.assertEqual(app.recorder.on_live_final, s._on_live_final)
+        s._on_live_final("Where are we on pricing?", "en", 0.4, 2.1)
+        s._on_live_final("Almost done.", "en", 6.0, 7.2)
+        s._on_chunk_transcribed(0, "Where are we on pricing? Almost done.", "en")    # kept, not shown twice
+        self.assertEqual(len(raw.calls), 2)
+        self.assertEqual(lines.calls, [("Where are we on pricing?", "You"), ("Almost done.", "Them")])
+        rows = (s.meeting_dir / "chunks.jsonl").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(rows), 1)
+
+    def test_with_the_speaker_model_each_voice_gets_its_own_label(self):
+        """Several people on one mic or on the call: the sentence's own voice, not just "You" / "Them"."""
+        app = _App(meeting_audio_mode="smart_meeting")
+        app.recorder.live_showing = lambda: True
+        app.recorder.live_source_energy = lambda start, end: (0.5, 9.5)
+        app.recorder.live_audio = lambda start, end: ("audio", start, end)
+        s = self.session(app)
+        lines = _Recorder(s.live_line)
+        s.start("x")
+        asked = []
+
+        class Speakers:
+            def label(self, audio, side):
+                asked.append((audio, side))
+                return "Speaker 2"
+        s._live_speakers, s._live_speakers_tried = Speakers(), True
+        s._on_live_final("Can you hear me?", "en", 3.0, 4.5)
+        self.assertEqual(lines.calls, [("Can you hear me?", "Speaker 2")])
+        self.assertEqual(asked, [(("audio", 3.0, 4.5), "call")])
+
+    def test_when_the_live_stream_gives_up_the_pieces_show_again(self):
+        app = _App(meeting_audio_mode="smart_meeting")
+        app.recorder.live_showing = lambda: False
+        s = self.session(app)
+        raw = _Recorder(s.sig_chunk)
+        s.start("x")
+        s._on_chunk_transcribed(0, "Hello there.", "en")
+        self.assertEqual(len(raw.calls), 1)
+
+    def test_nothing_after_stop_and_nothing_empty(self):
+        app = _App(meeting_audio_mode="smart_meeting")
+        app.recorder.live_showing = lambda: True
+        s = self.session(app)
+        raw = _Recorder(s.sig_chunk)
+        s._on_live_final("Too early.", "en", 0.0, 1.0)                 # not recording yet
+        s.start("x")
+        s._on_live_final("  ", "en", 0.0, 1.0)
+        self.assertEqual(raw.calls, [])
+
+
 class TestOutcome(_Base):
     def _record(self, app=None, notes="## Summary\n- Ship Friday", **start):
         app = app or _App()

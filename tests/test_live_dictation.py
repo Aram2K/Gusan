@@ -50,11 +50,19 @@ class TestWhenItRuns(unittest.TestCase):
     def test_a_dictation_on_gusan_cloud_streams(self):
         self.assertTrue(self._wanted())
 
-    def _engine(self, **cfg):
+    def _engine(self, capture_mode=None, **cfg):
         r = _rec()
         with mock.patch.dict(main.cfg, dict({"privacy_mode": False, "live_stt": True}, **cfg)), \
                 mock.patch.object(AR, "_backend", lambda self: "managed"):
-            return AR._live_engine(r, None)
+            return AR._live_engine(r, capture_mode)
+
+    def test_a_meetings_live_view_is_gladia_or_openai_for_armenian_whatever_the_profile(self):
+        """A meeting's live view only (the pieces make its notes): OpenAI's live model for Armenian (the best in
+        the founder's test), Gladia for the rest - on Fast and Best accuracy alike."""
+        for profile in ("fast", "best"):
+            self.assertEqual(self._engine("smart_meeting", language="fr", managed_speech_profile=profile), "gladia")
+            self.assertEqual(self._engine("smart_meeting", language="hy", managed_speech_profile=profile), "openai")
+        self.assertIsNone(self._engine("smart_meeting", language="en", privacy_mode=True))
 
     def test_armenian_streams_to_openai_on_fast_and_not_at_all_on_best_accuracy(self):
         """The founder's pick (2026-11-07): Armenian Fast = OpenAI gpt-live-transcribe (Gladia writes it poorly),
@@ -65,8 +73,8 @@ class TestWhenItRuns(unittest.TestCase):
         self.assertEqual(self._engine(language="auto", managed_speech_profile="fast"), "gladia")
         self.assertIsNone(self._engine(language="hy", managed_speech_profile="fast", privacy_mode=True))
 
-    def test_never_a_meeting_another_engine_privacy_mode_or_signed_out(self):
-        self.assertFalse(self._wanted(capture_mode="smart_meeting"))
+    def test_meetings_stream_too_but_never_another_engine_privacy_mode_or_signed_out(self):
+        self.assertTrue(self._wanted(capture_mode="smart_meeting"))       # real time in meetings (2026-11-08)
         self.assertFalse(self._wanted(backend="local"))
         self.assertFalse(self._wanted(privacy_mode=True))
         self.assertFalse(self._wanted(token=False))
@@ -142,6 +150,47 @@ class TestAnotherLanguageThanTheOneSet(unittest.TestCase):
     def test_only_when_the_backup_detected_by_itself(self):
         self.assertFalse(AR._spoke_other_language(self._rec(["Okay so tomorrow I have to go."], detects=False)))
         self.assertFalse(AR._spoke_other_language(self._rec(["Okay so tomorrow I have to go."], language="fr")))
+
+
+class TestMeetingLiveView(unittest.TestCase):
+    def test_who_was_loud_during_a_sentence(self):
+        r = _rec(_live_fed_s=0.0, _live_energy_t=[], _live_energy_v=[])
+        for i in range(30):                                   # 3 s: the mic first, then the call
+            r._live_fed_s = (i + 1) * 0.1
+            AR._note_live_energy(r, 9.0 if i < 15 else 0.2, 0.3 if i < 15 else 8.0)
+        mic, call = AR.live_source_energy(r, 0.0, 1.4)
+        self.assertGreater(mic, call)
+        mic, call = AR.live_source_energy(r, 1.6, 3.0)
+        self.assertGreater(call, mic)
+        self.assertIsNone(AR.live_source_energy(r, 10.0, 11.0))
+        self.assertIsNone(AR.live_source_energy(_rec(_live_energy_t=[], _live_energy_v=[]), 0.0, 1.0))
+
+    def test_a_sentences_own_audio_is_kept_for_its_voice(self):
+        import collections
+        np = main.np
+        try:
+            real = tuple(np.zeros(2).shape) == (2,)
+        except Exception:
+            real = False
+        if not real:
+            self.skipTest("real numpy not importable (stubbed)")
+        r = _rec(_live_fed_s=0.0, _live_ring=collections.deque(), _live_ring_s=0.0)
+        for i in range(20):                                   # 2 s, each 0.1 s block holds its own number
+            AR._live_keep(r, np.full(1600, float(i), dtype=np.float32))
+            r._live_fed_s += 0.1
+        got = AR.live_audio(r, 0.5, 0.8)
+        self.assertEqual(len(got), 4800)
+        self.assertEqual((float(got[0]), float(got[-1])), (5.0, 7.0))
+        self.assertIsNone(AR.live_audio(r, 5.0, 6.0))
+        with mock.patch.object(main, "LIVE_RING_S", 1.0):
+            AR._live_keep(r, np.zeros(1600, dtype=np.float32))
+        self.assertLessEqual(r._live_ring_s, 1.0 + 1e-6)
+
+    def test_the_live_view_is_the_streams_while_it_works(self):
+        self.assertFalse(AR.live_showing(_rec()))
+        self.assertTrue(AR.live_showing(_rec(_live_session=SimpleNamespace(failed="", _stopping=False))))
+        self.assertFalse(AR.live_showing(_rec(_live_session=SimpleNamespace(failed="dropped", _stopping=False))))
+        self.assertFalse(AR.live_showing(_rec(_live_session=SimpleNamespace(failed="", _stopping=True))))
 
 
 class TestAtStop(unittest.TestCase):

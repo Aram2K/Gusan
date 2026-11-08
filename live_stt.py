@@ -19,15 +19,18 @@ Two engines speak here (the server function chooses the key, the app the engine 
 
 Qt-free; everything here runs on its own threads and never raises into the recorder.
 """
+import array
 import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import queue
 import socket
 import ssl
 import struct
+import sys
 import threading
 import time
 import urllib.parse
@@ -42,6 +45,11 @@ OPENAI_SEND_EVERY_BYTES = 4800       # 100 ms of 24 kHz 16-bit mono
 OPENAI_WSS = "wss://api.openai.com/v1/realtime?intent=transcription"
 ENGINE_GLADIA, ENGINE_OPENAI = "gladia", "openai"
 ENGINE_MODELS = {ENGINE_GLADIA: "solaria-1", ENGINE_OPENAI: "gpt-live-transcribe"}
+BYTES_PER_SECOND = {ENGINE_GLADIA: SAMPLE_RATE * 2, ENGINE_OPENAI: OPENAI_RATE * 2}
+# A meeting: a dropped or ended session (Gladia's 3 h, OpenAI's session length, a pause the server ends) is opened
+# again - at most this many times; OpenAI turns are committed at a pause (after TURN_MIN_S) or every TURN_MAX_S.
+MEETING_REOPENS = 20
+TURN_MIN_S, TURN_MAX_S = 2.5, 15.0
 QUEUE_MAX_BLOCKS = 600               # about a minute of audio waiting while the line is slow
 OPEN_TIMEOUT_S = 8.0
 STOP_TIMEOUT_S = 6.0                 # how long stop() waits for the last sentences
@@ -320,13 +328,24 @@ class LiveSession:
 
     def __init__(self, token_fn, language="auto", languages=(), vocabulary=(), *, on_partial=None, on_final=None,
                  on_failed=None, connect=None, opener=None, purpose="dictation", engine=ENGINE_GLADIA,
-                 ender=None):
+                 ender=None, on_utterance=None):
         self._token_fn = token_fn
         self.engine = ENGINE_OPENAI if engine == ENGINE_OPENAI else ENGINE_GLADIA
         self._headers = None
         self._token = ""
         self._ender = ender or end_session
         self._oa_partial = ""        # OpenAI: the transcript deltas of the turn so far
+        # Every finished sentence with its span in the recording (seconds since the session began, across re-opened
+        # sessions): on_utterance(text, language, start, end) - a meeting's live lines and "You" / "Them".
+        self.on_utterance = on_utterance
+        self._sent_s = 0.0           # audio sent so far (seconds)
+        self._session_at = 0.0       # where the current server session's own clock starts (a re-opened one: later)
+        self._commit_at = 0.0        # OpenAI: where the uncommitted turn starts
+        self._commit_spans = []      # OpenAI: committed turns waiting for their item id, oldest first
+        self._item_spans = {}        # OpenAI: item id -> (start, end)
+        self._loud_rms = 0.0         # OpenAI meetings: how loud speech is (a pause is well below it)
+        self._reopens = 0
+        self._session_ids = []       # every Gladia session of this take (all deleted at the end)
         self._language, self._languages, self._vocabulary = language, tuple(languages or ()), tuple(vocabulary or ())
         self.on_partial = on_partial
         self.on_final = on_final
@@ -354,7 +373,8 @@ class LiveSession:
         self.timings = {}            # ms after Stop: end_recording, last_final, ready (the log line)
 
     # ── what the recorder calls ──
-    def start(self):
+    def _open(self):
+        """A new server session and its connection (the first one, or a re-opened one): the WebSocket."""
         token = self._token_fn() if callable(self._token_fn) else self._token_fn
         self._token = token or ""
         if self.engine == ENGINE_OPENAI:
@@ -363,11 +383,16 @@ class LiveSession:
         else:
             got = self._opener(token, self._language, self._languages, self._vocabulary, purpose=self._purpose)
         self._url, self.session_id = got[0], got[1]
+        if self.session_id:
+            self._session_ids.append(self.session_id)
         self._headers = got[2] if len(got) > 2 else None
         try:
-            ws = self._connect(self._url, headers=self._headers) if self._headers else self._connect(self._url)
+            return self._connect(self._url, headers=self._headers) if self._headers else self._connect(self._url)
         except Exception as e:
             raise LiveUnavailable("connect", str(e)) from e
+
+    def start(self):
+        ws = self._open()
         self._ws = ws
         if self._done.is_set():                     # stopped or cancelled while opening
             ws.close()
@@ -435,16 +460,18 @@ class LiveSession:
 
     def _end_later(self):
         """Gladia keeps a live session's audio and text: once the connection is over, the server deletes it."""
-        if self.engine != ENGINE_GLADIA or not self.session_id or getattr(self, "_ending", False):
+        ids = list(self._session_ids) or ([self.session_id] if self.session_id else [])
+        if self.engine != ENGINE_GLADIA or not ids or getattr(self, "_ending", False):
             return
         self._ending = True
 
         def run():
             self._done.wait(STOP_TIMEOUT_S + 2)
             time.sleep(1.0)                          # Gladia's own post-processing ends with the close
-            if not self._ender(self._token, self.session_id):
-                time.sleep(15)
-                self._ender(self._token, self.session_id)
+            for sid in ids:
+                if not self._ender(self._token, sid):
+                    time.sleep(15)
+                    self._ender(self._token, sid)
         threading.Thread(target=run, daemon=True, name="gusan-live-end").start()
 
     def _since_stop(self):
@@ -477,13 +504,46 @@ class LiveSession:
             if block is None:
                 if pending:
                     self._send_audio(pending)
-                self._send_control({"type": "input_audio_buffer.commit"} if self.engine == ENGINE_OPENAI
-                                   else {"type": "stop_recording"})
+                if self.engine == ENGINE_OPENAI:
+                    if self._sent_s - self._commit_at > 0.05:
+                        self._commit()
+                    elif not self._commit_spans:
+                        self._done.set()                 # everything said is committed: nothing more comes
+                else:
+                    self._send_control({"type": "stop_recording"})
                 return
             pending += block
             if len(pending) >= (OPENAI_SEND_EVERY_BYTES if self.engine == ENGINE_OPENAI else SEND_EVERY_BYTES):
                 self._send_audio(pending)
+                if self.engine == ENGINE_OPENAI and self._purpose == "meeting":
+                    self._maybe_commit(pending)
                 pending = b""
+
+    def _commit(self):
+        """OpenAI: the audio since the last commit is one turn: its text comes back as one finished sentence."""
+        self._commit_spans.append((self._commit_at, self._sent_s))
+        self._commit_at = self._sent_s
+        self._send_control({"type": "input_audio_buffer.commit"})
+
+    def _maybe_commit(self, block):
+        """An OpenAI meeting: commit the turn at a pause (a block well below speech loudness) once it is TURN_MIN_S
+        long, and every TURN_MAX_S whatever happens (OpenAI's live model has no turn detection of its own)."""
+        samples = array.array("h")
+        try:
+            samples.frombytes(block[:len(block) - len(block) % 2])
+        except (ValueError, TypeError):
+            return
+        if sys.byteorder != "little":
+            samples.byteswap()                   # the PCM is little-endian
+        if not samples:
+            return
+        rms = math.sqrt(sum(x * x for x in samples) / float(len(samples)))
+        if rms > 600.0:
+            self._loud_rms = rms if not self._loud_rms else 0.9 * self._loud_rms + 0.1 * rms
+        turn = self._sent_s - self._commit_at
+        quiet = rms < max(250.0, 0.25 * self._loud_rms)
+        if (turn >= TURN_MIN_S and quiet) or turn >= TURN_MAX_S:
+            self._commit()
 
     def _send_audio(self, data):
         ws = self._ws
@@ -495,6 +555,7 @@ class LiveSession:
                                          "audio": base64.b64encode(data).decode("ascii")}))
             else:
                 ws.send_binary(data)
+            self._sent_s += len(data) / float(BYTES_PER_SECOND[self.engine])
         except (OSError, WebSocketError):
             self.dropped_audio = True          # the reader reconnects (or gives up)
 
@@ -521,9 +582,26 @@ class LiveSession:
             if op == OP_BINARY:
                 continue
             # closed: on purpose (we stopped) or a drop
-            if self._stopping or (op == OP_CLOSE and payload == 1000):
+            meeting = self._purpose == "meeting"
+            if self._stopping or (op == OP_CLOSE and payload == 1000 and not meeting):
                 self._done.set()
                 return
+            if meeting and (op == OP_CLOSE or reconnects >= 1 or self.engine == ENGINE_OPENAI) \
+                    and self._reopens < MEETING_REOPENS:
+                # A meeting goes on: a new server session (its sentences' times continue from here).
+                self._reopens += 1
+                try:
+                    ws = self._open()
+                    self._ws = ws
+                    self._session_at = self._sent_s
+                    self._commit_at, self._commit_spans, self._item_spans = self._sent_s, [], {}
+                    self.dropped_audio = True
+                    logger.info("Live transcript: a new session for the meeting (%d)", self._reopens)
+                    continue
+                except Exception:
+                    logger.info("Live transcript: could not open a new session", exc_info=True)
+                    self._give_up("dropped")
+                    return
             if reconnects < 1 and self.engine == ENGINE_GLADIA:
                 reconnects += 1
                 try:
@@ -533,6 +611,8 @@ class LiveSession:
                     continue
                 except Exception:
                     logger.info("Live transcript: could not reconnect", exc_info=True)
+                    if self._purpose == "meeting":
+                        continue                         # a meeting: a new session next (above)
             self._give_up("dropped")
             return
 
@@ -587,6 +667,12 @@ class LiveSession:
                 start = float(utt.get("start") or 0.0)
             except (TypeError, ValueError):
                 start = 0.0
+            try:
+                end = float(utt.get("end") or start)
+            except (TypeError, ValueError):
+                end = start
+            start, end = start + self._session_at, end + self._session_at
+            uid = "%d:%s" % (self._reopens, uid)
             with self._lock:
                 if uid not in self._finals:
                     self._order.append(uid)
@@ -596,6 +682,7 @@ class LiveSession:
                 self.language = lang
                 if lang not in self.languages:
                     self.languages.append(lang)
+            self._utterance(text, lang, start, end)
             cb = self.on_final
             if cb is not None:
                 try:
@@ -613,7 +700,19 @@ class LiveSession:
 
 
     # OpenAI realtime transcription: deltas while speaking, the text once the committed turn is complete.
+    def _utterance(self, text, lang, start, end):
+        cb = self.on_utterance
+        if cb is not None:
+            try:
+                cb(text, lang, start, end)
+            except Exception:
+                logger.debug("on_utterance failed", exc_info=True)
+
     def _handle_openai(self, kind, msg):
+        if kind == "input_audio_buffer.committed":
+            if self._commit_spans:
+                self._item_spans[str(msg.get("item_id") or "")] = self._commit_spans.pop(0)
+            return
         if kind == "conversation.item.input_audio_transcription.delta":
             self._oa_partial += str(msg.get("delta") or "")
             self._open_partial = True
@@ -630,28 +729,38 @@ class LiveSession:
             self._oa_partial = ""
             if self._stop_at is not None:
                 self.timings["last_final"] = self._since_stop()
+            item = str(msg.get("item_id") or "")
+            span = self._item_spans.pop(item, None) or (self._commit_spans.pop(0) if self._commit_spans else None)
             if text:
-                uid = str(msg.get("item_id") or len(self._order))
+                uid = item or str(len(self._order))
+                start, end = span if span else (float(len(self._order)), float(len(self._order)))
                 with self._lock:
                     if uid not in self._finals:
                         self._order.append(uid)
-                    self._finals[uid] = (float(len(self._order)), text)
+                    self._finals[uid] = (start, text)
                 lang = self._language if self._language not in ("", "auto", "multi") else ""
                 if lang:
                     self.language = lang
                     if lang not in self.languages:
                         self.languages.append(lang)
+                self._utterance(text, lang, start, end)
                 cb = self.on_final
                 if cb is not None:
                     try:
                         cb(text, lang)
                     except Exception:
                         logger.debug("on_final failed", exc_info=True)
-            if self._stopping:
-                self._done.set()                     # the committed turn is complete: the text is ready
+            if self._stopping and not self._commit_spans and not self._item_spans:
+                self._done.set()                     # every committed turn is complete: the text is ready
             return
         if kind == "error":
             err = msg.get("error") if isinstance(msg.get("error"), dict) else {}
+            if err.get("code") == "input_audio_buffer_commit_empty":
+                if self._commit_spans:
+                    self._commit_spans.pop(0)             # that turn had no audio after all
+                if self._stopping and not self._commit_spans and not self._item_spans:
+                    self._done.set()
+                return
             logger.info("Live transcript: OpenAI said %s", str(err.get("code") or err.get("message") or "")[:160])
             if self._stopping or err.get("type") not in ("invalid_request_error",):
                 self._give_up("openai_error")

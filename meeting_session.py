@@ -1010,10 +1010,14 @@ class MeetingCore:
             "on_lang_detected": getattr(rec, "on_lang_detected", None),
             "on_source_levels": getattr(rec, "on_source_levels", None),
             "on_chunk_gap": getattr(rec, "on_chunk_gap", None),
+            "on_live_final": getattr(rec, "on_live_final", None),
         }
         self._gap_marked = False
+        # Live speaker labels (live_speakers.py): built off the GUI thread at the first live sentence.
+        self._live_speakers, self._live_speakers_tried = None, False
         rec.on_chunk_gap = self._on_chunk_gap
         rec.on_chunk_complete = self._on_chunk_transcribed
+        rec.on_live_final = self._on_live_final
         rec.on_levels = self._on_audio_levels
         rec.on_partial = lambda *a, **k: None
         rec.on_lang_detected = lambda *a, **k: None
@@ -1468,6 +1472,7 @@ class MeetingCore:
         rec.on_lang_detected = saved.get("on_lang_detected") or (lambda code, name: None)
         rec.on_source_levels = saved.get("on_source_levels")
         rec.on_chunk_gap = saved.get("on_chunk_gap")
+        rec.on_live_final = saved.get("on_live_final")
 
     def _on_audio_levels(self, levels):
         pass  # the dictation bar's 20 bands - unused by meetings
@@ -1515,19 +1520,77 @@ class MeetingCore:
         except (OSError, TypeError):
             pass
         # Hand the text to the GUI thread via signals - never touch widgets
-        # from this thread (that crashed the meeting recorder on Windows).
-        if text:
+        # from this thread (that crashed the meeting recorder on Windows). While the live stream carries the
+        # live view (real time, _on_live_final) a piece is only kept for the transcript and the notes.
+        if text and not self._live_showing():
             try:
                 self.sig_chunk.emit(text)
                 self._piece.emit(text, self._speaker_for(idx))
             except RuntimeError:
                 pass  # session already destroyed
 
+    def _live_showing(self):
+        rec = getattr(self.app, "recorder", None) if self.app else None
+        showing = getattr(rec, "live_showing", None)
+        try:
+            return bool(callable(showing) and showing())
+        except Exception:
+            return False
+
+    def _live_speakers_for(self, two_sources):
+        """This meeting's live speaker labeler (live_speakers.py), or None while it is being built / when the speaker
+        model is not installed (the "You" / "Them" hint stays). The first call builds it on its own thread."""
+        speakers = getattr(self, "_live_speakers", None)
+        if speakers is not None or getattr(self, "_live_speakers_tried", False):
+            return speakers
+        self._live_speakers_tried = True
+
+        def build():
+            try:
+                import live_speakers
+                self._live_speakers = live_speakers.labeler(two_sources=two_sources)
+            except Exception:
+                logger.debug("Live speakers unavailable", exc_info=True)
+        threading.Thread(target=build, daemon=True, name="gusan-live-speakers").start()
+        return None
+
+    def _on_live_final(self, text, lang, start, end):
+        """A sentence the live stream finished (real time, live_stt.py) - about 0.3 s after it was said: the live
+        view and the Live Assistant get it at once, with the "You" / "Them" hint of who was loud meanwhile. The
+        pieces still make the saved transcript and the notes. Runs on the live stream's thread."""
+        text = (text or "").strip()
+        if self.state != STATE_RECORDING or not text:
+            return
+        who = ""
+        rec = getattr(self.app, "recorder", None) if self.app else None
+        two = self._session_audio_mode == "smart_meeting"
+        if two:
+            getter = getattr(rec, "live_source_energy", None)
+            try:
+                who = speaker_hint(getter(start, end)) if callable(getter) else ""
+            except Exception:
+                who = ""
+        # Who is speaking (several people on one mic, many on the call): the voice of this sentence.
+        speakers = self._live_speakers_for(two)
+        audio = getattr(rec, "live_audio", None)
+        if speakers is not None and callable(audio):
+            try:
+                side = {"You": "mic", "Them": "call"}.get(who, "")
+                who = speakers.label(audio(start, end), side) or who
+            except Exception:
+                logger.debug("Live speaker label failed", exc_info=True)
+        self._gap_marked = False
+        try:
+            self.sig_chunk.emit(text)
+            self._piece.emit(text, who)
+        except RuntimeError:
+            pass  # session already destroyed
+
     def _on_chunk_gap(self, idx, kind=""):
         """A piece the cloud could not transcribe in a language local Whisper is poor at
         (the recorder keeps its audio): "[...]" on the live transcript, once for a run of them,
         never stored as words. Runs on a transcription worker thread."""
-        if self.state != STATE_RECORDING or getattr(self, "_gap_marked", False):
+        if self.state != STATE_RECORDING or getattr(self, "_gap_marked", False) or self._live_showing():
             return
         self._gap_marked = True
         try:
