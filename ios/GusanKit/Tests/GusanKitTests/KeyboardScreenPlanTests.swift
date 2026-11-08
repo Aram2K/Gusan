@@ -56,6 +56,12 @@ final class KeyboardScreenPlanTests: XCTestCase {
         XCTAssertEqual(KeyboardScreenIconState.resolve(enabled: false, live: true), .off)
         XCTAssertEqual(KeyboardScreenIconState.off.accessibilityValue, "Off")
     }
+    func testScreenEnabledWithoutLiveBroadcastKeepsNormalVoicePath() {
+        let screenTake = KeyboardScreenPlan.shouldRequest(enabled: true, live: false, secure: false, fullAccess: true)
+        XCTAssertFalse(screenTake)
+        let action: VoiceAction? = screenTake ? .transcribeOnly : nil
+        XCTAssertNil(action)
+    }
     func testRequestPhaseRoundTripAndResponseCorrelation() throws {
         let store = MemoryBackend(), channel = ScreenChannel(stores: [])
         XCTAssertNil(channel.readFrame())

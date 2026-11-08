@@ -206,7 +206,7 @@ final class KeyboardViewController: UIInputViewController {
     private func beginTake() -> VoiceAction? {
         retryTake = nil
         agentTake = preferences.keyboardMode == .agent
-        screenTake = !agentTake && preferences.keyboardScreenEnabled && hasFullAccess && !screen.secureField
+        screenTake = !agentTake && KeyboardScreenPlan.shouldRequest(enabled: preferences.keyboardScreenEnabled, live: screen.live, secure: screen.secureField, fullAccess: hasFullAccess)
         lastFrame = nil; firstFrame = nil
         if KeyboardScreenPlan.shouldRequest(enabled: screenTake, live: screen.live, secure: screen.secureField, fullAccess: hasFullAccess) {
             let provider = screen.frames(phase: .start)
