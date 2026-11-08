@@ -149,10 +149,12 @@ final class VoiceKeyController: NSObject {
                 defaults.set(true, forKey: "voiceHopExplained")
                 show("iOS lets only the Gusan app hear the microphone. Add the Gusan control to Control Center to start from anywhere.")
             }
-            var url = URLComponents(string: "gusan://voice")!
-            url.queryItems = [URLQueryItem(name: "nonce", value: launch.nonce.uuidString)]
-            if let bundle = hostBundleID() { url.queryItems?.append(URLQueryItem(name: "return", value: bundle)) }
-            open(url.url!)
+            var components = URLComponents()
+            components.scheme = "gusan"; components.host = "voice"
+            components.queryItems = [URLQueryItem(name: "nonce", value: launch.nonce.uuidString)]
+            if let bundle = hostBundleID() { components.queryItems?.append(URLQueryItem(name: "return", value: bundle)) }
+            guard let url = components.url else { show("Couldn't open the Gusan app"); return }
+            open(url)
         case .stop: onFinish?(); send(.stop)
         case .cancel: cancel()
         }
@@ -273,16 +275,15 @@ final class VoiceKeyController: NSObject {
         guard let parent = host?.parent, parent.responds(to: selector), let value = parent.perform(selector)?.takeUnretainedValue() as? String, !value.isEmpty, value != "<null>" else { return nil }
         return value
     }
+    /// Keyboard extensions have no UIApplication API; the host application object is found through the responder
+    /// chain and asked with the plain `openURL:` selector. No IMP casting: a mismatch there traps in Release.
     private func open(_ url: URL) {
-        let selector = NSSelectorFromString("openURL:options:completionHandler:")
+        let selector = NSSelectorFromString("openURL:")
+        guard let applicationClass = NSClassFromString("UIApplication") else { fallbackOpen(url); return }
         var responder: UIResponder? = host
         while let current = responder {
-            if current.isKind(of: NSClassFromString("UIApplication") ?? NSObject.self), current.responds(to: selector) {
-                typealias Open = @convention(c) (AnyObject, Selector, NSURL, NSDictionary, @convention(block) (Bool) -> Void) -> Void
-                let invoke = unsafeBitCast(current.method(for: selector), to: Open.self)
-                invoke(current, selector, url as NSURL, [:]) { [weak self] success in
-                    DispatchQueue.main.async { if !success { self?.fallbackOpen(url) } }
-                }
+            if current.isKind(of: applicationClass), current.responds(to: selector) {
+                _ = current.perform(selector, with: url)
                 return
             }
             responder = current.next
