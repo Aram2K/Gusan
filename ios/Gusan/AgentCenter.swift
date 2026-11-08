@@ -13,11 +13,16 @@ final class AgentCenter: NSObject, ObservableObject {
     static let confirmCategory = "GUSAN_AGENT_CONFIRM"
     static let resultCategory = "GUSAN_AGENT_RESULT"
 
-    @Published private(set) var tasks: [AgentTask] = []
+    @Published private(set) var tasks: [AgentTask] = [] {
+        didSet {
+            if #available(iOS 16.1, *) {
+                (liveActivities as? AgentLiveActivityController)?.synchronize(tasks, sessions: sessionStore)
+            }
+        }
+    }
     @Published private(set) var loading = false
     @Published var error: String?
     @Published private(set) var notificationStatus: UNAuthorizationStatus = .notDetermined
-    @Published var openTaskID: UUID?
     @Published var lastRefresh: Date?
 
     private unowned let model: AppModel
@@ -25,7 +30,10 @@ final class AgentCenter: NSObject, ObservableObject {
     private var serviceToken: String?
     private var poller: Task<Void, Never>?
     private var active = false
+    private var liveActivities: AnyObject?
+    private var activityUserID: String?
     private lazy var tracker = AgentTaskTracker(defaults: UserDefaults(suiteName: model.store.resolution.chosen) ?? .standard)
+    lazy var sessionStore = AgentSessionStore(defaults: UserDefaults(suiteName: model.store.resolution.chosen) ?? .standard)
 
     init(model: AppModel) {
         self.model = model
@@ -42,7 +50,6 @@ final class AgentCenter: NSObject, ObservableObject {
     }
 
     var signedIn: Bool { model.session != nil }
-    var privacyMode: Bool { model.settings.privacyMode }
     var activeCount: Int { tasks.filter { !$0.status.isTerminal }.count }
     var atActiveLimit: Bool { activeCount >= AgentTask.maxActive }
     /// Tasks the user confirmed from this device; if one is awaiting again, the server is asking to confirm again.
@@ -50,19 +57,41 @@ final class AgentCenter: NSObject, ObservableObject {
     /// Full instructions of tasks started on this device (the server keeps only a 120-char title).
     private var instructions: [UUID: (instruction: String, context: String?)] = [:]
     /// Whether "Run again" can reproduce the original request faithfully.
-    func canRunAgain(_ task: AgentTask) -> Bool { instructions[task.id] != nil || task.title.count < 120 }
+    func canRunAgain(_ task: AgentTask) -> Bool { instructions[task.id] != nil }
+    var threads: [AgentSessionStore.Thread] { sessionStore.threads(for: tasks) }
+    func message(for task: AgentTask) -> String { sessionStore.records.first { $0.id == task.id }?.message ?? task.title }
     func needsReconfirm(_ task: AgentTask) -> Bool { task.status == .awaitingConfirmation && confirmedIDs.contains(task.id) }
 
-    func setPrivacyMode(_ on: Bool) {
-        objectWillChange.send()
-        model.settings.privacyMode = on
-        if on { poller?.cancel(); poller = nil; tasks = []; error = nil } else if active { setActive(true) }
-    }
     var unseenCount: Int { tasks.filter(\.needsAttention).count }
     var hasLiveTasks: Bool { tasks.contains { !$0.status.isTerminal } }
     var isDemo: Bool { model.session?.accessToken == "gusan-debug-no-network" }
 
     func task(_ id: UUID) -> AgentTask? { tasks.first { $0.id == id } }
+
+    func configureLiveActivities() {
+        activityUserID = model.session.map { $0.userID ?? $0.accessToken }
+        if #available(iOS 16.1, *) {
+            let controller = AgentLiveActivityController(defaults: UserDefaults(suiteName: model.store.resolution.chosen) ?? .standard)
+            liveActivities = controller
+            if !signedIn { controller.dismissAll() }
+            else { controller.synchronize(tasks, sessions: sessionStore) }
+        }
+        if #available(iOS 17.0, *) {
+            AgentResultIntentBridge.handler = { [weak self] id in
+                guard let self, self.signedIn else { throw AgentResultIntentError.unavailable }
+                await self.load(id)
+                guard let task = self.task(id), task.phase == .completed, let result = task.result else { throw AgentResultIntentError.unavailable }
+                self.endFinishedActivity(for: id)
+                return result.plainText
+            }
+        }
+    }
+
+    func endFinishedActivity(for id: UUID) {
+        if #available(iOS 16.1, *) {
+            (liveActivities as? AgentLiveActivityController)?.endFinishedSession(sessionStore.sessionID(for: id))
+        }
+    }
 
     // MARK: Service
 
@@ -84,16 +113,21 @@ final class AgentCenter: NSObject, ObservableObject {
     // MARK: Loading and polling
 
     func refresh() async {
-        guard !privacyMode, let service = currentService() else { tasks = []; return }
+        guard let service = currentService() else { tasks = []; return }
         loading = tasks.isEmpty
         defer { loading = false }
         do {
             var fetched = try await service.list(limit: 100)
+            let listedIDs = Set(fetched.map(\.id))
+            for task in tasks where !listedIDs.contains(task.id) && !task.status.isTerminal {
+                fetched.append(try await service.status(task.id, waitSeconds: 0))
+            }
             // The table hides the pending confirmation text; ask the function for it.
             for index in fetched.indices where fetched[index].status == .awaitingConfirmation && fetched[index].confirmation == nil {
                 if let full = try? await service.status(fetched[index].id, waitSeconds: 0) { fetched[index] = full }
             }
-            tasks = fetched
+            let fetchedIDs = Set(fetched.map(\.id))
+            tasks = (fetched + tasks.filter { !fetchedIDs.contains($0.id) }).sorted { $0.createdAt > $1.createdAt }
             lastRefresh = Date()
             error = nil
             await deliver(tracker.consumeEvents(from: fetched))
@@ -107,7 +141,7 @@ final class AgentCenter: NSObject, ObservableObject {
         self.active = active
         poller?.cancel(); poller = nil
         guard active else { scheduleBackgroundRefresh(); return }
-        if notificationStatus == .notDetermined, !privacyMode, tracker.activeTaskID != nil { Task { await requestNotifications() } }
+        if notificationStatus == .notDetermined, tracker.activeTaskID != nil { Task { await requestNotifications() } }
         poller = Task { @MainActor [weak self] in
             while let self, self.active, !Task.isCancelled {
                 await self.refresh()
@@ -117,16 +151,24 @@ final class AgentCenter: NSObject, ObservableObject {
         }
     }
 
-    func sessionChanged() { service = nil; Task { await refresh() } }
+    func sessionChanged() {
+        let userID = model.session.map { $0.userID ?? $0.accessToken }
+        if userID != activityUserID, #available(iOS 16.1, *) {
+            (liveActivities as? AgentLiveActivityController)?.dismissAll()
+        }
+        activityUserID = userID
+        service = nil; tasks = []; instructions = [:]; confirmedIDs = []
+        Task { await refresh() }
+    }
 
     // MARK: Actions
 
     @discardableResult
-    func start(_ intent: AgentIntent, context: String? = nil) async throws -> AgentTask {
-        guard !privacyMode else { throw AgentError.privacyMode }
+    func start(_ intent: AgentIntent, context: String? = nil, continuing parentID: UUID? = nil) async throws -> AgentTask {
         guard let service = currentService() else { throw AgentError.unauthorized }
         let task = try await service.start(intent, context: context)
         instructions[task.id] = (intent.instruction, context)
+        sessionStore.record(taskID: task.id, message: intent.instruction, continuing: parentID, date: task.createdAt)
         tracker.markNotified(task)
         tasks.insert(task, at: 0)
         if notificationStatus == .notDetermined { await requestNotifications() }
@@ -140,8 +182,29 @@ final class AgentCenter: NSObject, ObservableObject {
 
     /// Starts the same request again (e.g. after a confirmation expired), with the original wording when known.
     func runAgain(_ task: AgentTask) async throws -> AgentTask {
-        let original = instructions[task.id]
-        return try await start(AgentIntent(mode: task.mode, instruction: original?.instruction ?? task.title), context: original?.context)
+        guard let original = instructions[task.id] else {
+            throw NSError(domain: "Gusan.AgentRetry", code: 1, userInfo: [NSLocalizedDescriptionKey: "The original input is no longer available. Start again from Home."])
+        }
+        return try await start(AgentIntent(mode: task.mode, instruction: original.instruction), context: original.context, continuing: task.id)
+    }
+
+    @discardableResult
+    func continueTask(_ id: UUID, message: String) async throws -> AgentTask {
+        guard let service = currentService() else { throw AgentError.unauthorized }
+        let task = try await service.continueTask(id, message: message)
+        sessionStore.record(taskID: task.id, message: message, continuing: id, date: task.createdAt)
+        tracker.markNotified(task)
+        if let index = tasks.firstIndex(where: { $0.id == task.id }) { tasks[index] = task }
+        else { tasks.insert(task, at: 0) }
+        return task
+    }
+
+    func stop(_ id: UUID) async { await mutate(id) { try await $0.stop(id) } }
+
+    func loadSession(_ id: UUID) async {
+        let root = sessionStore.sessionID(for: id)
+        let ids = Set(sessionStore.tasks(in: root).map(\.id) + [root, id])
+        for taskID in ids { await load(taskID) }
     }
 
     func cancel(_ id: UUID) async {
@@ -162,7 +225,6 @@ final class AgentCenter: NSObject, ObservableObject {
     }
 
     private func mutate(_ id: UUID, _ operation: (AgentService) async throws -> AgentTask) async {
-        guard !privacyMode else { error = AgentError.privacyMode.errorDescription; return }
         guard let service = currentService() else { return }
         do {
             let updated = try await operation(service)
@@ -201,6 +263,12 @@ final class AgentCenter: NSObject, ObservableObject {
             let content = UNMutableNotificationContent()
             let task: AgentTask
             switch event {
+            case .needsLogin(let pending), .needsCode(let pending):
+                task = pending
+                content.title = "Gusan " + pending.phase.label.lowercased()
+                content.body = pending.summaryLine
+                content.categoryIdentifier = Self.resultCategory
+                content.interruptionLevel = .timeSensitive
             case .needsConfirmation(let pending):
                 task = pending
                 content.title = "Gusan needs your OK"
@@ -254,9 +322,9 @@ extension AgentCenter: UNUserNotificationCenterDelegate {
         let action = response.actionIdentifier
         await MainActor.run {
             switch action {
-            case "confirm" where !self.privacyMode: Task { await self.confirm(id) }
-            case "cancel" where !self.privacyMode: Task { await self.cancel(id) }
-            default: self.openTaskID = id; self.model.selectedTab = .activity
+            case "confirm": Task { await self.confirm(id) }
+            case "cancel": Task { await self.cancel(id) }
+            default: self.model.openSessionID = id; self.model.selectedTab = .sessions
             }
         }
     }

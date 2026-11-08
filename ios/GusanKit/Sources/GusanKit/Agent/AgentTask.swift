@@ -24,6 +24,24 @@ public enum AgentStatus: String, Codable {
     }
 }
 
+public enum AgentPhase: String, Codable {
+    case queued, working, needsConfirmation, needsLogin, needsCode, completed, failed, cancelled, stopped, timedOut
+    public var label: String {
+        switch self {
+        case .needsLogin: return "Needs a login"
+        case .needsCode: return "Needs a code"
+        case .stopped: return "Stopped"
+        case .working: return "Working"
+        case .needsConfirmation: return "Needs your OK"
+        case .completed: return "Done"
+        case .queued: return "Queued"
+        case .failed: return "Failed"
+        case .cancelled: return "Cancelled"
+        case .timedOut: return "Timed out"
+        }
+    }
+}
+
 public struct AgentStep: Codable, Equatable {
     public let at: Date?
     public let text: String
@@ -33,8 +51,19 @@ public struct AgentStep: Codable, Equatable {
 public struct AgentConfirmation: Codable, Equatable {
     public let summary: String
     public let actionKind: String?
-    enum CodingKeys: String, CodingKey { case summary, actionKind = "action_kind" }
-    public init(summary: String, actionKind: String? = nil) { self.summary = summary; self.actionKind = actionKind }
+    public let startURL: URL?
+    public let steps: [String]
+    enum CodingKeys: String, CodingKey { case summary, actionKind = "action_kind", startURL = "start_url", steps }
+    public init(summary: String, actionKind: String? = nil, startURL: URL? = nil, steps: [String] = []) {
+        self.summary = summary; self.actionKind = actionKind; self.startURL = startURL; self.steps = steps
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        summary = (try? c.decode(String.self, forKey: .summary)) ?? ""
+        actionKind = try? c.decode(String.self, forKey: .actionKind)
+        startURL = try? c.decode(URL.self, forKey: .startURL)
+        steps = (try? c.decode([String].self, forKey: .steps)) ?? []
+    }
     public var kindLabel: String {
         switch actionKind {
         case "submit": return "Submit a form"
@@ -71,7 +100,39 @@ public struct AgentResult: Codable, Equatable {
 public struct AgentTask: Codable, Equatable, Identifiable {
     public let id: UUID
     public var mode: AgentMode
-    public var status: AgentStatus
+    public var status: AgentStatus {
+        didSet { rawStatus = status.rawValue }
+    }
+    public private(set) var rawStatus: String
+    public var phase: AgentPhase {
+        switch rawStatus {
+        case "awaiting_login": return .needsLogin
+        case "awaiting_code": return .needsCode
+        case "interrupted": return .stopped
+        default:
+            switch status {
+            case .queued: return .queued
+            case .running: return .working
+            case .awaitingConfirmation: return .needsConfirmation
+            case .awaitingLogin: return .needsLogin
+            case .completed: return .completed
+            case .failed: return .failed
+            case .cancelled: return .cancelled
+            case .timedOut: return .timedOut
+            }
+        }
+    }
+    public mutating func setServerStatus(_ value: String) {
+        status = Self.coarseStatus(value)
+        rawStatus = value
+    }
+    private static func coarseStatus(_ value: String) -> AgentStatus {
+        switch value {
+        case "idle": return .completed
+        case "interrupted": return .cancelled
+        default: return AgentStatus(rawValue: value) ?? .running
+        }
+    }
     public var title: String
     public var steps: [AgentStep]
     public var confirmation: AgentConfirmation?
@@ -85,7 +146,7 @@ public struct AgentTask: Codable, Equatable, Identifiable {
     public var seenAt: Date?
 
     public init(id: UUID = UUID(), mode: AgentMode, status: AgentStatus, title: String, steps: [AgentStep] = [], confirmation: AgentConfirmation? = nil, result: AgentResult? = nil, outcome: String? = nil, errorCode: String? = nil, createdAt: Date = Date(), updatedAt: Date? = nil, finishedAt: Date? = nil, deadlineAt: Date? = nil, seenAt: Date? = nil) {
-        self.id = id; self.mode = mode; self.status = status; self.title = title; self.steps = steps; self.confirmation = confirmation
+        self.id = id; self.mode = mode; self.status = status; self.rawStatus = status.rawValue; self.title = title; self.steps = steps; self.confirmation = confirmation
         self.result = result; self.outcome = outcome; self.errorCode = errorCode; self.createdAt = createdAt; self.updatedAt = updatedAt
         self.finishedAt = finishedAt; self.deadlineAt = deadlineAt; self.seenAt = seenAt
     }
@@ -102,7 +163,8 @@ public struct AgentTask: Codable, Equatable, Identifiable {
         }
         self.id = id
         mode = (try? c.decode(AgentMode.self, forKey: .mode)) ?? .research
-        status = (try? c.decode(AgentStatus.self, forKey: .status)) ?? .queued
+        rawStatus = (try? c.decode(String.self, forKey: .status)) ?? "running"
+        status = Self.coarseStatus(rawStatus)
         title = (try? c.decode(String.self, forKey: .title)) ?? ""
         steps = ((try? c.decode([AgentStep?].self, forKey: .steps)) ?? []).compactMap { $0 }
         confirmation = try? c.decodeIfPresent(AgentConfirmation.self, forKey: .confirmation)
@@ -117,7 +179,7 @@ public struct AgentTask: Codable, Equatable, Identifiable {
     }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(id, forKey: .taskID); try c.encode(mode, forKey: .mode); try c.encode(status, forKey: .status); try c.encode(title, forKey: .title)
+        try c.encode(id, forKey: .taskID); try c.encode(mode, forKey: .mode); try c.encode(rawStatus, forKey: .status); try c.encode(title, forKey: .title)
         try c.encode(steps, forKey: .steps); try c.encodeIfPresent(confirmation, forKey: .confirmation); try c.encodeIfPresent(result, forKey: .result)
         try c.encodeIfPresent(outcome, forKey: .outcome); try c.encodeIfPresent(errorCode, forKey: .errorCode); try c.encode(createdAt, forKey: .createdAt)
         try c.encodeIfPresent(updatedAt, forKey: .updatedAt); try c.encodeIfPresent(finishedAt, forKey: .finishedAt); try c.encodeIfPresent(deadlineAt, forKey: .deadlineAt); try c.encodeIfPresent(seenAt, forKey: .seenAt)
@@ -130,9 +192,11 @@ public struct AgentTask: Codable, Equatable, Identifiable {
     public static let maxActive = 2
     public static let maxPerDay = 40
     public static let confirmationWindow: TimeInterval = 15 * 60
-    public var needsAttention: Bool { status == .awaitingConfirmation || (status.isTerminal && seenAt == nil) }
+    public var needsAttention: Bool { phase == .needsLogin || phase == .needsCode || status == .awaitingConfirmation || (status.isTerminal && seenAt == nil) }
     /// One line for cards and notifications.
     public var summaryLine: String {
+        if phase == .needsCode { return phase.label }
+        if phase == .stopped { return "Stopped. Gusan can continue with another message." }
         switch status {
         case .queued: return "Waiting for an agent…"
         case .running: return latestStep ?? (mode == .research ? "Researching…" : "Working on it…")
@@ -177,7 +241,6 @@ public enum AgentError: Error, LocalizedError, Equatable {
         case "quota_exceeded": self = .quotaExceeded
         case "not_awaiting_confirmation": self = .notAwaitingConfirmation
         case "not_found": self = .notFound
-        case "privacy_mode": self = .privacyMode
         case "pro_required": self = .proRequired
         case "unauthorized": self = .unauthorized
         default: self = .code(code, status: status)
@@ -216,6 +279,11 @@ public enum AgentError: Error, LocalizedError, Equatable {
         case "upstream_error": return "The agent service had a problem."
         case "confirmation_expired": return "The confirmation expired after 15 minutes."
         case "timeout": return "The task ran out of time."
+        case "plan_missing": return "Gusan couldn't make a plan for that. Try rephrasing."
+        case "login_expired": return "Gusan's login expired. Sign in again to continue."
+        case "otp_timeout": return "Gusan didn't receive a code in time. Try again."
+        case "off_plan_navigation": return "Gusan stopped because the page went outside the approved plan."
+        case "vault_error": return "Gusan couldn't access the saved login. Try signing in again."
         case "environment_error": return "The agent's browser hit a problem."
         case "no_answer": return "The agent finished without an answer."
         case "answer_validation": return "The agent's answer couldn't be read."

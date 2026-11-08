@@ -34,8 +34,16 @@ public struct AgentJob: GusanJob {
                     onTask?(current)
                     var reportedSteps = 0
                     var askedFor: String?
+                    var reportedPhase: AgentPhase?
                     while !current.status.isTerminal {
                         try Task.checkCancellation()
+                        if current.phase != reportedPhase {
+                            reportedPhase = current.phase
+                            if current.phase == .needsLogin || current.phase == .needsCode {
+                                let host = current.confirmation?.startURL?.host
+                                continuation.yield(.progress(current.phase.label + (host.map { " on " + $0 } ?? "") + "…"))
+                            }
+                        }
                         if current.steps.count > reportedSteps, let step = current.latestStep {
                             reportedSteps = current.steps.count
                             continuation.yield(.progress(step))
@@ -63,7 +71,7 @@ public struct AgentJob: GusanJob {
                             onTask?(current)
                             continue
                         }
-                        let waiting = current.status == .awaitingConfirmation
+                        let waiting = current.status == .awaitingConfirmation || current.phase == .needsLogin || current.phase == .needsCode
                         try await Task.sleep(nanoseconds: waiting ? max(interval, 5_000_000_000) : interval)
                         let fresh = try await service.status(current.id, waitSeconds: waiting ? 0 : 10)
                         if fresh != current { current = fresh; onTask?(current) }

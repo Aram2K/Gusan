@@ -5,6 +5,7 @@ import WidgetKit
 struct GusanActivityBundle: WidgetBundle {
     var body: some Widget {
         RecordingActivityWidget()
+        AgentActivityWidget()
         if #available(iOS 18.0, *) { GusanVoiceControl() }
     }
 }

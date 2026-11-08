@@ -79,7 +79,6 @@ struct AccountView: View {
                     if model.authBusy { ProgressView("Signing out…") }
                 }
             } else { SignInCard() }
-            AppCard { NavigationLink { HowToUseView() } label: { Label("How to use Gusan", systemImage: "questionmark.circle").frame(minHeight: 44) } }
         }.navigationTitle("Account")
             .confirmationDialog("Sign out of Gusan?", isPresented: $confirmingSignOut, titleVisibility: .visible) {
                 Button("Sign out", role: .destructive) { Task { await model.signOut() } }

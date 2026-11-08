@@ -8,6 +8,8 @@ public protocol AgentService: AnyObject {
     func status(_ id: UUID, waitSeconds: Int) async throws -> AgentTask
     func confirm(_ id: UUID) async throws -> AgentTask
     func cancel(_ id: UUID) async throws -> AgentTask
+    func continueTask(_ id: UUID, message: String) async throws -> AgentTask
+    func stop(_ id: UUID) async throws -> AgentTask
     /// Newest first, straight from the `agent_tasks` table (owner RLS).
     func list(limit: Int) async throws -> [AgentTask]
     func markSeen(_ id: UUID) async throws
@@ -85,6 +87,21 @@ public final class AgentClient: AgentService {
         try await task(["action": "cancel", "task_id": id.uuidString.lowercased()])
     }
 
+    public func continueTask(_ id: UUID, message: String) async throws -> AgentTask {
+        do {
+            return try await task(["action": "continue", "task_id": id.uuidString.lowercased(), "message": message])
+        } catch AgentError.code("bad_request", status: 400) {
+            let previous = try await status(id, waitSeconds: 0)
+            let summary = "Earlier in this session:\n" + previous.title + "\n" + (previous.result?.plainText ?? "")
+            return try await start(AgentIntent(mode: previous.mode, instruction: message), context: String(summary.prefix(18_000)))
+        }
+    }
+
+    public func stop(_ id: UUID) async throws -> AgentTask {
+        do { return try await task(["action": "stop", "task_id": id.uuidString.lowercased()]) }
+        catch AgentError.code(_, status: 400) { return try await cancel(id) }
+    }
+
     public func list(limit: Int = 50) async throws -> [AgentTask] {
         let request = Self.listRequest(limit: limit, token: try await token())
         let (data, response) = try await transport.data(for: request)
@@ -133,6 +150,8 @@ public final class StubAgentService: AgentService {
     public struct Scenario {
         public var pollsUntilProgress: Int = 1
         public var pollsUntilDone: Int = 3
+        public var needsLogin = false
+        public var planMissing = false
         /// Re-surface the same confirmation once after it was confirmed (PR #18: uncertain delivery → "confirm again").
         public var reconfirmOnce = false
         public init() {}
@@ -142,6 +161,7 @@ public final class StubAgentService: AgentService {
     private var tasks: [UUID: AgentTask] = [:]
     private var polls: [UUID: Int] = [:]
     private var order: [UUID] = []
+    public private(set) var parentTaskIDs: [UUID: UUID] = [:]
     private let lock = NSLock()
     public var scenario = Scenario()
     public var delay: UInt64 = 0
@@ -163,7 +183,11 @@ public final class StubAgentService: AgentService {
         guard !task.status.isTerminal, task.status != .awaitingConfirmation else { return task }
         let count = (polls[id] ?? 0) + 1
         polls[id] = count
-        if count >= scenario.pollsUntilDone {
+        if scenario.needsLogin {
+            task.setServerStatus("awaiting_login")
+        } else if scenario.planMissing, count >= scenario.pollsUntilDone {
+            task.status = .failed; task.errorCode = "plan_missing"; task.finishedAt = Date()
+        } else if count >= scenario.pollsUntilDone {
             if task.mode == .do, task.confirmation == nil, task.outcome == nil || (scenario.reconfirmOnce && !reconfirmed.contains(id)) {
                 if task.outcome != nil { reconfirmed.insert(id) }
                 task.status = .awaitingConfirmation
@@ -213,6 +237,23 @@ public final class StubAgentService: AgentService {
         return locked { order.prefix(limit).compactMap { tasks[$0] } }
     }
 
+    public func continueTask(_ id: UUID, message: String) async throws -> AgentTask {
+        let previous = try locked { () throws -> AgentTask in
+            guard let task = tasks[id] else { throw AgentError.notFound }; return task
+        }
+        let next = try await start(AgentIntent(mode: previous.mode, instruction: message), context: previous.result?.plainText)
+        locked { parentTaskIDs[next.id] = id }
+        return next
+    }
+
+    public func stop(_ id: UUID) async throws -> AgentTask {
+        _ = try await cancel(id)
+        return try locked {
+            guard var task = tasks[id] else { throw AgentError.notFound }
+            task.setServerStatus("interrupted"); tasks[id] = task; return task
+        }
+    }
+
     public func markSeen(_ id: UUID) async throws {
         locked { tasks[id]?.seenAt = Date() }
     }
@@ -239,6 +280,9 @@ public final class StubAgentService: AgentService {
         let confirm = AgentTask(id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!, mode: .do, status: .awaitingConfirmation, title: "Book a table for two at Osteria Francescana on Friday at 19:30", steps: [AgentStep(at: now, text: "Opened the reservation page"), AgentStep(at: now, text: "Filled in the form")], confirmation: AgentConfirmation(summary: "Submit the reservation form on osteriafrancescana.it for 2 guests, Friday 19:30, name Aram. No payment is taken.", actionKind: "submit"), createdAt: now.addingTimeInterval(-600))
         let running = AgentTask(id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!, mode: .research, status: .running, title: "Research the best noise-cancelling headphones under €300", steps: [AgentStep(at: now, text: "Reading reviews on rtings.com")], createdAt: now.addingTimeInterval(-120))
         let failed = AgentTask(id: UUID(uuidString: "00000000-0000-0000-0000-000000000004")!, mode: .research, status: .timedOut, title: "Compare electricity tariffs in Paris for a 60 m² flat", createdAt: now.addingTimeInterval(-86_400), finishedAt: now.addingTimeInterval(-86_000), seenAt: now)
-        return [running, confirm, research, failed]
+        var login = AgentTask(mode: .do, status: .running, title: "Open the account dashboard", confirmation: AgentConfirmation(summary: "Sign in to continue", startURL: URL(string: "https://example.com/login")))
+        login.setServerStatus("awaiting_login")
+        let noPlan = AgentTask(mode: .do, status: .failed, title: "Prepare a booking", errorCode: "plan_missing")
+        return [running, confirm, research, failed, login, noPlan]
     }
 }
