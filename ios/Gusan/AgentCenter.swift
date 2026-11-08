@@ -13,7 +13,13 @@ final class AgentCenter: NSObject, ObservableObject {
     static let confirmCategory = "GUSAN_AGENT_CONFIRM"
     static let resultCategory = "GUSAN_AGENT_RESULT"
 
-    @Published private(set) var tasks: [AgentTask] = []
+    @Published private(set) var tasks: [AgentTask] = [] {
+        didSet {
+            if #available(iOS 16.1, *) {
+                (liveActivities as? AgentLiveActivityController)?.synchronize(tasks, sessions: sessionStore)
+            }
+        }
+    }
     @Published private(set) var loading = false
     @Published var error: String?
     @Published private(set) var notificationStatus: UNAuthorizationStatus = .notDetermined
@@ -24,6 +30,8 @@ final class AgentCenter: NSObject, ObservableObject {
     private var serviceToken: String?
     private var poller: Task<Void, Never>?
     private var active = false
+    private var liveActivities: AnyObject?
+    private var activityUserID: String?
     private lazy var tracker = AgentTaskTracker(defaults: UserDefaults(suiteName: model.store.resolution.chosen) ?? .standard)
     lazy var sessionStore = AgentSessionStore(defaults: UserDefaults(suiteName: model.store.resolution.chosen) ?? .standard)
 
@@ -59,6 +67,31 @@ final class AgentCenter: NSObject, ObservableObject {
     var isDemo: Bool { model.session?.accessToken == "gusan-debug-no-network" }
 
     func task(_ id: UUID) -> AgentTask? { tasks.first { $0.id == id } }
+
+    func configureLiveActivities() {
+        activityUserID = model.session.map { $0.userID ?? $0.accessToken }
+        if #available(iOS 16.1, *) {
+            let controller = AgentLiveActivityController(defaults: UserDefaults(suiteName: model.store.resolution.chosen) ?? .standard)
+            liveActivities = controller
+            if !signedIn { controller.dismissAll() }
+            else { controller.synchronize(tasks, sessions: sessionStore) }
+        }
+        if #available(iOS 17.0, *) {
+            AgentResultIntentBridge.handler = { [weak self] id in
+                guard let self, self.signedIn else { throw AgentResultIntentError.unavailable }
+                await self.load(id)
+                guard let task = self.task(id), task.phase == .completed, let result = task.result else { throw AgentResultIntentError.unavailable }
+                self.endFinishedActivity(for: id)
+                return result.plainText
+            }
+        }
+    }
+
+    func endFinishedActivity(for id: UUID) {
+        if #available(iOS 16.1, *) {
+            (liveActivities as? AgentLiveActivityController)?.endFinishedSession(sessionStore.sessionID(for: id))
+        }
+    }
 
     // MARK: Service
 
@@ -119,6 +152,11 @@ final class AgentCenter: NSObject, ObservableObject {
     }
 
     func sessionChanged() {
+        let userID = model.session.map { $0.userID ?? $0.accessToken }
+        if userID != activityUserID, #available(iOS 16.1, *) {
+            (liveActivities as? AgentLiveActivityController)?.dismissAll()
+        }
+        activityUserID = userID
         service = nil; tasks = []; instructions = [:]; confirmedIDs = []
         Task { await refresh() }
     }

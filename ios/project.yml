@@ -29,6 +29,7 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         GusanAppGroup: group.com.aram2k.gusan
+        NSSupportsLiveActivities: true
         NSMicrophoneUsageDescription: Gusan records your voice only while you dictate, to transcribe it with Gusan Cloud.
         UIBackgroundModes: [audio, fetch]
         BGTaskSchedulerPermittedIdentifiers: [com.aram2k.gusan.agent-refresh]

@@ -12,9 +12,9 @@ struct AgentActivityAttributes: ActivityAttributes {
 
         init(phase: String, latestStep: String, stepCount: Int, resultPreview: String, updatedAt: Date) {
             self.phase = String(phase.prefix(16))
-            self.latestStep = Self.clipped(latestStep, bytes: 512)
+            self.latestStep = Self.clipped(latestStep, bytes: 240)
             self.stepCount = max(0, stepCount)
-            self.resultPreview = Self.clipped(resultPreview, bytes: 512)
+            self.resultPreview = Self.clipped(resultPreview, bytes: 240)
             self.updatedAt = updatedAt
         }
 

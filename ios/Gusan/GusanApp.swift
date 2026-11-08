@@ -10,6 +10,7 @@ struct GusanApp: App {
         Theme.configureTabBar()
         let model = AppModel()
         let agent = AgentCenter(model: model)
+        agent.configureLiveActivities()
         _model = StateObject(wrappedValue: model); _agent = StateObject(wrappedValue: agent)
         AgentCenter.registerBackgroundRefresh(agent)
     }

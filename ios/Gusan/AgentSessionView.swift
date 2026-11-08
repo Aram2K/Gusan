@@ -77,7 +77,10 @@ struct AgentSessionView: View {
         }.padding().background(.bar)
     }
 
-    private func markSeen() { for task in tasks { agent.markSeen(task.id) } }
+    private func markSeen() {
+        for task in tasks { agent.markSeen(task.id) }
+        agent.endFinishedActivity(for: id)
+    }
 }
 
 private struct AgentSessionTurn: View {
