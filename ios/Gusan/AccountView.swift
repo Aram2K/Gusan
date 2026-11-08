@@ -16,8 +16,9 @@ struct SignInCard: View {
                     else { Image("GoogleG").resizable().scaledToFit().frame(width: 24, height: 24).accessibilityHidden(true) }
                     Text("Continue with Google").font(.headline).multilineTextAlignment(.center)
                 }.frame(maxWidth: .infinity, minHeight: 52).padding(.horizontal, 12)
+                    .contentShape(Rectangle())
             }.buttonStyle(.plain).foregroundStyle(.black).background(.white, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Color.gray.opacity(0.3)) }
+                .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Color.gray.opacity(0.3)).allowsHitTesting(false) }
                 .disabled(model.authBusy).accessibilityHint("Opens secure Google sign-in")
             Button("Use email instead") { withAnimation(reduceMotion ? .easeInOut(duration: 0.15) : .spring(response: 0.35, dampingFraction: 0.85)) { emailExpanded.toggle() } }
                 .frame(minHeight: 44).disabled(model.authBusy).accessibilityHint("Shows email and password fields")

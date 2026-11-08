@@ -94,7 +94,8 @@ struct HomeView: View {
     }
     private func checklistLabel(_ title: String, complete: Bool) -> some View {
         Label(title, systemImage: complete ? "checkmark.circle.fill" : "circle")
-            .foregroundStyle(complete ? Theme.success : Theme.accent).frame(minHeight: 36)
+            .foregroundStyle(complete ? Theme.success : Theme.accent)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
     }
 
     @ViewBuilder private var smartSections: some View {
