@@ -7,6 +7,7 @@ public enum AgentMode: String, Codable, CaseIterable {
 }
 
 public enum AgentStatus: String, Codable {
+    case awaitingLogin = "awaiting_login"
     case queued, running, awaitingConfirmation = "awaiting_confirmation", completed, failed, cancelled, timedOut = "timed_out"
     public var isTerminal: Bool { [.completed, .failed, .cancelled, .timedOut].contains(self) }
     public var label: String {
@@ -14,6 +15,7 @@ public enum AgentStatus: String, Codable {
         case .queued: return "Queued"
         case .running: return "Working"
         case .awaitingConfirmation: return "Needs your OK"
+        case .awaitingLogin: return "Needs a login"
         case .completed: return "Done"
         case .failed: return "Failed"
         case .cancelled: return "Cancelled"
@@ -135,6 +137,7 @@ public struct AgentTask: Codable, Equatable, Identifiable {
         case .queued: return "Waiting for an agent…"
         case .running: return latestStep ?? (mode == .research ? "Researching…" : "Working on it…")
         case .awaitingConfirmation: return confirmation.map { "Needs your OK: " + $0.summary } ?? "Needs your OK before continuing"
+        case .awaitingLogin: return "Open Vault in the Gusan app to approve a saved login"
         case .completed: return result.map { MarkdownBlocks.firstLine($0.markdown) } ?? "Finished"
         case .failed: return AgentError.message(forCode: errorCode) ?? "The task failed"
         case .cancelled: return confirmationExpired ? "Cancelled: the confirmation expired after 15 minutes" : "Cancelled"
