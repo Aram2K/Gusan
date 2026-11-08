@@ -16,3 +16,12 @@ public struct KeyboardVoiceState: Codable, Equatable {
         return documentID == current.documentID && context == current
     }
 }
+
+public enum VoiceInsertionDestination: Equatable {
+    case planned, cursor, clipboard
+    public static func resolve(snapshot: VoiceContext, current: VoiceContext) -> Self {
+        guard let document = snapshot.documentID, !document.isEmpty, document == current.documentID else { return .clipboard }
+        if snapshot == current { return .planned }
+        return current.selected.isEmpty ? .cursor : .clipboard
+    }
+}

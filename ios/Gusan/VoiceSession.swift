@@ -1,5 +1,8 @@
 import SwiftUI
 import AVFoundation
+import AudioToolbox
+import UIKit
+import UserNotifications
 import GusanKit
 
 private final class VoiceAudioBuffer {
@@ -21,6 +24,8 @@ private final class VoiceAudioBuffer {
         return Float(min(1, sqrt(energy / Double(max(1, count))) * 5))
     }
 }
+
+struct VoiceIntentFailure: LocalizedError { let errorDescription: String? }
 
 @MainActor
 final class VoiceSession: ObservableObject {
@@ -46,6 +51,9 @@ final class VoiceSession: ObservableObject {
     private var consumed: UUID?
     private var tapped = false
     private var hostBundleID: String?
+    /// The take started by a system trigger (Control Center, Action button, Siri, Live Activity): its result goes to the clipboard.
+    private var systemRequestID: UUID?
+    let activity = VoiceLiveActivity()
     var alive: Bool { status.isAlive() }
 
     init(store: SessionStore = SessionStore()) {
@@ -93,12 +101,16 @@ final class VoiceSession: ObservableObject {
                 try Task.checkCancellation()
                 guard allowed else { throw VoiceError.micPermissionDenied }
                 try activateAudio()
-                machine.idleTimeout = TimeInterval(settings.idleMinutes * 60)
+                // Keep the engine running for the whole ready window: an active input keeps the app alive in the
+                // background so the keyboard mic starts instantly. Samples are dropped unless a take is recording.
+                try resumeCapture()
+                activity.begin()
+                machine.idleTimeout = settings.idleTimeout
                 execute(machine.handle(.sessionStarted(Date())))
                 timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
                     Task { @MainActor in
                         guard let self else { return }
-                        self.machine.idleTimeout = TimeInterval(self.settings.idleMinutes * 60)
+                        self.machine.idleTimeout = self.settings.idleTimeout
                         self.execute(self.machine.handle(.tick(Date())))
                         if self.machine.phase != .off { self.publish() }
                     }
@@ -163,7 +175,7 @@ final class VoiceSession: ObservableObject {
         guard machine.phase != .off else { return }
         guard let command = channel.consumeCommand(), command.id != consumed else { return }
         consumed = command.id
-        if command.kind == .start { error = ""; machine.action = settings.defaultAction }
+        if command.kind == .start { error = ""; systemRequestID = nil; machine.action = command.action ?? settings.defaultAction }
         execute(machine.handle(.command(command, Date())))
         if command.kind == .cancel { channel.discardRequest(command.requestID) }
     }
@@ -171,12 +183,12 @@ final class VoiceSession: ObservableObject {
         for effect in effects {
             switch effect {
             case .beginCapture:
-                do { try resumeCapture(); audio.begin(); status.level = 0 }
+                do { if !tapped { try resumeCapture() }; AudioServicesPlaySystemSound(1113); audio.begin(); status.level = 0 }
                 catch { audioFailure(error.localizedDescription); return }
-            case .discardCapture: pauseCapture(); _ = audio.finish(); status.level = 0
+            case .discardCapture: _ = audio.finish(); status.level = 0
             case .cancelWork: work?.cancel(); work = nil
             case .finishCapture(let id):
-                pauseCapture()
+                AudioServicesPlaySystemSound(1114)
                 let wav = WAV.encode(samples: audio.finish()); status.level = 0
                 work = Task {
                     do {
@@ -187,7 +199,9 @@ final class VoiceSession: ObservableObject {
                     } catch is CancellationError {} catch { execute(machine.handle(.failed(id, error.localizedDescription))) }
                 }
             case .runAction(let id, let transcript, let context):
-                if machine.action == .automatic, !SettingsStore(group: store.resolution.chosen).privacyMode, let intent = AgentIntent.detect(transcript), let agentHandoff {
+                // Agent only when the user picked Agent mode in the strip; a system-trigger take follows that choice.
+                if id == systemRequestID, UserDefaults(suiteName: store.resolution.chosen)?.string(forKey: "keyboardMode") == "agent", let agentHandoff {
+                    let intent = AgentIntent.detect(transcript) ?? AgentIntent(mode: .research, instruction: transcript)
                     work = Task {
                         do {
                             try await agentHandoff(intent, context?.selected ?? "")
@@ -205,6 +219,7 @@ final class VoiceSession: ObservableObject {
                         try Task.checkCancellation()
                         guard !result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw VoiceError.invalidResponse }
                         execute(machine.handle(.completed(id, result)))
+                        if id == systemRequestID { deliverToClipboard(result.text, id: id) }
                     } catch is CancellationError {} catch { execute(machine.handle(.failed(id, error.localizedDescription))) }
                 }
             case .deliver: break
@@ -221,18 +236,73 @@ final class VoiceSession: ObservableObject {
             return try await operation(refreshed.accessToken)
         }
     }
+    /// No text field to write into: the result goes to the clipboard and the Live Activity says "Copied".
+    private func deliverToClipboard(_ text: String, id: UUID) {
+        UIPasteboard.general.string = text
+        // The keyboard offers "Insert" the next time a field is focused; a notification says where the text went.
+        if let defaults = UserDefaults(suiteName: store.resolution.chosen) {
+            VoicePendingInsert(text: text, at: Date(), account: store.read().flatMap { $0.userID ?? $0.email }).write(to: defaults)
+        }
+        // No result text in the notice: lock-screen previews would show it.
+        let note = UNMutableNotificationContent()
+        note.title = "Copied to clipboard"
+        note.body = "Open a text field and tap Insert, or paste."
+        let center = UNUserNotificationCenter.current()
+        // Never asks for permission here (AgentCenter owns that prompt); the Live Activity already says "Copied".
+        center.getNotificationSettings { settings in
+            guard [.authorized, .provisional, .ephemeral].contains(settings.authorizationStatus) else { return }
+            center.add(UNNotificationRequest(identifier: "gusan.voice.copied", content: note, trigger: nil))
+        }
+        activity.update(status, heard: nil, copied: true)
+        systemRequestID = nil
+        execute(machine.handle(.acknowledged(id)))
+    }
     private func publish() {
         if machine.phase != .off && !channel.available { error = channel.unavailableError.localizedDescription; stop(); return }
-        status = VoiceStatus(phase: machine.phase, requestID: machine.requestID, sessionEndsAt: machine.phase == .recording ? machine.recordingStarted?.addingTimeInterval(machine.maxRecording) : machine.lastActivity.addingTimeInterval(machine.idleTimeout), level: status.level, message: machine.message, result: machine.result, replacesSelection: machine.replacesSelection, resultKind: machine.resultKind)
+        let readyUntil = machine.idleTimeout.isFinite ? machine.lastActivity.addingTimeInterval(machine.idleTimeout) : nil
+        status = VoiceStatus(phase: machine.phase, requestID: machine.requestID, sessionEndsAt: machine.phase == .recording ? machine.recordingStarted?.addingTimeInterval(machine.maxRecording) : readyUntil, level: status.level, message: machine.message, result: machine.result, replacesSelection: machine.replacesSelection, resultKind: machine.resultKind)
         try? channel.write(status: status); channel.post(.status)
+        if !(status.phase == .done && status.requestID == systemRequestID) {
+            let heard = [.thinking, .transcribing].contains(status.phase) ? channel.readTranscript().flatMap { $0.requestID == status.requestID ? $0.text : nil } : nil
+            activity.update(status, heard: heard)
+        }
+        if status.phase == .failed, let id = status.requestID, id == systemRequestID { systemRequestID = nil; execute(machine.handle(.acknowledged(id))) }
+    }
+    /// System triggers (StartListeningIntent and the Live Activity buttons) land here, in the app process.
+    func perform(_ command: VoiceIntentCommand) async throws {
+        switch command {
+        case .endReady: stop()
+        case .cancel:
+            if let id = machine.requestID { systemRequestID = nil; execute(machine.handle(.command(VoiceCommand(kind: .cancel, requestID: id), Date()))) }
+        case .stop:
+            if machine.phase == .recording, let id = machine.requestID { execute(machine.handle(.command(VoiceCommand(kind: .stop, requestID: id), Date()))) }
+        case .start, .toggle:
+            if machine.phase == .recording {
+                if command == .toggle, let id = machine.requestID { execute(machine.handle(.command(VoiceCommand(kind: .stop, requestID: id), Date()))) }
+                return
+            }
+            guard ![.transcribing, .thinking].contains(machine.phase) else { return }
+            // Apple: an AudioRecordingIntent must show a Live Activity before recording.
+            activity.begin()
+            if machine.phase == .off {
+                start(pendingWithin: 0)
+                await startup?.value
+                guard machine.phase != .off else { throw VoiceIntentFailure(errorDescription: error.isEmpty ? "Gusan couldn't start listening." : error) }
+            }
+            let id = UUID()
+            systemRequestID = id
+            machine.action = settings.defaultAction
+            execute(machine.handle(.command(VoiceCommand(kind: .start, requestID: id), Date())))
+        }
     }
     func stop() {
         startup?.cancel(); work?.cancel(); work = nil; timer?.invalidate(); timer = nil
         engine.stop()
         if tapped { engine.inputNode.removeTap(onBus: 0); tapped = false }
-        _ = audio.finish(); _ = machine.handle(.sessionStopped)
+        _ = audio.finish(); _ = machine.handle(.sessionStopped); systemRequestID = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         status.level = 0; publish()
+        activity.end()
     }
     private func interrupted(_ notification: Notification) {
         guard machine.phase != .off, let value = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt, let type = AVAudioSession.InterruptionType(rawValue: value) else { return }
@@ -242,7 +312,7 @@ final class VoiceSession: ObservableObject {
             guard options.contains(.shouldResume) else { stop(); return }
             do {
                 try AVAudioSession.sharedInstance().setActive(true)
-                if machine.phase == .recording { try resumeCapture() }
+                if machine.phase != .off { try resumeCapture() }
             } catch { audioFailure(error.localizedDescription) }
         }
     }

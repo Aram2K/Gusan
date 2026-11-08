@@ -16,7 +16,8 @@ targets:
   Gusan:
     type: application
     platform: iOS
-    sources: [Gusan, GusanKeyboard/AgentKeyboard.swift, GusanKeyboard/KeyboardTheme.swift]
+    deploymentTarget: "17.0"
+    sources: [Gusan, GusanKeyboard/AgentKeyboard.swift, GusanKeyboard/KeyboardTheme.swift, GusanActivity/RecordingActivityAttributes.swift, GusanActivity/AgentActivityAttributes.swift, GusanActivity/VoiceIntents.swift]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.aram2k.gusan
@@ -33,6 +34,7 @@ targets:
         UIBackgroundModes: [audio, fetch]
         BGTaskSchedulerPermittedIdentifiers: [com.aram2k.gusan.agent-refresh]
         UILaunchScreen: {}
+        NSSupportsLiveActivities: true
         CFBundleURLTypes:
           - CFBundleURLSchemes: [gusan]
     entitlements:
@@ -44,6 +46,8 @@ targets:
       - target: GusanKeyboard
         embed: true
       - target: GusanScreen
+        embed: true
+      - target: GusanActivity
         embed: true
   GusanKeyboard:
     type: app-extension
@@ -123,6 +127,25 @@ targets:
         com.apple.security.application-groups: [group.com.aram2k.gusan]
     dependencies:
       - package: GusanKit
+  # Live Activities (recording glow, Agent progress) and the Control Center control.
+  GusanActivity:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources: [GusanActivity]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aram2k.gusan.activity
+        TARGETED_DEVICE_FAMILY: "1,2"
+        APPLICATION_EXTENSION_API_ONLY: YES
+    info:
+      path: GusanActivity/Info.plist
+      properties:
+        CFBundleDisplayName: Gusan
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
 schemes:
   Gusan:
     build:

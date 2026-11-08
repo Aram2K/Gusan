@@ -346,13 +346,15 @@ public final class SessionStore: SessionStorage {
     }
 }
 
+public enum KeyboardMode: String, CaseIterable { case smart, agent }
+
 public final class SettingsStore {
     private let defaults: UserDefaults
     private let shared: SessionBackend
     private let lock = NSLock()
     private var cached: [String: Any] = [:]
     private var lastRead = Date.distantPast
-    private let keys = ["defaultAction", "translateTarget", "keyClicks", "autoCapitalization", "doubleSpacePeriod", "haptics", "pasteboardFallback", "privacyMode"]
+    private let keys = ["defaultAction", "translateTarget", "keyClicks", "autoCapitalization", "doubleSpacePeriod", "haptics", "pasteboardFallback", "privacyMode", "keyboardMode", "keyboardScreenEnabled"]
     public init(group: String?, pasteboardAccessAllowed: @escaping () -> Bool = { true }) {
         defaults = group.flatMap(UserDefaults.init(suiteName:)) ?? .standard
         shared = NamedSessionPasteboard(namespace: "com.aram2k.gusan.settings", accessAllowed: pasteboardAccessAllowed)
@@ -395,6 +397,14 @@ public final class SettingsStore {
             values["updatedAt"] = timestamp; cached = values
             if let data = try? JSONSerialization.data(withJSONObject: values) { _ = shared.write(data, key: "session") }
         }
+    }
+    public var keyboardMode: KeyboardMode {
+        get { (preference("keyboardMode") as? String).flatMap(KeyboardMode.init(rawValue:)) ?? .smart }
+        set { setPreference(newValue.rawValue, key: "keyboardMode") }
+    }
+    public var keyboardScreenEnabled: Bool {
+        get { preference("keyboardScreenEnabled") as? Bool ?? true }
+        set { setPreference(newValue, key: "keyboardScreenEnabled") }
     }
     public var defaultAction: SmartActionMode {
         get { (preference("defaultAction") as? String).flatMap(SmartActionMode.init(rawValue:)) ?? .smartAuto }

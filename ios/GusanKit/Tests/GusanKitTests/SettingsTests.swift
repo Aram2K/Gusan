@@ -2,6 +2,28 @@ import XCTest
 @testable import GusanKit
 
 final class SettingsTests: XCTestCase {
+    func testKeyboardModeAndScreenAreSharedAndDefaultToSmartWithScreenOn() {
+        let appName = "Gusan.mode.app." + UUID().uuidString
+        let keyboardName = "Gusan.mode.keyboard." + UUID().uuidString
+        let appDefaults = UserDefaults(suiteName: appName)!
+        let keyboardDefaults = UserDefaults(suiteName: keyboardName)!
+        defer { appDefaults.removePersistentDomain(forName: appName); keyboardDefaults.removePersistentDomain(forName: keyboardName) }
+        let shared = Shared()
+        let app = SettingsStore(defaults: appDefaults, shared: shared)
+        let keyboard = SettingsStore(defaults: keyboardDefaults, shared: shared)
+        XCTAssertEqual(keyboard.keyboardMode, .smart)
+        XCTAssertTrue(keyboard.keyboardScreenEnabled)
+        keyboard.keyboardMode = .agent
+        keyboard.keyboardScreenEnabled = false
+        app.refresh()
+        XCTAssertEqual(app.keyboardMode, .agent)
+        XCTAssertFalse(app.keyboardScreenEnabled)
+        app.keyboardMode = .smart
+        keyboard.refresh()
+        XCTAssertEqual(keyboard.keyboardMode, .smart)
+        keyboardDefaults.set("invalid", forKey: "keyboardMode")
+        XCTAssertEqual(keyboard.keyboardMode, .smart)
+    }
     private final class Shared: SessionBackend {
         let name = "Preferences"
         var data: Data?
