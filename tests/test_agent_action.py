@@ -114,6 +114,7 @@ for (let i=0; i<scenarios.length; i++) {
   if((url.endsWith('/sessions') || url.endsWith('/messages')) && createFailure){const code=createFailure;createFailure=null;return new Response('failure',{status:code});}
   if(url.endsWith('/messages'))return new Response(null,{status:202});
   if(init.method==='DELETE'){
+   if(url.includes('/sessions/')&&s.sessionDeleteNetworkFailure)throw new Error('untrusted network failure detail');
    const status=url.includes('/sessions/')&&s.sessionDeleteStatuses?.length?s.sessionDeleteStatuses.shift():s.deleteFailure??204;
    return status===204?new Response(null,{status}):new Response('failure',{status});
   }
@@ -684,6 +685,18 @@ def test_stop_awaiting_confirmation_cleans_gone_prepare_session(run, gone):
     assert out["run"]["h_vault_id"] is None and out["run"]["release_nonce"] is None
     deletes = [c for c in out["calls"] if c["method"] == "DELETE" and "/sessions/" in c["url"]]
     assert len(deletes) == 1
+
+
+@pytest.mark.parametrize("failure", [500, "network"])
+def test_stop_awaiting_confirmation_best_effort_session_delete(run, failure):
+    out, = run({"row": {"status": "awaiting_confirmation"}, "sessionDeleteStatuses": [500],
+        "sessionDeleteNetworkFailure": failure == "network",
+        "run": {"h_vault_id": "vault1", "release_nonce": ID}, "body": {"action": "stop", "task_id": ID}})
+    assert out["replies"][0]["status"] == 200 and out["replies"][0]["body"]["status"] == "cancelled"
+    assert out["row"]["status"] == "cancelled"
+    assert out["run"]["h_vault_id"] is None and out["run"]["release_nonce"] is None
+    assert len([c for c in out["calls"] if "/sessions/" in c["url"]]) == 1
+    assert "untrusted network failure detail" not in " ".join(out["logs"])
 
 
 def test_stop_terminal_returns_task_even_when_cleanup_fails(run):

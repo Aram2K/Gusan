@@ -620,12 +620,12 @@ async function stopTask(db: any, row: Obj) {
   const deleted = new Set<string>();
   const deleteSession = async (id?: string) => {
     if (!id || deleted.has(id)) return;
+    deleted.add(id);
     try {
       await h(`/sessions/${encodeURIComponent(id)}`, "DELETE");
     } catch (error) {
       if (!(error instanceof HFailure && [404, 410].includes(error.httpStatus))) throw error;
     }
-    deleted.add(id);
   };
   let failure;
   try {
@@ -635,7 +635,7 @@ async function stopTask(db: any, row: Obj) {
   }
   await cleanupVault(db, row, run);
   row = await loadTask(db, row.id, row.user_id);
-  if (failure && !terminal(row)) throw failure;
+  if (failure && !terminal(row) && row.status !== "awaiting_confirmation") throw failure;
   const currentRun = await loadRun(db, row);
   if (currentRun.h_vault_id && currentRun.h_vault_id !== run.h_vault_id) {
     await cleanupVault(db, row, currentRun);
