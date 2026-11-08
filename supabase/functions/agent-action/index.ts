@@ -5,12 +5,21 @@
 //          timezone (IANA-like, <=64).
 //   status: task_id UUID, wait_s (integer 0..20).
 //   confirm / cancel: task_id UUID, always scoped to the verified owner.
+//   continue: task_id UUID, message (trimmed 1..4000). Active tasks: 409 task_active.
+//     Finished research sessions <24h old restart in place (200); otherwise a
+//     new task uses untrusted prior instruction/result context (201, continued_from).
+//     Do tasks always start a new prepare/approval flow, never restart execute.
+//   stop: task_id UUID, cancel any active phase and clean up the vault (200).
+//     Terminal tasks retain their status/result and still run session/vault cleanup.
 // Responses are task objects: task_id, mode, status, title, steps,
 // confirmation ({summary, action_kind, start_url, steps} | null), result ({markdown, links,
 // images} | null), outcome, error_code, created_at, updated_at, finished_at,
 // deadline_at. No session or call ids are client-visible.
 // Statuses: queued, running, awaiting_confirmation, completed, failed,
-// cancelled, timed_out. Limits: 2 active, 40 starts/24h, 8 MiB request body;
+// cancelled, timed_out, awaiting_login. Limits: 2 active, 40 starts/continues
+// per 24h (429 too_many_active / quota_exceeded), 8 MiB request body;
+// Both new actions require JWT/Pro, reject Privacy Mode, and return not_found
+// for missing/non-owned tasks. Invalid message/task_id: 400 bad_request.
 // Research and do/prepare: structurally read-only text browser, 300s/60 steps.
 // Do/execute: new visual session, 600s/120 steps, only after plan approval.
 // Deadlines add 180s grace. A prepared plan waits up to 15 minutes for approval;
@@ -27,7 +36,7 @@
 // Execute is submit-once. Sync reactively stops duplicate_action and
 // off_plan_navigation from observable events; this is not a pre-action gate.
 // Errors: bad_request (400, field), unauthorized (401), privacy_mode and
-// pro_required (403), not_found (404), not_awaiting_confirmation (409),
+// pro_required (403), not_found (404), not_awaiting_confirmation / task_active (409),
 // body_too_large (413), too_many_active / quota_exceeded (429),
 // entitlement_check_failed / storage_error (500), upstream_error (502),
 // agent_not_configured / agent_busy (503). Privacy refusal precedes all I/O.
@@ -507,6 +516,148 @@ async function saveRun(db: any, row: Obj, patch: Obj) {
   );
   if (error) throw new Failure("storage_error", 500);
 }
+function taskRPCResult(data: Obj, error: Obj) {
+  if (error) {
+    const failures: Obj = {
+      P0001: ["too_many_active", 429], P0002: ["quota_exceeded", 429],
+      P0003: ["task_active", 409], P0004: ["not_found", 404],
+      P0005: ["session_unavailable", 409],
+    };
+    const [code, status] = failures[error.code] ?? ["storage_error", 500];
+    throw new Failure(code, status);
+  }
+  return Array.isArray(data) ? data[0] : data;
+}
+async function startTask(db: any, userId: string, body: Obj, reservedRow?: Obj) {
+  const instruction = body.instruction.trim();
+  const mode = body.mode ?? "research";
+  let row: Obj;
+  if (reservedRow) row = reservedRow;
+  else {
+    const { data, error } = await db.rpc("begin_agent_task", {
+      p_user_id: userId, p_mode: mode, p_title: instruction.slice(0, 120),
+      p_max_active: 2, p_max_per_day: 40, p_deadline_s: 300 + 180,
+    });
+    row = taskRPCResult(data, error);
+  }
+  await saveRun(db, row, {
+    phase: "prepare",
+    plan: { instruction, ...(body.timezone ? { timezone: body.timezone } : {}) },
+  });
+  let session;
+  try {
+    session = await h("/sessions", "POST", sessionRequest(body, mode, instruction), row.id);
+    if (typeof session?.id !== "string" || !session.id) throw new Failure("upstream_error");
+  } catch (e) {
+    const busy = e instanceof Failure && e.code === "agent_busy";
+    await save(db, row, {
+      status: "failed", error_code: busy ? "agent_capacity" : "upstream_error",
+      finished_at: new Date().toISOString(),
+    }, true);
+    throw new Failure(busy ? "agent_busy" : "upstream_error", busy ? 503 : 502);
+  }
+  await saveRun(db, row, { h_session_id: session.id });
+  row = await loadTask(db, row.id, userId);
+  if (terminal(row)) await h(`/sessions/${encodeURIComponent(session.id)}`, "DELETE");
+  return row;
+}
+async function continueTask(db: any, row: Obj, run: Obj, message: string) {
+  if (!terminal(row)) throw new Failure("task_active", 409);
+  const previous = `Prior instruction:\n${run.plan?.instruction ?? row.title}\n\nPrior result:\n${row.result?.markdown ?? ""}`;
+  const body = {
+    instruction: message, mode: row.mode, context: previous.slice(0, 20000),
+    ...(run.plan?.timezone ? { timezone: run.plan.timezone } : {}),
+  };
+  const fresh = async (reservedRow?: Obj) => json({
+    ...task(await startTask(db, row.user_id, body, reservedRow)), continued_from: row.id,
+  }, 201);
+  if (
+    row.mode !== "research" || !["completed", "failed"].includes(row.status) ||
+    !run.h_session_id || run.plan?.session_stopped ||
+    !(Date.parse(row.finished_at) > Date.now() - 24 * 60 * 60 * 1000)
+  ) return fresh();
+  const marker = `gusan-continue:${crypto.randomUUID()}`;
+  const claim = async (operation: string) => {
+    const { data, error } = await db.rpc("continue_agent_task", {
+      p_user_id: row.user_id, p_task_id: row.id, p_message: message,
+      p_marker: marker, p_operation: operation,
+    });
+    return taskRPCResult(data, error);
+  };
+  let resumed;
+  try { resumed = await claim("resume"); }
+  catch (error) {
+    if (error instanceof Failure && error.code === "session_unavailable") return fresh();
+    throw error;
+  }
+  const claimedRun = await loadRun(db, resumed);
+  const path = `/sessions/${encodeURIComponent(claimedRun.h_session_id)}`;
+  try {
+    await h(`${path}/messages`, "POST", {
+      type: "user_message", message: `[${marker}]\n${prompt(message)}`,
+    });
+  } catch (error) {
+    const gone = error instanceof HFailure && [404, 410].includes(error.httpStatus);
+    const restored = await claim(gone ? "fallback" : "restore");
+    if (gone && restored.id !== row.id) return fresh(restored);
+    if (restored.status === "cancelled") return json(task(restored));
+    throw error;
+  }
+  resumed = await loadTask(db, row.id, row.user_id);
+  if (terminal(resumed)) {
+    await h(path, "DELETE");
+    return json(task(resumed));
+  }
+  const plan = { ...claimedRun.plan, prepare_retry: "running" };
+  delete plan.continuation_previous_task;
+  delete plan.continuation_previous_plan;
+  const updated = await db.from("agent_task_runs").update({ plan })
+    .eq("task_id", row.id).eq("plan", JSON.stringify(claimedRun.plan)).select().maybeSingle();
+  if (updated.error) throw new Failure("storage_error", 500);
+  return json(task(await loadTask(db, row.id, row.user_id)));
+}
+async function stopTask(db: any, row: Obj) {
+  const run = await loadRun(db, row);
+  const deleted = new Set<string>();
+  const deleteSession = async (id?: string) => {
+    if (!id || deleted.has(id)) return;
+    deleted.add(id);
+    try {
+      await h(`/sessions/${encodeURIComponent(id)}`, "DELETE");
+    } catch (error) {
+      if (!(error instanceof HFailure && [404, 410].includes(error.httpStatus))) throw error;
+    }
+  };
+  let failure;
+  try {
+    await deleteSession(run.h_session_id);
+  } catch (error) {
+    failure = error;
+  }
+  await cleanupVault(db, row, run);
+  row = await loadTask(db, row.id, row.user_id);
+  if (failure && !terminal(row) && row.status !== "awaiting_confirmation") throw failure;
+  const currentRun = await loadRun(db, row);
+  if (currentRun.h_vault_id && currentRun.h_vault_id !== run.h_vault_id) {
+    await cleanupVault(db, row, currentRun);
+  }
+  await saveRun(db, row, { plan: { ...currentRun.plan, session_stopped: true } });
+  row = await loadTask(db, row.id, row.user_id);
+  if (!terminal(row)) {
+    const cancelled = await db.from("agent_tasks").update({
+      status: "cancelled", confirmation: null, confirmation_at: null,
+      login_request: null, finished_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }).eq("id", row.id).eq("user_id", row.user_id)
+      .in("status", ["queued", "running", "awaiting_confirmation", "awaiting_login"])
+      .select().maybeSingle();
+    if (cancelled.error) throw new Failure("storage_error", 500);
+    row = cancelled.data ?? await loadTask(db, row.id, row.user_id);
+    const latestRun = await loadRun(db, row);
+    await deleteSession(latestRun.h_session_id);
+  }
+  return row;
+}
 async function retryPrepare(db: any, row: Obj, run: Obj, patch: Obj) {
   const plan = {
     ...run.plan,
@@ -849,8 +1000,9 @@ async function sync(db: any, row: Obj, wait = 0) {
   patch.confirmation = null;
   patch.confirmation_at = null;
   let retryAnswer = run.plan?.prepare_retry_answer;
+  const continuation = row.mode === "research" && run.plan?.prepare_retry_kind === "continue";
   if (
-    row.mode === "do" && run.phase === "prepare" &&
+    ((row.mode === "do" && run.phase === "prepare") || continuation) &&
     run.plan?.prepare_retry === "running"
   ) {
     let messageIndex = run.plan.prepare_retry_message_index;
@@ -962,7 +1114,7 @@ async function sync(db: any, row: Obj, wait = 0) {
       : events.findLast((event: Obj) =>
         event.type === "AgentEvent" && event.data?.kind === "answer_event"
       )?.data;
-    const final = prepareResult && answerEvent
+    const final = (prepareResult || continuation) && answerEvent
       ? {
         ...answerEvent,
         answer: answerEvent.answer ?? (await h(path)).latest_answer,
@@ -1167,65 +1319,17 @@ Deno.serve(async (req: Request) => {
       if (body.images !== undefined && !validImages(body.images)) {
         return bad("images");
       }
-      const seconds = 300;
-      const instruction = body.instruction.trim();
-      const { data, error } = await db.rpc("begin_agent_task", {
-        p_user_id: userId,
-        p_mode: mode,
-        p_title: instruction.slice(0, 120),
-        p_max_active: 2,
-        p_max_per_day: 40,
-        p_deadline_s: seconds + 180,
-      });
-      if (error) {
-        if (error.code === "P0001") {
-          return json({ error: "too_many_active" }, 429);
-        }
-        if (error.code === "P0002") {
-          return json({ error: "quota_exceeded" }, 429);
-        }
-        throw new Failure("storage_error", 500);
-      }
-      let row = Array.isArray(data) ? data[0] : data;
-      await saveRun(db, row, {
-        phase: "prepare",
-        plan: {
-          instruction,
-          ...(body.timezone ? { timezone: body.timezone } : {}),
-        },
-      });
-      let session;
-      try {
-        session = await h(
-          "/sessions",
-          "POST",
-          sessionRequest(body, mode, instruction),
-          row.id,
-        );
-        if (typeof session?.id !== "string" || !session.id) {
-          throw new Failure("upstream_error");
-        }
-      } catch (e) {
-        const busy = e instanceof Failure && e.code === "agent_busy";
-        await save(db, row, {
-          status: "failed",
-          error_code: busy ? "agent_capacity" : "upstream_error",
-          finished_at: new Date().toISOString(),
-        });
-        throw new Failure(
-          busy ? "agent_busy" : "upstream_error",
-          busy ? 503 : 502,
-        );
-      }
-      await saveRun(db, row, { h_session_id: session.id });
-      return json(task(row), 201);
+      return json(task(await startTask(db, userId, body)), 201);
     }
-    if (!["status", "confirm", "cancel"].includes(body.action)) {
+    if (!["status", "confirm", "cancel", "continue", "stop"].includes(body.action)) {
       return bad("action");
     }
     if (typeof body.task_id !== "string" || !uuid.test(body.task_id)) {
       return bad("task_id");
     }
+    if (body.action === "continue" && (
+      typeof body.message !== "string" || !body.message.trim() || body.message.trim().length > 4000
+    )) return bad("message");
     if (
       body.action === "status" && body.wait_s !== undefined &&
       (!Number.isInteger(body.wait_s) || body.wait_s < 0 || body.wait_s > 20)
@@ -1234,7 +1338,9 @@ Deno.serve(async (req: Request) => {
       .eq("user_id", userId).maybeSingle();
     if (loaded.error) throw new Failure("storage_error", 500);
     if (!loaded.data) return json({ error: "not_found" }, 404);
+    if (body.action === "stop") return json(task(await stopTask(db, loaded.data)));
     const run = await loadRun(db, loaded.data);
+    if (body.action === "continue") return await continueTask(db, loaded.data, run, body.message.trim());
     let row = await expire(db, loaded.data, run);
     if (body.action === "status") row = await sync(db, row, body.wait_s ?? 0);
     else if (body.action === "confirm") {
