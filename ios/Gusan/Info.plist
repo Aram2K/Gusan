@@ -37,6 +37,8 @@
 	<string>group.com.aram2k.gusan</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Gusan records your voice only while you dictate, to transcribe it with Gusan Cloud.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Gusan uses Face ID to protect saved logins and approve each use by an agent.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

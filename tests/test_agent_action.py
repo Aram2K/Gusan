@@ -26,7 +26,7 @@ for (let i=0; i<scenarios.length; i++) {
  console.log=(...args)=>logs.push(args.join(' '));
  const id='11111111-1111-1111-1111-111111111111';
  let row={id,user_id:'u1',mode:'research',status:'running',title:'task',event_index:0,steps:[],confirmation:null,result:null,created_at:new Date().toISOString(),updated_at:new Date().toISOString(),deadline_at:new Date(Date.now()+600000).toISOString(),...s.row};
- let run={task_id:id,h_session_id:'session1',phase:'prepare',plan:{instruction:'SECRET instruction'},...s.run};
+ let run={task_id:id,h_session_id:'session1',phase:'prepare',release_count:0,release_nonce:null,tool_req:null,plan:{instruction:'SECRET instruction'},...s.run};
  let conflict=s.conflict;
  let createFailure=s.createFailure;
  let runReads=0;
@@ -35,16 +35,23 @@ for (let i=0; i<scenarios.length; i++) {
   rpc:async(name,args)=>{dbCalls.push({name,args});return name==='is_pro'?{data:s.pro??true,error:s.proError?{}:null}:{data:{...row,status:'queued',mode:args.p_mode,title:args.p_title},error:s.quota?{code:s.quota}:null}},
   from:(table)=>{
    let patch=null, filters=[], allowedStatuses=null;
-   const q={select:()=>q,update:p=>{patch=p;return q},eq:(k,v)=>{filters.push([k,v]);return q},
+   const q={select:()=>q,limit:()=>q,is:(k,v)=>{filters.push([k,v]);return q},insert:p=>{patch=p;return q},update:p=>{patch=p;return q},eq:(k,v)=>{filters.push([k,v]);return q},
     in:(k,v)=>{filters.push([k,v]);allowedStatuses=v;return q},maybeSingle:async()=>{
     dbCalls.push({table,patch,filters});
+    if(table==='vault_logins')return {data:s.logins??[],error:null};
+    if(table==='vault_events')return {data:null,error:null};
     if(s.notFound)return {data:null,error:null};
     if(table==='agent_tasks' && patch && allowedStatuses){
      if(s.cancelBeforeRetrySave){s.cancelBeforeRetrySave=false;row={...row,status:'cancelled'};}
      if(!allowedStatuses.includes(row.status))return {data:null,error:null};
     }
+    if(table==='agent_task_runs' && patch?.phase==='execute' && s.executeGuardDuringConfirm){
+     s.executeGuardDuringConfirm=false;
+     run={...run,...patch,plan:{...patch.plan,execute_action_count:1}};
+     row={...row,status:'running'};
+    }
     if(table==='agent_task_runs' && patch && filters.some(([k,v])=>
-      k==='plan' ? JSON.stringify(run.plan)!==v : k==='h_session_id' && run[k]!==v)){
+      ['plan','tool_req'].includes(k) && typeof v==='string' ? JSON.stringify(run[k])!==v : ['h_session_id','phase','release_nonce','release_count','tool_req'].includes(k) && run[k]!==v)){
      return {data:null,error:null};
     }
     if(table==='agent_tasks' && patch && conflict){conflict=false;row={...row,status:'completed',updated_at:'concurrent-write'};return {data:null,error:null};}
@@ -60,13 +67,14 @@ for (let i=0; i<scenarios.length; i++) {
  globalThis.fetch=async(url,init)=>{
   calls.push({url,method:init.method,headers:init.headers,body:init.body?JSON.parse(init.body):null});
   if(s.upstream) return new Response('untrusted error text',{status:s.upstream});
+  if(url.endsWith('/vaults'))return s.vaultFailure?new Response('failure',{status:500}):new Response(JSON.stringify({id:'vault1'}));
   if(url.endsWith('/messages') && s.cancelDuringMessages){
    s.cancelDuringMessages=false;
    await handler(new Request('https://edge.test/',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer aaa.bbb.ccc'},body:JSON.stringify({action:'cancel',task_id:id})}));
   }
   if((url.endsWith('/sessions') || url.endsWith('/messages')) && createFailure){const code=createFailure;createFailure=null;return new Response('failure',{status:code});}
   if(url.endsWith('/messages'))return new Response(null,{status:202});
-  if(init.method==='DELETE')return new Response(null,{status:204});
+  if(init.method==='DELETE')return s.deleteFailure?new Response('failure',{status:s.deleteFailure}):new Response(null,{status:204});
   if(url.includes('/tool_results'))return new Response(null,{status:202});
   if(url.includes('/changes'))return s.empty?new Response(null,{status:204}):new Response(JSON.stringify(s.change??{status:'running',new_events:[]}));
   return new Response(JSON.stringify({id:init.headers['Idempotency-Key']?.endsWith(':prepare-retry')?'retry-session':'session1',latest_answer:s.latest}));
@@ -128,7 +136,95 @@ def run():
 
 
 ID = "11111111-1111-1111-1111-111111111111"
+LOGIN = {"id": "22222222-2222-2222-2222-222222222222", "hostname": "example.com"}
+LOGIN_CALL = {"tool_name": "request_login", "args": {"hostname": "EXAMPLE.com"}, "id": "login1"}
 CALL = {"tool_name": "request_confirmation", "args": {"summary": "Send $10 to Alice", "action_kind": "send"}, "id": "call1"}
+
+
+def test_vault_confirm(run):
+    saved, empty, failure = run(
+        waiting(logins=[LOGIN], body={"action": "confirm", "task_id": ID}),
+        waiting(body={"action": "confirm", "task_id": ID}),
+        waiting(logins=[LOGIN], vaultFailure=True, body={"action": "confirm", "task_id": ID}))
+    request = next(c["body"] for c in saved["calls"] if c["url"].endswith("/sessions"))
+    assert request["overrides"]["agent.environments[kind=web].vault_id"] == "vault1"
+    assert request["overrides"]["agent.tools"][0]["name"] == "request_login"
+    assert request["overrides"]["agent.environments[kind=web].mode"] == {"type": "visual", "markdown": False}
+    assert request["delete_after_min"] == 60 and request["delete_screenshot_after_min"] == 10
+    assert request["max_steps"] == min(120, 15 + 10 * len(PLAN["steps"]))
+    instructions = request["overrides"]["agent.instructions"]
+    assert "call request_login" in instructions and "then use fill_secret_at" in instructions
+    for text in [instructions, request["messages"][0]["message"]]:
+        assert "Perform that action exactly once" in text
+        assert "Never go back, refill, or resubmit" in text
+    assert saved["run"]["h_vault_id"] == "vault1"
+    assert not any("/vaults" in c["url"] for c in empty["calls"])
+    assert failure["row"]["error_code"] == "vault_error"
+    assert not any(c["url"].endswith("/sessions") for c in failure["calls"])
+
+
+def test_login_parking_and_missing(run):
+    scenario = {"row": {"mode": "do"}, "run": {"phase": "execute", "h_vault_id": "vault1"},
+                "change": {"status": "awaiting_tool_results", "pending_tool_calls": [LOGIN_CALL],
+                           "new_events": [{"type": "AgentEvent", "data": {"kind": "observation_event", "type": "web", "metadata": {"url": "https://example.com/login?private=yes#secret"}}}]}}
+    parked, missing = run({**scenario, "logins": [LOGIN], "requests": [{"body": {"action": "status", "task_id": ID}}] * 2}, scenario)
+    assert parked["row"]["status"] == "awaiting_login"
+    assert parked["run"]["release_nonce"]
+    assert "release_nonce" not in json.dumps(parked["row"])
+    assert "release_nonce" not in json.dumps(parked["replies"])
+    assert parked["row"]["login_request"]["page_url"] == "https://example.com/login"
+    assert len(parked["calls"]) == 1
+    assert missing["calls"][-1]["body"]["kind"] == "error_event"
+
+
+@pytest.mark.parametrize("action,status,extra", [
+    ("status", "running", {"change": {"status": "completed", "answer": "Done"}}),
+    ("cancel", "running", {}),
+    ("status", "running", {"row": {"deadline_at": "2000-01-01T00:00:00Z"}}),
+    ("status", "awaiting_login", {"run": {"release_nonce_expires_at": "2000-01-01T00:00:00Z"}}),
+])
+def test_vault_terminal_cleanup(run, action, status, extra):
+    out, = run({**extra, "row": {"status": status, **extra.get("row", {})},
+                "run": {"h_vault_id": "vault1", **extra.get("run", {})},
+                "body": {"action": action, "task_id": ID}})
+    assert any(c["url"].endswith("/vaults/vault1") and c["method"] == "DELETE" for c in out["calls"])
+    assert out["run"]["h_vault_id"] is None
+    if status == "awaiting_login":
+        assert out["row"]["error_code"] == "login_expired"
+
+
+def test_opening_redacts_query(run):
+    out, = run({"change": {"status": "running", "new_events": [{"type": "AgentEvent", "data": {
+        "kind": "policy_event", "tool_reqs": [{"args": {"url": "https://example.com/login?token=secret#private"}}]}}]}})
+    assert out["row"]["steps"][0]["text"] == "Opening https://example.com/login"
+
+
+def test_login_url_from_prior_observation_and_subdomain(run):
+    out, = run({"logins": [LOGIN], "row": {"mode": "do"}, "run": {"phase": "execute", "h_vault_id": "vault1"},
+                "requests": [
+                    {"body": {"action": "status", "task_id": ID}, "change": {"status": "running", "new_events": [{"type": "AgentEvent", "data": {"kind": "observation_event", "type": "web", "metadata": {"url": "https://app.example.com/login?secret=yes"}}}]}},
+                    {"body": {"action": "status", "task_id": ID}, "change": {"status": "awaiting_tool_results", "pending_tool_calls": [{**LOGIN_CALL, "args": {"hostname": "app.example.com"}}]}},
+                ]})
+    assert out["row"]["status"] == "awaiting_login"
+    assert out["row"]["login_request"]["page_url"] == "https://app.example.com/login"
+    assert out["run"]["tool_req"]["hostname"] == "example.com"
+
+
+def test_login_duplicate_delivery_cannot_replace_nonce(run):
+    out, = run({"logins": [LOGIN], "run": {"phase": "execute", "h_vault_id": "vault1"},
+                "requests": [{"body": {"action": "status", "task_id": ID}, "concurrent": 2}],
+                "change": {"status": "awaiting_tool_results", "pending_tool_calls": [LOGIN_CALL]}})
+    events = [c for c in out["dbCalls"] if c.get("table") == "vault_events"]
+    assert len(events) == 1
+    assert out["row"]["status"] == "awaiting_login"
+
+
+def test_vault_cleanup_failure_is_best_effort(run):
+    out, = run({"run": {"h_vault_id": "vault1"}, "upstream": 500,
+                "body": {"action": "cancel", "task_id": ID}})
+    assert out["replies"][0]["body"]["status"] == "cancelled"
+    assert out["run"]["h_vault_id"] == "vault1"  # kept so a later cleanup or the sweeper retries
+    assert any(c.get("patch", {}).get("event") == "vault_delete_failed" for c in out["dbCalls"] if c.get("patch"))
 
 
 @pytest.mark.parametrize("scenario,status,error", [
@@ -383,10 +479,15 @@ def test_confirm_creates_execute_once(run):
     call = out["calls"][0]
     assert call["headers"]["Idempotency-Key"] == f"{ID}:execute"
     body = call["body"]
-    assert body["max_time_s"] == 600 and body["max_steps"] == 120
+    assert body["max_time_s"] == 600 and body["max_steps"] == 15 + 10 * len(PLAN["steps"])
     assert "agent.environments[kind=web].mode" not in body["overrides"]
     assert "agent.tools" not in body["overrides"]
     assert "stop BEFORE submitting" in body["overrides"]["agent.instructions"]
+    for text in [body["overrides"]["agent.instructions"], body["messages"][0]["message"]]:
+        assert "Complete and verify every fill step" in text
+        assert "Perform that action exactly once" in text
+        assert "Never go back, refill, or resubmit" in text
+        assert "triggered early, stop and report instead of retrying" in text
     assert "SECRET instruction" in body["messages"][0]["message"]
     assert "<approved_plan>" in body["messages"][0]["message"]
     assert out["run"]["phase"] == "execute"
@@ -404,13 +505,23 @@ def test_execute_uses_the_visible_approved_plan(run):
 
 
 @pytest.mark.parametrize("code,error,status", [(429, "agent_busy", 503), (500, "upstream_error", 502)])
-def test_execute_creation_failure_retryable(run, code, error, status):
-    out, = run(waiting(createFailure=code, requests=[{"body": {"action": "confirm", "task_id": ID}}] * 2))
+@pytest.mark.parametrize("with_login", [False, True])
+def test_execute_creation_failure_retryable(run, code, error, status, with_login):
+    out, = run(waiting(createFailure=code, logins=[LOGIN] if with_login else [],
+                       requests=[{"body": {"action": "confirm", "task_id": ID}}] * 2))
     assert out["replies"][0] == {"status": status, "body": {"error": error}}
     assert out["snapshots"][0]["row"]["status"] == "awaiting_confirmation"
     assert out["snapshots"][0]["run"]["phase"] == "prepare"
     assert out["replies"][1]["body"]["status"] == "running"
-    assert out["calls"][0]["headers"]["Idempotency-Key"] == out["calls"][1]["headers"]["Idempotency-Key"]
+    sessions = [c for c in out["calls"] if c["url"].endswith("/sessions")]
+    assert len(sessions) == 2
+    assert sessions[0]["headers"]["Idempotency-Key"] == sessions[1]["headers"]["Idempotency-Key"]
+    if with_login:
+        assert out["snapshots"][0]["run"]["h_vault_id"] == "vault1"
+        assert out["run"]["h_vault_id"] == "vault1"
+        assert len([c for c in out["calls"] if c["url"].endswith("/vaults")]) == 1
+        assert all(c["body"]["overrides"]["agent.environments[kind=web].vault_id"] == "vault1" for c in sessions)
+        assert not any(c["method"] == "DELETE" for c in out["calls"])
 
 
 def test_cancel_awaiting_is_local(run):
@@ -444,7 +555,7 @@ def test_progress_fallbacks_persist_on_two_running_polls(run):
     events = [{"type": "AgentEvent", "timestamp": "now", "data": {"kind": "policy_event", **d}} for d in data]
     out, = run({"requests": [{"body": {"action": "status", "task_id": ID}, "change": {"status": "running", "new_events": events}},
                              {"body": {"action": "status", "task_id": ID}, "change": {"status": "running", "new_events": []}}]})
-    expected = ["First step", "Read the source.", "Opening https://source.test", "read_page"]
+    expected = ["First step", "Read the source.", "Opening https://source.test/", "read_page"]
     assert [s["text"] for s in out["snapshots"][0]["row"]["steps"]] == expected
     assert [s["text"] for s in out["replies"][1]["body"]["steps"]] == expected
     assert out["row"]["status"] == "running" and out["row"]["event_index"] == 5
@@ -622,7 +733,7 @@ def test_retry_cannot_overwrite_terminal_row_before_restart(run):
     assert out["row"]["status"] == "cancelled"
     assert not any(c["method"] == "POST" for c in out["calls"])
     guarded = next(c for c in out["dbCalls"] if c.get("table") == "agent_tasks" and c.get("patch"))
-    assert ["status", ["queued", "running", "awaiting_confirmation"]] in guarded["filters"]
+    assert ["status", ["queued", "running", "awaiting_confirmation", "awaiting_login"]] in guarded["filters"]
 
 
 def test_cancel_reloads_current_session_before_delete(run):
@@ -851,3 +962,119 @@ def test_blank_lines_do_not_truncate_prose_plan(run, separator, suffix):
         "change": answered(text)})
     assert out["row"]["status"] == "awaiting_confirmation"
     assert out["row"]["confirmation"]["steps"] == ["Open X", "Fill name", "Submit"]
+
+
+def execute_policy(call_id, content="Click the Submit button", tool="click_web", args=None):
+    return {"type": "AgentEvent", "data": {"kind": "policy_event", "content": content,
+            "tool_reqs": [{"id": call_id, "tool_name": tool, "args": args or {}}]}}
+
+
+def execute_observation(url):
+    return {"type": "AgentEvent", "data": {"kind": "observation_event", "type": "web",
+                                        "metadata": {"url": url}}}
+
+
+@pytest.mark.parametrize("delete_failure", [None, 500])
+def test_execute_duplicate_submit_cancels_even_on_completed_status(run, delete_failure):
+    events = [execute_policy("first"), execute_policy("second")]
+    out, = run({"row": {"mode": "do"}, "run": {"phase": "execute", "plan": PLAN},
+        "deleteFailure": delete_failure,
+        "change": {"status": "completed", "answer": {"markdown": "Done"}, "new_events": events}})
+    assert out["row"]["status"] == "failed" and out["row"]["error_code"] == "duplicate_action"
+    assert out["row"]["result"] is None and len(out["row"]["steps"]) == 2
+    assert out["run"]["plan"]["execute_action_count"] == 2
+    assert len([c for c in out["calls"] if c["method"] == "DELETE"]) == 1
+
+
+@pytest.mark.parametrize("violation", ["duplicate_action", "off_plan_navigation"])
+@pytest.mark.parametrize("delete_failure", [None, 500])
+@pytest.mark.parametrize("change_status", ["running", "completed"])
+def test_execute_kill_switch_cleans_vault(run, violation, delete_failure, change_status):
+    events = ([execute_policy("first"), execute_policy("second")] if violation == "duplicate_action" else
+              [execute_policy("navigate", "Open page", "go_to_web", {"url": "https://unapproved.test"})])
+    out, = run({"row": {"mode": "do"}, "run": {"phase": "execute", "plan": PLAN,
+        "h_vault_id": "vault1", "release_nonce": ID}, "deleteFailure": delete_failure,
+        "change": {"status": change_status, "new_events": events}})
+    assert out["row"]["status"] == "failed" and out["row"]["error_code"] == violation
+    assert out["replies"][0]["body"]["status"] == "failed"
+    assert out["run"]["release_nonce"] is None
+    assert out["run"]["h_vault_id"] == ("vault1" if delete_failure else None)
+    assert len([c for c in out["calls"] if c["method"] == "DELETE" and "/sessions/" in c["url"]]) == 1
+    assert len([c for c in out["calls"] if c["method"] == "DELETE" and "/vaults/" in c["url"]]) == 1
+    event = "vault_delete_failed" if delete_failure else "vault_deleted"
+    assert any(c.get("table") == "vault_events" and c.get("patch", {}).get("event") == event for c in out["dbCalls"])
+
+
+def test_execute_one_submit_and_result_complete_normally(run):
+    out, = run({"row": {"mode": "do"}, "run": {"phase": "execute", "plan": {
+        **PLAN, "start_url": "https://httpbin.org/forms/post"}},
+        "change": {"status": "completed", "answer": {"markdown": "Done"}, "new_events": [
+            execute_policy("fill", "Fill the name", tool="write"),
+            execute_policy("submit"), execute_observation("https://httpbin.org/post")]}})
+    assert out["row"]["status"] == "completed" and out["row"]["error_code"] is None
+    assert out["run"]["plan"]["execute_action_count"] == 1
+    assert not any(c["method"] == "DELETE" for c in out["calls"])
+
+
+def test_execute_guard_persists_across_polls_and_ignores_repeated_call_ids(run):
+    out, = run({"row": {"mode": "do"}, "run": {"phase": "execute", "plan": PLAN},
+        "requests": [
+            {"body": {"action": "status", "task_id": ID},
+             "change": {"status": "running", "new_events": [execute_policy("submit")]}},
+            {"body": {"action": "status", "task_id": ID},
+             "change": {"status": "running", "new_events": [execute_policy("submit")]}},
+            {"body": {"action": "status", "task_id": ID},
+             "change": {"status": "running", "new_events": [execute_policy("resubmit")]}}]})
+    assert [r["body"]["status"] for r in out["replies"]] == ["running", "running", "failed"]
+    assert [s["run"]["plan"]["execute_action_count"] for s in out["snapshots"]] == [1, 1, 2]
+    assert out["row"]["error_code"] == "duplicate_action"
+
+
+def test_execute_coordinate_only_actions_use_result_url_transitions(run):
+    start = "https://httpbin.org/forms/post"
+    out, = run({"row": {"mode": "do"}, "run": {"phase": "execute", "plan": {**PLAN, "start_url": start}},
+        "change": {"status": "running", "new_events": [
+            execute_observation(start), execute_policy("first", None),
+            execute_observation("https://httpbin.org/post"), execute_observation("https://httpbin.org/post"),
+            execute_observation(start), execute_policy("second", None),
+            execute_observation("https://httpbin.org/post")]}})
+    assert out["row"]["status"] == "failed" and out["row"]["error_code"] == "duplicate_action"
+    assert out["run"]["plan"]["execute_action_count"] == 2
+
+
+@pytest.mark.parametrize("host,expected", [
+    ("example.com", "running"), ("checkout.example.com", "running"),
+    ("example.com.attacker.test", "failed"), ("unapproved.test", "failed"),
+])
+def test_execute_off_plan_navigation_kill_switch(run, host, expected):
+    out, = run({"row": {"mode": "do"}, "run": {"phase": "execute", "plan": PLAN},
+        "change": {"status": "running", "new_events": [
+            execute_policy("navigate", "Open page", "go_to_web", {"url": "https://" + host})]}})
+    assert out["row"]["status"] == expected
+    assert out["row"].get("error_code") == ("off_plan_navigation" if expected == "failed" else None)
+    assert any(c["method"] == "DELETE" for c in out["calls"]) == (expected == "failed")
+
+
+def test_execute_concurrent_duplicate_detection_has_one_cancellation(run):
+    out, = run({"row": {"mode": "do"}, "run": {"phase": "execute", "plan": PLAN},
+        "change": {"status": "running", "new_events": [execute_policy("one"), execute_policy("two")]},
+        "requests": [{"body": {"action": "status", "task_id": ID}, "concurrent": 2}]})
+    assert out["row"]["status"] == "failed" and out["row"]["error_code"] == "duplicate_action"
+    assert out["run"]["plan"]["execute_action_count"] == 2
+    assert len([c for c in out["calls"] if c["method"] == "DELETE"]) == 1
+
+
+def test_execute_persisted_violation_cannot_be_overwritten_by_completion(run):
+    out, = run({"row": {"mode": "do"}, "run": {"phase": "execute", "plan": {
+        **PLAN, "execute_action_count": 2, "execute_violation": "duplicate_action"}},
+        "change": {"status": "completed", "answer": {"markdown": "Done"}, "new_events": []}})
+    assert out["row"]["status"] == "failed" and out["row"]["error_code"] == "duplicate_action"
+    assert any(c["method"] == "DELETE" for c in out["calls"])
+
+
+def test_inflight_double_confirm_cannot_reset_submit_count(run):
+    out, = run(waiting(executeGuardDuringConfirm=True,
+                       body={"action": "confirm", "task_id": ID}))
+    assert out["row"]["status"] == "running"
+    assert out["run"]["phase"] == "execute"
+    assert out["run"]["plan"]["execute_action_count"] == 1

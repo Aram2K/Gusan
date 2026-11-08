@@ -50,7 +50,7 @@ final class AgentTests: XCTestCase {
     }
     func testRichPhasesRoundTripWithoutChangingKeyboardStatus() throws {
         let cases: [(String, AgentStatus, AgentPhase)] = [
-            ("awaiting_login", .running, .needsLogin), ("awaiting_code", .running, .needsCode),
+            ("awaiting_login", .awaitingLogin, .needsLogin), ("awaiting_code", .running, .needsCode),
             ("idle", .completed, .completed), ("interrupted", .cancelled, .stopped),
             ("future_status", .running, .working), ("", .running, .working)
         ]
@@ -66,6 +66,11 @@ final class AgentTests: XCTestCase {
         }
         let missing = try AgentClient.decodeTask(Data("{\"task_id\":\"\(UUID().uuidString)\"}".utf8))
         XCTAssertEqual(missing.status, .running)
+        let login = AgentTask(mode: .do, status: .awaitingLogin, title: "Sign in")
+        XCTAssertEqual(login.phase, .needsLogin)
+        XCTAssertFalse(login.status.isTerminal)
+        XCTAssertTrue(login.needsAttention)
+        XCTAssertEqual(login.summaryLine, "Open Vault in the Gusan app to approve a saved login")
         var changed = missing
         changed.setServerStatus("awaiting_login")
         changed.status = .completed

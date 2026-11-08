@@ -30,6 +30,7 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         GusanAppGroup: group.com.aram2k.gusan
         NSSupportsLiveActivities: true
+        NSFaceIDUsageDescription: Gusan uses Face ID to protect saved logins and approve each use by an agent.
         NSMicrophoneUsageDescription: Gusan records your voice only while you dictate, to transcribe it with Gusan Cloud.
         UIBackgroundModes: [audio, fetch]
         BGTaskSchedulerPermittedIdentifiers: [com.aram2k.gusan.agent-refresh]
