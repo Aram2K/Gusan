@@ -33,7 +33,7 @@ struct VoiceListeningView: View {
             VStack(spacing: 20) {
                 Spacer()
                 if voice.starting { ProgressView().controlSize(.large) }
-                else { Image(systemName: "waveform").font(.largeTitle).foregroundStyle(Theme.accent).accessibilityHidden(true) }
+                else { VoiceLevelBars(level: voice.status.level, active: voice.status.phase == .recording).frame(height: 44).accessibilityHidden(true) }
                 Text(title).font(.title2).bold()
                 if voice.error.isEmpty {
                     Text("Swipe back to your app.").foregroundStyle(.secondary)
@@ -80,5 +80,30 @@ struct VoiceSettingsSection: View {
             Text("An open session reserves the mic and uses some battery. iOS may end a background session early.").font(.footnote).foregroundStyle(.secondary)
         }.onAppear { language = voice.settings.language; minutes = voice.settings.idleMinutes; voice.refreshPermission() }
             .onChange(of: scenePhase) { if $0 == .active { voice.refreshPermission() } }
+    }
+}
+
+/// Seven bars that follow the microphone level while recording; idle bars rest at a low height.
+struct VoiceLevelBars: View {
+    let level: Float
+    let active: Bool
+    private let weights: [CGFloat] = [0.45, 0.7, 0.9, 1, 0.9, 0.7, 0.45]
+    var body: some View {
+        HStack(spacing: 5) {
+            ForEach(weights.indices, id: \.self) { index in
+                Capsule()
+                    .fill(Theme.accent)
+                    .frame(width: 6, height: height(for: index))
+            }
+        }
+        .animation(.easeOut(duration: 0.18), value: level)
+        .animation(.easeInOut(duration: 0.25), value: active)
+    }
+    private func height(for index: Int) -> CGFloat {
+        let floor: CGFloat = 8
+        guard active else { return floor }
+        let strength = CGFloat(min(max(level, 0), 1))
+        let wobble = 0.85 + 0.15 * sin(CGFloat(index) * 1.7 + strength * 6)
+        return floor + (44 - floor) * strength * weights[index] * wobble
     }
 }
