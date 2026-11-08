@@ -71,7 +71,7 @@ public final class AgentClient: AgentService {
 
     public func start(_ intent: AgentIntent, context: String?) async throws -> AgentTask {
         var body: [String: Any] = ["action": "start", "instruction": intent.instruction, "mode": intent.mode.rawValue]
-        let calendar = CalendarContext.connectedSummary(store: calendarStore)
+        let calendar = CalendarContext.schedulingSummary(texts: [intent.instruction], store: calendarStore)
         if let context = CalendarContext.prepending(calendar, to: context?.trimmingCharacters(in: .whitespacesAndNewlines)) {
             body["context"] = context
         }
