@@ -629,9 +629,7 @@ async function stopTask(db: any, row: Obj) {
   };
   let failure;
   try {
-    if (run.h_session_id && row.status !== "awaiting_confirmation") {
-      await deleteSession(run.h_session_id);
-    }
+    await deleteSession(run.h_session_id);
   } catch (error) {
     failure = error;
   }

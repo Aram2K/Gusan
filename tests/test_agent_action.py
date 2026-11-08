@@ -646,6 +646,7 @@ def test_stop_deletes_each_distinct_session_and_tolerates_gone_replacement(run, 
 @pytest.mark.parametrize("status,phase,session", [
     ("queued", "prepare", "session1"), ("running", "prepare", "session1"),
     ("running", "execute", "session1"), ("awaiting_login", "execute", "session1"),
+    ("awaiting_confirmation", "prepare", "session1"),
     ("awaiting_confirmation", "prepare", None), ("queued", "prepare", None),
 ])
 def test_stop_cancels_each_phase_and_cleans_vault(run, status, phase, session):
@@ -672,6 +673,17 @@ def test_stop_terminal_is_idempotent_and_still_cleans_vault(run, status):
     assert all(r["body"]["result"]["markdown"] == "Prior result" for r in out["replies"])
     assert out["run"]["h_vault_id"] is None and out["run"]["release_nonce"] is None
     assert len([c for c in out["calls"] if "/vaults/" in c["url"]]) == 1
+    assert len([c for c in out["calls"] if "/sessions/" in c["url"]]) == 2
+
+
+@pytest.mark.parametrize("gone", [404, 410])
+def test_stop_awaiting_confirmation_cleans_gone_prepare_session(run, gone):
+    out, = run({"row": {"status": "awaiting_confirmation"}, "sessionDeleteStatuses": [gone],
+        "run": {"h_vault_id": "vault1", "release_nonce": ID}, "body": {"action": "stop", "task_id": ID}})
+    assert out["replies"][0]["status"] == 200 and out["row"]["status"] == "cancelled"
+    assert out["run"]["h_vault_id"] is None and out["run"]["release_nonce"] is None
+    deletes = [c for c in out["calls"] if c["method"] == "DELETE" and "/sessions/" in c["url"]]
+    assert len(deletes) == 1
 
 
 def test_stop_terminal_returns_task_even_when_cleanup_fails(run):
