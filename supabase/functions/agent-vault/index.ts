@@ -83,6 +83,15 @@ async function secretMatches(candidate: string, expected: string) {
   return different === 0;
 }
 async function sweep(db: any) {
+  const orphaned = checked(await db.from("agent_session_cleanups").select());
+  for (const entry of orphaned) {
+    try {
+      const path = `/sessions/${encodeURIComponent(entry.h_session_id)}`;
+      await h(`${path}/pause`, "POST");
+      await h(path, "DELETE");
+      checked(await db.from("agent_session_cleanups").delete().eq("h_session_id", entry.h_session_id));
+    } catch { console.log("agent-vault", "session_cleanup_failed"); }
+  }
   const pending = checked(await db.from("agent_task_runs").select().eq("session_cleanup_pending", true));
   for (const run of pending) {
     const row = checked(await db.from("agent_tasks").select().eq("id", run.task_id).maybeSingle());
