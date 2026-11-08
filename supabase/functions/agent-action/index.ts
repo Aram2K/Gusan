@@ -1299,7 +1299,8 @@ Deno.serve(async (req: Request) => {
       userId = data.user.id;
       const pro = await supa.rpc("is_pro");
       if (pro.error) return json({ error: "entitlement_check_failed" }, 500);
-      if (!pro.data) return json({ error: "pro_required" }, 403);
+      // Deleting your own sessions must keep working after Pro ends.
+      if (!pro.data && body.action !== "delete") return json({ error: "pro_required" }, 403);
     }
     if (!KEY) return json({ error: "agent_not_configured" }, 503);
     const db = createClient(

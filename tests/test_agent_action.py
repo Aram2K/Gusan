@@ -1702,3 +1702,9 @@ def test_httpbin_second_submission_requires_second_landing(run):
     assert out["row"]["status"] == "failed" and out["row"]["error_code"] == "duplicate_action"
     assert out["run"]["plan"]["execute_submission_count"] == 2
     assert any(c["method"] == "DELETE" for c in out["calls"])
+
+
+def test_delete_allowed_without_pro(run):
+    out, = run({"pro": False, "body": {"action": "delete", "task_id": ID}})
+    assert out["replies"][0]["status"] == 200
+    assert out["replies"][0]["body"] == {"deleted": True}
