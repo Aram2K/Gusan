@@ -286,7 +286,7 @@ final class VoiceTests: XCTestCase {
         defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
         let settings = VoiceSettings(group: suite)
         XCTAssertEqual(settings.language, "auto"); XCTAssertEqual(settings.defaultAction, .automatic)
-        XCTAssertEqual(settings.idleMinutes, 15); XCTAssertTrue(settings.autoReturn)
+        XCTAssertEqual(settings.idleMinutes, 0); XCTAssertTrue(settings.autoReturn)
         settings.language = "hy"; settings.defaultAction = .smart(.translate); settings.idleMinutes = 60; settings.autoReturn = false
         let read = VoiceSettings(group: suite)
         XCTAssertEqual(read.language, "hy"); XCTAssertEqual(read.defaultAction, .smart(.translate)); XCTAssertEqual(read.idleMinutes, 60); XCTAssertFalse(read.autoReturn)

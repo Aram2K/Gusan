@@ -27,6 +27,22 @@ struct HomeView: View {
             } header: { Text("Mode") } footer: {
                 Text("The strip opens in this mode. You can also switch from the chip in the strip.")
             }
+            Section {
+                Toggle(isOn: Binding(get: { voice.alive || voice.starting }, set: { on in on ? voice.start() : voice.stop() })) {
+                    HStack(spacing: 10) {
+                        Image(systemName: voice.alive ? "mic.fill" : "mic").foregroundStyle(voice.alive ? Theme.accent : .secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Gusan Voice").font(.body)
+                            Text(voice.alive ? "Ready: the keyboard mic records in place." : voice.starting ? "Starting…" : "Off: the first mic tap opens Gusan to start.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .disabled(voice.starting || model.session == nil)
+                if !voice.error.isEmpty, !voice.alive { Text(voice.error).font(.footnote).foregroundStyle(.secondary) }
+            } footer: {
+                Text("Keeps the microphone reserved in the background (orange dot) so you never leave your app. Stop it here when you're done.")
+            }
             if !model.restoringSession && !setupDismissed && !setupCompleted && !setupComplete {
                 setupChecklist
                 MakeGusanKeyboardSection(compact: true)
