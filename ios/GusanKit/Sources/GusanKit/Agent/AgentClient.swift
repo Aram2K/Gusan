@@ -92,8 +92,11 @@ public final class AgentClient: AgentService {
     }
 
     public func continueTask(_ id: UUID, message: String) async throws -> AgentTask {
+        let calendar = CalendarContext.schedulingSummary(texts: [message], store: calendarStore)
+        let enriched = CalendarContext.prepending(calendar, to: message) ?? message
+        let wireMessage = enriched.utf16.count <= 4_000 ? enriched : message
         do {
-            return try await task(["action": "continue", "task_id": id.uuidString.lowercased(), "message": message], detectUnsupportedAction: true)
+            return try await task(["action": "continue", "task_id": id.uuidString.lowercased(), "message": wireMessage], detectUnsupportedAction: true)
         } catch ActionFailure.unsupported {
             let previous = try await status(id, waitSeconds: 0)
             let summary = "Earlier in this session:\n" + previous.title + "\n" + (previous.result?.plainText ?? "")
