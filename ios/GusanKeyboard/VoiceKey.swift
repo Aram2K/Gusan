@@ -183,7 +183,7 @@ final class VoiceKeyController: NSObject {
     private func refresh() {
         documentDidChange()
         if Date() >= undoExpires, inserted != nil { inserted = nil; undoRecord = nil; message = nil }
-        let active = preview || status?.isAlive() == true
+        let active = preview || status?.isAlive() == true || KeyboardVoiceFeedback.displaysFailure(status, pending: pending)
         phase = status?.requestID == cancelledID && cancelledID != nil ? .off : active ? status?.phase ?? .off : .off
         level = preview ? Float(0.2 + abs(sin(Date.timeIntervalSinceReferenceDate * 3)) * 0.6) : status?.level ?? 0
         if let status, status.phase == .done, status.requestID == pending.requestID, pending.insertedID != pending.requestID, status.requestID != cancelledID { deliver(status) }
