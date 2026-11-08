@@ -27,3 +27,6 @@ installer/wizard/GusanSlides.exe
 
 # Supabase CLI local state
 supabase/.temp/
+
+# Local Claude Code settings (machine-specific paths and permissions)
+.claude/settings.local.json
