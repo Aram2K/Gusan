@@ -7,8 +7,10 @@ struct GusanApp: App {
     @StateObject private var agent: AgentCenter
     @Environment(\.scenePhase) private var scenePhase
     init() {
+        Theme.configureTabBar()
         let model = AppModel()
         let agent = AgentCenter(model: model)
+        agent.configureLiveActivities()
         _model = StateObject(wrappedValue: model); _agent = StateObject(wrappedValue: agent)
         // Created here, not lazily by SwiftUI, so a background launch for an App Intent can record before any UI exists.
         let voice = VoiceSession()
@@ -30,7 +32,6 @@ struct GusanApp: App {
                 #if DEBUG
                 .overlay(alignment: .bottom) { AgentCardPreview() }
                 #endif
-                .onChange(of: model.pendingTaskID) { if let id = $0 { agent.openTaskID = id; model.pendingTaskID = nil } }
                 .onOpenURL { if $0.host == "voice" { voice.handleURL($0) } else { model.handleURL($0) } }
                 .sheet(isPresented: $voice.presented, onDismiss: {
                     if voiceSignInRequested {

@@ -200,13 +200,13 @@ final class VoiceSession: ObservableObject {
                 }
             case .runAction(let id, let transcript, let context):
                 // Agent only when the user picked Agent mode in the strip; a system-trigger take follows that choice.
-                if id == systemRequestID, UserDefaults(suiteName: store.resolution.chosen)?.string(forKey: "keyboardMode") == "agent", let agentHandoff {
+                if id == systemRequestID, SettingsStore(group: store.resolution.chosen).keyboardMode == .agent, let agentHandoff {
                     let intent = AgentIntent.detect(transcript) ?? AgentIntent(mode: .research, instruction: transcript)
                     work = Task {
                         do {
                             try await agentHandoff(intent, context?.selected ?? "")
                             try Task.checkCancellation()
-                            execute(machine.handle(.failed(id, "Agent task started. See Activity in the Gusan app.")))
+                            execute(machine.handle(.failed(id, "Agent task started. See Sessions in the Gusan app.")))
                         } catch is CancellationError {} catch { execute(machine.handle(.failed(id, (error as? AgentError)?.errorDescription ?? error.localizedDescription))) }
                     }
                     continue
@@ -218,6 +218,9 @@ final class VoiceSession: ObservableObject {
                         }
                         try Task.checkCancellation()
                         guard !result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw VoiceError.invalidResponse }
+                        if self.machine.action != .transcribeOnly {
+                            SmartHistory(group: self.store.resolution.chosen).append(instruction: transcript, result: result.text)
+                        }
                         execute(machine.handle(.completed(id, result)))
                         if id == systemRequestID { deliverToClipboard(result.text, id: id) }
                     } catch is CancellationError {} catch { execute(machine.handle(.failed(id, error.localizedDescription))) }

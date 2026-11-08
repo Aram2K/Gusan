@@ -354,7 +354,7 @@ public final class SettingsStore {
     private let lock = NSLock()
     private var cached: [String: Any] = [:]
     private var lastRead = Date.distantPast
-    private let keys = ["defaultAction", "translateTarget", "keyClicks", "autoCapitalization", "doubleSpacePeriod", "haptics", "pasteboardFallback", "privacyMode", "keyboardMode", "keyboardScreenEnabled"]
+    private let keys = ["defaultAction", "translateTarget", "keyClicks", "autoCapitalization", "doubleSpacePeriod", "haptics", "pasteboardFallback", "privacyMode", "stripMode", "keyboardMode", "keyboardScreenEnabled"]
     public init(group: String?, pasteboardAccessAllowed: @escaping () -> Bool = { true }) {
         defaults = group.flatMap(UserDefaults.init(suiteName:)) ?? .standard
         shared = NamedSessionPasteboard(namespace: "com.aram2k.gusan.settings", accessAllowed: pasteboardAccessAllowed)
@@ -398,9 +398,16 @@ public final class SettingsStore {
             if let data = try? JSONSerialization.data(withJSONObject: values) { _ = shared.write(data, key: "session") }
         }
     }
+    public var stripMode: StripMode {
+        get { StripMode(rawValue: keyboardMode.rawValue) ?? .smart }
+        set { keyboardMode = KeyboardMode(rawValue: newValue.rawValue) ?? .smart }
+    }
     public var keyboardMode: KeyboardMode {
-        get { (preference("keyboardMode") as? String).flatMap(KeyboardMode.init(rawValue:)) ?? .smart }
-        set { setPreference(newValue.rawValue, key: "keyboardMode") }
+        get { ((preference("keyboardMode") ?? preference("stripMode")) as? String).flatMap(KeyboardMode.init(rawValue:)) ?? .smart }
+        set {
+            setPreference(newValue.rawValue, key: "keyboardMode")
+            setPreference(newValue.rawValue, key: "stripMode")
+        }
     }
     public var keyboardScreenEnabled: Bool {
         get { preference("keyboardScreenEnabled") as? Bool ?? true }
@@ -438,11 +445,15 @@ public final class SettingsStore {
         get { preference("pasteboardFallback") as? Bool ?? true }
         set { setPreference(newValue, key: "pasteboardFallback") }
     }
-    /// Privacy Mode: no agent tasks at all (nothing is sent to Gusan Cloud agents; agent actions are hidden).
+    /// Compatibility API for older keyboard clients; cloud actions are always available.
     public var privacyMode: Bool {
-        get { preference("privacyMode") as? Bool ?? false }
-        set { setPreference(newValue, key: "privacyMode") }
+        get { false }
+        set {}
     }
+}
+
+public enum StripMode: String, CaseIterable {
+    case smart, agent
 }
 
 public enum KeyboardDefaultAction: String, CaseIterable, Identifiable {

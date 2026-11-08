@@ -7,19 +7,16 @@ struct AppRootView: View {
     var body: some View {
         TabView(selection: $model.selectedTab) {
             NavigationStack { HomeView() }.tabItem { Label("Home", systemImage: "house") }.tag(AppTab.home)
-            NavigationStack { KeyboardSettingsView() }.tabItem { Label("Keyboard", systemImage: "keyboard") }.tag(AppTab.keyboard)
-            NavigationStack { ActivityView() }
-                .tabItem { Label("Activity", systemImage: "sparkles.rectangle.stack") }
+            NavigationStack { SessionsView() }
+                .tabItem { Label("Sessions", systemImage: "list.bullet.rectangle") }
                 .badge(agent.unseenCount)
-                .tag(AppTab.activity)
-            NavigationStack { AccountView() }.tabItem { Label("Account", systemImage: "person.crop.circle") }.tag(AppTab.account)
+                .tag(AppTab.sessions)
+            NavigationStack { VaultView() }.tabItem { Label("Vault", systemImage: "lock") }.tag(AppTab.vault)
+            NavigationStack { SettingsView() }.tabItem { Label("Settings", systemImage: "gearshape") }.tag(AppTab.settings)
         }
-        .fullScreenCover(isPresented: $model.showingOnboarding, onDismiss: {
-            if model.pendingSignIn { model.pendingSignIn = false; model.showingSignIn = true }
-        }) { OnboardingView() }
+        .tint(Theme.accent)
         .sheet(isPresented: $model.showingSignIn, onDismiss: {
             model.cancelGoogle()
-            if model.pendingOnboarding { model.pendingOnboarding = false; model.showingOnboarding = true }
         }) { SignInSheet() }
         .task { await model.update() }
         .onChange(of: scenePhase) { phase in if phase == .active { Task { await model.update() } } }

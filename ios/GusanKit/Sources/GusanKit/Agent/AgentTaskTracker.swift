@@ -5,6 +5,8 @@ import Foundation
 public final class AgentTaskTracker {
     public enum Event: Equatable {
         case needsConfirmation(AgentTask)
+        case needsLogin(AgentTask)
+        case needsCode(AgentTask)
         case finished(AgentTask)
     }
 
@@ -24,9 +26,11 @@ public final class AgentTaskTracker {
         var seen = notified
         var events: [Event] = []
         for task in tasks {
-            let state = task.status.rawValue
+            let state = task.rawStatus
             guard seen[task.id.uuidString] != state else { continue }
             seen[task.id.uuidString] = state
+            if task.phase == .needsLogin { events.append(.needsLogin(task)); continue }
+            if task.phase == .needsCode { events.append(.needsCode(task)); continue }
             switch task.status {
             case .awaitingConfirmation: events.append(.needsConfirmation(task))
             case .completed, .failed, .timedOut: events.append(.finished(task))
@@ -44,7 +48,7 @@ public final class AgentTaskTracker {
     /// Marks a task as already known in its current state (e.g. the keyboard showed the card itself).
     public func markNotified(_ task: AgentTask) {
         var seen = notified
-        seen[task.id.uuidString] = task.status.rawValue
+        seen[task.id.uuidString] = task.rawStatus
         notified = seen
     }
 

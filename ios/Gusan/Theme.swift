@@ -10,8 +10,10 @@ enum Theme {
     static let brandRed = color(0xD91E18, 0xE5483F)
     static let brandBlue = color(0x0033A0, 0x4A6FD8)
     static let brandOrange = color(0xF2A815, 0xF2A815)
-    static let accent = color(0x2563EB, 0x3B82F6)
-    static let success = color(0x16A34A, 0x22C55E)
+    static let accent = color(0x0058B8, 0x0A84FF)
+    static let agent = color(0x5E5CE6, 0x8482FF)
+    static let success = color(0x1D7A3B, 0x30D158)
+    static let inactiveTab = color(0x8E8E93, 0x8E8E93)
     static let danger = color(0xDC2626, 0xEF4444)
     static let surface = Color(uiColor: .systemGroupedBackground)
     static let card = Color(uiColor: .secondarySystemGroupedBackground)
@@ -19,6 +21,16 @@ enum Theme {
     static let hero = LinearGradient(colors: [brandRed, brandBlue], startPoint: .topLeading, endPoint: .bottomTrailing)
     static let website = URL(string: "https://gusan.aibuben.xyz")!
     static let pricing = URL(string: "https://gusan.aibuben.xyz/#pricing")!
+    static func configureTabBar() {
+        let appearance = UITabBarAppearance()
+        appearance.configureWithDefaultBackground()
+        for item in [appearance.stackedLayoutAppearance, appearance.inlineLayoutAppearance, appearance.compactInlineLayoutAppearance] {
+            item.normal.iconColor = UIColor(inactiveTab)
+            item.normal.titleTextAttributes = [.foregroundColor: UIColor(inactiveTab)]
+        }
+        UITabBar.appearance().standardAppearance = appearance
+        UITabBar.appearance().scrollEdgeAppearance = appearance
+    }
     static func openSettings() { UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!) }
 }
 
@@ -38,6 +50,7 @@ struct PrimaryButton: View {
     let title: String
     var icon: String? = nil
     var busy = false
+    var tint: Color = Theme.accent
     let action: () -> Void
     var body: some View {
         Button(action: action) {
@@ -47,7 +60,7 @@ struct PrimaryButton: View {
                 Text(title).multilineTextAlignment(.center)
             }.font(.headline).frame(maxWidth: .infinity, minHeight: 52).padding(.horizontal, 16)
         }.buttonStyle(.plain).foregroundStyle(.white)
-            .background(Theme.accent, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .background(tint, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .disabled(busy).accessibilityHint(busy ? "Please wait" : title)
     }
 }
