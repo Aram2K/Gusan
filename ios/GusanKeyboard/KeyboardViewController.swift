@@ -64,7 +64,7 @@ final class KeyboardViewController: UIInputViewController {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         settings.refresh()
-        pendingInsert = hasFullAccess ? VoicePendingInsert.read(from: sharedDefaults, account: store.read()?.userID) : nil
+        pendingInsert = hasFullAccess ? VoicePendingInsert.read(from: sharedDefaults, account: store.read().flatMap { $0.userID ?? $0.email }) : nil
         screen.appear(); voice.appear(); agent.appear(); update()
     }
     override func viewDidAppear(_ animated: Bool) {
@@ -117,7 +117,7 @@ final class KeyboardViewController: UIInputViewController {
     }
     @objc private func actionPressed() {
         if let pendingInsert {
-            guard hasFullAccess, VoicePendingInsert.read(from: sharedDefaults, account: store.read()?.userID) == pendingInsert else {
+            guard hasFullAccess, VoicePendingInsert.read(from: sharedDefaults, account: store.read().flatMap { $0.userID ?? $0.email }) == pendingInsert else {
                 self.pendingInsert = nil; update(); return
             }
             let snapshot = context

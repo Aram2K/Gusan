@@ -241,7 +241,7 @@ final class VoiceSession: ObservableObject {
         UIPasteboard.general.string = text
         // The keyboard offers "Insert" the next time a field is focused; a notification says where the text went.
         if let defaults = UserDefaults(suiteName: store.resolution.chosen) {
-            VoicePendingInsert(text: text, at: Date(), account: store.read()?.userID).write(to: defaults)
+            VoicePendingInsert(text: text, at: Date(), account: store.read().flatMap { $0.userID ?? $0.email }).write(to: defaults)
         }
         // No result text in the notice: lock-screen previews would show it.
         let note = UNMutableNotificationContent()
