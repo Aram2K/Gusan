@@ -82,7 +82,10 @@ final class JobTests: XCTestCase {
             XCTAssertFalse(VoiceEdit.containsInsertedResult("Hello world", context: context, snapshot: snapshot))
         }
         XCTAssertFalse(VoiceEdit.containsInsertedResult("", context: VoiceContext(before: "Text", documentID: "one"), snapshot: snapshot))
-        XCTAssertFalse(VoiceEdit.containsInsertedResult("Text", context: VoiceContext(before: "Text"), snapshot: VoiceContext()))
+        XCTAssertTrue(VoiceEdit.containsInsertedResult("Text", context: VoiceContext(before: "Text"), snapshot: VoiceContext()))
+        XCTAssertTrue(VoiceEdit.containsInsertedResult("Text", context: VoiceContext(before: "Text", documentID: ""), snapshot: VoiceContext()))
+        XCTAssertFalse(VoiceEdit.containsInsertedResult("Text", context: VoiceContext(before: "Text", documentID: "one"), snapshot: VoiceContext()))
+        XCTAssertFalse(VoiceEdit.containsInsertedResult("Text", context: VoiceContext(before: "Text"), snapshot: VoiceContext(documentID: "one")))
     }
     func testUndoRejectsSuffixCollisionAndTruncation() {
         let snapshot = VoiceContext(before: "Existing result", after: "Tail", documentID: "one")
