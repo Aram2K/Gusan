@@ -1,78 +1,149 @@
 import SwiftUI
-
-struct PlaygroundCard: View {
-    @EnvironmentObject private var model: AppModel
-    @State private var text = "Thanks for all your help with the launch. The team did a great job!"
-    @FocusState private var focused: Bool
-    @State private var focusedAt = Date.distantFuture
-    private let timer = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
-    var body: some View {
-        AppCard {
-            Text("Try Gusan").font(.title2).bold()
-            Text("Select text → tap the Gusan button → pick an action, or type an instruction.").font(.subheadline).foregroundStyle(.secondary)
-            TextEditor(text: $text).font(.body).frame(minHeight: 120).focused($focused)
-                .onAppear { if ProcessInfo.processInfo.arguments.contains("--gusan-focus-playground") { focused = true } }
-                .padding(8).background(Theme.surface, in: RoundedRectangle(cornerRadius: 14)).scrollContentBackground(.hidden)
-                .accessibilityLabel("Try the Gusan keyboard").accessibilityHint("Select some text, then open Gusan actions in the keyboard")
-            Text(model.diagnostics?.peer.map { $0.timestamp >= focusedAt } == true ? "Gusan is connected." : "Use the globe key to switch to Gusan.").font(.footnote).foregroundStyle(.secondary)
-            if focused { Button("Done typing") { focused = false }.frame(minHeight: 44) }
-        }
-        .onChange(of: focused) { value in if value { focusedAt = Date() } }
-        .onReceive(timer) { _ in if focused { model.refreshDiagnostics() } }
-    }
-}
+import GusanKit
 
 struct HomeView: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var agent: AgentCenter
     @EnvironmentObject private var screen: ScreenMonitor
-    private let examples: [(String, String, String, String)] = [
-        ("Ask Gusan", "sparkles", "Make this warmer: Thanks for the update.", "Thanks so much for keeping me in the loop!"),
-        ("Rephrase", "arrow.triangle.2.circlepath", "We need to do a check of the plan.", "Let's review the plan."),
-        ("Fix grammar", "checkmark.seal", "The team have finish the work.", "The team has finished the work."),
-        ("Email", "envelope", "Thank the team for the launch.", "Hi team, thank you for a fantastic launch…"),
-        ("To-do", "checklist", "Book a room and send the agenda.", "☐ Book a room\n☐ Send the agenda"),
-        ("Translate", "character.bubble", "Thank you!", "Շնորհակալություն։"),
-        ("Summarize", "text.alignleft", "A long update with decisions and next steps…", "The key points, clearly and concisely.")
-    ]
+    @EnvironmentObject private var voice: VoiceSession
+    @AppStorage("gusan.home.mode") private var mode = "smart"
+    @AppStorage("gusan.setup.dismissed") private var setupDismissed = false
+    @State private var instruction = ""
+    @State private var starting = false
+    @State private var error: String?
+    @State private var lastResult: SmartHistory.Entry?
+    @State private var showScreen = false
+    private var notificationsAllowed: Bool {
+        [.authorized, .provisional, .ephemeral].contains(agent.notificationStatus)
+    }
+    private var setupComplete: Bool {
+        model.session != nil && model.keyboardAdded && model.fullAccess == true && notificationsAllowed
+    }
+
     var body: some View {
-        ScreenContent {
-            if screen.isLive { ScreenCard() }
-            AppCard {
-                HStack(alignment: .top, spacing: 12) { BrandMark(); Text("Welcome to Gusan").font(.title2).bold() }
-                Text(model.session?.email ?? "Sign in to use Gusan Cloud.").font(.subheadline).foregroundStyle(.secondary)
-                if model.session == nil {
-                    Button("Sign in") { model.impact(); model.handleURL(URL(string: "gusan://signin")!) }.frame(minHeight: 44)
-                }
-                if model.loadingPlan { ProgressView("Checking your plan…") }
-                else if model.session != nil, model.planError == nil { PlanBadge(pro: model.isPro) }
-                if let error = model.planError {
-                    Text(error).font(.footnote).foregroundStyle(Theme.danger)
-                    Button("Try again") { Task { await model.update() } }.frame(minHeight: 44)
-                }
-                Divider()
-                StatusRow(title: "Keyboard added", detail: model.keyboardAdded ? "Gusan has been used on this iPhone." : "Not checked yet. Add Gusan in Settings.", confirmed: model.keyboardAdded)
-                StatusRow(title: "Full Access", detail: model.fullAccess.map { $0 ? "Enabled at the last keyboard check." : "Turn on Full Access for AI actions." } ?? "Open Gusan to check Full Access.", confirmed: model.fullAccess == true)
-                StatusRow(title: "Ready to write", detail: model.ready ? "Your keyboard can see your sign-in." : (model.session == nil ? "Sign in and finish setup to connect Gusan." : "Finish keyboard setup to connect Gusan."), confirmed: model.ready)
-                Text(model.keyboardCheck).font(.caption).foregroundStyle(.secondary)
-                if !model.setupFinished { PrimaryButton(title: "Finish setup", icon: "arrow.right") { model.impact(); model.resumeSetup() } }
+        List {
+            Section {
+                Picker("Mode", selection: $mode) {
+                    Text("Smart").tag("smart")
+                    Text("Agent").tag("agent")
+                }.pickerStyle(.segmented)
+            } header: { Text("Mode") } footer: {
+                Text("The strip opens in this mode. You can also switch from the chip in the strip.")
             }
-            PlaygroundCard()
-            if !screen.isLive { ScreenCard() }
-            AppCard {
-                NavigationLink { HowToUseView() } label: { Label("How to use Gusan", systemImage: "questionmark.circle").frame(minHeight: 44) }
-                Button("Review keyboard setup") { model.resumeSetup() }.frame(minHeight: 44)
-                Button("Keyboard preferences") { model.selectedTab = .keyboard }.frame(minHeight: 44)
-            }
-            Text("What you can do").font(.title2).bold().padding(.top, 12)
-            ForEach(examples, id: \.0) { example in
-                AppCard {
-                    Label(example.0, systemImage: example.1).font(.headline)
-                    Text("Before").font(.caption).foregroundStyle(.secondary)
-                    Text(example.2).font(.body).foregroundStyle(.secondary)
-                    Image(systemName: "arrow.down").foregroundStyle(Theme.accent).accessibilityLabel("Becomes")
-                    Text(example.3).font(.body)
+            if !setupDismissed && !setupComplete { setupChecklist }
+            if mode == "agent" { agentSections } else { smartSections }
+            Section {
+                NavigationLink { KeyboardSetupView() } label: {
+                    HStack {
+                        Text("Keyboard · Full Access · Mic")
+                        Spacer()
+                        Text(model.ready && voice.permission == .granted ? "On" : "Set up")
+                            .foregroundStyle(model.ready && voice.permission == .granted ? Theme.success : Theme.accent)
+                    }
                 }
             }
-        }.navigationTitle("Home")
+            Section {
+                NavigationLink { ScreenView() } label: {
+                    Label {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Gusan Screen")
+                            Text(screen.isLive ? "On · sees the screen when you speak" : "Sees the screen when you speak")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                        }
+                    } icon: { Image(systemName: "iphone").foregroundStyle(Theme.accent) }
+                }
+            } footer: {
+                Text("Screen sharing requires the iOS broadcast sheet. Deselect the screen icon in the strip for a private moment.")
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("Gusan")
+        .toolbar { ToolbarItem(placement: .navigationBarTrailing) { BrandMark() } }
+        .navigationDestination(isPresented: $showScreen) { ScreenView() }
+        .onAppear {
+            model.refreshDiagnostics(); voice.refreshPermission()
+            lastResult = SmartHistory(group: model.store.resolution.chosen).entries.last
+            if model.openScreenPage { showScreen = true; model.openScreenPage = false }
+        }
+        .onChange(of: model.openScreenPage) { if $0 { showScreen = true; model.openScreenPage = false } }
+        .task { await agent.refreshNotificationStatus() }
+    }
+
+    private var setupChecklist: some View {
+        Section {
+            checklistRow("Sign in", complete: model.session != nil) { model.showingSignIn = true }
+            NavigationLink { KeyboardSetupView() } label: {
+                checklistLabel("Add keyboard", complete: model.keyboardAdded)
+            }
+            checklistRow("Allow Full Access", complete: model.fullAccess == true) { Theme.openSettings() }
+            checklistRow("Allow notifications", complete: notificationsAllowed) {
+                if agent.notificationStatus == .denied { Theme.openSettings() }
+                else { Task { await agent.requestNotifications() } }
+            }
+            Button("Dismiss checklist") { setupDismissed = true }.font(.footnote)
+        } header: { Text("Get ready") } footer: {
+            Text("Open the Gusan keyboard once to check keyboard setup and Full Access.")
+        }
+    }
+
+    private func checklistRow(_ title: String, complete: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) { checklistLabel(title, complete: complete) }.disabled(complete)
+    }
+    private func checklistLabel(_ title: String, complete: Bool) -> some View {
+        Label(title, systemImage: complete ? "checkmark.circle.fill" : "circle")
+            .foregroundStyle(complete ? Theme.success : Theme.accent).frame(minHeight: 36)
+    }
+
+    @ViewBuilder private var smartSections: some View {
+        Section {
+            Label("Speak from your keyboard", systemImage: "mic.fill")
+            Text("Open Gusan with the globe key, tap the mic and say what you need. Select text to edit it; the result goes back where you’re typing.")
+                .foregroundStyle(.secondary)
+        }
+        if let lastResult {
+            Section("Last result") {
+                Button {
+                    UserDefaults.standard.set("smart", forKey: "gusan.sessions.segment")
+                    model.selectedTab = .sessions
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(lastResult.result).lineLimit(2).foregroundStyle(.primary)
+                        Text(lastResult.date.formatted(date: .abbreviated, time: .shortened))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var agentSections: some View {
+        Section {
+            TextField("What should Gusan do?", text: $instruction, axis: .vertical).lineLimit(2...5)
+            Button {
+                let text = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+                Task {
+                    starting = true; error = nil
+                    defer { starting = false }
+                    do {
+                        let task = try await agent.start(AgentIntent(mode: .research, instruction: text))
+                        instruction = ""; model.openSessionID = task.id; model.selectedTab = .sessions
+                    } catch { self.error = error.localizedDescription }
+                }
+            } label: {
+                HStack { if starting { ProgressView().tint(Theme.agent) }; Text(starting ? "Starting…" : "Start session") }
+            }.disabled(starting || !agent.signedIn || agent.atActiveLimit || instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            if !agent.signedIn { Button("Sign in to start") { model.showingSignIn = true } }
+            if let error { Text(error).foregroundStyle(Theme.danger) }
+        } header: { Text("Agent") } footer: {
+            Text("Gusan researches the web. It asks before submitting, buying or sending anything.")
+        }
+        .tint(Theme.agent)
+        Section("Recent agent sessions") {
+            if agent.tasks.isEmpty { Text("No agent sessions yet").foregroundStyle(.secondary) }
+            ForEach(Array(agent.tasks.prefix(3))) { task in
+                Button { model.openSessionID = task.id; model.selectedTab = .sessions } label: { TaskRow(task: task) }
+                    .buttonStyle(.plain)
+            }
+        }
     }
 }

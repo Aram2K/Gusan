@@ -2,8 +2,7 @@ import SwiftUI
 import AuthenticationServices
 import GusanKit
 
-enum AppTab: Hashable { case home, keyboard, activity, account }
-enum OnboardingStep: Int, CaseIterable { case welcome, signIn, addKeyboard, mainKeyboard, tryIt }
+enum AppTab: Hashable { case home, sessions, vault, settings }
 
 @MainActor
 final class AppModel: NSObject, ObservableObject, ASWebAuthenticationPresentationContextProviding {
@@ -19,11 +18,9 @@ final class AppModel: NSObject, ObservableObject, ASWebAuthenticationPresentatio
     @Published var usingGoogle = false
     @Published var diagnostics: SessionDiagnostics?
     @Published var selectedTab: AppTab = .home
-    @Published var pendingTaskID: UUID?
+    @Published var openSessionID: UUID?
     /// Set by `gusan://screen` (the keyboard's "Open"); Home opens the Gusan Screen page and clears it.
     @Published var openScreenPage = false
-    @Published var showingOnboarding = false
-    @Published var onboardingStep: OnboardingStep = .welcome
     @Published var showingSignIn = false
     @Published var fromKeyboard = false
     private var webSession: ASWebAuthenticationSession?
@@ -31,8 +28,6 @@ final class AppModel: NSObject, ObservableObject, ASWebAuthenticationPresentatio
     private var updating = false
     private let impactGenerator = UIImpactFeedbackGenerator(style: .light)
     private let notificationGenerator = UINotificationFeedbackGenerator()
-    var pendingSignIn = false
-    var pendingOnboarding = false
 
     override init() {
         super.init()
@@ -47,14 +42,9 @@ final class AppModel: NSObject, ObservableObject, ASWebAuthenticationPresentatio
         #endif
         session = store.read(); diagnostics = store.diagnostics()
         loadingPlan = session != nil
-        showingOnboarding = !UserDefaults.standard.bool(forKey: "onboardingComplete")
         #if DEBUG
-        if args.contains("--gusan-skip-onboarding") { showingOnboarding = false }
         if let index = args.firstIndex(of: "--gusan-keyboard-agent-demo"), args.indices.contains(index + 1) { UIPasteboard(name: UIPasteboard.Name("gusan.debug.agentDemo"), create: true)?.string = args[index + 1] }
-        if let index = args.firstIndex(of: "--gusan-open-task"), args.indices.contains(index + 1) { selectedTab = .activity; pendingTaskID = UUID(uuidString: args[index + 1]) }
-        if let index = args.firstIndex(of: "--gusan-onboarding-step"), args.indices.contains(index + 1), let number = Int(args[index + 1]), let step = OnboardingStep(rawValue: number) {
-            onboardingStep = step; showingOnboarding = true
-        }
+        if let index = args.firstIndex(of: "--gusan-open-task"), args.indices.contains(index + 1) { selectedTab = .sessions; openSessionID = UUID(uuidString: args[index + 1]) }
         #endif
     }
     var keyboardAdded: Bool { diagnostics?.peer != nil }
@@ -62,10 +52,7 @@ final class AppModel: NSObject, ObservableObject, ASWebAuthenticationPresentatio
     var keyboardHasSession: Bool { diagnostics?.peer?.stores.contains { $0.hasSession && $0.readable } == true }
     var sessionState: SessionState { store.sessionState(fullAccess: fullAccess) }
     var ready: Bool { keyboardHasSession && sessionState.canRunActions }
-    var mainKeyboardConfirmed: Bool { UserDefaults.standard.bool(forKey: "mainKeyboardConfirmed") }
-    var setupFinished: Bool { ready && mainKeyboardConfirmed }
     var keyboardCheck: String { diagnostics?.peer.map { "Last checked " + $0.timestamp.formatted(date: .omitted, time: .shortened) } ?? "Open the Gusan keyboard to check setup." }
-    var missingStep: OnboardingStep { session == nil ? .signIn : (!keyboardAdded || fullAccess != true ? .addKeyboard : (mainKeyboardConfirmed ? .tryIt : .mainKeyboard)) }
     func refreshDiagnostics() { diagnostics = store.diagnostics() }
     func update() async {
         guard !updating else { return }; updating = true
@@ -123,21 +110,22 @@ final class AppModel: NSObject, ObservableObject, ASWebAuthenticationPresentatio
         guard url.scheme == "gusan" else { return }
         switch url.host {
         case "task":
-            pendingTaskID = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "id" }?.value.flatMap(UUID.init)
-            selectedTab = .activity
+            openSessionID = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "id" }?.value.flatMap(UUID.init)
+            selectedTab = .sessions
+        case "session":
+            openSessionID = url.pathComponents.last.flatMap(UUID.init)
+            selectedTab = .sessions
         case "signin":
             session = store.read(); refreshDiagnostics()
             cancelGoogle(); authError = nil; fromKeyboard = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.contains { $0.name == "from" && $0.value == "keyboard" } == true
-            if showingOnboarding { pendingSignIn = true; showingOnboarding = false }
-            else { showingSignIn = true }
+            showingSignIn = true
         case "onboarding":
-            cancelGoogle(); onboardingStep = .welcome
-            if showingSignIn { pendingOnboarding = true; showingSignIn = false }
-            else { showingOnboarding = true }
+            cancelGoogle(); showingSignIn = false; selectedTab = .home
+            UserDefaults.standard.set(false, forKey: "gusan.setup.dismissed")
         case "keyboard-settings":
-            showingSignIn = false; showingOnboarding = false; selectedTab = .keyboard
+            showingSignIn = false; selectedTab = .settings
         case "screen":
-            showingSignIn = false; showingOnboarding = false; selectedTab = .home; openScreenPage = true
+            showingSignIn = false; selectedTab = .home; openScreenPage = true
         case "open-settings":
             UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!)
         case "auth-callback":
@@ -155,8 +143,6 @@ final class AppModel: NSObject, ObservableObject, ASWebAuthenticationPresentatio
         default: break
         }
     }
-    func finishOnboarding() { UserDefaults.standard.set(true, forKey: "onboardingComplete"); showingOnboarding = false }
-    func resumeSetup() { onboardingStep = missingStep; showingOnboarding = true }
     func impact() { if settings.haptics { impactGenerator.impactOccurred(); impactGenerator.prepare() } }
     private func feedback(_ type: UINotificationFeedbackGenerator.FeedbackType) { if settings.haptics { notificationGenerator.notificationOccurred(type); notificationGenerator.prepare() } }
     private func friendly(_ error: Error) -> String {

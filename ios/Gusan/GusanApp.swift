@@ -7,6 +7,7 @@ struct GusanApp: App {
     @StateObject private var agent: AgentCenter
     @Environment(\.scenePhase) private var scenePhase
     init() {
+        Theme.configureTabBar()
         let model = AppModel()
         let agent = AgentCenter(model: model)
         _model = StateObject(wrappedValue: model); _agent = StateObject(wrappedValue: agent)
@@ -22,7 +23,6 @@ struct GusanApp: App {
                 #if DEBUG
                 .overlay(alignment: .bottom) { AgentCardPreview() }
                 #endif
-                .onChange(of: model.pendingTaskID) { if let id = $0 { agent.openTaskID = id; model.pendingTaskID = nil } }
                 .onOpenURL { if $0.host == "voice" { voice.handleURL($0) } else { model.handleURL($0) } }
                 .sheet(isPresented: $voice.presented, onDismiss: {
                     if voiceSignInRequested {

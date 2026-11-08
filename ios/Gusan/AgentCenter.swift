@@ -42,7 +42,6 @@ final class AgentCenter: NSObject, ObservableObject {
     }
 
     var signedIn: Bool { model.session != nil }
-    var privacyMode: Bool { model.settings.privacyMode }
     var activeCount: Int { tasks.filter { !$0.status.isTerminal }.count }
     var atActiveLimit: Bool { activeCount >= AgentTask.maxActive }
     /// Tasks the user confirmed from this device; if one is awaiting again, the server is asking to confirm again.
@@ -53,11 +52,6 @@ final class AgentCenter: NSObject, ObservableObject {
     func canRunAgain(_ task: AgentTask) -> Bool { instructions[task.id] != nil || task.title.count < 120 }
     func needsReconfirm(_ task: AgentTask) -> Bool { task.status == .awaitingConfirmation && confirmedIDs.contains(task.id) }
 
-    func setPrivacyMode(_ on: Bool) {
-        objectWillChange.send()
-        model.settings.privacyMode = on
-        if on { poller?.cancel(); poller = nil; tasks = []; error = nil } else if active { setActive(true) }
-    }
     var unseenCount: Int { tasks.filter(\.needsAttention).count }
     var hasLiveTasks: Bool { tasks.contains { !$0.status.isTerminal } }
     var isDemo: Bool { model.session?.accessToken == "gusan-debug-no-network" }
@@ -84,7 +78,7 @@ final class AgentCenter: NSObject, ObservableObject {
     // MARK: Loading and polling
 
     func refresh() async {
-        guard !privacyMode, let service = currentService() else { tasks = []; return }
+        guard let service = currentService() else { tasks = []; return }
         loading = tasks.isEmpty
         defer { loading = false }
         do {
@@ -107,7 +101,7 @@ final class AgentCenter: NSObject, ObservableObject {
         self.active = active
         poller?.cancel(); poller = nil
         guard active else { scheduleBackgroundRefresh(); return }
-        if notificationStatus == .notDetermined, !privacyMode, tracker.activeTaskID != nil { Task { await requestNotifications() } }
+        if notificationStatus == .notDetermined, tracker.activeTaskID != nil { Task { await requestNotifications() } }
         poller = Task { @MainActor [weak self] in
             while let self, self.active, !Task.isCancelled {
                 await self.refresh()
@@ -123,7 +117,6 @@ final class AgentCenter: NSObject, ObservableObject {
 
     @discardableResult
     func start(_ intent: AgentIntent, context: String? = nil) async throws -> AgentTask {
-        guard !privacyMode else { throw AgentError.privacyMode }
         guard let service = currentService() else { throw AgentError.unauthorized }
         let task = try await service.start(intent, context: context)
         instructions[task.id] = (intent.instruction, context)
@@ -162,7 +155,6 @@ final class AgentCenter: NSObject, ObservableObject {
     }
 
     private func mutate(_ id: UUID, _ operation: (AgentService) async throws -> AgentTask) async {
-        guard !privacyMode else { error = AgentError.privacyMode.errorDescription; return }
         guard let service = currentService() else { return }
         do {
             let updated = try await operation(service)
@@ -260,9 +252,9 @@ extension AgentCenter: UNUserNotificationCenterDelegate {
         let action = response.actionIdentifier
         await MainActor.run {
             switch action {
-            case "confirm" where !self.privacyMode: Task { await self.confirm(id) }
-            case "cancel" where !self.privacyMode: Task { await self.cancel(id) }
-            default: self.openTaskID = id; self.model.selectedTab = .activity
+            case "confirm": Task { await self.confirm(id) }
+            case "cancel": Task { await self.cancel(id) }
+            default: self.model.openSessionID = id; self.model.selectedTab = .sessions
             }
         }
     }

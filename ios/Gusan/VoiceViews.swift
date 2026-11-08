@@ -98,7 +98,6 @@ struct VoiceSettingsSection: View {
     @ObservedObject var voice: VoiceSession
     @Environment(\.scenePhase) private var scenePhase
     @State private var language = "auto"
-    @State private var action = VoiceAction.transcribeOnly
     @State private var minutes = 2
     @State private var autoReturn = true
     var body: some View {
@@ -108,14 +107,13 @@ struct VoiceSettingsSection: View {
             LabeledContent("Microphone", value: voice.permission == .granted ? "Allowed" : voice.permission == .denied ? "Denied" : "Not requested")
             if voice.permission == .denied { Button("Open Settings") { UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!) } }
             if !voice.error.isEmpty { Label(voice.inAppError, systemImage: "exclamationmark.circle").foregroundStyle(.secondary) }
-            Picker("Spoken language", selection: $language) { ForEach(VoiceSettings.languages, id: \.code) { Text($0.name).tag($0.code) } }.onChange(of: language) { voice.settings.language = $0 }
-            Picker("Default voice action", selection: $action) { ForEach(VoiceAction.all, id: \.self) { Text($0.label).tag($0) } }.onChange(of: action) { voice.settings.defaultAction = $0 }
-            Picker("Keep session alive", selection: $minutes) { ForEach(VoiceSettings.idleOptions, id: \.self) { Text("\($0) min").tag($0) } }.onChange(of: minutes) { voice.settings.idleMinutes = $0 }
+            Picker("Language I speak", selection: $language) { ForEach(VoiceSettings.languages, id: \.code) { Text($0.name).tag($0.code) } }.onChange(of: language) { voice.settings.language = $0 }
+            Picker("Ready window", selection: $minutes) { ForEach(VoiceSettings.idleOptions, id: \.self) { Text("\($0) min").tag($0) } }.onChange(of: minutes) { voice.settings.idleMinutes = $0 }
             Text("An open session reserves the mic and uses some battery. Capture pauses while idle; iOS may end the window early.").font(.footnote).foregroundStyle(.secondary)
             #if GUSAN_SIDELOAD
             Toggle("Return to the previous app automatically (sideload only)", isOn: $autoReturn).onChange(of: autoReturn) { voice.settings.autoReturn = $0 }
             #endif
-        }.onAppear { language = voice.settings.language; action = voice.settings.defaultAction; minutes = voice.settings.idleMinutes; autoReturn = voice.settings.autoReturn; voice.refreshPermission() }
+        }.onAppear { language = voice.settings.language; minutes = voice.settings.idleMinutes; autoReturn = voice.settings.autoReturn; voice.refreshPermission() }
             .onChange(of: scenePhase) { if $0 == .active { voice.refreshPermission() } }
     }
 }
