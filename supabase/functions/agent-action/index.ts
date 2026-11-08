@@ -671,26 +671,33 @@ async function startDevin(db: any, userId: string, body: Obj) {
     p_max_active: 2, p_max_per_day: 40, p_deadline_s: 86400,
   });
   let row = taskRPCResult(data, error);
-  row = await save(db, row, { provider: "devin" });
-  await saveRun(db, row, config);
+  let run: Obj = config;
   try {
+    row = await save(db, row, { provider: "devin" });
+    await saveRun(db, row, config);
     const session = await devinRequest(devinPath(config), "POST", {
       prompt: `${prompt(instruction, body.context)}\n\nYou were asked from the Gusan iPhone keyboard. Do not merge PRs, deploy, spend money or delete data; open PRs for code changes and finish with a short plain-text summary for a phone screen.`,
       max_acu_limit: 10,
     });
     if (typeof session.session_id !== "string" || !session.session_id) throw new Failure("devin_error", 502);
-    const run = { ...config, devin_session_id: session.session_id, devin_session_url: session.url ?? null };
+    run = { ...config, devin_session_id: session.session_id, devin_session_url: session.url ?? null };
     await saveRun(db, row, run);
     row = await loadTask(db, row.id, userId);
     if (terminal(row)) { await terminateDevin(run); return row; }
     return await save(db, row, { steps: [{ at: new Date().toISOString(), text: `Devin session started: ${devinURL(run)}` }] }, true);
   } catch (error) {
+    // The Devin session must not outlive a task that reports failure.
+    await terminateDevin(run);
     await save(db, row, { status: "failed", error_code: "devin_error", finished_at: new Date().toISOString() }, true);
     throw error;
   }
 }
 async function syncDevin(db: any, row: Obj, run: Obj) {
   if (terminal(row)) return row;
+  if (Date.now() > Date.parse(row.deadline_at)) {
+    await terminateDevin(run);
+    return save(db, row, { status: "timed_out", error_code: "timeout", finished_at: new Date().toISOString() }, true);
+  }
   const session = await devinRequest(devinPath(run));
   let messages = session.messages ?? [];
   if (run.devin_api === "v3") {
@@ -736,9 +743,19 @@ async function devinAction(db: any, row: Obj, body: Obj) {
   if (body.action === "status") return json(task(await syncDevin(db, row, run)));
   if (body.action === "confirm") return json({ error: "not_awaiting_confirmation" }, 409);
   if (body.action === "continue") {
-    await devinRequest(run.devin_api === "v3" ? `${devinPath(run)}/messages`
-      : `/v1/session/${encodeURIComponent(run.devin_session_id)}/message`, "POST", { message: body.message.trim() });
-    return json(task(await save(db, row, { status: "running", result: null, outcome: null, error_code: null, finished_at: null, seen_at: null })));
+    // Follow-ups are paid Devin work: same active/daily caps as a new task, claimed before posting.
+    const claimed = await db.rpc("claim_agent_follow_up", {
+      p_user_id: row.user_id, p_task_id: row.id, p_max_active: 2, p_max_per_day: 40, p_deadline_s: 86400,
+    });
+    row = taskRPCResult(claimed.data, claimed.error);
+    try {
+      await devinRequest(run.devin_api === "v3" ? `${devinPath(run)}/messages`
+        : `/v1/session/${encodeURIComponent(run.devin_session_id)}/message`, "POST", { message: body.message.trim() });
+    } catch (error) {
+      await save(db, row, { status: "failed", error_code: "devin_error", finished_at: new Date().toISOString() }, true);
+      throw error;
+    }
+    return json(task(row));
   }
   await terminateDevin(run);
   if (body.action === "delete") {

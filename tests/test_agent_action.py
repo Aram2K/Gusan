@@ -59,6 +59,12 @@ for (let i=0; i<scenarios.length; i++) {
   rpc:async(name,args)=>{
    dbCalls.push({name,args});
    if(name==='is_pro')return {data:s.pro??true,error:s.proError?{}:null};
+   if(name==='claim_agent_follow_up'){
+    if(args.p_user_id!==row.user_id||args.p_task_id!==row.id)return {data:null,error:{code:'P0004'}};
+    if(s.quota)return {data:null,error:{code:s.quota}};
+    row={...row,status:'running',result:null,outcome:null,error_code:null,finished_at:null,seen_at:null,deadline_at:new Date(Date.now()+args.p_deadline_s*1000).toISOString()};
+    return {data:structuredClone(row),error:null};
+   }
    if(name==='continue_agent_task'){
     const source=row.id===args.p_task_id?{row,run}:priorTasks.find(p=>p.row.id===args.p_task_id);
     if(!source||args.p_user_id!==source.row.user_id)return {data:null,error:{code:'P0004'}};
@@ -2135,3 +2141,24 @@ def test_delete_allowed_without_pro(run):
     out, = run({"pro": False, "body": {"action": "delete", "task_id": ID}})
     assert out["replies"][0]["status"] == 200
     assert out["replies"][0]["body"] == {"deleted": True}
+
+
+@pytest.mark.parametrize("quota", ["P0001", "P0002"])
+def test_devin_follow_up_claims_quota_before_posting(run, quota):
+    result, = run({"env": {"Devin_API_key": "apk_test"}, "row": {"provider": "devin", "status": "completed"},
+                   "run": {"devin_api": "v3", "devin_org_id": "org1", "devin_session_id": "devin-test"},
+                   "quota": quota, "body": {"action": "continue", "task_id": ID, "message": "Follow up"}})
+    assert result["replies"][0]["status"] == 429
+    assert result["calls"] == []
+    assert any(c.get("name") == "claim_agent_follow_up" for c in result["dbCalls"])
+
+
+def test_devin_status_times_out_past_deadline_and_terminates(run):
+    result, = run({"env": {"Devin_API_key": "apk_test"}, "row": {"provider": "devin", "status": "running",
+                   "deadline_at": "2000-01-01T00:00:00.000Z"},
+                   "run": {"devin_api": "v1", "devin_session_id": "devin-test"},
+                   "devinSession": {"status_enum": "working", "messages": []},
+                   "body": {"action": "status", "task_id": ID}})
+    assert result["row"]["status"] == "timed_out"
+    assert result["row"]["error_code"] == "timeout"
+    assert [c["method"] for c in result["calls"]] == ["DELETE"]
