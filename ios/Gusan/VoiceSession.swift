@@ -81,7 +81,8 @@ final class VoiceSession: ObservableObject {
         if channel.consumeLaunch(nonce: items?.first { $0.name == "nonce" }?.value) {
             keyboardActivation = true
             start(pendingWithin: 60)
-        } else {
+        } else if startup == nil, machine.requestID == nil,
+                  ![VoicePhase.recording, .transcribing, .thinking].contains(machine.phase) {
             error = "Couldn't start — try again"
             let failure = channel.failureStatus(message: error)
             try? channel.write(status: failure); channel.post(.status)
