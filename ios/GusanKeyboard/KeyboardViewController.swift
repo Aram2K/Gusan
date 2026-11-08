@@ -43,7 +43,13 @@ final class KeyboardViewController: UIInputViewController {
         strip.action.addTarget(self, action: #selector(actionPressed), for: .touchUpInside)
         strip.status.addTarget(self, action: #selector(statusPressed), for: .touchUpInside)
         onVoice = { [weak self] in self?.voice.toggle() }
-        voice.onChange = { [weak self] in self?.scheduleUpdate() }
+        voice.onChange = { [weak self] in
+            guard let self else { return }
+            if voice.phase == .failed || !voice.hasPendingRequest {
+                firstFrame?.cancel(); lastFrame?.cancel(); firstFrame = nil; lastFrame = nil
+            }
+            scheduleUpdate()
+        }
         voice.onStart = { [weak self] in self?.beginTake() }
         voice.onFinish = { [weak self] in self?.finishTake() }
         voice.onTranscript = { [weak self] text, context in self?.process(text, context: context) }

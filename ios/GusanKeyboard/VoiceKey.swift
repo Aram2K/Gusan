@@ -58,6 +58,7 @@ final class VoiceKeyController: NSObject {
     private var presentation: Presentation?
     private var pending = KeyboardVoiceState()
     private var deadline = KeyboardVoiceDeadline()
+    var hasPendingRequest: Bool { pending.requestID != nil && pending.requestID != pending.insertedID && pending.requestID != cancelledID }
     private var status: VoiceStatus?
     private var cancelledID: UUID?
     private var action: VoiceAction?
@@ -186,8 +187,8 @@ final class VoiceKeyController: NSObject {
     private func refresh() {
         if !preview, let expired = deadline.expiry(pending: pending, status: status) {
             cancelledID = pending.requestID
-            if expired == .processing { send(.cancel) }
             if let id = pending.requestID { channel.discardRequest(id) }
+            if expired == .processing { send(.cancel) }
             pending = KeyboardVoiceState(); phase = .off
             show(expired == .acknowledgement ? "Gusan didn't start — tap mic to retry" : "Timed out — Retry", action: expired == .processing ? "Retry" : nil)
             updateFallbackTimer(); return
