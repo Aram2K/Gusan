@@ -18,7 +18,8 @@
 //   stop: task_id UUID, cancel any active phase and clean up the vault (200).
 //     Terminal tasks retain their status/result and still run session/vault cleanup.
 // Responses are task objects: task_id, mode, status, title, steps,
-// confirmation ({summary, action_kind, start_url, steps} | null), result ({markdown, links,
+// confirmation ({summary, action_kind, start_url, steps} | null), result ({markdown, links
+// ({title, url, kind: listing | search | source}),
 // images} | null), outcome, error_code, created_at, updated_at, finished_at,
 // deadline_at. No session or call ids are client-visible.
 // Statuses: queued, running, awaiting_confirmation, completed, failed,
@@ -43,6 +44,8 @@
 // Missing research links fall back to up to 8 private trajectory sources,
 // ranked by visit count then recency, excluding search result pages. Follow-ups
 // prefer visits after their matching user message, falling back to all visits.
+// Listing citations with repeated URLs or search/category/non-item targets are
+// labeled search in both links and markdown; this is heuristic, not verification.
 // Execute is submit-once. Sync reactively stops duplicate_action and
 // off_plan_navigation from observable events; this is not a pre-action gate.
 // Errors: bad_request (400, field), unauthorized (401), privacy_mode and
@@ -235,6 +238,42 @@ function safeResult(answer: unknown) {
       url(s, true)
     ).slice(0, 8),
   };
+}
+function classifyResultLinks(result: Obj, answer: unknown) {
+  const listingLabel = /\b(?:voir l['’]annonce|view listing|listing|annonce|offer|offre)\b/i;
+  const raw = decodePlanJSON(answer) as Obj;
+  const counts = new Map<string, number>();
+  const markdownCounts = new Map<string, number>();
+  const add = (map: Map<string, number>, href: unknown) => {
+    if (typeof href === "string") map.set(href, (map.get(href) ?? 0) + 1);
+  };
+  for (const link of Array.isArray(raw?.links) ? raw.links : []) {
+    if (listingLabel.test(String(link?.title ?? ""))) add(counts, link?.url);
+  }
+  const recommended = /(?:recommend(?:ed|ations)?|best deals|meilleur|sélection|comparaison|offres)/i.test(result.markdown);
+  const markdownLink = /\[([^\]]*)\]\(([^\s)]+)\)/g;
+  for (const match of result.markdown.matchAll(markdownLink)) {
+    const line = result.markdown.slice(0, match.index).split("\n").at(-1) ?? "";
+    if (listingLabel.test(match[1]) || (recommended && /^\s*(?:[-*]|\d+[.)])\s+/.test(line))) {
+      add(markdownCounts, match[2]);
+    }
+  }
+  for (const [href, count] of markdownCounts) counts.set(href, Math.max(counts.get(href) ?? 0, count));
+  const kind = (href: string) => {
+    try {
+      const parsed = new URL(href);
+      const search = /(?:^|\/)(?:search|recherche|categor(?:y|ies))(?:\/|$)/i.test(parsed.pathname) ||
+        [...parsed.searchParams.keys()].some((key) => /^(?:q|text|query|category|search)$/i.test(key));
+      const item = /\/(?:ad|item|dp|p)\/[^/]+|\/\d+(?:\/|$)/i.test(parsed.pathname);
+      if (search || (counts.has(href) && ((counts.get(href) ?? 0) > 1 || !item))) return "search";
+      return counts.has(href) || item ? "listing" : "source";
+    } catch { return "source"; }
+  };
+  result.links = result.links.map((link: Obj) => ({ ...link, kind: kind(link.url) }));
+  result.markdown = result.markdown.replace(markdownLink, (match: string, title: string, href: string) =>
+    counts.has(href) && kind(href) === "search" && !title.includes("(search results)")
+      ? `[${title} (search results)](${href})` : match);
+  return result;
 }
 const SUBMIT_ONCE =
   "Complete and verify every fill step before the single final irreversible action. Perform that action exactly once. Never go back, refill, or resubmit after it. If something is wrong after the irreversible action, or it was triggered early, stop and report instead of retrying.";
@@ -1298,6 +1337,7 @@ async function sync(db: any, row: Obj, wait = 0) {
     if (row.mode === "research" && patch.result && !patch.result.links.length) {
       patch.result.links = sourceLinks(run.plan ?? {});
     }
+    if (patch.result) patch.result = classifyResultLinks(patch.result, final.answer ?? final.latest_answer);
     patch.outcome =
       ["success", "partial", "infeasible", "blocked"].includes(final.outcome)
         ? final.outcome

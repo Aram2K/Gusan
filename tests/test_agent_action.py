@@ -395,7 +395,7 @@ def test_terminal_and_progress(run):
     body = out["replies"][0]["body"]
     assert body["status"] == "completed" and len(body["result"]["markdown"]) == 20000
     assert body["steps"] == [{"at": "now", "text": "Looking around"}]
-    assert body["result"]["links"] == [{"url": "https://ok.test", "title": "ok"}]
+    assert body["result"]["links"] == [{"url": "https://ok.test", "title": "ok", "kind": "source"}]
     assert body["result"]["images"] == ["https://ok.test/a"]
     assert out["row"]["event_index"] == 1
     assert "SECRET answer" not in " ".join(out["logs"])
@@ -1150,6 +1150,39 @@ def test_empty_links_and_link_caps(run):
     assert empty["row"]["result"]["links"] == []
     assert len(capped["row"]["result"]["links"]) == 20
     assert all(len(link["title"]) == 200 for link in capped["row"]["result"]["links"])
+
+
+@pytest.mark.parametrize("href", ["https://market.example/search?text=phone",
+    "https://market.example/recherche", "https://market.example/category/phones",
+    "https://market.example/?q=phone", "https://market.example/phones"])
+def test_listing_search_links_are_downgraded_and_markdown_relabelled(run, href):
+    markdown = "\n".join(f"{i}. [Voir l'annonce]({href})" for i in range(1, 4))
+    out, = run({"change": answered({"markdown": markdown, "links": [
+        {"title": "Voir l'annonce", "url": href}] * 3})})
+    assert out["row"]["result"]["links"] == [{"title": "Voir l'annonce", "url": href, "kind": "search"}]
+    assert out["row"]["result"]["markdown"].count("(search results)") == 3
+
+
+def test_distinct_item_links_remain_listings_without_double_counting_markdown(run):
+    links = [{"title": "View listing", "url": f"https://market.example/ad/{i}"} for i in [123, 456, 789]]
+    markdown = "\n".join(f"[{link['title']}]({link['url']})" for link in links)
+    out, = run({"change": answered({"markdown": markdown, "links": links})})
+    assert [link["kind"] for link in out["row"]["result"]["links"]] == ["listing"] * 3
+    assert out["row"]["result"]["markdown"] == markdown
+
+
+def test_duplicate_item_urls_presented_as_different_listings_are_search(run):
+    out, = run({"change": answered({"markdown": "Best deals:\n1. [Phone A](https://market.example/ad/123)\n"
+        "2. [Phone B](https://market.example/ad/123)"})})
+    assert out["row"]["result"]["links"][0]["kind"] == "search"
+    assert out["row"]["result"]["markdown"].count("(search results)") == 2
+
+
+def test_result_link_kinds_handle_empty_links_and_source_citations(run):
+    empty, source = run({"change": answered({"markdown": "Nothing found"})},
+        {"change": answered({"markdown": "[Documentation](https://docs.example/guide)"})})
+    assert empty["row"]["result"]["links"] == []
+    assert source["row"]["result"]["links"][0]["kind"] == "source"
 
 
 def source_observation(url, mode="textual_web"):
