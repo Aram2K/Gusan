@@ -51,7 +51,9 @@ public struct ScreenChannel {
     public init(container: URL?, group: String = "com.aram2k.gusan", pasteboardAllowed: @escaping () -> Bool = { true }) {
         let directory = container?.appendingPathComponent("screen", isDirectory: true)
         if let directory { try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
-        self.init(stores: [FileSessionBackend(container: directory), NamedSessionPasteboard(namespace: "com.aram2k.gusan.screen", lifetime: 60, keyLifetimes: Self.lifetimes, accessAllowed: pasteboardAllowed)], group: group)
+        let keychain = SharedKeychain.backend(named: "screen", maxBytes: 1024 * 1024)
+        self.init(stores: [FileSessionBackend(container: directory), keychain,
+                           NamedSessionPasteboard(namespace: "com.aram2k.gusan.screen", lifetime: 60, keyLifetimes: Self.lifetimes, accessAllowed: pasteboardAllowed)].compactMap { $0 }, group: group)
     }
     init(stores: [SessionBackend], group: String = "com.aram2k.gusan", now: @escaping () -> Date = Date.init) {
         self.stores = stores; self.group = group; self.now = now
