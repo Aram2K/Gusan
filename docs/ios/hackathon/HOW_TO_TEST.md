@@ -11,6 +11,7 @@ Gusan is an iPhone keyboard (iOS 17+). We don't have an Apple Developer account 
 4. Open Gusan and sign in with the demo account (ask us for the login).
 5. Settings › General › Keyboard › Keyboards › Add New Keyboard › **Gusan** › turn on **Allow Full Access**.
 6. In Notes or WhatsApp, hold the globe key and pick Gusan.
+7. To make Gusan the keyboard that opens first: Settings › General › Keyboard › Keyboards › Edit, then drag Gusan to the top.
 
 ## What to try
 - **Smart:** select a message or put the cursor in a reply, tap the mic, and say "reply that I'm free at 3". The text appears at the cursor, with Undo.
