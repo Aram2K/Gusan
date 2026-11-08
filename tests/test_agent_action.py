@@ -730,7 +730,7 @@ def test_string_steps_are_normalized(run, steps):
 
 @pytest.mark.parametrize("source", ["answer", "latest", "event"])
 def test_answer_validation_failure_salvages_raw_text(run, source):
-    text = "Proposed action at https://example.com/send\n1. Recipient Alice\n2. Amount $10\n3. Click Send"
+    text = "Proposed action at https://example.com/send\nPlan:\n1. Recipient Alice\n2. Amount $10\n3. Click Send"
     change = {"status": "failed", "error_code": "answer_validation", "answer": None}
     scenario = {"row": {"mode": "do"}, "change": change}
     if source == "answer":
@@ -758,7 +758,7 @@ def test_answer_validation_without_salvage_retries_then_plan_missing(run):
 
 
 def test_retry_validation_failure_can_also_be_salvaged(run):
-    text = "- Recipient Alice\n- Amount $10\n- Click Send"
+    text = "## Steps\n- Recipient Alice\n- Amount $10\n- Click Send"
     out, = run({"row": {"mode": "do"}, "run": {"plan": {"instruction": "Send at https://example.com/send"}},
         "requests": [
             {"body": {"action": "status", "task_id": ID}, "change": answered("Cannot act")},
@@ -780,7 +780,7 @@ def test_string_steps_still_reject_oversized_values(run, steps):
 
 @pytest.mark.parametrize("latest,expected", [
     (None, "failed"),
-    ("https://example.com/send\n1. Recipient Alice\n2. Amount $10\n3. Click Send", "awaiting_confirmation"),
+    ("https://example.com/send\nProposed steps\n1. Recipient Alice\n2. Amount $10\n3. Click Send", "awaiting_confirmation"),
 ])
 def test_retry_validation_failure_without_answer_event(run, latest, expected):
     out, = run({"row": {"mode": "do"}, "latest": latest, "requests": [
@@ -794,3 +794,18 @@ def test_retry_validation_failure_without_answer_event(run, latest, expected):
             "status": "failed", "error_code": "answer_validation", "answer": None}}]})
     assert out["row"]["status"] == expected
     assert out["row"]["error_code"] == ("plan_missing" if expected == "failed" else None)
+
+
+@pytest.mark.parametrize("text", [
+    "I can't do this because:\n- the browser is read-only\n- forms can't be filled",
+    "Plan:\nI can't do this because:\n- the browser is read-only\n- forms can't be filled",
+])
+def test_refusal_bullets_are_not_salvaged_as_a_plan(run, text):
+    out, = run({"row": {"mode": "do"},
+        "run": {"plan": {"instruction": "Submit https://example.com/send"}},
+        "requests": [
+            {"body": {"action": "status", "task_id": ID}, "change": answered({"markdown": text})},
+            {"body": {"action": "status", "task_id": ID}, "change": answered({"markdown": text}, retry=True)}]})
+    assert [r["body"]["status"] for r in out["replies"]] == ["running", "failed"]
+    assert out["row"]["error_code"] == "plan_missing"
+    assert out["row"]["confirmation"] is None
