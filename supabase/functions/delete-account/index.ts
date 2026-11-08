@@ -78,6 +78,12 @@ Deno.serve(async (req) => {
   if (!SERVICE_KEY) return json({ error: "server_misconfigured" }, 500);
   const svc = createClient(SUPABASE_URL, SERVICE_KEY);
 
+  const { data: pendingCleanup, error: cleanupError } = await svc.from("agent_tasks")
+    .select("id,agent_task_runs!inner(session_cleanup_pending)")
+    .eq("user_id", user.id).eq("agent_task_runs.session_cleanup_pending", true).limit(1);
+  if (cleanupError) return json({ error: "storage_error" }, 500);
+  if (pendingCleanup?.length) return json({ error: "session_cleanup_pending" }, 409);
+
   // 1. Cancel any live Stripe subscription so deletion never keeps billing.
   let stripeCancelled = false;
   try {

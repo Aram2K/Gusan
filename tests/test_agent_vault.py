@@ -274,6 +274,31 @@ def test_sweep_does_not_stop_active_or_unmarked_sessions(run):
         assert not any("/sessions/" in c["url"] for c in out["calls"])
 
 
+def test_pending_session_cleanup_survives_task_and_account_deletion():
+    sql = (ROOT / "supabase/migrations/202611080002_agent_session_cleanup.sql").read_text().lower()
+    policy = re.search(r"create policy agent_tasks_owner_delete[^;]+", sql).group()
+    assert "drop policy agent_tasks_owner_delete on public.agent_tasks" in sql
+    assert "(select auth.uid()) = user_id" in policy
+    assert "status in ('completed', 'failed', 'cancelled', 'timed_out')" in policy
+    assert "public.agent_task_deletion_allowed(id)" in policy
+    helper = sql.split("create function public.agent_task_deletion_allowed")[1].split("$$;")[0]
+    assert "security definer set search_path = ''" in helper
+    assert "not exists" in helper and "from public.agent_task_runs" in helper
+    assert "task_id = p_task_id and session_cleanup_pending" in helper
+    assert "user_id = (select auth.uid())" in helper
+    assert "revoke all on function public.agent_task_deletion_allowed(uuid) from public, anon, authenticated, service_role" in sql
+    assert "grant execute on function public.agent_task_deletion_allowed(uuid) to authenticated" in sql
+    guard = sql.split("create function public.preserve_pending_session_cleanup()")[1].split("$$;")[0]
+    assert "security definer set search_path = ''" in guard
+    assert "where task_id = old.id and session_cleanup_pending for update" in guard
+    assert "raise exception" in guard and "message = 'session_cleanup_pending'" in guard
+    assert "before delete on public.agent_tasks" in sql
+    deletion = (ROOT / "supabase/functions/delete-account/index.ts").read_text()
+    assert '.eq("user_id", user.id).eq("agent_task_runs.session_cleanup_pending", true)' in deletion
+    assert 'if (cleanupError) return json({ error: "storage_error" }, 500)' in deletion
+    assert deletion.index('if (pendingCleanup?.length)') < deletion.index('svc.auth.admin.deleteUser')
+
+
 def test_sweep_auth_and_scope(run):
     vaults = [{"id": "terminal", "name": f"gusan-task-{ID}", "created_at": "2099-01-01T00:00:00Z"},
               {"id": "foreign", "name": "customer-vault", "created_at": "2000-01-01T00:00:00Z"},
