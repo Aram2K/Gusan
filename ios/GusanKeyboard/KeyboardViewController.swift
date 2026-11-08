@@ -114,7 +114,7 @@ final class KeyboardViewController: UIInputViewController {
     @objc private func hideAgent() { agent.hide() }
     private func beginTake() -> VoiceAction? {
         agentTake = settings.keyboardMode == .agent
-        screenTake = !agentTake && settings.keyboardScreenEnabled && screen.live
+        screenTake = !agentTake && settings.keyboardScreenEnabled && screen.live && !screen.secureField
         screenHint = settings.keyboardScreenEnabled && !screen.live
         lastFrame = nil; firstFrame = nil
         if screenTake {
@@ -124,7 +124,7 @@ final class KeyboardViewController: UIInputViewController {
         return agentTake || screenTake ? .transcribeOnly : nil
     }
     private func finishTake() {
-        guard screenTake, screen.live else { return }
+        guard screenTake, screen.live, !screen.secureField else { return }
         let provider = screen.frames
         lastFrame = Task { try? await provider.frame(timeout: 3) }
     }
@@ -146,7 +146,7 @@ final class KeyboardViewController: UIInputViewController {
                 let finish = await last?.value
                 try Task.checkCancellation()
                 guard let session = try await auth.refresh() else { throw GusanError.unauthorized }
-                let frames = screen.live ? [start, finish].compactMap { $0 } : []
+                let frames = screen.live && !screen.secureField ? [start, finish].compactMap { $0 } : []
                 let kind: JobResult.Kind = context.selected.isEmpty ? .insert : .replaceSelection
                 let task: GusanJob
                 if frames.isEmpty {
