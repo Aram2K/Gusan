@@ -22,6 +22,8 @@ final class KeyboardViewController: UIInputViewController {
     private var collapse: Timer?
     private var screenHint = false
     private var retryTake: (text: String, context: VoiceContext)?
+    private var pendingInsert: VoicePendingInsert?
+    private var sharedDefaults: UserDefaults { UserDefaults(suiteName: store.resolution.chosen) ?? .standard }
     private var context: VoiceContext {
         VoiceContext(selected: textDocumentProxy.selectedText ?? "", before: textDocumentProxy.documentContextBeforeInput ?? "", after: textDocumentProxy.documentContextAfterInput ?? "", documentID: textDocumentProxy.documentID.uuidString)
     }
@@ -61,7 +63,9 @@ final class KeyboardViewController: UIInputViewController {
     }
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        settings.refresh(); screen.appear(); voice.appear(); agent.appear(); update()
+        settings.refresh()
+        pendingInsert = hasFullAccess ? VoicePendingInsert.read(from: sharedDefaults) : nil
+        screen.appear(); voice.appear(); agent.appear(); update()
     }
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
@@ -76,9 +80,9 @@ final class KeyboardViewController: UIInputViewController {
         super.viewWillLayoutSubviews()
         let compact = traitCollection.verticalSizeClass == .compact
         height.constant = compact ? 208 : 262
-        strip.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: 46)
-        keyArea.frame = CGRect(x: 0, y: 46, width: view.bounds.width, height: max(0, view.bounds.height - 46))
-        agent.card.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: min(158, max(0, keyArea.bounds.height - 54)))
+        strip.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: 45)
+        keyArea.frame = CGRect(x: 0, y: 45, width: view.bounds.width, height: max(0, view.bounds.height - 45))
+        agent.card.frame = CGRect(x: 0, y: 45, width: view.bounds.width, height: max(0, keyArea.bounds.height - 54))
         view.bringSubviewToFront(agent.card)
     }
     override func textDidChange(_ textInput: UITextInput?) { super.textDidChange(textInput); voice.documentDidChange(); update() }
@@ -92,11 +96,11 @@ final class KeyboardViewController: UIInputViewController {
         keyArea.updateContext(before: textDocumentProxy.documentContextBeforeInput, capitalization: settings.autoCapitalization ? textDocumentProxy.autocapitalizationType : UITextAutocapitalizationType.none, returnType: textDocumentProxy.returnKeyType, appearance: textDocumentProxy.keyboardAppearance, needsGlobe: needsInputModeSwitchKey)
         agent.apply(theme)
         let selected = context.selected
-        let title = selected.isEmpty ? "Near cursor" : "Selected · \(selected.split(whereSeparator: { $0.isWhitespace }).count) words"
+        let title = selected.isEmpty ? (settings.keyboardScreenEnabled ? "Near cursor" : "") : "Selected · \(selected.split(whereSeparator: { $0.isWhitespace }).count) words"
         let active = working || [.recording, .transcribing, .thinking].contains(voice.phase)
         let hint = screenHint && !active && voice.message == nil
         let actionTitle = voice.canUndo ? "Undo" : hint ? "Open" : voice.actionTitle == "Undo" ? nil : voice.actionTitle
-        strip.update(agent: settings.keyboardMode == .agent, screenOn: settings.keyboardScreenEnabled, live: screen.live, context: title, phase: working ? .thinking : voice.phase, level: voice.level, message: working ? voice.message ?? "Working…" : voice.message ?? agentMessage ?? (hint ? "Gusan Screen is off" : nil), action: actionTitle, theme: theme)
+        strip.update(agent: settings.keyboardMode == .agent, screenOn: settings.keyboardScreenEnabled, live: screen.live && !screen.secureField, context: title, phase: working ? .thinking : voice.phase, level: voice.level, message: working ? voice.message ?? "Working…" : pendingInsert != nil ? "Result ready" : voice.message ?? agentMessage ?? (hint ? "Gusan Screen is off" : nil), action: pendingInsert != nil && !active ? "Insert" : actionTitle, theme: theme, pendingInsert: pendingInsert != nil && !active)
     }
     @objc private func toggleMode() {
         guard !working, ![.recording, .transcribing, .thinking].contains(voice.phase) else { return }
@@ -105,11 +109,19 @@ final class KeyboardViewController: UIInputViewController {
     @objc private func toggleScreen() { settings.keyboardScreenEnabled.toggle(); screenHint = settings.keyboardScreenEnabled && !screen.live; update() }
     @objc private func startVoice() { onVoice?() }
     @objc private func cancelVoice() {
+        if pendingInsert != nil {
+            VoicePendingInsert.clear(in: sharedDefaults); pendingInsert = nil; update(); return
+        }
         job?.cancel(); firstFrame?.cancel(); lastFrame?.cancel()
         firstFrame = nil; lastFrame = nil; working = false; voice.cancel()
     }
     @objc private func actionPressed() {
-        if voice.actionTitle == "Retry", let retryTake { process(retryTake.text, context: retryTake.context) }
+        if let pendingInsert {
+            let snapshot = context
+            voice.insert(JobResult(text: pendingInsert.text, kind: snapshot.selected.isEmpty ? .insert : .replaceSelection), context: snapshot)
+            VoicePendingInsert.clear(in: sharedDefaults); self.pendingInsert = nil; update()
+        }
+        else if voice.actionTitle == "Retry", let retryTake { process(retryTake.text, context: retryTake.context) }
         else if screenHint && voice.message == nil { openContainingApp(URL(string: "gusan://screen")!) }
         else { voice.performAction() }
     }

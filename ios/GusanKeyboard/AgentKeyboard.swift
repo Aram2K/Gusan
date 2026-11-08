@@ -245,7 +245,7 @@ final class AgentKeyboardController {
 
     private func toolbarLine(_ task: AgentTask) -> String {
         switch task.status {
-        case .queued, .running: return "Agent · " + (task.latestStep ?? "Starting…")
+        case .queued, .running: return String(task.title.prefix(16)) + " · " + (task.latestStep ?? "Starting…")
         case .awaitingConfirmation: return "Agent needs your OK"
         case .completed: return "Agent result ready"
         case .failed, .timedOut: return "Agent task failed"
@@ -370,10 +370,12 @@ final class AgentCardView: UIView {
     private func restyle() {
         backgroundColor = theme.background
         sheet.backgroundColor = theme.letter
-        title.textColor = theme.foreground; status.textColor = theme.dark ? UIColor.white.withAlphaComponent(0.75) : .darkGray
+        let indigo = UIColor(red: 94/255, green: 92/255, blue: 230/255, alpha: 1)
+        title.textColor = theme.dark ? UIColor(red: 132/255, green: 130/255, blue: 1, alpha: 1) : indigo
+        status.textColor = title.textColor
         body.backgroundColor = theme.dark ? UIColor.white.withAlphaComponent(0.08) : UIColor.black.withAlphaComponent(0.05)
         body.textColor = theme.foreground
-        minimise.tintColor = KeyboardTheme.blue
+        minimise.tintColor = indigo
         buttons = []
         spinner.color = UIColor(red: 94/255, green: 92/255, blue: 230/255, alpha: 1)
         var announce: String?
