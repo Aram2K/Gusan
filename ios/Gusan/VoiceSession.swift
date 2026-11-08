@@ -240,8 +240,8 @@ final class VoiceSession: ObservableObject {
     private func deliverToClipboard(_ text: String, id: UUID) {
         UIPasteboard.general.string = text
         // The keyboard offers "Insert" the next time a field is focused; a notification says where the text went.
-        if let data = try? JSONSerialization.data(withJSONObject: ["text": text, "at": Date().timeIntervalSince1970]) {
-            UserDefaults(suiteName: store.resolution.chosen)?.set(data, forKey: "pendingInsert")
+        if let defaults = UserDefaults(suiteName: store.resolution.chosen) {
+            VoicePendingInsert(text: text, at: Date(), account: store.read()?.userID).write(to: defaults)
         }
         // No result text in the notice: lock-screen previews would show it.
         let note = UNMutableNotificationContent()
