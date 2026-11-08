@@ -302,6 +302,21 @@ final class ScreenFrameTimingTests: XCTestCase {
         XCTAssertNil(store.snapshot(before: start.addingTimeInterval(-1)), "capacity 2: the first frame is gone")
         XCTAssertEqual(store.snapshot(before: start.addingTimeInterval(1))?.capturedAt, start.addingTimeInterval(0.5))
     }
+    func testDelayedFinishRequestUsesFrameClosestToFinishInstant() throws {
+        let store = ScreenFrameStore(fastInterval: 0.1, idleInterval: 1, capacity: 32)
+        let start = Date(), finishInstant = start.addingTimeInterval(0.5)
+        for index in 0..<30 {
+            store.store(image(10 + index, 40), at: start.addingTimeInterval(Double(index) / 10))
+        }
+        let request = ScreenRequest(issuedAt: start.addingTimeInterval(2.5), phase: .finish, notBefore: finishInstant)
+        let response = try XCTUnwrap(store.frame(for: request, keyboard: nil))
+        XCTAssertEqual(response.capturedAt, finishInstant)
+        XCTAssertEqual(response.width, 15)
+        XCTAssertEqual(response.phase, .finish)
+        XCTAssertEqual(response.requestID, request.id)
+        XCTAssertLessThan(response.capturedAt, request.issuedAt)
+        XCTAssertEqual(try JSONDecoder().decode(ScreenRequest.self, from: JSONEncoder().encode(request)).targetAt, finishInstant)
+    }
 
     func testRequestsUseFreshDistinctPicturesAndCropTheKeyboard() throws {
         let store = ScreenFrameStore(fastInterval: 0.4, idleInterval: 1.0, capacity: 4)

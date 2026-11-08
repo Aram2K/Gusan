@@ -73,8 +73,12 @@ public struct ScreenKeyboardState: Codable, Equatable {
 /// Keeps bounded recent pictures and rate-limits scaling of broadcast frames.
 public final class ScreenFrameStore {
     public struct Snapshot: Equatable {
-        public let image: CGImage
+        public let jpeg: Data
         public let capturedAt: Date
+        public var image: CGImage? {
+            guard let source = CGImageSourceCreateWithData(jpeg as CFData, nil) else { return nil }
+            return CGImageSourceCreateImageAtIndex(source, 0, nil)
+        }
     }
     public let fastInterval: TimeInterval
     public let idleInterval: TimeInterval
@@ -102,8 +106,10 @@ public final class ScreenFrameStore {
         return now.timeIntervalSince(lastAccepted) >= (now < fastUntil ? fastInterval : idleInterval)
     }
     public func store(_ image: CGImage, at now: Date = Date()) {
+        guard let jpeg = ScreenFrameEncoder.jpeg(image, budgetBytes: ScreenFrameEncoder.defaultBudget),
+              jpeg.count <= ScreenFrameEncoder.defaultBudget else { return }
         lock.lock(); defer { lock.unlock() }
-        recent.insert(Snapshot(image: image, capturedAt: now), at: 0)
+        recent.insert(Snapshot(jpeg: jpeg, capturedAt: now), at: 0)
         if recent.count > capacity { recent.removeLast(recent.count - capacity) }
         lastAccepted = now; count += 1
     }
@@ -122,14 +128,17 @@ public final class ScreenFrameStore {
         return Self.encode(newest, requestID: requestID, frozen: false, cropBottom: keyboard?.bottomFraction ?? 0, budgetBytes: budgetBytes)
     }
     public func frame(for request: ScreenRequest, keyboard: ScreenKeyboardState?, allowFallback: Bool = false, budgetBytes: Int = ScreenFrameEncoder.defaultBudget) -> ScreenFrame? {
-        lock.lock(); let newest = recent.first; lock.unlock()
-        guard let newest, allowFallback || newest.capturedAt >= request.issuedAt else { return nil }
-        var frame = Self.encode(newest, requestID: request.id, frozen: false, cropBottom: keyboard?.bottomFraction ?? 0, budgetBytes: budgetBytes)
+        lock.lock()
+        let match = recent.filter { $0.capturedAt >= request.targetAt }.min { $0.capturedAt < $1.capturedAt }
+            ?? (allowFallback ? recent.first : nil)
+        lock.unlock()
+        guard let match else { return nil }
+        var frame = Self.encode(match, requestID: request.id, frozen: false, cropBottom: keyboard?.bottomFraction ?? 0, budgetBytes: budgetBytes)
         frame?.phase = request.phase
         return frame
     }
     static func encode(_ snapshot: Snapshot, requestID: UUID, frozen: Bool, cropBottom: Double, budgetBytes: Int) -> ScreenFrame? {
-        var image = snapshot.image
+        guard var image = snapshot.image else { return nil }
         var cropped = false
         if cropBottom > 0 {
             let rect = ScreenFrameGeometry.cropRect(width: image.width, height: image.height, bottomFraction: cropBottom)

@@ -216,12 +216,13 @@ final class KeyboardViewController: UIInputViewController {
     }
     private func finishTake() {
         guard screenTake else { return }
+        let finishedAt = Date()
         let first = firstFrame
         lastFrame = Task { @MainActor [weak self] in
             _ = await first?.value
             guard let self, !Task.isCancelled,
                   KeyboardScreenPlan.shouldRequest(enabled: screenTake, live: screen.live, secure: screen.secureField, fullAccess: hasFullAccess) else { return nil }
-            return try? await screen.frames(phase: .finish).frame(timeout: 2)
+            return try? await screen.frames(phase: .finish, notBefore: finishedAt).frame(timeout: 2)
         }
     }
     private func process(_ text: String, context: VoiceContext) {

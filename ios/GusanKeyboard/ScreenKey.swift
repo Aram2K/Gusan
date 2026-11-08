@@ -23,8 +23,8 @@ final class ScreenKeyboardController {
         channel = ScreenChannel(container: store.resolution.container, pasteboardAllowed: pasteboardAllowed)
     }
     var secureField: Bool { host?.textDocumentProxy.isSecureTextEntry == true }
-    func frames(phase: ScreenRequest.Phase) -> ScreenFrameProvider {
-        ScreenChannelFrameProvider(channel: channel, phase: phase, accessAllowed: { [weak self] in
+    func frames(phase: ScreenRequest.Phase, notBefore: Date = Date()) -> ScreenFrameProvider {
+        ScreenChannelFrameProvider(channel: channel, phase: phase, notBefore: notBefore, accessAllowed: { [weak self] in
             self?.host?.hasFullAccess == true && self?.secureField == false
         })
     }

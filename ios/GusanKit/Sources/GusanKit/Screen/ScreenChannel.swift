@@ -25,7 +25,11 @@ public struct ScreenRequest: Codable, Equatable {
     public let id: UUID
     public let issuedAt: Date
     public let phase: Phase?
-    public init(id: UUID = UUID(), issuedAt: Date = Date(), phase: Phase = .start) { self.id = id; self.issuedAt = issuedAt; self.phase = phase }
+    public let notBefore: Date?
+    public var targetAt: Date { notBefore ?? issuedAt }
+    public init(id: UUID = UUID(), issuedAt: Date = Date(), phase: Phase = .start, notBefore: Date? = nil) {
+        self.id = id; self.issuedAt = issuedAt; self.phase = phase; self.notBefore = notBefore
+    }
 }
 
 /// Keyboard ↔ broadcast extension transport. Every packet is written to every
@@ -134,15 +138,17 @@ public struct ScreenChannelFrameProvider: ScreenFrameProvider {
     public let keyboardShownAt: Date?
     public let maxAge: TimeInterval
     public let phase: ScreenRequest.Phase
+    public let notBefore: Date?
     private let accessAllowed: () -> Bool
-    public init(channel: ScreenChannel, pollInterval: TimeInterval = 0.2, keyboardShownAt: Date? = nil, maxAge: TimeInterval = ScreenFrame.maxAge, phase: ScreenRequest.Phase = .start, accessAllowed: @escaping () -> Bool = { true }) {
+    public init(channel: ScreenChannel, pollInterval: TimeInterval = 0.2, keyboardShownAt: Date? = nil, maxAge: TimeInterval = ScreenFrame.maxAge, phase: ScreenRequest.Phase = .start, notBefore: Date? = nil, accessAllowed: @escaping () -> Bool = { true }) {
         self.channel = channel; self.pollInterval = pollInterval; self.keyboardShownAt = keyboardShownAt; self.maxAge = maxAge; self.phase = phase
         self.accessAllowed = accessAllowed
+        self.notBefore = notBefore
     }
     public func frame(timeout: TimeInterval = 5) async throws -> ScreenFrame {
         guard accessAllowed() else { throw ScreenError.channelUnavailable }
         guard channel.isLive() else { throw ScreenError.notLive }
-        let request = ScreenRequest(phase: phase)
+        let request = ScreenRequest(phase: phase, notBefore: notBefore)
         channel.clearFrame()
         guard channel.write(request: request) else { throw ScreenError.channelUnavailable }
         defer {

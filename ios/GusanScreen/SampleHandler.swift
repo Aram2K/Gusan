@@ -16,7 +16,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
     /// A request that arrives between frames (right after a pause, say) waits this long for the next one.
     static let pendingWindow: TimeInterval = 1
     private let queue = DispatchQueue(label: "com.aram2k.gusan.screen", qos: .userInitiated)
-    private let frames = ScreenFrameStore(fastInterval: 0.1, idleInterval: 1.0, capacity: 4)
+    private let frames = ScreenFrameStore(fastInterval: 0.1, idleInterval: 1.0, capacity: 32)
     private let ciContext = CIContext(options: [.cacheIntermediates: false, .priorityRequestLow: true])
     private let lanczos = CIFilter.lanczosScaleTransform()
     private var channel: ScreenChannel?
