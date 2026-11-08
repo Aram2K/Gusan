@@ -57,7 +57,7 @@ public final class AgentClient: AgentService {
     public static func listRequest(limit: Int, token: String) -> URLRequest {
         var components = URLComponents(url: tableURL, resolvingAgainstBaseURL: false)!
         components.queryItems = [
-            URLQueryItem(name: "select", value: "id,mode,status,title,steps,confirmation,result,outcome,error_code,created_at,updated_at,finished_at,deadline_at,seen_at"),
+            URLQueryItem(name: "select", value: "id,mode,provider,status,title,steps,confirmation,result,outcome,error_code,created_at,updated_at,finished_at,deadline_at,seen_at"),
             URLQueryItem(name: "order", value: "created_at.desc"),
             URLQueryItem(name: "limit", value: String(max(1, min(limit, 100)))),
         ]
@@ -102,7 +102,7 @@ public final class AgentClient: AgentService {
         } catch ActionFailure.unsupported {
             let previous = try await status(id, waitSeconds: 0)
             let summary = "Earlier in this session:\n" + previous.title + "\n" + (previous.result?.plainText ?? "")
-            return try await start(AgentIntent(mode: previous.mode, instruction: message), context: String(summary.prefix(18_000)))
+            return try await start(AgentIntent(mode: previous.mode, instruction: message, provider: previous.provider), context: String(summary.prefix(18_000)))
         }
     }
 
@@ -262,7 +262,7 @@ public final class StubAgentService: AgentService {
         let previous = try locked { () throws -> AgentTask in
             guard let task = tasks[id] else { throw AgentError.notFound }; return task
         }
-        let next = try await start(AgentIntent(mode: previous.mode, instruction: message), context: previous.result?.plainText)
+        let next = try await start(AgentIntent(mode: previous.mode, instruction: message, provider: previous.provider), context: previous.result?.plainText)
         locked { parentTaskIDs[next.id] = id }
         return next
     }
