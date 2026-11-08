@@ -244,6 +244,7 @@ final class AgentKeyboardController {
     private var settingsHaptics: Bool { (UserDefaults(suiteName: store.resolution.chosen) ?? .standard).object(forKey: "haptics") as? Bool ?? true }
 
     private func toolbarLine(_ task: AgentTask) -> String {
+        if let attention = AgentKeyboardAttention.resolve(task) { return attention.text }
         switch task.status {
         case .queued, .running: return String(task.title.prefix(16)) + " · " + (task.latestStep ?? "Starting…")
         case .awaitingConfirmation: return "Agent needs your OK"
