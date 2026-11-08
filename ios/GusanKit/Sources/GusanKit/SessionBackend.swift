@@ -114,7 +114,9 @@ final class NamedSessionPasteboard: SessionBackend {
 }
 
 /// The signing team's keychain prefix ("TEAMID"), learned from the keychain itself so it survives re-signing
-/// (Sideloadly/AltStore change the team). Items in "TEAMID.<name>" groups are shared by the app and its extensions.
+/// (Sideloadly/AltStore change the team). Items in "TEAMID.<name>" groups are shared by the app and its extensions
+/// whenever the signature allows that group (sideloading tools sign free-account builds with a "TEAMID.*" wildcard;
+/// the unsigned IPA declares no keychain groups, so Xcode-signed builds simply fall back to the App Group route).
 public enum SharedKeychain {
     private static var cached: String??
     public static func teamPrefix() -> String? {

@@ -43,7 +43,6 @@ targets:
       path: Gusan/Gusan.entitlements
       properties:
         com.apple.security.application-groups: [group.com.aram2k.gusan]
-        keychain-access-groups: ["$(AppIdentifierPrefix)$(CFBundleIdentifier)", "$(AppIdentifierPrefix)com.aram2k.gusan.voice", "$(AppIdentifierPrefix)com.aram2k.gusan.screen"]
     dependencies:
       - package: GusanKit
       - target: GusanKeyboard
@@ -79,7 +78,6 @@ targets:
       path: GusanKeyboard/GusanKeyboard.entitlements
       properties:
         com.apple.security.application-groups: [group.com.aram2k.gusan]
-        keychain-access-groups: ["$(AppIdentifierPrefix)$(CFBundleIdentifier)", "$(AppIdentifierPrefix)com.aram2k.gusan.voice", "$(AppIdentifierPrefix)com.aram2k.gusan.screen"]
     dependencies:
       - package: GusanKit
   # Simulator-only host for screenshots and manual checks of the keyboard; never embedded in the app.
@@ -140,7 +138,6 @@ targets:
       path: GusanScreen/GusanScreen.entitlements
       properties:
         com.apple.security.application-groups: [group.com.aram2k.gusan]
-        keychain-access-groups: ["$(AppIdentifierPrefix)$(CFBundleIdentifier)", "$(AppIdentifierPrefix)com.aram2k.gusan.voice", "$(AppIdentifierPrefix)com.aram2k.gusan.screen"]
     dependencies:
       - package: GusanKit
   # Live Activities (recording glow, Agent progress) and the Control Center control.
