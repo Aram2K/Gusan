@@ -108,7 +108,7 @@ final class VoiceKeyController: NSObject {
         guard let host else { return }
         switch KeyboardVoice.tap(status: status, access: store.sessionState(fullAccess: host.hasFullAccess)) {
         case .error(let error):
-            show(error.localizedDescription, action: error == .fullAccessRequired ? "Turn on Full Access" : "Sign in", url: "gusan://open-settings")
+            show(error.localizedDescription, action: error == .fullAccessRequired ? "Turn on Full Access" : "Sign in", url: error == .fullAccessRequired ? "gusan://open-settings" : "gusan://signin")
         case .start: start()
         case .openApp:
             start()

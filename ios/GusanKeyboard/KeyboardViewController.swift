@@ -162,7 +162,7 @@ final class KeyboardViewController: UIInputViewController {
                 try Task.checkCancellation()
                 voice.insert(result, context: context)
             } catch is CancellationError { voice.show("Cancelled") }
-            catch GusanError.unauthorized { voice.show("Sign in to use Gusan", action: "Sign in", url: "gusan://open-settings") }
+            catch GusanError.unauthorized { voice.show("Sign in to use Gusan", action: "Sign in", url: "gusan://signin") }
             catch { voice.show(error.localizedDescription, action: "Retry") }
         }
     }
