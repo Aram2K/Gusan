@@ -204,6 +204,9 @@ final class VoiceSession: ObservableObject {
                         }
                         try Task.checkCancellation()
                         guard !result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw VoiceError.invalidResponse }
+                        if self.machine.action != .transcribeOnly {
+                            SmartHistory(group: self.store.resolution.chosen).append(instruction: transcript, result: result.text)
+                        }
                         execute(machine.handle(.completed(id, result)))
                     } catch is CancellationError {} catch { execute(machine.handle(.failed(id, error.localizedDescription))) }
                 }

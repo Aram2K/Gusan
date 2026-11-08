@@ -2,6 +2,136 @@ import XCTest
 @testable import GusanKit
 
 final class AgentTests: XCTestCase {
+    func testRichPhasesRoundTripWithoutChangingKeyboardStatus() throws {
+        let cases: [(String, AgentStatus, AgentPhase)] = [
+            ("awaiting_login", .running, .needsLogin), ("awaiting_code", .running, .needsCode),
+            ("idle", .completed, .completed), ("interrupted", .cancelled, .stopped),
+            ("future_status", .running, .working), ("", .running, .working)
+        ]
+        for (raw, coarse, phase) in cases {
+            let data = try JSONSerialization.data(withJSONObject: ["task_id": UUID().uuidString, "status": raw])
+            let task = try AgentClient.decodeTask(data)
+            XCTAssertEqual(task.status, coarse)
+            XCTAssertEqual(task.phase, phase)
+            XCTAssertEqual(task.rawStatus, raw)
+            let restored = try AgentTask.dateDecoder.decode(AgentTask.self, from: JSONEncoder().encode(task))
+            XCTAssertEqual(restored.rawStatus, raw)
+            XCTAssertEqual(restored.phase, phase)
+        }
+        let missing = try AgentClient.decodeTask(Data("{\"task_id\":\"\(UUID().uuidString)\"}".utf8))
+        XCTAssertEqual(missing.status, .running)
+        var changed = missing
+        changed.setServerStatus("awaiting_login")
+        changed.status = .completed
+        XCTAssertEqual(changed.rawStatus, "completed")
+    }
+
+    func testConfirmationDetailsAreTolerant() throws {
+        let decoder = JSONDecoder()
+        let full = try decoder.decode(AgentConfirmation.self, from: Data(#"{"summary":"Book","start_url":"https://example.com/book","steps":["Open","Submit"]}"#.utf8))
+        XCTAssertEqual(full.startURL?.host, "example.com")
+        XCTAssertEqual(full.steps, ["Open", "Submit"])
+        let empty = try decoder.decode(AgentConfirmation.self, from: Data("{}".utf8))
+        XCTAssertEqual(empty.summary, "")
+        XCTAssertEqual(empty.steps, [])
+        let malformed = try decoder.decode(AgentConfirmation.self, from: Data(#"{"summary":42,"start_url":42,"steps":false}"#.utf8))
+        XCTAssertNil(malformed.startURL)
+        XCTAssertEqual(malformed.steps, [])
+    }
+
+    func testContinuationAndStopFallbacks() async throws {
+        final class Transport: HTTPTransport {
+            var bodies: [[String: Any]] = []
+            var rejection = 400
+            let id = UUID()
+            func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+                let body = try JSONSerialization.jsonObject(with: request.httpBody!) as! [String: Any]
+                bodies.append(body)
+                let action = body["action"] as! String
+                let unsupported = action == "continue" || action == "stop"
+                let task = AgentTask(id: action == "start" ? UUID() : id, mode: .do, status: .completed, title: "Previous title", result: AgentResult(markdown: "**Earlier** " + String(repeating: "x", count: 25_000)))
+                let data = unsupported ? Data(#"{"error":"bad_request","field":"action"}"#.utf8) : try JSONEncoder().encode(task)
+                return (data, HTTPURLResponse(url: request.url!, statusCode: unsupported ? rejection : 200, httpVersion: nil, headerFields: nil)!)
+            }
+        }
+        let transport = Transport()
+        let client = AgentClient(tokenProvider: { "jwt" }, transport: transport)
+        let next = try await client.continueTask(transport.id, message: "Try another date")
+        XCTAssertNotEqual(next.id, transport.id)
+        XCTAssertEqual(transport.bodies.map { $0["action"] as! String }, ["continue", "status", "start"])
+        let start = transport.bodies[2]
+        XCTAssertEqual(start["mode"] as? String, "do")
+        XCTAssertEqual(start["instruction"] as? String, "Try another date")
+        let context = try XCTUnwrap(start["context"] as? String)
+        XCTAssertTrue(context.hasPrefix("Earlier in this session:\nPrevious title\nEarlier "))
+        XCTAssertLessThanOrEqual(context.count, 20_000)
+        _ = try await client.stop(transport.id)
+        XCTAssertEqual(transport.bodies.suffix(2).map { $0["action"] as! String }, ["stop", "cancel"])
+        transport.rejection = 503
+        let count = transport.bodies.count
+        do { _ = try await client.continueTask(transport.id, message: "Retry"); XCTFail("must not retry server errors") }
+        catch { XCTAssertEqual(transport.bodies.count, count + 1) }
+    }
+
+    func testSessionThreadsPersistAndCap() throws {
+        let suite = "AgentSessionTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = AgentSessionStore(defaults: defaults)
+        XCTAssertTrue(store.records.isEmpty)
+        let root = UUID(), child = UUID()
+        store.record(taskID: root, message: "Original instruction")
+        store.record(taskID: child, message: "Follow up", continuing: root)
+        let restored = AgentSessionStore(defaults: defaults)
+        XCTAssertEqual(restored.tasks(in: root).map(\.message), ["Original instruction", "Follow up"])
+        XCTAssertEqual(restored.record(taskID: child, message: "Duplicate"), root)
+        for _ in 0..<205 { restored.record(taskID: UUID(), message: "Next", continuing: child) }
+        XCTAssertEqual(restored.records.count, 200)
+        defaults.set(Data("invalid".utf8), forKey: "gusan.agent.sessions")
+        XCTAssertTrue(restored.records.isEmpty)
+    }
+
+    func testSmartHistoryAndPrivacyCompatibility() throws {
+        let suite = "SmartHistoryTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let history = SmartHistory(defaults: defaults)
+        XCTAssertTrue(history.entries.isEmpty)
+        history.append(instruction: "Empty", result: " ")
+        XCTAssertTrue(history.entries.isEmpty)
+        for index in 0..<55 { history.append(instruction: "Heard \(index)", result: "Answer", sourceApp: "Mail") }
+        let restored = SmartHistory(defaults: defaults)
+        XCTAssertEqual(restored.entries.count, 50)
+        XCTAssertEqual(restored.entries.first?.instruction, "Heard 5")
+        XCTAssertEqual(restored.entries.last?.sourceApp, "Mail")
+        defaults.set(true, forKey: "privacyMode")
+        let settings = SettingsStore(group: suite)
+        XCTAssertFalse(settings.privacyMode)
+        settings.privacyMode = true
+        XCTAssertFalse(settings.privacyMode)
+        XCTAssertNotEqual(AgentError(code: "privacy_mode", status: 403), .privacyMode)
+    }
+
+    func testStubContinuationAndRobustnessScenarios() async throws {
+        let stub = StubAgentService()
+        let root = try await stub.start(AgentIntent(mode: .do, instruction: "Book"), context: nil)
+        let next = try await stub.continueTask(root.id, message: "Next")
+        XCTAssertNotEqual(next.id, root.id)
+        XCTAssertEqual(stub.parentTaskIDs[next.id], root.id)
+        let stopped = try await stub.stop(next.id)
+        XCTAssertEqual(stopped.phase, .stopped)
+        stub.scenario.needsLogin = true
+        let login = try await stub.status(root.id, waitSeconds: 0)
+        XCTAssertEqual(login.phase, .needsLogin)
+        XCTAssertFalse(login.status.isTerminal)
+        stub.scenario.needsLogin = false
+        stub.scenario.planMissing = true
+        stub.scenario.pollsUntilDone = 1
+        let failed = try await stub.status(root.id, waitSeconds: 0)
+        XCTAssertEqual(failed.errorCode, "plan_missing")
+        XCTAssertTrue(failed.summaryLine.contains("couldn't make a plan"))
+    }
+
     // MARK: Intent
 
     func testDetectsResearchAndDoTasks() {
@@ -197,6 +327,40 @@ final class AgentTests: XCTestCase {
 }
 
 final class AgentJobTests: XCTestCase {
+    func testLoginCodeAndUnknownPhasesKeepPolling() async throws {
+        final class Service: AgentService {
+            var polls = 0
+            var task = AgentTask(mode: .research, status: .running, title: "Find", confirmation: AgentConfirmation(summary: "Login", startURL: URL(string: "https://example.com/login")))
+            func start(_ intent: AgentIntent, context: String?) async throws -> AgentTask { task }
+            func status(_ id: UUID, waitSeconds: Int) async throws -> AgentTask {
+                let phases = ["awaiting_login", "awaiting_code", "future_status", "idle"]
+                task.setServerStatus(phases[min(polls, phases.count - 1)])
+                polls += 1
+                if task.status == .completed { task.result = AgentResult(markdown: "Answer") }
+                return task
+            }
+            func confirm(_ id: UUID) async throws -> AgentTask { task }
+            func cancel(_ id: UUID) async throws -> AgentTask { task }
+            func continueTask(_ id: UUID, message: String) async throws -> AgentTask { task }
+            func stop(_ id: UUID) async throws -> AgentTask { task }
+            func list(limit: Int) async throws -> [AgentTask] { [task] }
+            func markSeen(_ id: UUID) async throws {}
+        }
+        let service = Service()
+        var lines: [String] = []
+        var card: JobCard?
+        for try await event in AgentJob(service: service, start: .resume(service.task.id), interval: 1_000).run() {
+            switch event {
+            case .progress(let line): lines.append(line)
+            case .result(let result): card = result.card
+            case .needsConfirmation: XCTFail("login is not plan confirmation")
+            }
+        }
+        XCTAssertEqual(lines, ["Needs a login on example.com…", "Needs a code on example.com…"])
+        XCTAssertEqual(service.polls, 4)
+        XCTAssertEqual(card?.insertableText, "Answer")
+    }
+
     func testResearchJobEmitsProgressThenCard() async throws {
         let stub = StubAgentService()
         var seen: [AgentTask] = []

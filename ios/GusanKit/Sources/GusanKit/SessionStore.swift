@@ -428,10 +428,10 @@ public final class SettingsStore {
         get { preference("pasteboardFallback") as? Bool ?? true }
         set { setPreference(newValue, key: "pasteboardFallback") }
     }
-    /// Privacy Mode: no agent tasks at all (nothing is sent to Gusan Cloud agents; agent actions are hidden).
+    /// Compatibility API for older keyboard clients; cloud actions are always available.
     public var privacyMode: Bool {
-        get { preference("privacyMode") as? Bool ?? false }
-        set { setPreference(newValue, key: "privacyMode") }
+        get { false }
+        set {}
     }
 }
 
