@@ -19,6 +19,7 @@ ditto "$WORK_DIR/DerivedData/Build/Products/Release-iphoneos/Gusan.app" "$WORK_D
 APP="$WORK_DIR/Payload/Gusan.app"
 KEYBOARD="$APP/PlugIns/GusanKeyboard.appex"
 SCREEN="$APP/PlugIns/GusanScreen.appex"
+ACTIVITY="$APP/PlugIns/GusanActivity.appex"
 for entitlements in Gusan/Gusan.entitlements GusanKeyboard/GusanKeyboard.entitlements GusanScreen/GusanScreen.entitlements; do
     plutil -lint "$entitlements"
     if /usr/bin/grep -q '\$(' "$entitlements"; then
@@ -29,12 +30,15 @@ done
 
 codesign --force --sign - --entitlements GusanKeyboard/GusanKeyboard.entitlements "$KEYBOARD"
 codesign --force --sign - --entitlements GusanScreen/GusanScreen.entitlements "$SCREEN"
+codesign --force --sign - "$ACTIVITY"
 codesign --force --sign - --entitlements Gusan/Gusan.entitlements "$APP"
 codesign --verify --deep --strict "$APP"
 codesign -d --entitlements - "$APP"
 codesign -d --entitlements - "$KEYBOARD"
 codesign -d --entitlements - "$SCREEN"
 /usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$SCREEN/Info.plist"
+/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$ACTIVITY/Info.plist"
+/usr/libexec/PlistBuddy -c 'Print :NSSupportsLiveActivities' "$APP/Info.plist"
 /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes' "$APP/Info.plist"
 /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist"
 /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist"
