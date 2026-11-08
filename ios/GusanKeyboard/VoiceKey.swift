@@ -61,6 +61,7 @@ final class VoiceKeyController: NSObject {
     var hasPendingRequest: Bool { pending.requestID != nil && pending.requestID != pending.insertedID && pending.requestID != cancelledID }
     private var status: VoiceStatus?
     private var cancelledID: UUID?
+    private var timedOutID: UUID?
     private var action: VoiceAction?
     private var visible = false
     private var loading = false
@@ -185,7 +186,9 @@ final class VoiceKeyController: NSObject {
         if let actionURL { open(actionURL) }
     }
     private func refresh() {
+        status = KeyboardVoiceFeedback.statusForDisplay(status, timedOutRequestID: timedOutID)
         if !preview, let expired = deadline.expiry(pending: pending, status: status) {
+            timedOutID = pending.requestID
             cancelledID = pending.requestID
             if let id = pending.requestID { channel.discardRequest(id) }
             if expired == .processing { send(.cancel) }
