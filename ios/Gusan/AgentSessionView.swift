@@ -61,18 +61,20 @@ struct AgentSessionView: View {
                 TextField("Message the agent…", text: $message, axis: .vertical)
                     .lineLimit(1...5).textFieldStyle(.roundedBorder)
                 Button {
-                    guard let latest else { return }
+                    guard canSend, let latest else { return }
                     let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
+                    sending = true; error = nil
                     Task {
-                        sending = true; error = nil
                         defer { sending = false }
                         do { try await agent.continueTask(latest.id, message: text); message = "" }
                         catch { self.error = error.localizedDescription }
                     }
                 } label: {
-                    if sending { ProgressView() }
-                    else { Image(systemName: "arrow.up.circle.fill").font(.title).accessibilityLabel("Send") }
-                }.disabled(!canSend).frame(minWidth: 44, minHeight: 44)
+                    Group {
+                        if sending { ProgressView() }
+                        else { Image(systemName: "arrow.up.circle.fill").font(.title) }
+                    }.frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                }.disabled(!canSend).accessibilityLabel(sending ? "Sending" : "Send")
             }
         }.padding().background(.bar)
     }
@@ -88,6 +90,7 @@ private struct AgentSessionTurn: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var agent: AgentCenter
     @State private var working = false
+    @State private var activeAction: String?
     @State private var error: String?
 
     var body: some View {
@@ -126,9 +129,9 @@ private struct AgentSessionTurn: View {
                     if task.confirmation == nil { Text("Plan details are not available yet.").foregroundStyle(.secondary) }
                 }
                 HStack {
-                    Button("Cancel", role: .destructive) { perform { await agent.cancel(task.id) } }.buttonStyle(.bordered)
+                    Button(role: .destructive) { perform("Cancel") { await agent.cancel(task.id) } } label: { actionLabel("Cancel") }.buttonStyle(.bordered)
                     Spacer()
-                    Button("Confirm") { perform { await agent.confirm(task.id) } }.buttonStyle(.borderedProminent)
+                    Button { perform("Confirm") { await agent.confirm(task.id) } } label: { actionLabel("Confirm") }.buttonStyle(.borderedProminent)
                 }
             }
         case .needsLogin, .needsCode:
@@ -136,7 +139,7 @@ private struct AgentSessionTurn: View {
                 Label(task.phase.label, systemImage: "key.fill").font(.headline).foregroundStyle(Theme.agent)
                 Text("Gusan Cloud needs \(task.phase == .needsCode ? "a login code" : "a login") for \(task.confirmation?.startURL?.host ?? "this site") from Vault. The agent never sees your credentials.")
                 HStack {
-                    Button("Stop", role: .destructive) { perform { await agent.stop(task.id) } }
+                    Button(role: .destructive) { perform("Stop") { await agent.stop(task.id) } } label: { actionLabel("Stop") }
                     Spacer()
                     Button("Open Vault") { model.selectedTab = .vault }.buttonStyle(.borderedProminent)
                 }
@@ -146,7 +149,7 @@ private struct AgentSessionTurn: View {
                 ProgressView().tint(Theme.agent)
                 Text(task.phase == .queued ? "Queued" : "Working").foregroundStyle(.secondary)
                 Spacer()
-                Button("Stop", role: .destructive) { perform { await agent.stop(task.id) } }
+                Button(role: .destructive) { perform("Stop") { await agent.stop(task.id) } } label: { actionLabel("Stop") }
             }
         case .completed:
             AppCard {
@@ -182,9 +185,9 @@ private struct AgentSessionTurn: View {
                 Label(task.phase.label, systemImage: "exclamationmark.triangle").foregroundStyle(Theme.danger)
                 Text(task.summaryLine)
                 if agent.canRunAgain(task) {
-                    Button("Try again") {
-                        perform { do { try await agent.runAgain(task) } catch { self.error = error.localizedDescription } }
-                    }.disabled(agent.atActiveLimit)
+                    Button {
+                        perform("Try again") { do { try await agent.runAgain(task) } catch { self.error = error.localizedDescription } }
+                    } label: { actionLabel("Try again") }.disabled(agent.atActiveLimit)
                 } else {
                     Text("The original input is no longer available. Start again from Home.").font(.footnote).foregroundStyle(.secondary)
                 }
@@ -194,7 +197,16 @@ private struct AgentSessionTurn: View {
         }
     }
 
-    private func perform(_ action: @escaping () async -> Void) {
-        Task { working = true; error = nil; defer { working = false }; await action() }
+    private func actionLabel(_ title: String) -> some View {
+        HStack {
+            if activeAction == title { ProgressView() }
+            Text(title)
+        }.frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+    }
+
+    private func perform(_ title: String, _ action: @escaping () async -> Void) {
+        guard !working else { return }
+        working = true; activeAction = title; error = nil
+        Task { defer { working = false; activeAction = nil }; await action() }
     }
 }

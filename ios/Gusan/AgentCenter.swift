@@ -23,6 +23,7 @@ final class AgentCenter: NSObject, ObservableObject {
     @Published private(set) var loading = false
     @Published var error: String?
     @Published private(set) var notificationStatus: UNAuthorizationStatus = .notDetermined
+    @Published private(set) var requestingNotifications = false
     @Published var lastRefresh: Date?
 
     private unowned let model: AppModel
@@ -141,7 +142,7 @@ final class AgentCenter: NSObject, ObservableObject {
         self.active = active
         poller?.cancel(); poller = nil
         guard active else { scheduleBackgroundRefresh(); return }
-        if notificationStatus == .notDetermined, tracker.activeTaskID != nil { Task { await requestNotifications() } }
+        if notificationStatus == .notDetermined, tracker.activeTaskID != nil { requestNotifications() }
         poller = Task { @MainActor [weak self] in
             while let self, self.active, !Task.isCancelled {
                 await self.refresh()
@@ -171,7 +172,6 @@ final class AgentCenter: NSObject, ObservableObject {
         sessionStore.record(taskID: task.id, message: intent.instruction, continuing: parentID, date: task.createdAt)
         tracker.markNotified(task)
         tasks.insert(task, at: 0)
-        if notificationStatus == .notDetermined { await requestNotifications() }
         return task
     }
 
@@ -246,12 +246,24 @@ final class AgentCenter: NSObject, ObservableObject {
     // MARK: Notifications
 
     func refreshNotificationStatus() async {
-        notificationStatus = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+        let status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+        if notificationStatus != status { notificationStatus = status }
     }
 
-    func requestNotifications() async {
-        _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
-        await refreshNotificationStatus()
+    func requestNotifications() {
+        guard !requestingNotifications, notificationStatus == .notDetermined else { return }
+        requestingNotifications = true
+        Task.detached { [weak self] in
+            let center = UNUserNotificationCenter.current()
+            _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
+            let status = await center.notificationSettings().authorizationStatus
+            await self?.finishNotificationRequest(status)
+        }
+    }
+
+    private func finishNotificationRequest(_ status: UNAuthorizationStatus) {
+        if notificationStatus != status { notificationStatus = status }
+        requestingNotifications = false
     }
 
     private func deliver(_ events: [AgentTaskTracker.Event]) async {

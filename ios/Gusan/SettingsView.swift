@@ -30,8 +30,9 @@ struct SettingsView: View {
                 LabeledContent("Notifications", value: notificationsLabel)
                 Button(agent.notificationStatus == .denied ? "Open notification settings" : "Allow notifications") {
                     if agent.notificationStatus == .denied { Theme.openSettings() }
-                    else { Task { await agent.requestNotifications() } }
-                }.disabled([.authorized, .provisional, .ephemeral].contains(agent.notificationStatus))
+                    else { agent.requestNotifications() }
+                }.disabled(agent.requestingNotifications || [.authorized, .provisional, .ephemeral].contains(agent.notificationStatus))
+                if agent.requestingNotifications { ProgressView("Requesting permission…") }
             } footer: { Text("Session finished or needs you. On sideloaded builds, notifications arrive when Gusan next checks for updates.") }
             Section {
                 NavigationLink { KeyboardSetupView() } label: { Label("Keyboard setup", systemImage: "keyboard") }

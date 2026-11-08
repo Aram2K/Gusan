@@ -81,7 +81,7 @@ struct HomeView: View {
             checklistRow("Allow Full Access", complete: model.fullAccess == true) { Theme.openSettings() }
             checklistRow("Allow notifications", complete: notificationsAllowed) {
                 if agent.notificationStatus == .denied { Theme.openSettings() }
-                else { Task { await agent.requestNotifications() } }
+                else { agent.requestNotifications() }
             }
             Button("Dismiss checklist") { setupDismissed = true }.font(.footnote)
         } header: { Text("Get ready") } footer: {
@@ -124,14 +124,16 @@ struct HomeView: View {
         Section {
             TextField("What should Gusan do?", text: $instruction, axis: .vertical).lineLimit(2...5)
             Button {
+                guard !starting else { return }
                 let text = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+                starting = true; error = nil
                 Task {
-                    starting = true; error = nil
                     defer { starting = false }
                     do {
                         let intent = AgentIntent.detect(text) ?? AgentIntent(mode: .research, instruction: text)
                         let task = try await agent.start(intent)
                         instruction = ""; model.openSessionID = task.id; model.selectedTab = .sessions
+                        agent.requestNotifications()
                     } catch { self.error = error.localizedDescription }
                 }
             } label: {
