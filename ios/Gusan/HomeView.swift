@@ -6,6 +6,7 @@ struct HomeView: View {
     @EnvironmentObject private var agent: AgentCenter
     @EnvironmentObject private var screen: ScreenMonitor
     @EnvironmentObject private var voice: VoiceSession
+    @Environment(\.scenePhase) private var scenePhase
     @State private var mode: StripMode = .smart
     @AppStorage("gusan.setup.dismissed") private var setupDismissed = false
     @State private var instruction = ""
@@ -66,7 +67,12 @@ struct HomeView: View {
             lastResult = SmartHistory(group: model.store.resolution.chosen).entries.last
             if model.openScreenPage { showScreen = true; model.openScreenPage = false }
         }
-        .onChange(of: mode) { model.settings.stripMode = $0 }
+        .onChange(of: scenePhase) {
+            if $0 == .active { model.settings.refresh(); mode = model.settings.stripMode }
+        }
+        .onChange(of: mode) {
+            if model.settings.stripMode != $0 { model.settings.stripMode = $0 }
+        }
         .onChange(of: model.session) { _ in lastResult = SmartHistory(group: model.store.resolution.chosen).entries.last }
         .onChange(of: model.openScreenPage) { if $0 { showScreen = true; model.openScreenPage = false } }
         .task { await agent.refreshNotificationStatus() }

@@ -2,6 +2,30 @@ import XCTest
 @testable import GusanKit
 
 final class SettingsTests: XCTestCase {
+    func testHomeAndKeyboardModeAliasesRefreshAcrossPrivateDefaults() {
+        let appName = "Gusan.mode.home." + UUID().uuidString
+        let keyboardName = "Gusan.mode.extension." + UUID().uuidString
+        let appDefaults = UserDefaults(suiteName: appName)!
+        let keyboardDefaults = UserDefaults(suiteName: keyboardName)!
+        defer { appDefaults.removePersistentDomain(forName: appName); keyboardDefaults.removePersistentDomain(forName: keyboardName) }
+        let shared = Shared()
+        let home = SettingsStore(defaults: appDefaults, shared: shared)
+        let keyboard = SettingsStore(defaults: keyboardDefaults, shared: shared)
+        XCTAssertEqual(home.stripMode, .smart)
+        XCTAssertEqual(keyboard.keyboardMode, .smart)
+        home.stripMode = .agent
+        keyboard.refresh()
+        XCTAssertEqual(keyboard.keyboardMode, .agent)
+        keyboard.keyboardMode = .smart
+        home.refresh()
+        XCTAssertEqual(home.stripMode, .smart)
+        keyboard.keyboardMode = .agent
+        home.refresh()
+        XCTAssertEqual(home.stripMode, .agent)
+        home.stripMode = .smart
+        keyboard.refresh()
+        XCTAssertEqual(keyboard.keyboardMode, .smart)
+    }
     func testStripModeAndKeyboardModeUseOneSharedChoice() {
         let group = "Gusan.mode.alias.tests." + UUID().uuidString
         let defaults = UserDefaults(suiteName: group)!
