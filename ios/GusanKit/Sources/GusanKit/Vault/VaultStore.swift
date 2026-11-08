@@ -4,6 +4,7 @@ import Security
 
 public protocol VaultKeychain {
     func add(_ query: [String: Any]) -> OSStatus
+    func update(_ query: [String: Any], attributes: [String: Any]) -> OSStatus
     func copy(_ query: [String: Any]) -> (OSStatus, Data?)
     func delete(_ query: [String: Any]) -> OSStatus
 }
@@ -11,6 +12,9 @@ public protocol VaultKeychain {
 public struct SystemVaultKeychain: VaultKeychain {
     public init() {}
     public func add(_ query: [String: Any]) -> OSStatus { SecItemAdd(query as CFDictionary, nil) }
+    public func update(_ query: [String: Any], attributes: [String: Any]) -> OSStatus {
+        SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+    }
     public func copy(_ query: [String: Any]) -> (OSStatus, Data?) {
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
@@ -45,12 +49,11 @@ public final class VaultStore {
     }
     public func save(_ credential: VaultCredential, loginID: UUID) throws {
         guard let access = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly, .biometryCurrentSet, nil) else { throw VaultStoreError.passcodeRequired }
-        var attributes = query(loginID)
-        attributes[kSecAttrAccessControl as String] = access
-        attributes[kSecValueData as String] = try JSONEncoder().encode(credential)
-        var status = keychain.add(attributes)
-        if status == errSecDuplicateItem {
-            try delete(loginID: loginID)
+        let changes: [String: Any] = [kSecAttrAccessControl as String: access,
+                                      kSecValueData as String: try JSONEncoder().encode(credential)]
+        var status = keychain.update(query(loginID), attributes: changes)
+        if status == errSecItemNotFound {
+            let attributes = query(loginID).merging(changes) { _, new in new }
             status = keychain.add(attributes)
         }
         try check(status)

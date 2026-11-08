@@ -101,20 +101,12 @@ final class VaultController: ObservableObject {
             let host = try VaultHostname.normalize(hostname)
             let secret = try VaultHostname.authenticatorSecret(authenticator)
             guard !password.isEmpty, password.count <= 4096, username.count <= 4096 else { throw VaultValidationError.credential }
+            let existingIDs = Set(logins.map(\.id))
             let login = try await service.add(hostname: host, usernameHint: VaultHostname.usernameHint(username), hasTOTP: secret != nil)
             guard version == generation else { return false }
-            do {
-                try store.save(VaultCredential(username: username, password: password, totp: secret), loginID: login.id)
-            } catch {
-                let storageMessage = Self.message(error)
-                do { try await service.delete(loginID: login.id) }
-                catch {
-                    self.error = storageMessage + " The cloud entry couldn't be removed. Delete it from Logins and try again."
-                    return false
-                }
-                self.error = storageMessage
-                return false
-            }
+            try await VaultLoginChanges.save(VaultCredential(username: username, password: password, totp: secret),
+                                             loginID: login.id, existingLoginIDs: existingIDs, store: store, service: service)
+            guard version == generation else { return false }
             logins.removeAll { $0.id == login.id }; logins.insert(login, at: 0)
             return true
         } catch { if version == generation { self.error = Self.message(error) }; return false }
@@ -126,8 +118,7 @@ final class VaultController: ObservableObject {
         let version = generation
         defer { busy = false }
         do {
-            try store.delete(loginID: login.id)
-            try await service.delete(loginID: login.id)
+            try await VaultLoginChanges.delete(loginID: login.id, store: store, service: service)
             guard version == generation else { return }
             logins.removeAll { $0.id == login.id }
         } catch { if version == generation { self.error = Self.message(error) } }
@@ -136,6 +127,7 @@ final class VaultController: ObservableObject {
     static func message(_ error: Error) -> String {
         if let error = error as? VaultValidationError { return error.localizedDescription }
         if let error = error as? VaultStoreError { return error.localizedDescription }
+        if let error = error as? VaultLoginChangeError { return error.localizedDescription }
         if let error = error as? VaultClientError { return error.localizedDescription }
         if let error = error as? LAError {
             switch error.code {
