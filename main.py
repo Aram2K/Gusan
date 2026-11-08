@@ -96,7 +96,7 @@ import mac_permissions           # Qt-free: Microphone / Accessibility / Input M
 # Defined in app_info.py (no Qt) so pages and services can read them without
 # importing this module. main.APP_VERSION / main.resource_path stay available
 # (and patchable) for existing callers and tests.
-from app_info import APP_NAME, APP_VERSION, resource_path
+from app_info import APP_NAME, APP_VERSION, resource_path, is_store_package
 import settings_apply
 import updater
 # Gusan 2.0 services' config defaults (both modules are Qt-free at import).
@@ -4405,7 +4405,8 @@ class AppController(QObject):
         threading.Thread(target=self._restore_session, daemon=True).start()
 
         # Check updates in background
-        threading.Thread(target=self._background_check_updates, daemon=True).start()
+        if not is_store_package():
+            threading.Thread(target=self._background_check_updates, daemon=True).start()
 
         # The welcome wizard on the first launch only. Existing users (every
         # 1.9 upgrader) never see it, and get no automatic account gate either:
@@ -5371,6 +5372,8 @@ class AppController(QObject):
         """Worker: the one automatic update check of a launch. The answer is
         handled on the GUI thread (_on_update_checked) - pending_update_version
         is the controller's key, written there."""
+        if is_store_package():
+            return
         try:
             status, tag = updater.check_latest(self.cfg)
         except Exception as e:
@@ -5391,6 +5394,8 @@ class AppController(QObject):
         the page tracks its own). Stores pending_update_version (pages may not
         write it), fetches the installer ahead for "Install updates when I
         quit", and - for the automatic check only - asks for the quiet notice."""
+        if is_store_package():
+            return
         pending = updater.pending_after_check(self.cfg, status, tag)
         if pending is not None:
             self.cfg["pending_update_version"] = pending
@@ -5480,6 +5485,9 @@ class AppController(QObject):
         ``on_done(ok, info)`` runs once, on the GUI thread, when the attempt ends WITHOUT installing:
         info is a short message to show, "" for a plain Cancel or a hand-over to the browser. Without
         it a tray notification says why nothing started."""
+        if is_store_package():
+            AppController._update_call(on_done, False, updater.STORE_MESSAGE)
+            return False
         done = AppController._update_call
         if not updater.valid_tag(tag) or not AppController._is_newer(tag):
             done(on_done, False, updater.MSG_NOT_A_RELEASE)
@@ -5767,6 +5775,8 @@ class AppController(QObject):
         quitting only has to start it. It is kept per release in %TEMP%\\gusan-update\\<tag>\\ and reused
         by the next runs once its sha256 checks out (updater.cached_download) - not ~100 MB downloaded
         again every launch. Only a copy that can update itself in place."""
+        if is_store_package():
+            return
         if sys.platform != "win32" or not self.cfg.get("install_updates_on_quit", True):
             return
         if not updater.can_self_install():
@@ -5857,6 +5867,8 @@ class AppController(QObject):
         reopening Gusan: the person chose to quit. Never for a copy that can't update itself in place
         (portable zip, python main.py), and never for an all-users copy: Quit must not raise a Windows
         permission prompt - those keep the Install update button."""
+        if is_store_package():
+            return
         ready, self._update_ready = self._update_ready, None
         if self._update_closing:
             return              # the update window has handed over already
@@ -5909,6 +5921,8 @@ class AppController(QObject):
         Try again for a Install update; a tray notice for one at Quit). While Setup still runs (Gusan
         was opened by hand meanwhile) nothing is said and the record stays. Nothing was handed over:
         nothing happens."""
+        if is_store_package():
+            return
         try:
             attempt = self.cfg.get("update_attempt") or {}
             if not isinstance(attempt, dict) or not attempt:
@@ -8635,6 +8649,8 @@ def _running_update_install(config=None):
     or closes this copy again and nothing reopens it. Not when this version has already caught up with
     the attempt (it IS the updated app, started by Setup while Setup is still exiting), and not for a
     Setup that has been silent for ten minutes (a stuck installer must never keep Gusan from opening)."""
+    if is_store_package():
+        return None
     try:
         attempt = (cfg if config is None else config).get("update_attempt")
         if not isinstance(attempt, dict) or attempt.get("failed"):

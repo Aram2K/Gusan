@@ -3,6 +3,7 @@
 import os
 import sys
 import threading
+from app_info import is_store_package
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, QEvent
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
@@ -573,7 +574,10 @@ class Settings(QDialog):
         self.chk_telemetry.blockSignals(False)
         
         # 9. About Update button
-        if self.app and self.cfg_working.get("pending_update_version"):
+        if is_store_package():
+            self.btn_update.setText("Updates come from the Microsoft Store.")
+            self.btn_update.setEnabled(False)
+        elif self.app and self.cfg_working.get("pending_update_version"):
             tag = self.cfg_working.get("pending_update_version")
             self.btn_update.setText(f"Install Update {tag}")
             self.btn_update.setObjectName("primaryButton")
@@ -649,7 +653,7 @@ class Settings(QDialog):
         self.tabs.addTab(self._create_history_tab(), "History")
         
         about_title = "About"
-        if self.app and self.cfg_working.get("pending_update_version"):
+        if not is_store_package() and self.app and self.cfg_working.get("pending_update_version"):
             about_title = f"About (Update v{self.cfg_working.get('pending_update_version').replace('v', '')}!)"
             
         self.tabs.addTab(self._create_about_tab(), about_title)
@@ -781,7 +785,13 @@ class Settings(QDialog):
         st_desc.setObjectName("subtitleLabel")
         st_desc.setWordWrap(True)
         st_lay.addWidget(st_desc)
-        if autostart.supported():
+        if is_store_package():
+            self.chk_autostart.hide()
+            st_desc.setText("Start at login is managed in Windows Settings.")
+            startup_button = QPushButton("Open Startup apps", startup_frame)
+            startup_button.clicked.connect(lambda: os.startfile("ms-settings:startupapps"))
+            st_lay.addWidget(startup_button)
+        elif autostart.supported():
             self.chk_autostart.setChecked(autostart.is_enabled())
             self.chk_autostart.toggled.connect(self._on_autostart_toggled)
         else:
@@ -3926,7 +3936,10 @@ class Settings(QDialog):
 
         # Update checking button
         self.btn_update = QPushButton("Check for Updates", scroll_content)
-        if self.app and self.cfg_working.get("pending_update_version"):
+        if is_store_package():
+            self.btn_update.setText("Updates come from the Microsoft Store.")
+            self.btn_update.setEnabled(False)
+        elif self.app and self.cfg_working.get("pending_update_version"):
             tag = self.cfg_working.get("pending_update_version")
             self.btn_update.setText(f"Install Update {tag}")
             self.btn_update.setObjectName("primaryButton")
@@ -4693,6 +4706,9 @@ class Settings(QDialog):
         self._refresh_engine_availability()
 
     def _check_for_updates(self):
+        if is_store_package():
+            QMessageBox.information(self, "Updates", "Updates come from the Microsoft Store.")
+            return
         if self.app and self.cfg_working.get("pending_update_version"):
             tag = self.cfg_working.get("pending_update_version")
             self._on_download_finished("update", f"available:{tag}")

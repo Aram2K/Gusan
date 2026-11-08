@@ -105,7 +105,7 @@ import urllib.request
 import uuid
 from urllib.parse import urlparse
 
-from app_info import APP_NAME, APP_VERSION
+from app_info import APP_NAME, APP_VERSION, is_store_package
 
 logger = logging.getLogger("transcribe")
 
@@ -120,6 +120,8 @@ LEGACY_INSTALLER_NAME = "TranscribeApp-Windows-Setup.exe"
 APP_ID = "{8E3B7C8A-9D54-4F61-9F6C-2E8C7F0A1B23}"       # installer.iss AppId (never changes)
 
 AVAILABLE, LATEST, ERROR, DISMISSED = "available", "latest", "error", "dismissed"
+STORE = "store"
+STORE_MESSAGE = "Updates come from the Microsoft Store."
 UNSUPPORTED = "unsupported"
 CANCELLED = "cancelled"          # download/cached_download: the user pressed Cancel
 
@@ -204,6 +206,8 @@ def check_latest(cfg=None, *, manual=False, get=None, current=APP_VERSION, timeo
     ("dismissed", tag) newer but the user said "Not now" to that tag (an
     automatic check only - "Check now" always says available);
     ("error", "") no answer. Blocking (worker)."""
+    if is_store_package():
+        return STORE, ""
     try:
         # As 1.9: no system proxy (a broken proxy setting blocked the check).
         resp = _get(get)(RELEASES_API, timeout=timeout, proxies={"http": None, "https": None})
@@ -245,6 +249,8 @@ def pending_after_check(cfg, status, tag):
 
 def should_prompt(cfg, tag, current=APP_VERSION):
     """May the app bring up this update by itself? Newer and not dismissed."""
+    if is_store_package():
+        return False
     return is_newer(tag, current) and (cfg or {}).get("dismissed_update_version") != tag
 
 
@@ -255,6 +261,8 @@ def dismiss_changes(tag):
 
 def status_line(status, tag="", current=APP_VERSION):
     """(title, status text) for the Updates & about row."""
+    if is_store_package():
+        return APP_NAME + " " + current, STORE_MESSAGE
     title = f"{APP_NAME} {current}"
     if status in (AVAILABLE, DISMISSED):
         return title, f"Update available · {tag}"
@@ -471,6 +479,8 @@ def download(tag, *, urlopen=None, dest_dir=None, verify=True, expected=None,
     announced, longer than MAX_INSTALLER_BYTES, or smaller than ``min_bytes`` (default
     MIN_INSTALLER_BYTES: an error page, not an installer), is refused and removed.
     ``name``: the file name (a unique one when a kept file is locked)."""
+    if is_store_package():
+        return False, STORE_MESSAGE
     if not valid_tag(tag):
         return False, MSG_NOT_A_RELEASE
     url = installer_url(tag)
@@ -605,6 +615,8 @@ def cached_download(tag, *, urlopen=None, root=None, verify=True, on_progress=No
     removed - a running installer holds it). Other releases' files are removed.
     Blocking (worker). Returns (True, path), (False, message) or (False,
     CANCELLED); ``on_progress`` / ``should_cancel`` as for download()."""
+    if is_store_package():
+        return False, STORE_MESSAGE
     if not valid_tag(tag):
         return False, MSG_NOT_A_RELEASE
     root = root or cache_root()
@@ -662,6 +674,8 @@ def _remove_leftovers(folder, keep=()):
 
 def launch(path, *, startfile=None):
     """Run a downloaded installer (Windows). Returns (ok, message)."""
+    if is_store_package():
+        return False, STORE_MESSAGE
     if startfile is None:
         if sys.platform != "win32":
             return False, UNSUPPORTED
@@ -680,6 +694,8 @@ def install(tag, *, urlopen=None, startfile=None, dest_dir=None, verify=True):
     files - or (False, message). The app itself never uses this (install_update does, with its window
     and a quiet Setup); it stays for a page without a controller. The download goes to the release's
     own folder under %TEMP%\\gusan-update, never to a fixed name in %TEMP% itself."""
+    if is_store_package():
+        return False, STORE_MESSAGE
     if startfile is None and sys.platform != "win32":
         return False, UNSUPPORTED
     if dest_dir is None and valid_tag(tag):
@@ -701,6 +717,8 @@ def can_self_install(exe=None):
     portable zip and a source checkout would get a second, separate installed
     copy instead - they are sent to the download page. ``exe``: a program path
     to judge (tests); None is this program."""
+    if is_store_package():
+        return False
     if sys.platform != "win32":
         return False
     if exe is None and not getattr(sys, "frozen", False):
@@ -850,6 +868,8 @@ def launch_installer(path, *, all_users=False, log_path=None, relaunch=False, st
     (note_verified) and is held unchangeable until Windows has started it (_hold_checked_installer),
     or nothing starts: (False, MSG_DAMAGED). A per-user start gains nothing from that - the same user
     could run anything anyway - and only costs the time to read ~100 MB again."""
+    if is_store_package():
+        return False, STORE_MESSAGE
     if start is None:
         if sys.platform != "win32":
             return False, UNSUPPORTED
@@ -1058,6 +1078,8 @@ def spawn_relauncher(exe, log_path, popen=None):
     ``log_path`` has finished. Start it once Setup is running. Returns the process, or None when it
     could not be started (PowerShell blocked by policy, say) - the caller then says Gusan will not
     come back by itself."""
+    if is_store_package():
+        return None
     if sys.platform != "win32" and popen is None:
         return None
     env = reset_child_env(dict(os.environ))

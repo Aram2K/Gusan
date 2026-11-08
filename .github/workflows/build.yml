@@ -299,6 +299,31 @@ jobs:
           Write-Host "Multimedia plugin: $mm"
           # multimedia-check:end
 
+      - name: Build Microsoft Store package
+        shell: pwsh
+        env:
+          MSIX_IDENTITY_NAME: ${{ vars.MSIX_IDENTITY_NAME }}
+          MSIX_PUBLISHER: ${{ vars.MSIX_PUBLISHER }}
+          MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME }}
+        run: python installer/make_msix.py --version "${{ steps.version.outputs.app_version }}"
+
+      - name: Smoke test Store layout registration
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Add-AppxPackage -Register "$PWD\build\msix-layout\AppxManifest.xml" -ErrorAction Stop
+          [xml]$manifest = Get-Content build/msix-layout/AppxManifest.xml
+          $package = Get-AppxPackage -Name $manifest.Package.Identity.Name
+          if (-not $package) { throw "Store layout was not registered" }
+          Write-Host "Registered $($package.PackageFullName)"
+          Remove-AppxPackage -Package $package.PackageFullName -ErrorAction Stop
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-msix
+          path: Gusan-Windows-Store.msix
+          if-no-files-found: error
+
       - name: Zip output folder (portable build)
         shell: pwsh
         run: Compress-Archive -Path dist\TranscribeApp\* -DestinationPath TranscribeApp-Windows.zip
