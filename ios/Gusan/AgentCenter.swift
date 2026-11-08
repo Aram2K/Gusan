@@ -195,7 +195,7 @@ final class AgentCenter: NSObject, ObservableObject {
             throw NSError(domain: "Gusan.AgentRetry", code: 1, userInfo: [NSLocalizedDescriptionKey: "The original input is no longer available. Start again from Home."])
         }
         if original.continuation { return try await continueTask(task.id, message: original.instruction) }
-        return try await start(AgentIntent(mode: task.mode, instruction: original.instruction), context: original.context, continuing: task.id)
+        return try await start(AgentIntent(mode: task.mode, instruction: original.instruction, provider: task.provider), context: original.context, continuing: task.id)
     }
 
     @discardableResult

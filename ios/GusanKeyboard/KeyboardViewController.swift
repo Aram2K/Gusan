@@ -176,7 +176,7 @@ final class KeyboardViewController: UIInputViewController {
     @objc private func toggleScreen() {
         stripFeedback()
         guard hasFullAccess else { openContainingApp(URL(string: "gusan://open-settings")!); return }
-        if preferences.keyboardScreenEnabled && !screen.live { openContainingApp(URL(string: "gusan://screen")!); return }
+        // Tapping an enabled icon only turns it off; the app opens solely to start a broadcast that is not running.
         settings.keyboardScreenEnabled = !preferences.keyboardScreenEnabled
         preferences = KeyboardSettingsSnapshot(defaults: sharedDefaults); scheduleUpdate()
         if preferences.keyboardScreenEnabled && !screen.live { openContainingApp(URL(string: "gusan://screen")!) }

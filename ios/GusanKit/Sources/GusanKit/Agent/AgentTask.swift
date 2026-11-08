@@ -100,6 +100,7 @@ public struct AgentResult: Codable, Equatable {
 public struct AgentTask: Codable, Equatable, Identifiable {
     public let id: UUID
     public var mode: AgentMode
+    public var provider: AgentProvider = .h
     public var status: AgentStatus {
         didSet { rawStatus = status.rawValue }
     }
@@ -153,7 +154,7 @@ public struct AgentTask: Codable, Equatable, Identifiable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case taskID = "task_id", id, mode, status, title, steps, confirmation, result, outcome
+        case taskID = "task_id", id, mode, provider, status, title, steps, confirmation, result, outcome
         case errorCode = "error_code", createdAt = "created_at", updatedAt = "updated_at", finishedAt = "finished_at", deadlineAt = "deadline_at", seenAt = "seen_at"
     }
     /// Accepts both the function's task object (`task_id`) and a raw `agent_tasks` row (`id`).
@@ -164,6 +165,7 @@ public struct AgentTask: Codable, Equatable, Identifiable {
         }
         self.id = id
         mode = (try? c.decode(AgentMode.self, forKey: .mode)) ?? .research
+        provider = (try? c.decode(AgentProvider.self, forKey: .provider)) ?? .h
         rawStatus = (try? c.decode(String.self, forKey: .status)) ?? "running"
         status = Self.coarseStatus(rawStatus)
         title = (try? c.decode(String.self, forKey: .title)) ?? ""
@@ -180,7 +182,7 @@ public struct AgentTask: Codable, Equatable, Identifiable {
     }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(id, forKey: .taskID); try c.encode(mode, forKey: .mode); try c.encode(rawStatus, forKey: .status); try c.encode(title, forKey: .title)
+        try c.encode(id, forKey: .taskID); try c.encode(mode, forKey: .mode); try c.encode(provider, forKey: .provider); try c.encode(rawStatus, forKey: .status); try c.encode(title, forKey: .title)
         try c.encode(steps, forKey: .steps); try c.encodeIfPresent(confirmation, forKey: .confirmation); try c.encodeIfPresent(result, forKey: .result)
         try c.encodeIfPresent(outcome, forKey: .outcome); try c.encodeIfPresent(errorCode, forKey: .errorCode); try c.encode(createdAt, forKey: .createdAt)
         try c.encodeIfPresent(updatedAt, forKey: .updatedAt); try c.encodeIfPresent(finishedAt, forKey: .finishedAt); try c.encodeIfPresent(deadlineAt, forKey: .deadlineAt); try c.encodeIfPresent(seenAt, forKey: .seenAt)
