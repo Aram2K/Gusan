@@ -346,13 +346,15 @@ public final class SessionStore: SessionStorage {
     }
 }
 
+public enum KeyboardMode: String, CaseIterable { case smart, agent }
+
 public final class SettingsStore {
     private let defaults: UserDefaults
     private let shared: SessionBackend
     private let lock = NSLock()
     private var cached: [String: Any] = [:]
     private var lastRead = Date.distantPast
-    private let keys = ["defaultAction", "translateTarget", "keyClicks", "autoCapitalization", "doubleSpacePeriod", "haptics", "pasteboardFallback", "privacyMode", "stripMode"]
+    private let keys = ["defaultAction", "translateTarget", "keyClicks", "autoCapitalization", "doubleSpacePeriod", "haptics", "pasteboardFallback", "privacyMode", "stripMode", "keyboardMode", "keyboardScreenEnabled"]
     public init(group: String?, pasteboardAccessAllowed: @escaping () -> Bool = { true }) {
         defaults = group.flatMap(UserDefaults.init(suiteName:)) ?? .standard
         shared = NamedSessionPasteboard(namespace: "com.aram2k.gusan.settings", accessAllowed: pasteboardAccessAllowed)
@@ -397,8 +399,19 @@ public final class SettingsStore {
         }
     }
     public var stripMode: StripMode {
-        get { (preference("stripMode") as? String).flatMap(StripMode.init(rawValue:)) ?? .smart }
-        set { setPreference(newValue.rawValue, key: "stripMode") }
+        get { StripMode(rawValue: keyboardMode.rawValue) ?? .smart }
+        set { keyboardMode = KeyboardMode(rawValue: newValue.rawValue) ?? .smart }
+    }
+    public var keyboardMode: KeyboardMode {
+        get { ((preference("keyboardMode") ?? preference("stripMode")) as? String).flatMap(KeyboardMode.init(rawValue:)) ?? .smart }
+        set {
+            setPreference(newValue.rawValue, key: "keyboardMode")
+            setPreference(newValue.rawValue, key: "stripMode")
+        }
+    }
+    public var keyboardScreenEnabled: Bool {
+        get { preference("keyboardScreenEnabled") as? Bool ?? true }
+        set { setPreference(newValue, key: "keyboardScreenEnabled") }
     }
     public var defaultAction: SmartActionMode {
         get { (preference("defaultAction") as? String).flatMap(SmartActionMode.init(rawValue:)) ?? .smartAuto }

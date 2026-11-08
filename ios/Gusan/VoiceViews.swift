@@ -108,7 +108,7 @@ struct VoiceSettingsSection: View {
             if voice.permission == .denied { Button("Open Settings") { UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!) } }
             if !voice.error.isEmpty { Label(voice.inAppError, systemImage: "exclamationmark.circle").foregroundStyle(.secondary) }
             Picker("Language I speak", selection: $language) { ForEach(VoiceSettings.languages, id: \.code) { Text($0.name).tag($0.code) } }.onChange(of: language) { voice.settings.language = $0 }
-            Picker("Ready window", selection: $minutes) { ForEach(VoiceSettings.idleOptions, id: \.self) { Text("\($0) min").tag($0) } }.onChange(of: minutes) { voice.settings.idleMinutes = $0 }
+            Picker("Ready window", selection: $minutes) { ForEach(VoiceSettings.idleOptions, id: \.self) { Text($0 == 0 ? "Until I stop" : $0 == 60 ? "1 hour" : "\($0) min").tag($0) } }.onChange(of: minutes) { voice.settings.idleMinutes = $0 }
             Text("An open session reserves the mic and uses some battery. Capture pauses while idle; iOS may end the window early.").font(.footnote).foregroundStyle(.secondary)
             #if GUSAN_SIDELOAD
             Toggle("Return to the previous app automatically (sideload only)", isOn: $autoReturn).onChange(of: autoReturn) { voice.settings.autoReturn = $0 }

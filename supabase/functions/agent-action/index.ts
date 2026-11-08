@@ -647,10 +647,12 @@ function stepText(data: Obj) {
 function executeGuard(plan: Obj, events: Obj[], fromIndex: number) {
   const state = {
     ...plan,
-    execute_action_count: plan.execute_action_count ?? 0,
+    execute_submission_count: plan.execute_submission_count ?? 0,
     execute_action_ids: [...(plan.execute_action_ids ?? [])],
     execute_last_url: plan.execute_last_url ?? plan.start_url,
     execute_waiting_for_result: plan.execute_waiting_for_result ?? false,
+    execute_pending_unlabeled_click: plan.execute_pending_unlabeled_click ??
+      false,
     execute_guard_index: plan.execute_guard_index ?? 0,
     execute_violation: plan.execute_violation ?? null,
   };
@@ -703,37 +705,42 @@ function executeGuard(plan: Obj, events: Obj[], fromIndex: number) {
           : position === actions.length - 1
           ? data.content
           : null;
-        if (
-          typeof description !== "string" || !irreversible.test(description)
-        ) continue;
         const id = typeof call.id === "string"
           ? call.id
           : `${index}:${position}`;
         if (state.execute_action_ids.includes(id)) continue;
         state.execute_action_ids.push(id);
-        state.execute_action_count++;
-        state.execute_waiting_for_result = true;
+        if (typeof description !== "string") {
+          state.execute_pending_unlabeled_click = true;
+        } else if (irreversible.test(description)) {
+          state.execute_waiting_for_result = true;
+        }
       }
     } else if (
       data?.kind === "observation_event" && data.type === "web" &&
       typeof data.metadata?.url === "string"
     ) {
       const current = data.metadata.url;
-      if (current !== state.execute_last_url && current !== plan.start_url) {
+      if (current !== state.execute_last_url) {
         try {
           const path = new URL(current).pathname;
-          if (
+          const resultPage = current !== plan.start_url &&
             /^\/post\/?$|\/(?:submitted|thank-you|order-confirmation|order-complete|receipt|success)(?:\/|$)/i
-              .test(path)
+              .test(path);
+          if (
+            state.execute_waiting_for_result ||
+            (resultPage && (state.execute_submission_count === 0 ||
+              state.execute_pending_unlabeled_click))
           ) {
-            if (!state.execute_waiting_for_result) state.execute_action_count++;
+            state.execute_submission_count++;
             state.execute_waiting_for_result = false;
           }
+          state.execute_pending_unlabeled_click = false;
         } catch { /* Not an observable result URL. */ }
       }
       state.execute_last_url = current;
     }
-    if (state.execute_action_count > 1) violation = "duplicate_action";
+    if (state.execute_submission_count > 1) violation = "duplicate_action";
     if (violation) break;
   }
   state.execute_violation = violation;

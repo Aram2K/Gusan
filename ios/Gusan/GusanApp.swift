@@ -3,7 +3,7 @@ import SwiftUI
 @main
 struct GusanApp: App {
     @StateObject private var model: AppModel
-    @StateObject private var voice = VoiceSession()
+    @StateObject private var voice: VoiceSession
     @StateObject private var agent: AgentCenter
     @Environment(\.scenePhase) private var scenePhase
     init() {
@@ -12,6 +12,14 @@ struct GusanApp: App {
         let agent = AgentCenter(model: model)
         agent.configureLiveActivities()
         _model = StateObject(wrappedValue: model); _agent = StateObject(wrappedValue: agent)
+        // Created here, not lazily by SwiftUI, so a background launch for an App Intent can record before any UI exists.
+        let voice = VoiceSession()
+        voice.agentHandoff = { intent, context in try await agent.start(intent, context: context) }
+        _voice = StateObject(wrappedValue: voice)
+        VoiceIntentBridge.handler = { [weak voice] command in
+            guard let voice else { throw VoiceIntentError.appUnavailable }
+            try await voice.perform(command)
+        }
         AgentCenter.registerBackgroundRefresh(agent)
     }
     @StateObject private var screen = ScreenMonitor()

@@ -47,7 +47,7 @@ for (let i=0; i<scenarios.length; i++) {
     }
     if(table==='agent_task_runs' && patch?.phase==='execute' && s.executeGuardDuringConfirm){
      s.executeGuardDuringConfirm=false;
-     run={...run,...patch,plan:{...patch.plan,execute_action_count:1}};
+     run={...run,...patch,plan:{...patch.plan,execute_submission_count:1}};
      row={...row,status:'running'};
     }
     if(table==='agent_task_runs' && patch && filters.some(([k,v])=>
@@ -976,13 +976,14 @@ def execute_observation(url):
 
 @pytest.mark.parametrize("delete_failure", [None, 500])
 def test_execute_duplicate_submit_cancels_even_on_completed_status(run, delete_failure):
-    events = [execute_policy("first"), execute_policy("second")]
+    events = [execute_policy("first"), execute_observation("https://example.com/success"),
+              execute_policy("second"), execute_observation("https://example.com/receipt")]
     out, = run({"row": {"mode": "do"}, "run": {"phase": "execute", "plan": PLAN},
         "deleteFailure": delete_failure,
         "change": {"status": "completed", "answer": {"markdown": "Done"}, "new_events": events}})
     assert out["row"]["status"] == "failed" and out["row"]["error_code"] == "duplicate_action"
     assert out["row"]["result"] is None and len(out["row"]["steps"]) == 2
-    assert out["run"]["plan"]["execute_action_count"] == 2
+    assert out["run"]["plan"]["execute_submission_count"] == 2
     assert len([c for c in out["calls"] if c["method"] == "DELETE"]) == 1
 
 
@@ -1012,7 +1013,7 @@ def test_execute_one_submit_and_result_complete_normally(run):
             execute_policy("fill", "Fill the name", tool="write"),
             execute_policy("submit"), execute_observation("https://httpbin.org/post")]}})
     assert out["row"]["status"] == "completed" and out["row"]["error_code"] is None
-    assert out["run"]["plan"]["execute_action_count"] == 1
+    assert out["run"]["plan"]["execute_submission_count"] == 1
     assert not any(c["method"] == "DELETE" for c in out["calls"])
 
 
@@ -1020,13 +1021,16 @@ def test_execute_guard_persists_across_polls_and_ignores_repeated_call_ids(run):
     out, = run({"row": {"mode": "do"}, "run": {"phase": "execute", "plan": PLAN},
         "requests": [
             {"body": {"action": "status", "task_id": ID},
-             "change": {"status": "running", "new_events": [execute_policy("submit")]}},
+             "change": {"status": "running", "new_events": [execute_policy("submit"),
+                        execute_observation("https://example.com/success")]}},
             {"body": {"action": "status", "task_id": ID},
              "change": {"status": "running", "new_events": [execute_policy("submit")]}},
             {"body": {"action": "status", "task_id": ID},
-             "change": {"status": "running", "new_events": [execute_policy("resubmit")]}}]})
-    assert [r["body"]["status"] for r in out["replies"]] == ["running", "running", "failed"]
-    assert [s["run"]["plan"]["execute_action_count"] for s in out["snapshots"]] == [1, 1, 2]
+             "change": {"status": "running", "new_events": [execute_policy("resubmit")]}},
+            {"body": {"action": "status", "task_id": ID},
+             "change": {"status": "running", "new_events": [execute_observation("https://example.com/receipt")]}}]})
+    assert [r["body"]["status"] for r in out["replies"]] == ["running", "running", "running", "failed"]
+    assert [s["run"]["plan"]["execute_submission_count"] for s in out["snapshots"]] == [1, 1, 1, 2]
     assert out["row"]["error_code"] == "duplicate_action"
 
 
@@ -1039,7 +1043,7 @@ def test_execute_coordinate_only_actions_use_result_url_transitions(run):
             execute_observation(start), execute_policy("second", None),
             execute_observation("https://httpbin.org/post")]}})
     assert out["row"]["status"] == "failed" and out["row"]["error_code"] == "duplicate_action"
-    assert out["run"]["plan"]["execute_action_count"] == 2
+    assert out["run"]["plan"]["execute_submission_count"] == 2
 
 
 @pytest.mark.parametrize("host,expected", [
@@ -1057,16 +1061,18 @@ def test_execute_off_plan_navigation_kill_switch(run, host, expected):
 
 def test_execute_concurrent_duplicate_detection_has_one_cancellation(run):
     out, = run({"row": {"mode": "do"}, "run": {"phase": "execute", "plan": PLAN},
-        "change": {"status": "running", "new_events": [execute_policy("one"), execute_policy("two")]},
+        "change": {"status": "running", "new_events": [execute_policy("one"),
+            execute_observation("https://example.com/success"), execute_policy("two"),
+            execute_observation("https://example.com/receipt")]},
         "requests": [{"body": {"action": "status", "task_id": ID}, "concurrent": 2}]})
     assert out["row"]["status"] == "failed" and out["row"]["error_code"] == "duplicate_action"
-    assert out["run"]["plan"]["execute_action_count"] == 2
+    assert out["run"]["plan"]["execute_submission_count"] == 2
     assert len([c for c in out["calls"] if c["method"] == "DELETE"]) == 1
 
 
 def test_execute_persisted_violation_cannot_be_overwritten_by_completion(run):
     out, = run({"row": {"mode": "do"}, "run": {"phase": "execute", "plan": {
-        **PLAN, "execute_action_count": 2, "execute_violation": "duplicate_action"}},
+        **PLAN, "execute_submission_count": 2, "execute_violation": "duplicate_action"}},
         "change": {"status": "completed", "answer": {"markdown": "Done"}, "new_events": []}})
     assert out["row"]["status"] == "failed" and out["row"]["error_code"] == "duplicate_action"
     assert any(c["method"] == "DELETE" for c in out["calls"])
@@ -1077,4 +1083,30 @@ def test_inflight_double_confirm_cannot_reset_submit_count(run):
                        body={"action": "confirm", "task_id": ID}))
     assert out["row"]["status"] == "running"
     assert out["run"]["phase"] == "execute"
-    assert out["run"]["plan"]["execute_action_count"] == 1
+    assert out["run"]["plan"]["execute_submission_count"] == 1
+
+
+@pytest.mark.parametrize("events", [
+    [execute_policy("confirm", "Click Confirm"), execute_policy("submit"),
+     execute_observation("https://example.com/success")],
+    [execute_policy("submit"), execute_observation("https://example.com/success"),
+     execute_observation("https://example.com/receipt")],
+])
+def test_execute_preliminary_confirm_and_receipt_navigation_are_not_duplicates(run, events):
+    out, = run({"row": {"mode": "do"}, "run": {"phase": "execute", "plan": PLAN},
+        "change": {"status": "completed", "answer": {"markdown": "Done"}, "new_events": events}})
+    assert out["row"]["status"] == "completed" and out["row"]["error_code"] is None
+    assert out["run"]["plan"]["execute_submission_count"] == 1
+    assert not any(c["method"] == "DELETE" for c in out["calls"])
+
+
+def test_httpbin_second_submission_requires_second_landing(run):
+    start = "https://httpbin.org/forms/post"
+    out, = run({"row": {"mode": "do"}, "run": {"phase": "execute", "plan": {**PLAN, "start_url": start}},
+        "change": {"status": "completed", "answer": {"markdown": "Done"}, "new_events": [
+            execute_policy("first"), execute_observation("https://httpbin.org/post"),
+            execute_observation(start), execute_policy("refill", "Refill name", tool="write"),
+            execute_policy("second"), execute_observation("https://httpbin.org/post")]}})
+    assert out["row"]["status"] == "failed" and out["row"]["error_code"] == "duplicate_action"
+    assert out["run"]["plan"]["execute_submission_count"] == 2
+    assert any(c["method"] == "DELETE" for c in out["calls"])

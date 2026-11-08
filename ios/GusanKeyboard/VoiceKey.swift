@@ -38,365 +38,189 @@ final class VoiceWaveform: UIView {
 }
 
 final class VoiceKeyController: NSObject {
-    private weak var micKey: VoiceKey?
-    let bar = UIStackView()
-    let panel = VoicePanel()
-    var onPanelVisibility: ((Bool) -> Void)?
-    private var panelVisible = false
-    private var panelDismissed = false
-    private var cancelledID: UUID?
-    private var previewEnabled = false
-    private var cachedStatus: VoiceStatus?
-    private var statusTask: Task<Void, Never>?
-    private var statusLoadID: UUID?
-    private var handlingTap = false
-    #if DEBUG
-    private var previewStatus: VoiceStatus?
-    #endif
+    var onChange: (() -> Void)?
+    var onStart: (() -> VoiceAction?)?
+    var onFinish: (() -> Void)?
+    var onTranscript: ((String, VoiceContext) -> Void)?
     private weak var host: UIInputViewController?
     private let store: SessionStore
     private let channel: VoiceChannel
-    private let waveform = VoiceWaveform()
-    private let label = UILabel()
-    private let undoButton = UIButton(type: .system)
-    private let copyButton = UIButton(type: .system)
-    private let reviewButton = UIButton(type: .system)
-    private let settingsButton = UIButton(type: .system)
-    private var settingsURL: URL?
     private var observer: DarwinObserver?
     private var timer: Timer?
-    private var visible = false
     private var pending = KeyboardVoiceState()
-    private var requestID: UUID? { pending.requestID }
-    private var context: VoiceContext? { pending.context }
-    private var insertedID: UUID? { pending.insertedID }
+    private var status: VoiceStatus?
+    private var cancelledID: UUID?
+    private var action: VoiceAction?
+    private var visible = false
+    private var loading = false
+    private var undoRecord: ReplacementUndo?
+    private var undoSnapshot: VoiceContext?
     private var inserted: String?
     private var original = ""
     private var restoreUTF16 = 0
-    private var undoContext: VoiceContext?
-    private var undoRecord: ReplacementUndo?
-    private var undoIsRedo = false
-    private var undoSnapshot: VoiceContext?
-    private var undoCaptureDeadline: TimeInterval = 0
-    private var awaitingUndoContext = false
-    private var localMessage: String?
-    private var reviewResult: String?
-    private var resultPanel: UIView?
-    private var reviewContext: VoiceContext?
-    private var reviewHeading: UILabel?
-    init(host: UIInputViewController, store: SessionStore, micKey: VoiceKey) {
-        self.host = host; self.store = store; self.micKey = micKey
-        channel = store.makeVoiceChannel()
+    private var undoExpires = Date.distantPast
+    private var preview = false
+    private(set) var phase = VoicePhase.off
+    private(set) var level: Float = 0
+    private(set) var message: String?
+    private(set) var actionTitle: String?
+    private var actionURL: URL?
+    var canUndo: Bool {
+        guard Date() < undoExpires, let current = currentContext() else { return false }
+        return undoRecord?.step(context: current) != nil
+    }
+    init(host: UIInputViewController, store: SessionStore) {
+        self.host = host; self.store = store; channel = store.makeVoiceChannel()
         super.init()
-        panel.stop.addTarget(self, action: #selector(stopVoice), for: .touchUpInside)
-        panel.cancel.addTarget(self, action: #selector(cancelVoice), for: .touchUpInside)
-        panel.undo.addTarget(self, action: #selector(undo), for: .touchUpInside)
-        restorePending()
-        label.font = .systemFont(ofSize: 12); label.numberOfLines = 2
-        undoButton.setTitle("Undo", for: .normal); undoButton.addTarget(self, action: #selector(undo), for: .touchUpInside); undoButton.isHidden = true
-        copyButton.setTitle("Copy", for: .normal); copyButton.accessibilityLabel = "Copy voice result"
-        copyButton.addTarget(self, action: #selector(copyResult), for: .touchUpInside)
-        reviewButton.setTitle("View", for: .normal); reviewButton.accessibilityLabel = "Review voice result"
-        reviewButton.addTarget(self, action: #selector(viewResult), for: .touchUpInside)
-        settingsButton.setTitle("Open Settings", for: .normal)
-        settingsButton.addTarget(self, action: #selector(openSettings), for: .touchUpInside)
-        for button in [copyButton, reviewButton, settingsButton] {
-            button.isHidden = true
-            button.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
-            button.setContentCompressionResistancePriority(.required, for: .horizontal)
-        }
-        waveform.setContentHuggingPriority(.required, for: .horizontal)
-        undoButton.setContentHuggingPriority(.required, for: .horizontal)
-        bar.spacing = 8; bar.alignment = .center
-        [waveform, label, undoButton, reviewButton, copyButton, settingsButton].forEach { bar.addArrangedSubview($0) }
-        bar.isHidden = true
     }
     func appear() {
-        #if DEBUG
-        previewEnabled = UserDefaults(suiteName: store.resolution.chosen)?.bool(forKey: "debugVoicePreview") == true
-        #endif
-        if !previewEnabled { restorePending() }
         visible = true
-        observer = channel.observe(.status) { [weak self] in self?.loadStatus() }
+        #if DEBUG
+        preview = UserDefaults(suiteName: store.resolution.chosen)?.bool(forKey: "debugVoicePreview") == true
+        #endif
+        if !preview, let saved = channel.readKeyboardState() { pending = saved }
+        observer = channel.observe(.status) { [weak self] in self?.load() }
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.loadStatus() }
-        loadStatus()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in self?.load() }
+        load()
     }
-    private func loadStatus() {
-        guard visible else { return }
-        if previewEnabled { refresh(); return }
-        guard statusTask == nil else { return }
-        let id = UUID(); statusLoadID = id
-        statusTask = Task { @MainActor [weak self] in
+    func disappear() { visible = false; observer = nil; timer?.invalidate(); timer = nil }
+    private func load() {
+        guard visible, !loading else { return }
+        if preview { refresh(); return }
+        loading = true
+        Task { @MainActor [weak self] in
             guard let self else { return }
-            let status = await channel.readStatusSnapshot()
-            guard !Task.isCancelled, visible, statusLoadID == id else { return }
-            cachedStatus = status; statusTask = nil; refresh()
+            let value = await channel.readStatusSnapshot()
+            loading = false
+            guard visible else { return }
+            status = value; refresh()
         }
     }
-    func toggle() { tap() }
-    func documentDidChange() {
-        guard awaitingUndoContext else { return }
-        guard ProcessInfo.processInfo.systemUptime < undoCaptureDeadline else { awaitingUndoContext = false; undoSnapshot = nil; return }
-        guard let inserted, let snapshot = undoSnapshot, let current = currentContext(), VoiceEdit.containsInsertedResult(inserted, context: current, snapshot: snapshot) else { return }
-        undoContext = current; awaitingUndoContext = false
-        undoRecord = ReplacementUndo(original: original, replacement: inserted, snapshot: snapshot, restoreUTF16: restoreUTF16)
-    }
-    func insertedText(_ text: String, hasSelection: Bool) {
-        if awaitingUndoContext { documentDidChange(); awaitingUndoContext = false }
-        if hasSelection || undoRecord?.append(text) == false { undoRecord = nil; undoContext = nil }
-    }
-    func deletedText(hasSelection: Bool) {
-        if awaitingUndoContext { documentDidChange(); awaitingUndoContext = false }
-        if hasSelection || undoRecord?.deleteBackward() == false { undoRecord = nil; undoContext = nil }
-    }
-    func dismiss() { inserted = nil; undoRecord = nil; undoContext = nil; awaitingUndoContext = false; localMessage = nil; clearReview(); undoButton.isHidden = true; panelDismissed = true; refresh() }
-    func applyTheme(_ theme: KeyboardTheme) {
-        bar.overrideUserInterfaceStyle = theme.dark ? .dark : .light
-        panel.overrideUserInterfaceStyle = theme.dark ? .dark : .light
-        label.textColor = theme.foreground
-        panel.status.textColor = theme.foreground
-    }
-    func updateTypography(_ traits: UITraitCollection) {
-        label.font = keyboardFont(12, style: .caption1, maximum: 20, traits: traits)
-        panel.status.font = keyboardFont(20, style: .title3, maximum: 26, weight: .semibold, traits: traits)
-        panel.stop.titleLabel?.font = keyboardFont(22, style: .title2, maximum: 28, weight: .semibold, traits: traits)
-        for button in [panel.cancel, panel.undo, undoButton, copyButton, reviewButton, settingsButton] {
-            button.titleLabel?.font = keyboardFont(14, style: .callout, maximum: 20, traits: traits)
-        }
-    }
-    func disappear() { visible = false; observer = nil; timer?.invalidate(); timer = nil; statusTask?.cancel(); statusTask = nil; statusLoadID = nil; panel.waveform.update(level: 0, animated: false); closeResult() }
     private func currentContext() -> VoiceContext? {
         guard let proxy = host?.textDocumentProxy else { return nil }
         return VoiceContext(selected: proxy.selectedText ?? "", before: proxy.documentContextBeforeInput ?? "", after: proxy.documentContextAfterInput ?? "", documentID: proxy.documentID.uuidString)
     }
-    @objc private func tap() {
-        guard !handlingTap else { return }; handlingTap = true
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { handlingTap = false }
-            if !previewEnabled { cachedStatus = await channel.readStatusSnapshot() }
-            guard visible else { return }
-            handleTap()
+    func toggle() {
+        if preview {
+            if phase == .recording { onFinish?(); status?.phase = .thinking }
+            else if phase == .thinking { status?.phase = .done; status?.result = "This is a polished voice preview."; status?.resultKind = .insert }
+            else { start(); status = VoiceStatus(phase: .recording, requestID: pending.requestID) }
+            refresh(); return
         }
-    }
-    private func handleTap() {
         guard let host else { return }
-        #if DEBUG
-        if previewEnabled { advancePreview(); return }
-        #endif
-        let access = store.sessionState(fullAccess: host.hasFullAccess)
-        let status = readStatus()
-        settingsButton.isHidden = true; settingsURL = nil
-        switch KeyboardVoice.tap(status: status, access: access) {
+        switch KeyboardVoice.tap(status: status, access: store.sessionState(fullAccess: host.hasFullAccess)) {
         case .error(let error):
-            if error == .fullAccessRequired || error == .fallbackOff {
-                settingsURL = URL(string: error == .fullAccessRequired ? "gusan://open-settings" : "gusan://keyboard-settings")
-                settingsButton.setTitle(error == .fullAccessRequired ? "Open Settings" : "Settings", for: .normal)
-                settingsButton.isHidden = false
-            }
-            show(error.localizedDescription)
+            show(error.localizedDescription, action: error == .fullAccessRequired ? "Turn on Full Access" : "Sign in", url: error == .fullAccessRequired ? "gusan://open-settings" : "gusan://signin")
+        case .start: start()
         case .openApp:
-            guard sendStart(), let requestID else { return }
-            let launch = VoiceLaunch(requestID: requestID)
-            do { try channel.write(launch: launch) }
-            catch { show(error.localizedDescription); return }
+            start()
+            guard let id = pending.requestID else { return }
+            let launch = VoiceLaunch(requestID: id)
+            do { try channel.write(launch: launch) } catch { show(error.localizedDescription); return }
+            let defaults = UserDefaults(suiteName: store.resolution.chosen) ?? .standard
+            if !defaults.bool(forKey: "voiceHopExplained") {
+                defaults.set(true, forKey: "voiceHopExplained")
+                show("iOS lets only the Gusan app hear the microphone. Add the Gusan control to Control Center to start from anywhere.")
+            }
             var url = URLComponents(string: "gusan://voice")!
             url.queryItems = [URLQueryItem(name: "nonce", value: launch.nonce.uuidString)]
-            if let bundleID = hostBundleID() { url.queryItems?.append(URLQueryItem(name: "return", value: bundleID)) }
+            if let bundle = hostBundleID() { url.queryItems?.append(URLQueryItem(name: "return", value: bundle)) }
             open(url.url!)
-        case .start: _ = sendStart()
-        case .stop: send(.stop, id: status?.requestID)
-        case .cancel: send(.cancel, id: status?.requestID)
+        case .stop: onFinish?(); send(.stop)
+        case .cancel: cancel()
         }
     }
-    private func sendStart() -> Bool {
-        panelDismissed = false; cancelledID = nil
+    private func start() {
+        cancelledID = nil; message = nil; actionTitle = nil; undoRecord = nil; inserted = nil
         pending = KeyboardVoiceState(requestID: UUID(), context: currentContext())
-        do { try channel.write(keyboard: pending) }
-        catch { show(error.localizedDescription); return false }
-        inserted = nil; clearReview(); undoButton.isHidden = true
-        return send(.start, id: requestID, context: context)
+        action = onStart?()
+        if !preview { do { try channel.write(keyboard: pending) } catch { show(error.localizedDescription); return }; send(.start) }
     }
-    private func restorePending() { if let saved = channel.readKeyboardState() { pending = saved } }
-    @discardableResult private func send(_ kind: VoiceCommand.Kind, id: UUID?, context: VoiceContext? = nil) -> Bool {
-        guard let id else { return false }
+    private func send(_ kind: VoiceCommand.Kind) {
+        guard let id = pending.requestID else { return }
         do {
-            try channel.write(command: VoiceCommand(kind: kind, requestID: id, context: context)); channel.post(.command)
-            localMessage = nil; refresh(); return true
-        } catch { show(error.localizedDescription); return false }
+            try channel.write(command: VoiceCommand(kind: kind, requestID: id, context: kind == .start ? pending.context : nil, action: kind == .start ? action : nil))
+            channel.post(.command)
+        } catch { show(error.localizedDescription) }
     }
-    private func show(_ message: String) { localMessage = message; label.text = message; bar.isHidden = false; waveform.isHidden = true }
-    private func readStatus() -> VoiceStatus? {
-        #if DEBUG
-        if previewEnabled {
-            guard var status = previewStatus else { return nil }
-            status.heartbeat = Date()
-            status.level = status.phase == .recording ? Float(0.15 + abs(sin(Date.timeIntervalSinceReferenceDate * 3)) * 0.6) : 0
-            return status
-        }
-        #endif
-        return cachedStatus
+    func cancel() {
+        cancelledID = pending.requestID
+        if !preview { send(.cancel) } else { status = nil }
+        phase = .off; show("Cancelled")
     }
-    #if DEBUG
-    private func advancePreview() {
-        if previewStatus?.phase == .recording { previewStatus?.phase = .thinking }
-        else if previewStatus?.phase == .thinking {
-            previewStatus?.phase = .done
-            previewStatus?.result = "This is a polished voice preview."
-            previewStatus?.resultKind = context?.selected.isEmpty == false ? .replaceSelection : ((context?.before ?? "") + (context?.after ?? "")).isEmpty ? .insert : .replaceContext
-        } else {
-            pending = KeyboardVoiceState(requestID: UUID(), context: currentContext())
-            inserted = nil; localMessage = nil; clearReview(); panelDismissed = false; cancelledID = nil
-            previewStatus = VoiceStatus(phase: .recording, requestID: requestID)
-        }
-        refresh()
+    func show(_ text: String, action: String? = nil, url: String? = nil) {
+        message = text; actionTitle = action; actionURL = url.flatMap(URL.init(string:)); onChange?()
     }
-    #endif
+    func performAction() {
+        if actionTitle == "Undo" { if canUndo { undo() }; return }
+        if let actionURL { open(actionURL) }
+    }
     private func refresh() {
-        guard visible else { return }
         documentDidChange()
-        let status = readStatus()
-        let alive = status?.isAlive() == true
-        let phase = cancelledID != nil && cancelledID == status?.requestID ? VoicePhase.off : (alive ? status?.phase ?? .off : .off)
-        micKey?.update(phase: phase)
-        if phase == .recording { waveform.levels = Array((waveform.levels + [status?.level ?? 0]).suffix(30)) }
-        waveform.isHidden = phase != .recording
-        if let status, status.phase == .done, status.requestID == requestID, status.requestID != cancelledID, insertedID != requestID { deliver(status) }
-        if let status, status.phase == .failed, let id = status.requestID, id == requestID {
-            localMessage = status.message
-            if !previewEnabled, (try? channel.consumeResult(requestID: id)) != nil { channel.post(.command) }
-        }
-        let message: String?
-        switch phase {
-        case .recording: message = "Listening…"
-        case .transcribing: message = "Transcribing…"
-        case .thinking: message = "Thinking…"
-        case .failed: message = status?.message
-        case .done: message = inserted == nil ? nil : "Done"
-        default: message = nil
-        }
-        label.text = localMessage ?? message
-        bar.isHidden = label.text == nil && inserted == nil && reviewResult == nil
-        let active = [.recording, .transcribing, .thinking].contains(phase)
-        let failed = status?.phase == .failed && status?.requestID == requestID && localMessage != nil
-        let showPanel = !panelDismissed && (active || inserted != nil || failed)
-        panel.update(phase: active ? phase : inserted != nil ? .done : .failed, message: localMessage ?? (inserted != nil ? "Done" : message ?? "Voice"), level: status?.level ?? 0, hasUndo: inserted != nil)
-        let canUndo = currentContext().flatMap { undoRecord?.step(context: $0) } != nil && !awaitingUndoContext
-        panel.undo.isEnabled = canUndo; undoButton.isEnabled = canUndo
-        panel.undo.setTitle(undoIsRedo ? "Redo" : "↶ Undo", for: .normal); undoButton.setTitle(undoIsRedo ? "Redo" : "Undo", for: .normal)
-        if showPanel != panelVisible { panelVisible = showPanel; onPanelVisibility?(showPanel) }
-    }
-    @objc private func stopVoice() {
-        #if DEBUG
-        if previewEnabled { advancePreview(); return }
-        #endif
-        if readStatus()?.phase == .recording { send(.stop, id: requestID) }
-        else { cancelVoice() }
-    }
-    @objc private func cancelVoice() {
-        #if DEBUG
-        if previewEnabled { previewStatus = nil; panelDismissed = true; refresh(); return }
-        #endif
-        if let status = readStatus(), [.recording, .transcribing, .thinking].contains(status.phase) {
-            cancelledID = requestID; send(.cancel, id: requestID); localMessage = "Cancelled"
-        }
-        panelDismissed = true; refresh()
+        if Date() >= undoExpires, inserted != nil { inserted = nil; undoRecord = nil; message = nil }
+        let active = preview || status?.isAlive() == true
+        phase = status?.requestID == cancelledID && cancelledID != nil ? .off : active ? status?.phase ?? .off : .off
+        level = preview ? Float(0.2 + abs(sin(Date.timeIntervalSinceReferenceDate * 3)) * 0.6) : status?.level ?? 0
+        if let status, status.phase == .done, status.requestID == pending.requestID, pending.insertedID != pending.requestID, status.requestID != cancelledID { deliver(status) }
+        if phase == .recording { message = nil; actionTitle = nil }
+        else if phase == .thinking || phase == .transcribing {
+            let transcript = channel.readTranscript()
+            message = transcript?.requestID == pending.requestID ? transcript?.text : "Working…"
+        } else if phase == .failed { message = status?.message; actionTitle = "Retry" }
+        onChange?()
     }
     private func deliver(_ status: VoiceStatus) {
-        guard let id = requestID else { return }
+        guard let id = pending.requestID, !pending.isStale(status: status), let result = status.result, !result.isEmpty, let context = pending.context else { return }
         pending.insertedID = id
-        if !previewEnabled {
-            do { try channel.write(keyboard: pending) }
-            catch { pending.insertedID = nil; show(error.localizedDescription); return }
+        if !preview {
+            try? channel.write(keyboard: pending)
+            try? channel.consumeResult(requestID: id); channel.post(.command)
         }
-        defer {
-            if !previewEnabled {
-                do { try channel.consumeResult(requestID: id); channel.post(.command) }
-                catch { show(error.localizedDescription) }
-            }
-        }
-        guard !pending.isStale(status: status) else { return }
-        guard let result = status.result, !result.isEmpty, let context, let current = currentContext(), let proxy = host?.textDocumentProxy else {
-            if let result = status.result { offerResult(result) }; return
-        }
-        if !pending.canInsert(context: current) {
-            offerResult(result); return
-        }
-        let value = JobResult(text: result, kind: status.resultKind ?? (context.selected.isEmpty ? .insert : .replaceSelection))
-        guard let edit = VoiceEdit.plan(result: value, context: context) else { offerResult(result); return }
-        if edit.advanceUTF16 != 0 { proxy.adjustTextPosition(byCharacterOffset: edit.advanceUTF16) }
-        for _ in 0..<edit.deleteCount { proxy.deleteBackward() }
-        undoSnapshot = currentContext()
-        proxy.insertText(result)
-        inserted = result; original = edit.original; restoreUTF16 = edit.restoreUTF16
-        undoRecord = nil; undoIsRedo = false; undoContext = nil; undoCaptureDeadline = ProcessInfo.processInfo.systemUptime + 0.5; awaitingUndoContext = true
-        documentDidChange(); undoButton.isHidden = false
-        UIAccessibility.post(notification: .announcement, argument: "Done. Undo available.")
+        if action == .transcribeOnly { onTranscript?(result, context); return }
+        insert(JobResult(text: result, kind: status.resultKind ?? (context.selected.isEmpty ? .insert : .replaceSelection)), context: context)
     }
-    private func clearReview() { closeResult(); reviewResult = nil; copyButton.isHidden = true; reviewButton.isHidden = true }
-    private func offerResult(_ result: String) {
-        guard !result.isEmpty else { return }
-        reviewResult = result; copyButton.isHidden = false; reviewButton.isHidden = false
-        show("Text changed. Review result.")
-        viewResult()
-    }
-    @objc private func copyResult() {
-        guard let reviewResult else { return }
-        UIPasteboard.general.string = reviewResult
-        show("Result copied")
-    }
-    @objc private func openSettings() { if let settingsURL { open(settingsURL) } }
-    @objc private func viewResult() {
-        guard let result = reviewResult, let host else { return }
-        closeResult()
-        let panel = UIView(frame: host.view.bounds)
-        panel.autoresizingMask = [.flexibleWidth, .flexibleHeight]; panel.backgroundColor = .systemGroupedBackground
-        let heading = UILabel(); heading.text = "Voice result"; heading.font = .preferredFont(forTextStyle: .headline)
-        heading.adjustsFontForContentSizeCategory = true; heading.numberOfLines = 0
-        let text = UITextView(); text.text = result; text.isEditable = false; text.isSelectable = false
-        text.font = .preferredFont(forTextStyle: .body); text.adjustsFontForContentSizeCategory = true
-        text.backgroundColor = .secondarySystemGroupedBackground; text.layer.cornerRadius = 8
-        let actions = UIStackView(); actions.spacing = 8; actions.distribution = .fillEqually
-        func button(_ title: String, _ action: Selector) {
-            let button = UIButton(type: .system); button.setTitle(title, for: .normal)
-            button.addTarget(self, action: action, for: .touchUpInside)
-            button.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
-            actions.addArrangedSubview(button)
+    func insert(_ result: JobResult, context: VoiceContext) {
+        guard let current = currentContext(), let proxy = host?.textDocumentProxy else { return }
+        let edit = VoiceEdit.plan(result: result, context: context)
+        let destination = VoiceInsertionDestination.resolve(snapshot: context, current: current)
+        if destination == .planned, let edit {
+            if edit.advanceUTF16 != 0 { proxy.adjustTextPosition(byCharacterOffset: edit.advanceUTF16) }
+            for _ in 0..<edit.deleteCount { proxy.deleteBackward() }
+            original = edit.original; restoreUTF16 = edit.restoreUTF16
+        } else if destination == .cursor {
+            original = ""; restoreUTF16 = 0
+        } else {
+            if host?.hasFullAccess == true { UIPasteboard.general.string = result.text; show("Couldn't insert here · Copied") }
+            else { show("Couldn't insert here") }
+            return
         }
-        button("Copy", #selector(copyResult))
-        if let expected = currentContext(), let documentID = context?.documentID, !documentID.isEmpty, expected.documentID == documentID, expected.selected.isEmpty {
-            reviewContext = expected; button("Insert at cursor", #selector(insertReviewedResult))
-        }
-        button("Close", #selector(closeResult))
-        let stack = UIStackView(arrangedSubviews: [heading, text, actions]); stack.axis = .vertical; stack.spacing = 8
-        stack.translatesAutoresizingMaskIntoConstraints = false; panel.addSubview(stack)
-        NSLayoutConstraint.activate([stack.topAnchor.constraint(equalTo: panel.topAnchor, constant: 12), stack.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -12), stack.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 12), stack.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -12)])
-        resultPanel = panel; reviewHeading = heading; host.view.addSubview(panel)
+        undoSnapshot = currentContext(); inserted = result.text
+        proxy.insertText(result.text)
+        undoRecord = nil; undoExpires = Date().addingTimeInterval(30)
+        documentDidChange(); show("Inserted", action: "Undo")
     }
-    @objc private func closeResult() { resultPanel?.removeFromSuperview(); resultPanel = nil; reviewContext = nil; reviewHeading = nil }
-    @objc private func insertReviewedResult() {
-        guard let result = reviewResult, let expected = reviewContext, currentContext() == expected, let proxy = host?.textDocumentProxy else {
-            reviewHeading?.text = "Text changed. Use Copy."; return
-        }
-        undoSnapshot = expected
-        proxy.insertText(result)
-        inserted = result; original = ""; restoreUTF16 = 0
-        undoRecord = nil; undoIsRedo = false; undoContext = nil; undoCaptureDeadline = ProcessInfo.processInfo.systemUptime + 0.5; awaitingUndoContext = true; documentDidChange()
-        clearReview(); undoButton.isHidden = false; show("Done")
+    func documentDidChange() {
+        guard undoRecord == nil, let inserted, let snapshot = undoSnapshot, let current = currentContext(),
+              VoiceEdit.containsInsertedResult(inserted, context: current, snapshot: snapshot) else { return }
+        undoRecord = ReplacementUndo(original: original, replacement: inserted, snapshot: snapshot, restoreUTF16: restoreUTF16)
+        undoSnapshot = nil
     }
-    @objc private func undo() {
-        if awaitingUndoContext { documentDidChange(); if awaitingUndoContext { return } }
-        guard let record = undoRecord, let current = currentContext(), let step = record.step(context: current), let proxy = host?.textDocumentProxy else {
-            self.inserted = nil; undoButton.isHidden = true; show("Text changed. Undo is no longer available."); return
-        }
+    func insertedText(_ text: String, hasSelection: Bool) {
+        documentDidChange()
+        if hasSelection || undoRecord?.append(text) == false { undoRecord = nil; undoSnapshot = nil }
+    }
+    func deletedText(hasSelection: Bool) {
+        documentDidChange()
+        if hasSelection || undoRecord?.deleteBackward() == false { undoRecord = nil; undoSnapshot = nil }
+    }
+    private func undo() {
+        guard canUndo, let record = undoRecord, let current = currentContext(), let step = record.step(context: current), let proxy = host?.textDocumentProxy else { show("Text changed. Undo unavailable"); return }
         if step.advanceUTF16 != 0 { proxy.adjustTextPosition(byCharacterOffset: step.advanceUTF16) }
         for _ in 0..<step.deleteCount { proxy.deleteBackward() }
-        if !step.text.isEmpty { proxy.insertText(step.text) }
+        proxy.insertText(step.text)
         if step.restoreUTF16 != 0 { proxy.adjustTextPosition(byCharacterOffset: step.restoreUTF16) }
-        undoRecord = record.inverted(); undoIsRedo.toggle(); inserted = record.original
-        undoButton.isHidden = false; show(undoIsRedo ? "Undone" : "Redone")
-        panelDismissed = true; refresh()
+        undoRecord = nil; inserted = nil; undoSnapshot = nil; show("Undone")
     }
     private func hostBundleID() -> String? {
         let selector = NSSelectorFromString("_hostBundleID")

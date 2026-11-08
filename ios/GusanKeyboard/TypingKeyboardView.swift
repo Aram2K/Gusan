@@ -177,7 +177,7 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
         cap.accessibilityHint = key == .shift ? "Double tap quickly to lock capitals" : nil
         if key == .shift && shift != .off {
             cap.accessibilityTraits.insert(.selected)
-            cap.layer.backgroundColor = UIColor.white.cgColor; cap.textColor = .black
+            cap.layer.backgroundColor = theme.special.cgColor; cap.textColor = .white
         }
         if key == .enter && returnType != .default { cap.layer.backgroundColor = KeyboardTheme.blue.cgColor; cap.textColor = .white }
         if key == .shift || key == .delete {
