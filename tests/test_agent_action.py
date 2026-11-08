@@ -1544,6 +1544,19 @@ def test_answer_validation_failure_salvages_raw_text(run, source):
     assert out["row"]["error_code"] is None
 
 
+@pytest.mark.parametrize("code", ["insufficient_credit", "internal", "environment_error", "no_answer"])
+@pytest.mark.parametrize("after_retry", [False, True])
+def test_non_format_prepare_failure_does_not_retry_or_become_plan_missing(run, code, after_retry):
+    requests = [{"body": {"action": "status", "task_id": ID}, "change": {
+        "status": "failed", "error_code": code, "answer": None, "new_events": []}}]
+    if after_retry:
+        requests.insert(0, {"body": {"action": "status", "task_id": ID}, "change": answered("Cannot plan")})
+    out, = run({"row": {"mode": "do"}, "requests": requests})
+    assert out["row"]["status"] == "failed"
+    assert out["row"]["error_code"] == "upstream_error"
+    assert len([c for c in out["calls"] if c["url"].endswith("/messages")]) == int(after_retry)
+
+
 def test_answer_validation_without_salvage_retries_then_plan_missing(run):
     failure = {**answered("No actionable plan"), "status": "failed", "error_code": "answer_validation"}
     retry_failure = {**answered("Still no plan", retry=True), "status": "failed", "error_code": "answer_validation"}

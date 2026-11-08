@@ -1202,6 +1202,8 @@ async function sync(db: any, row: Obj, wait = 0) {
     timed_out: "timed_out",
   };
   patch.status = statuses[change.status] ?? "running";
+  const prepareUpstreamFailure = row.mode === "do" && run.phase === "prepare" &&
+    patch.status === "failed" && change.error_code !== "answer_validation";
   patch.confirmation = null;
   patch.confirmation_at = null;
   let retryAnswer = run.plan?.prepare_retry_answer;
@@ -1263,6 +1265,7 @@ async function sync(db: any, row: Obj, wait = 0) {
         patch.status,
       ) &&
       !retryAnswer &&
+      !prepareUpstreamFailure &&
       !(Number.isInteger(messageIndex) && patch.status === "failed" &&
         (retryFailed || change.error_code === "answer_validation"))
     ) {
@@ -1312,7 +1315,8 @@ async function sync(db: any, row: Obj, wait = 0) {
     ["completed", "failed", "cancelled", "timed_out"].includes(patch.status)
   ) {
     const prepareResult = row.mode === "do" && run.phase === "prepare" &&
-      ["completed", "failed"].includes(patch.status);
+      (patch.status === "completed" ||
+        (patch.status === "failed" && change.error_code === "answer_validation"));
     // /changes may report completion before the page containing the answer.
     const answerEvent = run.plan?.prepare_retry
       ? retryAnswer
@@ -1345,6 +1349,7 @@ async function sync(db: any, row: Obj, wait = 0) {
     patch.error_code = ["failed", "timed_out"].includes(patch.status)
       ? (errors.includes(change.error_code) ? change.error_code : "internal")
       : null;
+    if (prepareUpstreamFailure) patch.error_code = "upstream_error";
     patch.finished_at = new Date().toISOString();
     if (prepareResult) {
       {
