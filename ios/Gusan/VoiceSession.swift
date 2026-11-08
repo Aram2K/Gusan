@@ -35,6 +35,7 @@ final class VoiceSession: ObservableObject {
     @Published private(set) var error = ""
     @Published private(set) var permission = AVAudioSession.sharedInstance().recordPermission
     @Published private(set) var requestingMicrophone = false
+    @Published private(set) var starting = false
     private var microphoneRequest: Task<Bool, Never>?
     @Published var presented = false
     @Published private(set) var keyboardActivation = false
@@ -52,7 +53,6 @@ final class VoiceSession: ObservableObject {
     private var startup: Task<Void, Never>?
     private var consumed: UUID?
     private var tapped = false
-    private var hostBundleID: String?
     /// The take started by a system trigger (Control Center, Action button, Siri, Live Activity): its result goes to the clipboard.
     private var systemRequestID: UUID?
     let activity = VoiceLiveActivity()
@@ -80,10 +80,10 @@ final class VoiceSession: ObservableObject {
         if machine.phase == .off { error = ""; status = VoiceStatus() }
         if channel.consumeLaunch(nonce: items?.first { $0.name == "nonce" }?.value) {
             keyboardActivation = true
-            hostBundleID = items?.first { $0.name == "return" }?.value
             start(pendingWithin: 60)
-        } else { hostBundleID = nil }
+        }
     }
+    func closePresentation() { keyboardActivation = false; presented = false }
     func refreshPermission() {
         let current = AVAudioSession.sharedInstance().recordPermission
         if permission != current { permission = current }
@@ -107,12 +107,13 @@ final class VoiceSession: ObservableObject {
         return request
     }
     func start(pendingWithin: TimeInterval = 15) {
-        if machine.phase != .off { receive(); scheduleReturn(); return }
+        if machine.phase != .off { receive(); return }
         guard startup == nil else { return }
+        starting = true
         error = ""
         status = VoiceStatus()
         startup = Task {
-            defer { startup = nil }
+            defer { startup = nil; starting = false }
             do {
                 if let error = store.sessionState(fullAccess: store.diagnostics().peer?.fullAccess).voiceError { throw error }
                 guard let session = store.read() else { throw VoiceError.notSignedIn }
@@ -135,8 +136,9 @@ final class VoiceSession: ObservableObject {
                         if self.machine.phase != .off { self.publish() }
                     }
                 }
-                if let command = channel.readCommand(), Date().timeIntervalSince(command.sentAt) <= pendingWithin { receive() }
-                scheduleReturn()
+                if let command = channel.readCommand(), Date().timeIntervalSince(command.sentAt) <= pendingWithin {
+                    receive(acceptPendingStart: pendingWithin > 15)
+                }
             } catch is CancellationError {} catch {
                 self.error = error.localizedDescription
                 let failure = channel.failureStatus(message: self.error)
@@ -187,13 +189,16 @@ final class VoiceSession: ObservableObject {
         status = VoiceStatus(phase: .failed, requestID: requestID, heartbeat: .distantPast, message: error)
         try? channel.write(status: status); channel.post(.status)
     }
-    private func receive() {
+    private func receive(acceptPendingStart: Bool = false) {
         if let id = channel.consumeReceipt() {
             if status.phase == .failed && status.requestID == id { error = ""; if machine.phase == .off { status = VoiceStatus() } }
             execute(machine.handle(.acknowledged(id)))
         }
         guard machine.phase != .off else { return }
-        guard let command = channel.consumeCommand(), command.id != consumed else { return }
+        guard var command = channel.consumeCommand(), command.id != consumed else { return }
+        if acceptPendingStart, command.kind == .start, (0...60).contains(Date().timeIntervalSince(command.sentAt)) {
+            command.sentAt = Date()
+        }
         consumed = command.id
         if command.kind == .start { error = ""; systemRequestID = nil; machine.action = command.action ?? settings.defaultAction }
         execute(machine.handle(.command(command, Date())))
@@ -341,22 +346,5 @@ final class VoiceSession: ObservableObject {
                 if machine.phase != .off { try resumeCapture() }
             } catch { audioFailure(error.localizedDescription) }
         }
-    }
-    private func scheduleReturn() {
-        guard settings.autoReturn, let bundleID = hostBundleID, !bundleID.isEmpty else { return }
-        hostBundleID = nil
-        Task { try? await Task.sleep(nanoseconds: 500_000_000); if alive { returnToHost(bundleID: bundleID) } }
-    }
-    func returnToHost(bundleID: String) {
-        #if GUSAN_SIDELOAD
-        guard settings.autoReturn, let cls = NSClassFromString("LSApplicationWorkspace") as? NSObject.Type else { return }
-        let selector = NSSelectorFromString("defaultWorkspace")
-        guard cls.responds(to: selector), let workspace = cls.perform(selector)?.takeUnretainedValue() as? NSObject else { return }
-        let open = NSSelectorFromString("openApplicationWithBundleID:")
-        guard workspace.responds(to: open) else { return }
-        typealias Open = @convention(c) (AnyObject, Selector, NSString) -> Bool
-        let invoke = unsafeBitCast(workspace.method(for: open), to: Open.self)
-        _ = invoke(workspace, open, bundleID as NSString)
-        #endif
     }
 }

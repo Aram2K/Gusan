@@ -26,19 +26,26 @@ struct GusanApp: App {
     @State private var voiceSignInRequested = false
     var body: some Scene {
         WindowGroup {
-            AppRootView().environmentObject(model).environmentObject(voice).environmentObject(agent).environmentObject(screen).tint(Theme.accent)
+            Group {
+                if voice.keyboardActivation {
+                    VoiceListeningView(voice: voice, onSignIn: {
+                        voice.closePresentation()
+                        model.handleURL(URL(string: "gusan://signin")!)
+                    })
+                } else { AppRootView() }
+            }.environmentObject(model).environmentObject(voice).environmentObject(agent).environmentObject(screen).tint(Theme.accent)
                 .onAppear { voice.agentHandoff = { intent, context in try await agent.start(intent, context: context) } }
                 .onChange(of: scenePhase) { agent.setActive($0 == .active) }
                 #if DEBUG
                 .overlay(alignment: .bottom) { AgentCardPreview() }
                 #endif
                 .onOpenURL { if $0.host == "voice" { voice.handleURL($0) } else { model.handleURL($0) } }
-                .sheet(isPresented: $voice.presented, onDismiss: {
+                .sheet(isPresented: Binding(get: { voice.presented && !voice.keyboardActivation }, set: { voice.presented = $0 }), onDismiss: {
                     if voiceSignInRequested {
                         voiceSignInRequested = false
                         model.handleURL(URL(string: "gusan://signin")!)
                     }
-                }) { VoiceReadyView(voice: voice, onSignIn: { voiceSignInRequested = true }).tint(Theme.accent) }
+                }) { VoiceListeningView(voice: voice, onSignIn: { voiceSignInRequested = true; voice.closePresentation() }).tint(Theme.accent) }
                 .onChange(of: model.session) { if $0 == nil { voice.stop() }; agent.sessionChanged() }
         }
     }

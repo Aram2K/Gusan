@@ -70,18 +70,6 @@ struct KeyboardSetupView: View {
                 StatusRow(title: "Full Access", detail: model.fullAccess == true ? "On at the last check" : "Open the Gusan keyboard to check", confirmed: model.fullAccess == true)
                 Button("Check again") { model.refreshDiagnostics() }
             }
-            Section("Microphone") {
-                Text("The Gusan app records for the keyboard. The first mic tap may briefly open Gusan on a sideloaded build.")
-                Button(voice.permission == .denied ? "Open microphone settings" : "Set up microphone") {
-                    if voice.permission == .denied { Theme.openSettings() } else { voice.presented = true }
-                }
-            }
-            Section {
-                Button("Show Home checklist") {
-                    UserDefaults.standard.set(false, forKey: "gusan.setup.dismissed")
-                    model.selectedTab = .home
-                }
-            }
         }
         .navigationTitle("Keyboard setup").navigationBarTitleDisplayMode(.inline)
         .onAppear { model.refreshDiagnostics(); voice.refreshPermission() }

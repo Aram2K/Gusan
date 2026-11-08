@@ -5,91 +5,54 @@ import GusanKit
 fileprivate extension VoiceSession {
     var inAppError: String {
         switch error {
-        case VoiceError.notSignedIn.localizedDescription: return "Sign in to start a voice session."
+        case VoiceError.notSignedIn.localizedDescription: return "Sign in to use Gusan."
         case VoiceError.unauthorized.localizedDescription: return "Your sign-in has expired. Sign in again to continue."
-        case VoiceError.notShared.localizedDescription: return "Voice can't connect to your keyboard. Check Keyboard settings, then try again."
-        case VoiceError.fallbackOff.localizedDescription: return "Voice sharing is off. Enable pasteboard fallback in Keyboard settings to connect your keyboard."
-        case VoiceError.sessionEnded.localizedDescription: return "This voice session has ended. Tap Record to start a new one."
-        default: return error.hasPrefix("Audio failed:") ? "Your microphone couldn't start. Check microphone access in Settings, then try again." : error
+        case VoiceError.notShared.localizedDescription: return "Gusan couldn't connect to the keyboard. Check Full Access in Settings."
+        case VoiceError.fallbackOff.localizedDescription: return "Enable pasteboard fallback in Advanced settings to connect the keyboard."
+        default: return error
         }
     }
 }
 
-struct VoiceReadyView: View {
+struct VoiceListeningView: View {
     @ObservedObject var voice: VoiceSession
     let onSignIn: () -> Void
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.scenePhase) private var scenePhase
-    private var statusText: String? {
+    private var title: String {
+        if voice.starting { return "Starting…" }
         switch voice.status.phase {
-        case .off: return nil
-        case .ready: return "Ready"
-        case .recording: return "Listening…"
+        case .recording: return "Listening"
         case .transcribing: return "Transcribing…"
-        case .thinking: return "Thinking…"
+        case .thinking: return "Working…"
         case .done: return "Done"
         case .failed: return "Couldn't finish"
+        case .ready, .off: return "Ready"
         }
     }
     var body: some View {
         NavigationStack {
-            ScreenContent {
-                AppCard {
-                    BrandMark(large: true)
-                    Text("Voice dictation").font(.largeTitle).bold().accessibilityAddTraits(.isHeader)
-                    if voice.keyboardActivation {
-                        Text("Gusan needs to start the mic once — swipe back to your app.").font(.headline)
-                    }
-                    Text(voice.alive ? "Your voice session is ready. Switch back to your app, keep Gusan selected, and tap the mic to dictate." : "Speak naturally, right from your Gusan keyboard. Tap Record to prepare a voice session, then return to your app.")
-                        .font(.body).foregroundStyle(.secondary)
-                    Text("The microphone stays reserved and uses some battery while this window is open (2 minutes by default). Capture pauses between dictations. iOS may end a background session early; the next tap will guide you through activation again.").font(.footnote).foregroundStyle(.secondary)
-                    if !voice.alive && voice.error.isEmpty {
-                        PrimaryButton(title: "Record", icon: "mic.fill") { voice.start() }
-                    }
-                }
-                if let statusText, voice.error.isEmpty {
-                    AppCard {
-                        Label(statusText, systemImage: voice.status.phase == .failed ? "exclamationmark.circle" : voice.alive ? "waveform" : "mic")
-                            .font(.headline).foregroundStyle(voice.status.phase == .failed ? Color.secondary : Theme.accent)
-                        if let end = voice.status.sessionEndsAt, voice.alive {
-                            Text("Session until \(end.formatted(date: .omitted, time: .shortened))").font(.body).foregroundStyle(.secondary)
-                        }
+            VStack(spacing: 20) {
+                Spacer()
+                if voice.starting { ProgressView().controlSize(.large) }
+                else { Image(systemName: "waveform").font(.largeTitle).foregroundStyle(Theme.accent).accessibilityHidden(true) }
+                Text(title).font(.title2).bold()
+                if voice.error.isEmpty {
+                    Text("Swipe back to your app.").foregroundStyle(.secondary)
+                } else {
+                    Text(voice.inAppError).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    if voice.error == VoiceError.notSignedIn.localizedDescription || voice.error == VoiceError.unauthorized.localizedDescription {
+                        Button("Sign in", action: onSignIn).buttonStyle(.borderedProminent)
+                    } else if voice.permission == .denied {
+                        Button("Open Settings") { Theme.openSettings() }.buttonStyle(.bordered)
                     }
                 }
-                if !voice.error.isEmpty {
-                    AppCard {
-                        Label("Voice needs attention", systemImage: "exclamationmark.circle").font(.headline).foregroundStyle(.secondary)
-                        Text(voice.inAppError).font(.body).foregroundStyle(.secondary)
-                        if voice.error == VoiceError.notSignedIn.localizedDescription || voice.error == VoiceError.unauthorized.localizedDescription {
-                            PrimaryButton(title: "Sign in", icon: "person.crop.circle") { onSignIn(); dismiss() }
-                        } else if voice.error == VoiceError.fallbackOff.localizedDescription || voice.error == VoiceError.notShared.localizedDescription {
-                            PrimaryButton(title: "Keyboard settings", icon: "keyboard") { dismiss(); UIApplication.shared.open(URL(string: "gusan://keyboard-settings")!) }
-                        } else if voice.permission == .denied {
-                            PrimaryButton(title: "Open Settings", icon: "gear") { Theme.openSettings() }
-                        } else if !voice.alive {
-                            PrimaryButton(title: "Record", icon: "mic.fill") { voice.start() }
-                        }
-                    }
-                }
+                Spacer()
                 if voice.alive {
-                    AppCard {
-                        Button { voice.stop() } label: {
-                            Label("Stop voice session", systemImage: "stop.circle").frame(maxWidth: .infinity, minHeight: 44)
-                        }.buttonStyle(.bordered).tint(Theme.accent)
-                    }
+                    Button("Stop listening", role: .destructive) { voice.stop() }
+                        .buttonStyle(.bordered).controlSize(.large)
                 }
-            }.navigationTitle("Voice").navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button { dismiss() } label: {
-                            Image(systemName: "xmark").font(.system(size: 17, weight: .semibold)).frame(width: 44, height: 44)
-                        }.accessibilityLabel("Close voice")
-                    }
-                }
-                .onAppear { voice.refreshPermission() }
-                .onChange(of: scenePhase) { phase in
-                    if phase == .active { voice.refreshPermission() }
-                }
+            }.padding(24)
+                .navigationTitle("Gusan").navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { voice.closePresentation() } } }
         }
     }
 }
@@ -99,21 +62,23 @@ struct VoiceSettingsSection: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var language = "auto"
     @State private var minutes = 2
-    @State private var autoReturn = true
     var body: some View {
         Section("Voice") {
             LabeledContent("Session", value: voice.status.phase.rawValue.capitalized)
-            Button(voice.alive ? "Stop voice session" : "Start voice session") { if voice.alive { voice.stop() } else { voice.start() } }
-            LabeledContent("Microphone", value: voice.permission == .granted ? "Allowed" : voice.permission == .denied ? "Denied" : "Not requested")
-            if voice.permission == .denied { Button("Open Settings") { UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!) } }
+            Button {
+                if voice.alive { voice.stop() } else { voice.start() }
+            } label: {
+                HStack {
+                    Text(voice.alive ? "Stop voice session" : "Start voice session")
+                    if voice.starting { ProgressView() }
+                }.frame(minHeight: 44).contentShape(Rectangle())
+            }.disabled(voice.starting)
+            if voice.permission == .denied { Button("Open microphone settings") { Theme.openSettings() } }
             if !voice.error.isEmpty { Label(voice.inAppError, systemImage: "exclamationmark.circle").foregroundStyle(.secondary) }
             Picker("Language I speak", selection: $language) { ForEach(VoiceSettings.languages, id: \.code) { Text($0.name).tag($0.code) } }.onChange(of: language) { voice.settings.language = $0 }
             Picker("Ready window", selection: $minutes) { ForEach(VoiceSettings.idleOptions, id: \.self) { Text($0 == 0 ? "Until I stop" : $0 == 60 ? "1 hour" : "\($0) min").tag($0) } }.onChange(of: minutes) { voice.settings.idleMinutes = $0 }
-            Text("An open session reserves the mic and uses some battery. Capture pauses while idle; iOS may end the window early.").font(.footnote).foregroundStyle(.secondary)
-            #if GUSAN_SIDELOAD
-            Toggle("Return to the previous app automatically (sideload only)", isOn: $autoReturn).onChange(of: autoReturn) { voice.settings.autoReturn = $0 }
-            #endif
-        }.onAppear { language = voice.settings.language; minutes = voice.settings.idleMinutes; autoReturn = voice.settings.autoReturn; voice.refreshPermission() }
+            Text("An open session reserves the mic and uses some battery. iOS may end a background session early.").font(.footnote).foregroundStyle(.secondary)
+        }.onAppear { language = voice.settings.language; minutes = voice.settings.idleMinutes; voice.refreshPermission() }
             .onChange(of: scenePhase) { if $0 == .active { voice.refreshPermission() } }
     }
 }

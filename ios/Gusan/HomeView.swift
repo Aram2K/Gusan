@@ -15,9 +15,6 @@ struct HomeView: View {
     @State private var error: String?
     @State private var lastResult: SmartHistory.Entry?
     @State private var showScreen = false
-    private var notificationsAllowed: Bool {
-        [.authorized, .provisional, .ephemeral].contains(agent.notificationStatus)
-    }
     private var setupComplete: Bool {
         !model.restoringSession && model.session != nil && model.keyboardAdded && model.fullAccess == true && voice.permission == .granted
     }
