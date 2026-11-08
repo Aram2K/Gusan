@@ -100,7 +100,8 @@ final class KeyboardViewController: UIInputViewController {
         let active = working || [.recording, .transcribing, .thinking].contains(voice.phase)
         let hint = screenHint && !active && voice.message == nil
         let actionTitle = voice.canUndo ? "Undo" : hint ? "Open" : voice.actionTitle == "Undo" ? nil : voice.actionTitle
-        strip.update(agent: settings.keyboardMode == .agent, screenOn: settings.keyboardScreenEnabled, live: screen.live && !screen.secureField, context: title, phase: working ? .thinking : voice.phase, level: voice.level, message: working ? voice.message ?? "Working…" : pendingInsert != nil ? "Result ready" : voice.message ?? agentMessage ?? (hint ? "Gusan Screen is off" : nil), action: pendingInsert != nil && !active ? "Insert" : actionTitle, theme: theme, pendingInsert: pendingInsert != nil && !active)
+        let minimizedAgent = agent.isActive && !agent.showingCard && agentMessage != nil
+        strip.update(agent: minimizedAgent || settings.keyboardMode == .agent, screenOn: settings.keyboardScreenEnabled, live: screen.live && !screen.secureField, context: title, phase: working ? .thinking : voice.phase, level: voice.level, message: working ? voice.message ?? "Working…" : pendingInsert != nil ? "Result ready" : minimizedAgent ? agentMessage : voice.message ?? (hint ? "Gusan Screen is off" : nil), action: pendingInsert != nil && !active ? "Insert" : actionTitle, theme: theme, pendingInsert: pendingInsert != nil && !active)
     }
     @objc private func toggleMode() {
         guard !working, ![.recording, .transcribing, .thinking].contains(voice.phase) else { return }
@@ -131,7 +132,11 @@ final class KeyboardViewController: UIInputViewController {
         else if screenHint && voice.message == nil { openContainingApp(URL(string: "gusan://screen")!) }
         else { voice.performAction() }
     }
-    @objc private func statusPressed() { if agent.isActive { agent.show() } }
+    @objc private func statusPressed() {
+        if let task = agent.task, let attention = AgentKeyboardAttention.resolve(task) {
+            openContainingApp(attention.url)
+        } else if agent.isActive { agent.show() }
+    }
     @objc private func hideAgent() { agent.hide() }
     private func beginTake() -> VoiceAction? {
         retryTake = nil
