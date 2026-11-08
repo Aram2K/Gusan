@@ -144,8 +144,8 @@ public final class ScreenFrameStore {
             let rect = ScreenFrameGeometry.cropRect(width: image.width, height: image.height, bottomFraction: cropBottom)
             if rect.height < CGFloat(image.height), let cut = image.cropping(to: rect) { image = cut; cropped = true }
         }
-        guard let jpeg = ScreenFrameEncoder.jpeg(image, budgetBytes: budgetBytes) else { return nil }
-        return ScreenFrame(requestID: requestID, capturedAt: snapshot.capturedAt, width: image.width, height: image.height, jpeg: jpeg, frozen: frozen, cropped: cropped)
+        guard let encoded = ScreenFrameEncoder.encodedJPEG(image, budgetBytes: budgetBytes) else { return nil }
+        return ScreenFrame(requestID: requestID, capturedAt: snapshot.capturedAt, width: encoded.width, height: encoded.height, jpeg: encoded.data, frozen: frozen, cropped: cropped)
     }
 }
 
@@ -168,11 +168,16 @@ public enum ScreenFrameEncoder {
     }
     /// Lowers quality first, then resolution, until the JPEG fits the budget.
     public static func jpeg(_ image: CGImage, budgetBytes: Int = defaultBudget) -> Data? {
+        encodedJPEG(image, budgetBytes: budgetBytes)?.data
+    }
+    static func encodedJPEG(_ image: CGImage, budgetBytes: Int) -> (data: Data, width: Int, height: Int)? {
         guard budgetBytes > 0 else { return nil }
         var image = image
         while true {
             for quality in qualities {
-                if let data = jpeg(image, quality: quality), data.count <= budgetBytes { return data }
+                if let data = jpeg(image, quality: quality), data.count <= budgetBytes {
+                    return (data, image.width, image.height)
+                }
             }
             let longEdge = max(image.width, image.height)
             guard longEdge > minimumLongEdge else { return nil }

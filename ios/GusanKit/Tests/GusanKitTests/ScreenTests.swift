@@ -88,6 +88,13 @@ final class ScreenFrameTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(stored.width, ScreenFrameEncoder.minimumLongEdge)
         let frame = try XCTUnwrap(store.frame(for: UUID()))
         XCTAssertLessThanOrEqual(frame.jpeg.count, ScreenFrameEncoder.defaultBudget)
+        let reduced = try XCTUnwrap(store.frame(for: UUID(), budgetBytes: 100_000))
+        XCTAssertLessThanOrEqual(reduced.jpeg.count, 100_000)
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(reduced.jpeg as CFData, nil))
+        let decoded = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        XCTAssertLessThan(decoded.width, stored.width)
+        XCTAssertEqual(reduced.width, decoded.width)
+        XCTAssertEqual(reduced.height, decoded.height)
     }
 
     func testIdleTimer() {
