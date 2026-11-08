@@ -90,7 +90,6 @@ struct AdvancedSettingsView: View {
             Section {
                 Toggle("Share sign-in via pasteboard fallback", isOn: $pasteboardFallback)
             } footer: { Text("Used only if sign-in or voice can't be shared after sideloading. Other apps signed with the same Apple ID could read it.") }
-            ScreenSettingsSection()
             Section { NavigationLink { DiagnosticsView() } label: { Label("Diagnostics", systemImage: "stethoscope") } }
         }
         .navigationTitle("Advanced").navigationBarTitleDisplayMode(.inline)

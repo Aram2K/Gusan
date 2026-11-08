@@ -22,7 +22,6 @@ struct GusanApp: App {
         }
         AgentCenter.registerBackgroundRefresh(agent)
     }
-    @StateObject private var screen = ScreenMonitor()
     @State private var voiceSignInRequested = false
     var body: some Scene {
         WindowGroup {
@@ -33,7 +32,7 @@ struct GusanApp: App {
                         model.handleURL(URL(string: "gusan://signin")!)
                     })
                 } else { AppRootView() }
-            }.environmentObject(model).environmentObject(voice).environmentObject(agent).environmentObject(screen).tint(Theme.accent)
+            }.environmentObject(model).environmentObject(voice).environmentObject(agent).tint(Theme.accent)
                 .background(KeyboardDismissal())
                 .onAppear { voice.agentHandoff = { intent, context in try await agent.start(intent, context: context) } }
                 .onChange(of: scenePhase) { agent.setActive($0 == .active) }
@@ -41,6 +40,7 @@ struct GusanApp: App {
                 .overlay(alignment: .bottom) { AgentCardPreview() }
                 #endif
                 .onOpenURL { if $0.host == "voice" { voice.handleURL($0) } else { model.handleURL($0) } }
+                .sheet(isPresented: $model.showingScreenBroadcast) { ScreenBroadcastSheet() }
                 .sheet(isPresented: Binding(get: { voice.presented && !voice.keyboardActivation }, set: { voice.presented = $0 }), onDismiss: {
                     if voiceSignInRequested {
                         voiceSignInRequested = false
