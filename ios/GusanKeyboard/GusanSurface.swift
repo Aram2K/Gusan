@@ -81,17 +81,22 @@ final class GusanStrip: UIView {
         mode.backgroundColor = agent ? indigo.withAlphaComponent(0.12) : theme.letter.withAlphaComponent(0.6)
         mode.accessibilityLabel = "Mode: " + (agent ? "Agent" : "Smart")
         mode.accessibilityHint = "Switches between Smart and Agent"
-        if previous?.screenOn != screenOn { screen.setImage(UIImage(systemName: screenOn ? "iphone" : "iphone.slash"), for: .normal) }
+        let screenState = KeyboardScreenIconState.resolve(enabled: screenOn, live: live)
+        if previous?.screenOn != screenOn || previous?.live != live {
+            screen.setImage(UIImage(systemName: screenOn ? "iphone" : "iphone.slash"), for: .normal)
+        }
+        screen.alpha = screenState == .needsBroadcast ? 0.45 : 1
         screen.tintColor = screenOn ? accent : .secondaryLabel
         screen.backgroundColor = screenOn ? accent.withAlphaComponent(0.16) : .clear
-        screen.accessibilityValue = screenOn ? "On" : "Off"
+        screen.accessibilityValue = screenState.accessibilityValue
         context.text = (live ? "● " : "") + title + (screenOn && live ? " + Screen" : "")
         context.textColor = live ? .systemRed : .secondaryLabel
-        context.isHidden = title.isEmpty || working || (!listening && message != nil)
+        let captureFeedback = message == KeyboardScreenPlan.unavailableMessage || message == KeyboardScreenPlan.partialMessage
+        context.isHidden = captureFeedback || title.isEmpty || working || (!listening && message != nil)
         mode.isHidden = listening || working || (message != nil && !agentPill)
-        waveform.isHidden = !listening
+        waveform.isHidden = !listening || captureFeedback
         if !listening { waveform.update(level: 0, animated: false); waveformLevel = nil }
-        status.isHidden = listening || message == nil
+        status.isHidden = (listening && !captureFeedback) || message == nil
         if status.title(for: .normal) != message { status.setTitle(message, for: .normal) }
         status.setTitleColor(message == "Inserted" || pendingInsert ? .systemGreen : agent ? indigoText : theme.foreground, for: .normal)
         status.backgroundColor = agentPill && agentStatus ? indigo.withAlphaComponent(0.12) : .clear

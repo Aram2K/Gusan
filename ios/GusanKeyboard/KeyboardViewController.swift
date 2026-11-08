@@ -24,7 +24,6 @@ final class KeyboardViewController: UIInputViewController {
     private var working = false
     private var agentMessage: String?
     private var collapse: Timer?
-    private var screenHint = false
     private var retryTake: (text: String, context: VoiceContext)?
     private var pendingInsert: VoicePendingInsert?
     private var sharedDefaults: UserDefaults { UserDefaults(suiteName: store.resolution.chosen) ?? .standard }
@@ -67,6 +66,9 @@ final class KeyboardViewController: UIInputViewController {
         screen.onLost = { [weak self] in
             self?.firstFrame?.cancel(); self?.lastFrame?.cancel()
             self?.firstFrame = nil; self?.lastFrame = nil
+            if let self, screenTake && (voice.hasPendingRequest || working) {
+                screen.reportCapture(KeyboardScreenPlan.unavailableMessage)
+            }
             self?.scheduleUpdate()
         }
         agent.onSurfaceChange = { [weak self] in self?.view.setNeedsLayout(); self?.scheduleUpdate() }
@@ -151,12 +153,11 @@ final class KeyboardViewController: UIInputViewController {
         let selected = snapshot.selected
         let title = selected.isEmpty ? (preferences.keyboardScreenEnabled ? "Near cursor" : "") : "Selected · \(selected.split(whereSeparator: { $0.isWhitespace }).count) words"
         let active = working || [.recording, .transcribing, .thinking].contains(voice.phase)
-        let hint = screenHint && !active && voice.message == nil
-        let actionTitle = voice.canUndo(in: snapshot) ? "Undo" : hint ? "Open" : voice.actionTitle == "Undo" ? nil : voice.actionTitle
+        let actionTitle = voice.canUndo(in: snapshot) ? "Undo" : voice.actionTitle == "Undo" ? nil : voice.actionTitle
         // A task waiting on the user outranks stale strip text, but never an active take or a Smart result/error.
         let attention = active || voice.message != nil ? nil : agent.task.flatMap { AgentKeyboardAttention.resolve($0) }
         let agentStatus = !working && pendingInsert == nil && (attention != nil || (voice.message == nil && agentMessage != nil))
-        let message = !hasFullAccess && !active && voice.message == nil ? "Allow Full Access" : working ? voice.message ?? "Working…" : pendingInsert != nil ? "Result ready" : attention?.text ?? voice.message ?? agentMessage ?? (hint ? "Gusan Screen is off" : nil)
+        let message = screen.feedback ?? (!hasFullAccess && !active && voice.message == nil ? "Allow Full Access" : working ? voice.message ?? "Working…" : pendingInsert != nil ? "Result ready" : attention?.text ?? voice.message ?? agentMessage)
         strip.update(agent: preferences.keyboardMode == .agent, screenOn: preferences.keyboardScreenEnabled, live: screen.live && !secure, context: title, phase: working ? .thinking : voice.phase, level: voice.level, message: message, action: pendingInsert != nil && !active ? "Insert" : actionTitle, theme: theme, pendingInsert: pendingInsert != nil && !active, agentStatus: agentStatus)
     }
     @objc private func toggleMode() {
@@ -164,8 +165,13 @@ final class KeyboardViewController: UIInputViewController {
         settings.keyboardMode = preferences.keyboardMode == .smart ? .agent : .smart
         preferences = KeyboardSettingsSnapshot(defaults: sharedDefaults); scheduleUpdate()
     }
-    @objc private func toggleScreen() { settings.keyboardScreenEnabled = !preferences.keyboardScreenEnabled
-        preferences = KeyboardSettingsSnapshot(defaults: sharedDefaults); screenHint = preferences.keyboardScreenEnabled && !screen.live; scheduleUpdate() }
+    @objc private func toggleScreen() {
+        guard hasFullAccess else { openContainingApp(URL(string: "gusan://open-settings")!); return }
+        if preferences.keyboardScreenEnabled && !screen.live { openContainingApp(URL(string: "gusan://screen")!); return }
+        settings.keyboardScreenEnabled = !preferences.keyboardScreenEnabled
+        preferences = KeyboardSettingsSnapshot(defaults: sharedDefaults); scheduleUpdate()
+        if preferences.keyboardScreenEnabled && !screen.live { openContainingApp(URL(string: "gusan://screen")!) }
+    }
     @objc private func startVoice() { onVoice?() }
     @objc private func cancelVoice() {
         if pendingInsert != nil {
@@ -188,7 +194,6 @@ final class KeyboardViewController: UIInputViewController {
             if let retryTake { process(retryTake.text, context: retryTake.context) }
             else { voice.toggle() }
         }
-        else if screenHint && voice.message == nil { openContainingApp(URL(string: "gusan://screen")!) }
         else { voice.performAction() }
     }
     @objc private func statusPressed() {
@@ -201,19 +206,24 @@ final class KeyboardViewController: UIInputViewController {
     private func beginTake() -> VoiceAction? {
         retryTake = nil
         agentTake = preferences.keyboardMode == .agent
-        screenTake = !agentTake && preferences.keyboardScreenEnabled && screen.live && !screen.secureField
-        screenHint = preferences.keyboardScreenEnabled && !screen.live
+        screenTake = !agentTake && KeyboardScreenPlan.shouldRequest(enabled: preferences.keyboardScreenEnabled, live: screen.live, secure: screen.secureField, fullAccess: hasFullAccess)
         lastFrame = nil; firstFrame = nil
-        if screenTake {
-            let provider = screen.frames
-            firstFrame = Task { try? await provider.frame(timeout: 3) }
+        if KeyboardScreenPlan.shouldRequest(enabled: screenTake, live: screen.live, secure: screen.secureField, fullAccess: hasFullAccess) {
+            let provider = screen.frames(phase: .start)
+            firstFrame = Task { try? await provider.frame(timeout: 2) }
         }
         return agentTake || screenTake ? .transcribeOnly : nil
     }
     private func finishTake() {
-        guard screenTake, screen.live, !screen.secureField else { return }
-        let provider = screen.frames
-        lastFrame = Task { try? await provider.frame(timeout: 3) }
+        guard screenTake else { return }
+        let finishedAt = Date()
+        let first = firstFrame
+        lastFrame = Task { @MainActor [weak self] in
+            _ = await first?.value
+            guard let self, !Task.isCancelled,
+                  KeyboardScreenPlan.shouldRequest(enabled: screenTake, live: screen.live, secure: screen.secureField, fullAccess: hasFullAccess) else { return nil }
+            return try? await screen.frames(phase: .finish, notBefore: finishedAt).frame(timeout: 2)
+        }
     }
     private func process(_ text: String, context: VoiceContext) {
         let first = firstFrame, last = lastFrame
@@ -234,8 +244,11 @@ final class KeyboardViewController: UIInputViewController {
                 let start = await first?.value
                 let finish = await last?.value
                 try Task.checkCancellation()
+                guard hasFullAccess else { throw VoiceError.fullAccessRequired }
+                let plan = KeyboardScreenPlan(enabled: screenTake || preferences.keyboardScreenEnabled, live: screen.live, secure: screen.secureField, fullAccess: hasFullAccess, start: start, finish: finish)
+                screen.reportCapture(plan.message)
+                let frames = plan.frames
                 guard let session = try await auth.refresh() else { throw GusanError.unauthorized }
-                let frames = screen.live && !screen.secureField ? [start, finish].compactMap { $0 } : []
                 let kind: JobResult.Kind = context.selected.isEmpty ? .insert : .replaceSelection
                 let task: GusanJob
                 if frames.isEmpty {

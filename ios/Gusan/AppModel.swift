@@ -20,8 +20,7 @@ final class AppModel: NSObject, ObservableObject, ASWebAuthenticationPresentatio
     @Published var diagnostics: SessionDiagnostics?
     @Published var selectedTab: AppTab = .home
     @Published var openSessionID: UUID?
-    /// Set by `gusan://screen` (the keyboard's "Open"); Home opens the Gusan Screen page and clears it.
-    @Published var openScreenPage = false
+    @Published var showingScreenBroadcast = false
     @Published var showingSignIn = false
     @Published var fromKeyboard = false
     private var webSession: ASWebAuthenticationSession?
@@ -136,7 +135,7 @@ final class AppModel: NSObject, ObservableObject, ASWebAuthenticationPresentatio
         case "keyboard-settings":
             showingSignIn = false; selectedTab = .settings
         case "screen":
-            showingSignIn = false; selectedTab = .home; openScreenPage = true
+            showingSignIn = false; showingScreenBroadcast = true
         case "open-settings":
             UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!)
         case "auth-callback":

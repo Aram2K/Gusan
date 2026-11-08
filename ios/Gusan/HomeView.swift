@@ -4,7 +4,6 @@ import GusanKit
 struct HomeView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var agent: AgentCenter
-    @EnvironmentObject private var screen: ScreenMonitor
     @EnvironmentObject private var voice: VoiceSession
     @Environment(\.scenePhase) private var scenePhase
     @State private var mode: StripMode = .smart
@@ -14,7 +13,6 @@ struct HomeView: View {
     @State private var starting = false
     @State private var error: String?
     @State private var lastResult: SmartHistory.Entry?
-    @State private var showScreen = false
     private var setupComplete: Bool {
         !model.restoringSession && model.session != nil && model.keyboardAdded && model.fullAccess == true && voice.permission == .granted
     }
@@ -41,29 +39,14 @@ struct HomeView: View {
                     }
                 }
             }
-            Section {
-                NavigationLink { ScreenView() } label: {
-                    Label {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Gusan Screen")
-                            Text(screen.isLive ? "On · sees the screen when you speak" : "Sees the screen when you speak")
-                                .font(.subheadline).foregroundStyle(.secondary)
-                        }
-                    } icon: { Image(systemName: "iphone").foregroundStyle(Theme.accent) }
-                }
-            } footer: {
-                Text("Screen sharing requires the iOS broadcast sheet. Deselect the screen icon in the strip for a private moment.")
-            }
         }
         .listStyle(.insetGrouped)
         .navigationTitle("Gusan")
         .toolbar { ToolbarItem(placement: .navigationBarTrailing) { BrandMark() } }
-        .navigationDestination(isPresented: $showScreen) { ScreenView() }
         .onAppear {
             model.settings.refresh(); mode = model.settings.stripMode
             model.refreshDiagnostics(); voice.refreshPermission()
             lastResult = SmartHistory(group: model.store.resolution.chosen).entries.last
-            if model.openScreenPage { showScreen = true; model.openScreenPage = false }
             if setupComplete { setupCompleted = true }
         }
         .onChange(of: scenePhase) {
@@ -73,7 +56,6 @@ struct HomeView: View {
             if model.settings.stripMode != $0 { model.settings.stripMode = $0 }
         }
         .onChange(of: model.session) { _ in lastResult = SmartHistory(group: model.store.resolution.chosen).entries.last }
-        .onChange(of: model.openScreenPage) { if $0 { showScreen = true; model.openScreenPage = false } }
         .onChange(of: setupComplete) { if $0 { setupCompleted = true } }
         .onChange(of: scenePhase) { if $0 == .active { voice.refreshPermission(); model.refreshDiagnostics() } }
         .task { await agent.refreshNotificationStatus() }
