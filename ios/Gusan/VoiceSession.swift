@@ -248,8 +248,9 @@ final class VoiceSession: ObservableObject {
         note.title = "Copied to clipboard"
         note.body = "Open a text field and tap Insert, or paste."
         let center = UNUserNotificationCenter.current()
-        // Provisional: delivered quietly to Notification Center without a permission prompt for voice-only users.
-        center.requestAuthorization(options: [.alert, .sound, .provisional]) { _, _ in
+        // Never asks for permission here (AgentCenter owns that prompt); the Live Activity already says "Copied".
+        center.getNotificationSettings { settings in
+            guard [.authorized, .provisional, .ephemeral].contains(settings.authorizationStatus) else { return }
             center.add(UNNotificationRequest(identifier: "gusan.voice.copied", content: note, trigger: nil))
         }
         activity.update(status, heard: nil, copied: true)
