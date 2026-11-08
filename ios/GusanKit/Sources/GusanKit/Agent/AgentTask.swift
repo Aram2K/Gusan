@@ -189,7 +189,7 @@ public struct AgentTask: Codable, Equatable, Identifiable {
     public static let maxActive = 2
     public static let maxPerDay = 40
     public static let confirmationWindow: TimeInterval = 15 * 60
-    public var needsAttention: Bool { status == .awaitingConfirmation || (status.isTerminal && seenAt == nil) }
+    public var needsAttention: Bool { phase == .needsLogin || phase == .needsCode || status == .awaitingConfirmation || (status.isTerminal && seenAt == nil) }
     /// One line for cards and notifications.
     public var summaryLine: String {
         if phase == .needsLogin || phase == .needsCode { return phase.label }

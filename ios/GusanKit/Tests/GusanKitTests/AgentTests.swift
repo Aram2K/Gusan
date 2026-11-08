@@ -296,6 +296,31 @@ final class AgentTests: XCTestCase {
 
     // MARK: Tracker
 
+    func testLoginAndCodeAttentionTransitionsPersist() throws {
+        let suite = "AgentAttentionTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let tracker = AgentTaskTracker(defaults: defaults)
+        var task = AgentTask(mode: .do, status: .running, title: "Sign in", seenAt: Date())
+        XCTAssertFalse(task.needsAttention)
+        XCTAssertTrue(tracker.consumeEvents(from: [task]).isEmpty)
+        task.setServerStatus("awaiting_login")
+        XCTAssertTrue(task.needsAttention)
+        XCTAssertEqual(tracker.consumeEvents(from: [task]), [.needsLogin(task)])
+        XCTAssertTrue(AgentTaskTracker(defaults: defaults).consumeEvents(from: [task]).isEmpty)
+        task.setServerStatus("awaiting_code")
+        XCTAssertTrue(task.needsAttention)
+        XCTAssertEqual(tracker.consumeEvents(from: [task]), [.needsCode(task)])
+        XCTAssertTrue(tracker.consumeEvents(from: [task]).isEmpty)
+        task.status = .running
+        XCTAssertFalse(task.needsAttention)
+        XCTAssertTrue(tracker.consumeEvents(from: [task]).isEmpty)
+        task.setServerStatus("awaiting_login")
+        XCTAssertEqual(tracker.consumeEvents(from: [task]), [.needsLogin(task)])
+        tracker.markNotified(task)
+        XCTAssertTrue(tracker.consumeEvents(from: [task]).isEmpty)
+    }
+
     func testTrackerNotifiesEachTransitionOnce() {
         let defaults = UserDefaults(suiteName: "AgentTests.\(UUID().uuidString)")!
         let tracker = AgentTaskTracker(defaults: defaults)

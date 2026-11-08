@@ -201,6 +201,12 @@ final class AgentCenter: NSObject, ObservableObject {
             let content = UNMutableNotificationContent()
             let task: AgentTask
             switch event {
+            case .needsLogin(let pending), .needsCode(let pending):
+                task = pending
+                content.title = "Gusan " + pending.phase.label.lowercased()
+                content.body = pending.summaryLine
+                content.categoryIdentifier = Self.resultCategory
+                content.interruptionLevel = .timeSensitive
             case .needsConfirmation(let pending):
                 task = pending
                 content.title = "Gusan needs your OK"
