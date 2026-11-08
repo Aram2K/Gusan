@@ -151,8 +151,13 @@ final class CalendarTests: XCTestCase {
         }
         XCTAssertNil(try body(client.request(text: "Hello", action: .rephrase, accessToken: "test"))["calendar"])
         XCTAssertNotNil(try body(client.request(instruction: "Am I free?", text: "Hello", accessToken: "test"))["calendar"])
+        for action in [SmartAction.rephrase, .fixGrammar, .mode(.translate), .mode(.summarize), .mode(.writeEmail), .mode(.makeTodoList), .custom(instruction: "Shorten"), .voiceSmart(transcript: "Shorten")] {
+            XCTAssertNil(try body(client.request(text: "When can we meet?", action: action, accessToken: "test"))["calendar"], "\(action)")
+        }
+        XCTAssertNil(try body(client.request(instruction: "Shorten", text: "When can we meet?", accessToken: "test"))["calendar"])
         let frame = ScreenFrame(requestID: UUID(), capturedAt: Date(), width: 1, height: 1, jpeg: Data([1, 2, 3]))
         XCTAssertNotNil(try body(ScreenActionClient(calendarStore: store).request(instruction: "Am I free?", text: "", frame: frame, accessToken: "test"))["calendar"])
+        XCTAssertNil(try body(ScreenActionClient(calendarStore: store).request(instruction: "Shorten", text: "When can we meet?", frame: frame, accessToken: "test"))["calendar"])
         store.clear()
         XCTAssertNil(try body(client.request(text: "Am I free?", action: .mode(.smartAuto), accessToken: "test"))["calendar"])
     }

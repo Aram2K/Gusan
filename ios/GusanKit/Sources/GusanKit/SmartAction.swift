@@ -145,11 +145,12 @@ public struct SmartActionClient {
         request.httpMethod = "POST"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        var texts = [text]
+        let texts: [String]
         switch action {
-        case .custom(let instruction): texts.append(instruction)
-        case .voiceSmart(let transcript): texts.append(transcript)
-        default: break
+        case .custom(let instruction): texts = [instruction]
+        case .voiceSmart(let transcript): texts = [transcript]
+        case .mode(.smartAuto): texts = [text]
+        default: texts = []
         }
         let calendar = CalendarContext.schedulingSummary(texts: texts, store: calendarStore)
         struct Body: Encodable { let messages: [ChatMessage]; let max_tokens: Int; let mode: String; let calendar: String? }

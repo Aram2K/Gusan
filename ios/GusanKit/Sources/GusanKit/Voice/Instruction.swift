@@ -8,7 +8,7 @@ extension SmartActionClient {
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let messages = [ChatMessage(role: "system", content: "You edit text for the user. Apply the user's spoken instruction to the text and output only the resulting text - no commentary, no quotes. Keep the text's language unless the instruction says otherwise."), ChatMessage(role: "user", content: "Instruction:\n\(instruction)\n\nText:\n\(text)")]
-        let calendar = CalendarContext.schedulingSummary(texts: [instruction, text], store: calendarStore)
+        let calendar = CalendarContext.schedulingSummary(texts: [instruction], store: calendarStore)
         struct Body: Encodable { let messages: [ChatMessage]; let max_tokens: Int; let mode: String; let calendar: String? }
         request.httpBody = try JSONEncoder().encode(Body(messages: messages, max_tokens: 2000, mode: "smart_auto", calendar: calendar))
         return request

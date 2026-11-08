@@ -78,7 +78,7 @@ public struct ScreenActionClient {
         request.httpMethod = "POST"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let calendar = CalendarContext.schedulingSummary(texts: [instruction, text, selected], store: calendarStore)
+        let calendar = CalendarContext.schedulingSummary(texts: [instruction], store: calendarStore)
         struct Body: Encodable { let messages: [ScreenChatMessage]; let max_tokens: Int; let mode: String; let calendar: String? }
         request.httpBody = try JSONEncoder().encode(Body(messages: messages, max_tokens: SmartActionMode.smartAuto.maxTokens, mode: SmartActionMode.smartAuto.rawValue, calendar: calendar))
         return request
