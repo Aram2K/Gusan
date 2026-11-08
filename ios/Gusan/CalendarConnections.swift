@@ -57,6 +57,7 @@ final class CalendarConnections: ObservableObject {
     private var refreshTask: Task<CalendarSnapshot, Error>?
     private var generation = 0
     private var refreshAgain = false
+    private var requestingPermission = false
 
     init(group: String?) {
         store = CalendarSnapshotStore(group: group)
@@ -90,11 +91,15 @@ final class CalendarConnections: ObservableObject {
             syncState(); scheduleBackgroundRefresh()
             return
         }
-        guard !connecting, state != .connected else { return }
+        guard !requestingPermission, !connecting, state != .connected else { return }
+        requestingPermission = true
         connecting = true; error = nil
         let version = generation
         connection = Task {
-            defer { if version == generation { connecting = false; connection = nil } }
+            defer {
+                requestingPermission = false
+                if version == generation { connecting = false; connection = nil }
+            }
             do {
                 let granted = try await reader.requestAccess()
                 try Task.checkCancellation()

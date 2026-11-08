@@ -5,6 +5,7 @@
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>com.aram2k.gusan.agent-refresh</string>
+		<string>com.aram2k.gusan.calendar-refresh</string>
 	</array>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
@@ -37,6 +38,8 @@
 	<string>group.com.aram2k.gusan</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Gusan records your voice only while you dictate, to transcribe it with Gusan Cloud.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Gusan reads your calendar to help Smart and Agent answer scheduling questions without changing events.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Gusan uses Face ID to protect saved logins and approve each use by an agent.</string>
 	<key>UIBackgroundModes</key>

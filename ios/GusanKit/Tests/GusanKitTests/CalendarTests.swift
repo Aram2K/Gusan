@@ -70,6 +70,50 @@ final class CalendarTests: XCTestCase {
         XCTAssertEqual(CalendarContext.prepending(nil, to: ""), nil)
     }
 
+    func testSourceReplacementMergesDisconnectsAndStripsCachedTitles() throws {
+        let (store, defaults) = try store()
+        store.calendarIncludeTitles = true
+        store.calendarIPhoneEnabled = true; store.calendarGoogleEnabled = true
+        let now = Date()
+        let iphone = snapshot(now: now, blocks: [BusyBlock(start: now, end: now.addingTimeInterval(600), title: "Private")])
+        var google = iphone; google.sources = ["google"]
+        store.replaceSource("iphone", snapshot: iphone)
+        store.replaceSource("google", snapshot: google)
+        XCTAssertEqual(store.snapshot?.sources, ["iphone", "google"])
+        XCTAssertEqual(store.snapshot?.blocks.count, 2)
+        store.calendarIncludeTitles = false
+        for source in ["iphone", "google"] {
+            let cached = try JSONDecoder().decode(CalendarSnapshot.self, from: XCTUnwrap(defaults.data(forKey: "gusan.calendar.source." + source)))
+            XCTAssertNil(cached.blocks.first?.title)
+        }
+        store.calendarIPhoneEnabled = false
+        XCTAssertEqual(store.snapshot?.sources, ["google"])
+        XCTAssertNil(defaults.data(forKey: "gusan.calendar.source.iphone"))
+        store.replaceSource("google", snapshot: nil)
+        XCTAssertNil(store.snapshot)
+        store.replaceSource("google", snapshot: google)
+        store.clear()
+        XCTAssertNil(defaults.data(forKey: "gusan.calendar.source.google"))
+    }
+
+    func testEventFilteringClipsBusyBlocksAndProtectsTitles() {
+        let start = date("2026-11-08T00:00:00Z"), end = date("2026-11-09T00:00:00Z")
+        let records = [
+            CalendarEventRecord(start: start.addingTimeInterval(-600), end: start.addingTimeInterval(600), title: "Private"),
+            CalendarEventRecord(start: start, end: end, isFree: true),
+            CalendarEventRecord(start: start, end: end, isDeclined: true),
+            CalendarEventRecord(start: start, end: end, isCancelled: true),
+            CalendarEventRecord(start: start, end: start),
+            CalendarEventRecord(start: end, end: end.addingTimeInterval(600)),
+            CalendarEventRecord(start: start.addingTimeInterval(600), end: end.addingTimeInterval(600), isAllDay: true)
+        ]
+        let blocks = CalendarEventFilter.blocks(from: records, windowStart: start, windowEnd: end, includeTitles: false)
+        XCTAssertEqual(blocks, [BusyBlock(start: start, end: start.addingTimeInterval(600)), BusyBlock(start: start.addingTimeInterval(600), end: end, isAllDay: true)])
+        XCTAssertEqual(CalendarEventFilter.blocks(from: records, windowStart: start, windowEnd: end, includeTitles: true).first?.title, "Private")
+        XCTAssertTrue(CalendarEventFilter.blocks(from: [], windowStart: start, windowEnd: end, includeTitles: true).isEmpty)
+        XCTAssertTrue(CalendarEventFilter.blocks(from: records, windowStart: end, windowEnd: start, includeTitles: true).isEmpty)
+    }
+
     func testUnavailableAndCorruptStorage() throws {
         let unavailable = CalendarSnapshotStore(defaults: nil)
         unavailable.calendarIPhoneEnabled = true; unavailable.write(snapshot())
