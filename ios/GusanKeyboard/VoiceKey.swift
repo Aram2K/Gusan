@@ -57,8 +57,11 @@ final class VoiceKeyController: NSObject {
     }
     private var presentation: Presentation?
     private var pending = KeyboardVoiceState()
+    private var deadline = KeyboardVoiceDeadline()
+    var hasPendingRequest: Bool { pending.requestID != nil && pending.requestID != pending.insertedID && pending.requestID != cancelledID }
     private var status: VoiceStatus?
     private var cancelledID: UUID?
+    private var timedOutID: UUID?
     private var action: VoiceAction?
     private var visible = false
     private var loading = false
@@ -102,7 +105,7 @@ final class VoiceKeyController: NSObject {
         #if DEBUG
         preview = UserDefaults(suiteName: store.resolution.chosen)?.bool(forKey: "debugVoicePreview") == true
         #endif
-        if !preview, let saved = channel.readKeyboardState() { pending = saved }
+        if !preview, let saved = channel.readKeyboardState() { pending = saved; action = saved.action }
         observer = channel.observe(.status) { [weak self] in self?.load() }
         updateFallbackTimer()
         load()
@@ -157,7 +160,9 @@ final class VoiceKeyController: NSObject {
     private func start() {
         cancelledID = nil; message = nil; actionTitle = nil; undoRecord = nil; inserted = nil
         pending = KeyboardVoiceState(requestID: UUID(), context: currentContext())
+        deadline = KeyboardVoiceDeadline()
         action = onStart?()
+        pending.action = action
         updateFallbackTimer()
         if !preview { do { try channel.write(keyboard: pending) } catch { show(error.localizedDescription); return }; send(.start) }
     }
@@ -181,9 +186,19 @@ final class VoiceKeyController: NSObject {
         if let actionURL { open(actionURL) }
     }
     private func refresh() {
+        status = KeyboardVoiceFeedback.statusForDisplay(status, timedOutRequestID: timedOutID)
+        if !preview, let expired = deadline.expiry(pending: pending, status: status) {
+            timedOutID = pending.requestID
+            cancelledID = pending.requestID
+            if let id = pending.requestID { channel.discardRequest(id) }
+            if expired == .processing { send(.cancel) }
+            pending = KeyboardVoiceState(); phase = .off
+            show(expired == .acknowledgement ? "Gusan didn't start — tap mic to retry" : "Timed out — Retry", action: expired == .processing ? "Retry" : nil)
+            updateFallbackTimer(); return
+        }
         documentDidChange()
         if Date() >= undoExpires, inserted != nil { inserted = nil; undoRecord = nil; message = nil }
-        let active = preview || status?.isAlive() == true
+        let active = preview || status?.isAlive() == true || KeyboardVoiceFeedback.displaysFailure(status, pending: pending)
         phase = status?.requestID == cancelledID && cancelledID != nil ? .off : active ? status?.phase ?? .off : .off
         level = preview ? Float(0.2 + abs(sin(Date.timeIntervalSinceReferenceDate * 3)) * 0.6) : status?.level ?? 0
         if let status, status.phase == .done, status.requestID == pending.requestID, pending.insertedID != pending.requestID, status.requestID != cancelledID { deliver(status) }

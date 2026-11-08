@@ -72,7 +72,7 @@ targets:
           NSExtensionAttributes:
             RequestsOpenAccess: true
             PrimaryLanguage: en-US
-            IsASCIICapable: false
+            IsASCIICapable: true
     entitlements:
       path: GusanKeyboard/GusanKeyboard.entitlements
       properties:

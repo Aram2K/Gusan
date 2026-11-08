@@ -65,6 +65,7 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
         self.before = before ?? ""
         self.capitalization = capitalization ?? .sentences
         self.returnType = returnType ?? .default
+        if showGlobe != needsGlobe { cancelTouches() }
         showGlobe = needsGlobe
         theme = KeyboardTheme(appearance: appearance, traits: traitCollection)
         updateAutomaticShift()
@@ -256,8 +257,9 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
     }
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches where active[touch] != nil && !committed.contains(touch) {
+            guard let previous = active[touch], slots.indices.contains(previous) else { cancelTouches(); return }
             guard let index = nearest(touch.location(in: self)), active[touch] != index else { continue }
-            if let previous = active[touch], slots[previous].key == .delete { deleteTimer?.invalidate() }
+            if slots[previous].key == .delete { deleteTimer?.invalidate() }
             active[touch] = index
             showPreview(touch, index: index)
         }
@@ -267,6 +269,7 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
         for touch in touches {
             guard let index = active.removeValue(forKey: touch) else { continue }
             previews.removeValue(forKey: touch)?.removeFromSuperview()
+            guard slots.indices.contains(index) else { committed.remove(touch); deleteTimer?.invalidate(); continue }
             let key = slots[index].key
             let wasCommitted = committed.remove(touch) != nil
             if key == .delete {
@@ -281,7 +284,7 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
             committed.remove(touch)
-            if let index = active.removeValue(forKey: touch), slots[index].key == .delete { deleteTimer?.invalidate() }
+            if let index = active.removeValue(forKey: touch), !slots.indices.contains(index) || slots[index].key == .delete { deleteTimer?.invalidate() }
             previews.removeValue(forKey: touch)?.removeFromSuperview()
         }
         updateHighlights()
@@ -353,6 +356,9 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
         var ticks = 0
         deleteTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             guard let self, self.inputEnabled else { return }
+            guard self.active.values.contains(where: { self.slots.indices.contains($0) && self.slots[$0].key == .delete }) else {
+                self.deleteTimer?.invalidate(); self.deleteTimer = nil; return
+            }
             let elapsed = Date.timeIntervalSinceReferenceDate - self.deleteStarted
             guard elapsed > 0.4 else { return }
             ticks += 1

@@ -65,13 +65,14 @@ public struct VoiceStatus: Codable, Equatable {
     public var phase: VoicePhase
     public var requestID: UUID?
     public var heartbeat: Date
+    public var writtenAt: Date?
     public var sessionEndsAt: Date?
     public var level: Float
     public var message, result: String?
     public var replacesSelection: Bool
     public var resultKind: JobResult.Kind?
     public init(phase: VoicePhase = .off, requestID: UUID? = nil, heartbeat: Date = Date(), sessionEndsAt: Date? = nil, level: Float = 0, message: String? = nil, result: String? = nil, replacesSelection: Bool = false, resultKind: JobResult.Kind? = nil) {
-        self.phase = phase; self.requestID = requestID; self.heartbeat = heartbeat; self.sessionEndsAt = sessionEndsAt; self.level = level; self.message = message; self.result = result; self.replacesSelection = replacesSelection
+        self.phase = phase; self.requestID = requestID; self.heartbeat = heartbeat; self.writtenAt = Date(); self.sessionEndsAt = sessionEndsAt; self.level = level; self.message = message; self.result = result; self.replacesSelection = replacesSelection
         self.resultKind = resultKind
     }
     public func isAlive(now: Date = Date()) -> Bool { phase != .off && now.timeIntervalSince(heartbeat) < 3 }

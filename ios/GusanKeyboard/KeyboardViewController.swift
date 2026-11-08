@@ -43,7 +43,13 @@ final class KeyboardViewController: UIInputViewController {
         strip.action.addTarget(self, action: #selector(actionPressed), for: .touchUpInside)
         strip.status.addTarget(self, action: #selector(statusPressed), for: .touchUpInside)
         onVoice = { [weak self] in self?.voice.toggle() }
-        voice.onChange = { [weak self] in self?.scheduleUpdate() }
+        voice.onChange = { [weak self] in
+            guard let self else { return }
+            if voice.phase == .failed || !voice.hasPendingRequest {
+                firstFrame?.cancel(); lastFrame?.cancel(); firstFrame = nil; lastFrame = nil
+            }
+            scheduleUpdate()
+        }
         voice.onStart = { [weak self] in self?.beginTake() }
         voice.onFinish = { [weak self] in self?.finishTake() }
         voice.onTranscript = { [weak self] text, context in self?.process(text, context: context) }
@@ -69,6 +75,7 @@ final class KeyboardViewController: UIInputViewController {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         preferences = KeyboardSettingsSnapshot(defaults: sharedDefaults)
+        agentTake = preferences.keyboardMode == .agent
         scheduleUpdate()
     }
     override func viewDidAppear(_ animated: Bool) {
@@ -92,6 +99,7 @@ final class KeyboardViewController: UIInputViewController {
         super.viewWillDisappear(animated)
         appeared = false
         keyArea.cancelTouches(); voice.disappear(); screen.disappear(); agent.disappear()
+        firstFrame?.cancel(); lastFrame?.cancel(); firstFrame = nil; lastFrame = nil
         collapse?.invalidate()
     }
     override func viewWillLayoutSubviews() {
@@ -135,7 +143,7 @@ final class KeyboardViewController: UIInputViewController {
         // A task waiting on the user outranks stale strip text, but never an active take or a Smart result/error.
         let attention = active || voice.message != nil ? nil : agent.task.flatMap { AgentKeyboardAttention.resolve($0) }
         let agentStatus = !working && pendingInsert == nil && (attention != nil || (voice.message == nil && agentMessage != nil))
-        let message = working ? voice.message ?? "Working…" : pendingInsert != nil ? "Result ready" : attention?.text ?? voice.message ?? agentMessage ?? (hint ? "Gusan Screen is off" : nil)
+        let message = !hasFullAccess && !active && voice.message == nil ? "Allow Full Access" : working ? voice.message ?? "Working…" : pendingInsert != nil ? "Result ready" : attention?.text ?? voice.message ?? agentMessage ?? (hint ? "Gusan Screen is off" : nil)
         strip.update(agent: preferences.keyboardMode == .agent, screenOn: preferences.keyboardScreenEnabled, live: screen.live && !secure, context: title, phase: working ? .thinking : voice.phase, level: voice.level, message: message, action: pendingInsert != nil && !active ? "Insert" : actionTitle, theme: theme, pendingInsert: pendingInsert != nil && !active, agentStatus: agentStatus)
     }
     @objc private func toggleMode() {
@@ -154,6 +162,7 @@ final class KeyboardViewController: UIInputViewController {
         firstFrame = nil; lastFrame = nil; working = false; voice.cancel()
     }
     @objc private func actionPressed() {
+        if !hasFullAccess { openContainingApp(URL(string: "gusan://open-settings")!); return }
         if let pendingInsert {
             guard hasFullAccess, VoicePendingInsert.read(from: sharedDefaults, account: store.read().flatMap { $0.userID ?? $0.email }) == pendingInsert else {
                 self.pendingInsert = nil; scheduleUpdate(); return
@@ -170,6 +179,7 @@ final class KeyboardViewController: UIInputViewController {
         else { voice.performAction() }
     }
     @objc private func statusPressed() {
+        if !hasFullAccess { openContainingApp(URL(string: "gusan://open-settings")!); return }
         if let task = agent.task, let attention = AgentKeyboardAttention.resolve(task) {
             openContainingApp(attention.url)
         } else if agent.isActive { agent.show() }
@@ -193,6 +203,8 @@ final class KeyboardViewController: UIInputViewController {
         lastFrame = Task { try? await provider.frame(timeout: 3) }
     }
     private func process(_ text: String, context: VoiceContext) {
+        let first = firstFrame, last = lastFrame
+        firstFrame = nil; lastFrame = nil
         retryTake = (text, context)
         if agentTake {
             let intent = AgentIntent.detect(text) ?? AgentIntent(mode: .research, instruction: text)
@@ -202,7 +214,6 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
         working = true; voice.show(text)
-        let first = firstFrame, last = lastFrame
         job = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { working = false; scheduleUpdate() }
