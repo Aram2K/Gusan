@@ -47,6 +47,15 @@ final class VoiceKeyController: NSObject {
     private let channel: VoiceChannel
     private var observer: DarwinObserver?
     private var timer: Timer?
+    private var undoTimer: Timer?
+    private struct Presentation: Equatable {
+        let phase: VoicePhase
+        let level: Float
+        let message: String?
+        let action: String?
+        let canUndo: Bool
+    }
+    private var presentation: Presentation?
     private var pending = KeyboardVoiceState()
     private var status: VoiceStatus?
     private var cancelledID: UUID?
@@ -65,9 +74,24 @@ final class VoiceKeyController: NSObject {
     private(set) var message: String?
     private(set) var actionTitle: String?
     private var actionURL: URL?
+    var tracksUndo: Bool { inserted != nil || undoRecord != nil }
     var canUndo: Bool {
-        guard Date() < undoExpires, let current = currentContext() else { return false }
-        return undoRecord?.step(context: current) != nil
+        guard undoRecord != nil, Date() < undoExpires, let current = currentContext() else { return false }
+        return canUndo(in: current)
+    }
+    func canUndo(in context: VoiceContext) -> Bool {
+        Date() < undoExpires && undoRecord?.step(context: context) != nil
+    }
+    private func notifyChanged() {
+        let value = Presentation(phase: phase, level: level, message: message, action: actionTitle, canUndo: canUndo)
+        guard value != presentation else { return }
+        presentation = value; onChange?()
+    }
+    private func updateFallbackTimer() {
+        let waiting = pending.requestID != nil && pending.insertedID != pending.requestID && pending.requestID != cancelledID && phase != .failed
+        guard visible && (waiting || phase != .off) else { timer?.invalidate(); timer = nil; return }
+        guard timer == nil else { return }
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.load() }
     }
     init(host: UIInputViewController, store: SessionStore) {
         self.host = host; self.store = store; channel = store.makeVoiceChannel()
@@ -80,8 +104,7 @@ final class VoiceKeyController: NSObject {
         #endif
         if !preview, let saved = channel.readKeyboardState() { pending = saved }
         observer = channel.observe(.status) { [weak self] in self?.load() }
-        timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in self?.load() }
+        updateFallbackTimer()
         load()
     }
     func disappear() { visible = false; observer = nil; timer?.invalidate(); timer = nil }
@@ -135,6 +158,7 @@ final class VoiceKeyController: NSObject {
         cancelledID = nil; message = nil; actionTitle = nil; undoRecord = nil; inserted = nil
         pending = KeyboardVoiceState(requestID: UUID(), context: currentContext())
         action = onStart?()
+        updateFallbackTimer()
         if !preview { do { try channel.write(keyboard: pending) } catch { show(error.localizedDescription); return }; send(.start) }
     }
     private func send(_ kind: VoiceCommand.Kind) {
@@ -147,10 +171,10 @@ final class VoiceKeyController: NSObject {
     func cancel() {
         cancelledID = pending.requestID
         if !preview { send(.cancel) } else { status = nil }
-        phase = .off; show("Cancelled")
+        phase = .off; updateFallbackTimer(); show("Cancelled")
     }
     func show(_ text: String, action: String? = nil, url: String? = nil) {
-        message = text; actionTitle = action; actionURL = url.flatMap(URL.init(string:)); onChange?()
+        message = text; actionTitle = action; actionURL = url.flatMap(URL.init(string:)); notifyChanged()
     }
     func performAction() {
         if actionTitle == "Undo" { if canUndo { undo() }; return }
@@ -168,7 +192,7 @@ final class VoiceKeyController: NSObject {
             let transcript = channel.readTranscript()
             message = transcript?.requestID == pending.requestID ? transcript?.text : "Working…"
         } else if phase == .failed { message = status?.message; actionTitle = "Retry" }
-        onChange?()
+        updateFallbackTimer(); notifyChanged()
     }
     private func deliver(_ status: VoiceStatus) {
         guard let id = pending.requestID, !pending.isStale(status: status), let result = status.result, !result.isEmpty, let context = pending.context else { return }
@@ -198,6 +222,13 @@ final class VoiceKeyController: NSObject {
         undoSnapshot = currentContext(); inserted = result.text
         proxy.insertText(result.text)
         undoRecord = nil; undoExpires = Date().addingTimeInterval(30)
+        undoTimer?.invalidate()
+        undoTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            inserted = nil; undoRecord = nil; undoSnapshot = nil
+            if actionTitle == "Undo" { message = nil; actionTitle = nil }
+            notifyChanged()
+        }
         documentDidChange(); show("Inserted", action: "Undo")
     }
     func documentDidChange() {
