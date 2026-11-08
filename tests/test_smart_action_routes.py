@@ -316,6 +316,10 @@ def build_scenarios():
         *[{**SMART, "body": {**SMART["body"], "calendar": value}} for value in (None, 42, [], {})],
         SMART,
     ])
+    add("calendar_unicode", ONLY_OPENAI, [
+        {**SMART, "body": {**SMART["body"], "calendar": "😀" * 1100}},
+        {**SMART, "body": {**SMART["body"], "calendar": "x" * 1999 + "👨‍👩‍👧‍👦"}},
+    ])
     add("calendar_fallback", FULL_ENV, [
         {**SMART, "body": {**SMART["body"], "calendar": calendar}}
     ], ALL_FAIL)
@@ -376,6 +380,11 @@ class TestSmartActionRoutes(unittest.TestCase):
         self.assertTrue(self.openai_body(capped)["messages"][-2]["content"].endswith("\n" + "x" * 2000))
         self.assertNotIn("PRIVATE calendar", json.dumps(normal["logs"]))
         self.assertNotIn("PRIVATE calendar", normal["text"])
+
+    def test_calendar_unicode_cap_preserves_whole_characters(self):
+        emojis, family = self.sc("calendar_unicode")
+        self.assertTrue(self.openai_body(emojis)["messages"][-2]["content"].endswith("\n" + "😀" * 1000))
+        self.assertTrue(self.openai_body(family)["messages"][-2]["content"].endswith("\n" + "x" * 1999))
 
     def test_calendar_rejects_non_strings_without_upstream_calls(self):
         for result in self.sc("calendar")[3:7]:

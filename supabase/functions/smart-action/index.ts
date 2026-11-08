@@ -821,7 +821,13 @@ Deno.serve(async (req) => {
   if (body?.calendar !== undefined && typeof body.calendar !== "string") {
     return json({ error: "bad_request", field: "calendar" }, 400);
   }
-  const calendar = typeof body?.calendar === "string" ? body.calendar.trim().slice(0, 2000) : "";
+  let calendar = "";
+  if (typeof body?.calendar === "string") {
+    for (const { segment } of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(body.calendar.trim())) {
+      if (calendar.length + segment.length > 2000) break;
+      calendar += segment;
+    }
+  }
   const warmup = body?.warmup === true;
   const live = body?.mode === "live_assist";
   const smart = SMART_MODES.has(body?.mode);
