@@ -66,6 +66,13 @@ class TestTurn(unittest.TestCase):
         self.assertEqual(stream.call_args.kwargs["model"], actions.API_OPENAI_ID)
         self.assertNotIn("_live_session_id", stream.call_args.kwargs["config"])
 
+    def test_pro_falls_back_to_managed_when_selected_provider_has_no_key(self):
+        stream = mock.Mock(return_value="Answer")
+        cfg = {"action_api_key": "openai-key", "_managed_token": "pro-token"}
+        self.call(model=actions.API_GEMINI_ID, cfg=cfg, stream=stream)
+        self.assertEqual(stream.call_args.kwargs["model"], actions.API_MANAGED_ID)
+        self.assertEqual(stream.call_args.kwargs["config"]["_managed_token"], "pro-token")
+
     def test_refusals_never_send(self):
         stream = mock.Mock()
         for kwargs, code in [({"cfg": {"privacy_mode": True}}, "privacy"),
