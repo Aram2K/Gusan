@@ -149,6 +149,10 @@ def test_every_row_has_a_trash_icon_that_shows_on_hover_and_keyboard_focus(shell
     btn = row.trash
     assert btn.toolTip() == "Delete" and btn.accessibleName() == "Delete Q4 roadmap"
     assert btn.isEnabled() and btn.focusPolicy() == Qt.NoFocus      # the Delete key is the keyboard's way
+    # The pointer away from the list (an earlier test in the same process may have left it where this row now is).
+    from PySide6.QtGui import QCursor
+    QCursor.setPos(-5000, -5000)
+    _leave(row)
     _spin(20)
     assert btn.target_opacity() == 0.0 and not btn.isVisibleTo(row)       # nothing on a quiet list...
     _enter(row)

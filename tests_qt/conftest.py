@@ -134,6 +134,39 @@ def stub_app():
     return make_stub_app
 
 
+# Test files whose fixtures keep one app (its windows) for the whole file: nothing of theirs is closed between tests.
+KEEPS_WINDOWS_ACROSS_TESTS = ("test_wave4_controller",)
+
+
+@pytest.fixture(autouse=True)
+def _close_what_the_test_left_open(request):
+    """Every window, card, popup and dialog a test leaves behind is hidden and deleted after it. Left alive, their
+    timers, animations and repaints piled up in the one process: the later tests ran 10-30 times slower (12-37 s
+    each in test_live_documents_ui, 0.7 s alone) and the CI step hit its 40-minute cap (2.1.2's first build).
+    Windows that existed before the test (a file's shared app) are left as they are."""
+    if not _real_qt() or any(name in request.module.__name__ for name in KEEPS_WINDOWS_ACROSS_TESTS):
+        yield
+        return
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance()
+    before = {id(w) for w in app.topLevelWidgets()} if app is not None else set()
+    yield
+    app = QApplication.instance()
+    if app is None:
+        return
+    from PySide6.QtCore import QCoreApplication, QEvent
+    for w in app.topLevelWidgets():
+        if id(w) in before:
+            continue
+        try:
+            w.hide()
+            w.deleteLater()
+        except RuntimeError:
+            pass                                   # already gone
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    app.processEvents()
+
+
 @pytest.fixture(autouse=True)
 def _never_ask_the_website_for_the_model_list(monkeypatch):
     """The Armenian model's list is a request to gusan.aibuben.xyz that a page makes when it opens.
