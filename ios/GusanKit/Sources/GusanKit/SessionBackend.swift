@@ -112,3 +112,72 @@ final class NamedSessionPasteboard: SessionBackend {
         #endif
     }
 }
+
+/// The signing team's keychain prefix ("TEAMID"), learned from the keychain itself so it survives re-signing
+/// (Sideloadly/AltStore change the team). Items in "TEAMID.<name>" groups are shared by the app and its extensions
+/// whenever the signature allows that group (sideloading tools sign free-account builds with a "TEAMID.*" wildcard;
+/// the unsigned IPA declares no keychain groups, so Xcode-signed builds simply fall back to the App Group route).
+public enum SharedKeychain {
+    private static var cached: String??
+    public static func teamPrefix() -> String? {
+        if let cached { return cached }
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "Gusan.team-probe",
+                                    kSecAttrAccount as String: "team-probe", kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly]
+        SecItemAdd(query.merging([kSecValueData as String: Data([1])]) { _, new in new } as CFDictionary, nil)
+        var result: CFTypeRef?
+        var lookup = query; lookup[kSecReturnAttributes as String] = true; lookup[kSecMatchLimit as String] = kSecMatchLimitOne
+        let status = SecItemCopyMatching(lookup as CFDictionary, &result)
+        let group = status == errSecSuccess ? (result as? [String: Any])?[kSecAttrAccessGroup as String] as? String : nil
+        let prefix = parsePrefix(group)
+        cached = .some(prefix)
+        return prefix
+    }
+    /// "ABCDE12345.com.example.app" → "ABCDE12345"; nil for anything that is not a team-prefixed group.
+    static func parsePrefix(_ group: String?) -> String? {
+        guard let group, let dot = group.firstIndex(of: "."), dot > group.startIndex else { return nil }
+        let prefix = String(group[..<dot])
+        return prefix.count == 10 && prefix.allSatisfy({ $0.isLetter || $0.isNumber }) ? prefix : nil
+    }
+    /// A keychain backend shared with the extensions, or nil when the team prefix is unknown.
+    public static func backend(named name: String, maxBytes: Int? = nil) -> SessionBackend? {
+        guard let team = teamPrefix() else { return nil }
+        let keychain = KeychainSessionBackend(group: "\(team).com.aram2k.gusan.\(name)", enabled: true)
+        return maxBytes.map { SizeLimitedSessionBackend(wrapping: keychain, maxBytes: $0) } ?? keychain
+    }
+}
+
+/// Writes go to the first backend that accepts them; reads take the newest-looking value (first hit wins).
+final class LayeredSessionBackend: SessionBackend {
+    let name: String
+    private let layers: [SessionBackend]
+    init(_ layers: [SessionBackend]) { self.layers = layers; name = layers.map(\.name).joined(separator: "/") }
+    func read(_ key: String) -> SessionBackendRead {
+        var readable = false
+        for layer in layers {
+            let value = layer.read(key)
+            readable = readable || value.readable
+            if let data = value.data { return SessionBackendRead(data: data, readable: true) }
+        }
+        return SessionBackendRead(data: nil, readable: readable)
+    }
+    func write(_ data: Data, key: String) -> Bool {
+        for (index, layer) in layers.enumerated() where layer.write(data, key: key) {
+            // Only one layer may hold a key, or a reader could pick up a stale packet from another layer.
+            for (other, backend) in layers.enumerated() where other != index { backend.clear(key) }
+            return true
+        }
+        return false
+    }
+    func clear(_ key: String) { layers.forEach { $0.clear(key) } }
+}
+
+/// Refuses payloads above `maxBytes` (keychain items should stay small); reads/clears pass through.
+final class SizeLimitedSessionBackend: SessionBackend {
+    let name: String
+    private let inner: SessionBackend
+    private let maxBytes: Int
+    init(wrapping inner: SessionBackend, maxBytes: Int) { self.inner = inner; self.maxBytes = maxBytes; name = inner.name }
+    func read(_ key: String) -> SessionBackendRead { inner.read(key) }
+    func write(_ data: Data, key: String) -> Bool { data.count <= maxBytes && inner.write(data, key: key) }
+    func clear(_ key: String) { inner.clear(key) }
+}

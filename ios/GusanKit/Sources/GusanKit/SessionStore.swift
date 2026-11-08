@@ -141,6 +141,7 @@ public final class SessionStore: SessionStorage {
     private let fullAccess: () -> Bool?
     private let fallbackAllowed: () -> Bool
     private let voicePasteboard: SessionBackend
+    private let sharedKeychainVoice: SessionBackend?
     private var voiceCheckedAt = Date.distantPast
     private var cachedVoiceRoute = VoiceChannel.Route.unavailable
     private let lock = NSLock()
@@ -164,7 +165,12 @@ public final class SessionStore: SessionStorage {
         let isolated = false
         #endif
         self.resolution = isolated ? AppGroupResolution(candidatesTried: [], chosen: nil, container: nil) : resolution
-        voicePasteboard = NamedSessionPasteboard(namespace: isolated ? "com.aram2k.gusan.debug.voice" : "com.aram2k.gusan.voice", lifetime: 600, accessAllowed: pasteboardAccessAllowed)
+        let voiceBoard = NamedSessionPasteboard(namespace: isolated ? "com.aram2k.gusan.debug.voice" : "com.aram2k.gusan.voice", lifetime: 600, accessAllowed: pasteboardAccessAllowed)
+        // The shared keychain works while the app is in the background (the pasteboard does not), so the keyboard
+        // can see a ready voice session and record in place even when re-signing dropped the App Group.
+        let voiceKeychain = isolated ? nil : SharedKeychain.backend(named: "voice", maxBytes: 256 * 1024)
+        voicePasteboard = voiceKeychain.map { LayeredSessionBackend([$0, voiceBoard]) } ?? voiceBoard
+        sharedKeychainVoice = voiceKeychain
         keychainGroup = isolated ? nil : resolution.chosen
         backends = [KeychainSessionBackend(group: keychainGroup, enabled: keychainGroup != nil), FileSessionBackend(container: self.resolution.container), NamedSessionPasteboard(namespace: isolated ? "com.aram2k.gusan.debug.session" : "com.aram2k.gusan.session", accessAllowed: pasteboardAccessAllowed)]
         #if DEBUG
@@ -185,6 +191,14 @@ public final class SessionStore: SessionStorage {
         fullAccess = { nil }
         fallbackAllowed = pasteboardFallbackAllowed
         self.voicePasteboard = voicePasteboard ?? NamedSessionPasteboard(namespace: "com.aram2k.gusan.voice", lifetime: 600)
+        sharedKeychainVoice = nil
+    }
+    /// True when the team keychain accepts voice packets; then the shared route needs no pasteboard opt-in.
+    private func sharedKeychainReady() -> Bool {
+        guard let sharedKeychainVoice else { return false }
+        let ok = sharedKeychainVoice.write(Data([0]), key: "probe." + role.rawValue) && sharedKeychainVoice.read("probe." + role.rawValue).readable
+        sharedKeychainVoice.clear("probe." + role.rawValue)
+        return ok
     }
     public func makeVoiceChannel() -> VoiceChannel {
         VoiceChannel(container: resolution.container, group: "com.aram2k.gusan", pasteboard: voicePasteboard, route: { self.voiceRoute() })
@@ -192,7 +206,7 @@ public final class SessionStore: SessionStorage {
     private func voiceRoute() -> VoiceChannel.Route {
         synchronized {
             guard role != .keyboard || fullAccess() != false else { return .fullAccessRequired }
-            let allowed = fallbackAllowed()
+            let allowed = fallbackAllowed() || sharedKeychainReady()
             if Date().timeIntervalSince(voiceCheckedAt) < 1 {
                 if cachedVoiceRoute == .pasteboard && !allowed { return .disabled }
                 if cachedVoiceRoute != .disabled || !allowed { return cachedVoiceRoute }

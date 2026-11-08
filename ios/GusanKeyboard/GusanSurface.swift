@@ -92,9 +92,9 @@ final class GusanStrip: UIView {
         if previous?.screenOn != screenOn || previous?.live != live {
             screen.setImage(UIImage(systemName: screenOn ? "iphone" : "iphone.slash"), for: .normal)
         }
-        screen.alpha = screenState == .needsBroadcast ? 0.45 : 1
-        screen.tintColor = screenOn ? accent : .secondaryLabel
-        screen.backgroundColor = screenOn ? accent.withAlphaComponent(0.16) : .clear
+        screen.alpha = screenState == .needsBroadcast ? 0.6 : 1
+        screen.tintColor = screenOn ? .white : .secondaryLabel
+        screen.backgroundColor = screenOn ? accent : .clear
         screen.accessibilityValue = screenState.accessibilityValue
         context.text = (live ? "● " : "") + title + (screenOn && live ? " + Screen" : "")
         context.textColor = live ? .systemRed : .secondaryLabel
