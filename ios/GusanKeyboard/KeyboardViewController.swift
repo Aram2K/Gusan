@@ -1,6 +1,26 @@
 import UIKit
 import GusanKit
 
+final class KeyboardInputView: UIInputView {
+    var contentHeight: CGFloat = 262 {
+        didSet {
+            if contentHeight != oldValue { invalidateIntrinsicContentSize() }
+        }
+    }
+    override var intrinsicContentSize: CGSize {
+        CGSize(width: UIView.noIntrinsicMetric, height: contentHeight)
+    }
+    override func sizeThatFits(_ size: CGSize) -> CGSize {
+        CGSize(width: size.width, height: contentHeight)
+    }
+    override func systemLayoutSizeFitting(_ targetSize: CGSize) -> CGSize {
+        sizeThatFits(targetSize)
+    }
+    override func systemLayoutSizeFitting(_ targetSize: CGSize, withHorizontalFittingPriority horizontalFittingPriority: UILayoutPriority, verticalFittingPriority: UILayoutPriority) -> CGSize {
+        sizeThatFits(targetSize)
+    }
+}
+
 final class KeyboardViewController: UIInputViewController {
     var onVoice: (() -> Void)?
     private lazy var store = SessionStore(role: .keyboard, pasteboardAccessAllowed: { [weak self] in self?.hasFullAccess == true })
@@ -31,11 +51,12 @@ final class KeyboardViewController: UIInputViewController {
     private var context: VoiceContext {
         VoiceContext(selected: textDocumentProxy.selectedText ?? "", before: textDocumentProxy.documentContextBeforeInput ?? "", after: textDocumentProxy.documentContextAfterInput ?? "", documentID: textDocumentProxy.documentID.uuidString)
     }
+    override func loadView() {
+        inputView = KeyboardInputView(frame: .zero, inputViewStyle: .keyboard)
+    }
     override func viewDidLoad() {
         super.viewDidLoad()
         inputView?.allowsSelfSizing = true
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.autoresizingMask = [.flexibleWidth]
         height = view.heightAnchor.constraint(equalToConstant: 262)
         height.priority = UILayoutPriority(999)
         height.identifier = "Gusan.keyboardHeight"
@@ -111,6 +132,7 @@ final class KeyboardViewController: UIInputViewController {
         super.viewWillLayoutSubviews()
         let compact = traitCollection.verticalSizeClass == .compact
         height.constant = compact ? 208 : 262
+        (inputView as? KeyboardInputView)?.contentHeight = height.constant
         strip.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: 45)
         keyArea.frame = CGRect(x: 0, y: 45, width: view.bounds.width, height: height.constant - 45)
         agent.card.frame = CGRect(x: 0, y: 45, width: view.bounds.width, height: max(0, keyArea.bounds.height - 54))
