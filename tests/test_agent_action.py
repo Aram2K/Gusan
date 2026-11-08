@@ -167,7 +167,7 @@ for (let i=0; i<scenarios.length; i++) {
   }
   if(url.includes('/tool_results'))return new Response(null,{status:202});
   if(url.includes('/changes'))return s.empty?new Response(null,{status:204}):new Response(JSON.stringify(s.change??{status:'running',new_events:[]}));
-  return new Response(JSON.stringify({id:init.headers['Idempotency-Key']?.endsWith(':prepare-retry')?'retry-session':'session1',latest_answer:s.latest}));
+  return new Response(JSON.stringify({id:init.headers['Idempotency-Key']?.endsWith(':prepare-retry')?'retry-session':'session1',latest_answer:s.latest,...s.sessionPayload}));
  };
  await import(`${process.argv[2]}/proxy.mts?${i}`);
  const replies=[], snapshots=[];
@@ -402,7 +402,7 @@ def test_terminal_and_progress(run):
     body = out["replies"][0]["body"]
     assert body["status"] == "completed" and len(body["result"]["markdown"]) == 20000
     assert body["steps"] == [{"at": "now", "text": "Looking around"}]
-    assert body["result"]["links"] == [{"url": "https://ok.test", "title": "ok"}]
+    assert body["result"]["links"] == [{"url": "https://ok.test", "title": "ok", "kind": "source"}]
     assert body["result"]["images"] == ["https://ok.test/a"]
     assert out["row"]["event_index"] == 1
     assert "SECRET answer" not in " ".join(out["logs"])
@@ -998,6 +998,15 @@ def waiting(**extra):
             "run": {"plan": {**PLAN, "instruction": "SECRET instruction"}}, **extra}
 
 
+def test_research_marketplace_guidance_requires_item_urls_and_ui_sort(run):
+    out, = run({"body": {"action": "start", "instruction": "Compare used phones"}})
+    text = out["calls"][0]["body"]["overrides"]["agent.instructions"]
+    assert "open every listing you recommend" in text
+    assert "exact item URL, never a search or category page" in text
+    assert "sort by price through the site's UI" in text
+    assert "sort links in text mode" in text
+
+
 def test_do_prepare_request_is_structurally_read_only(run):
     out, = run({"body": {"action": "start", "mode": "do", "instruction": "Send it"}})
     body = out["calls"][0]["body"]
@@ -1040,22 +1049,22 @@ def test_prepare_no_action_retries_then_fails(run):
     out, = run({"row": {"mode": "do"}, "change": {"status": "completed", "answer": {
         "markdown": "Nothing to do", "needs_action": False}},
         "requests": [{"body": {"action": "status", "task_id": ID}},
+                     {"body": {"action": "status", "task_id": ID}, "change": answered(answer, retry=True)},
                      {"body": {"action": "status", "task_id": ID}, "change": answered(answer, retry=True)}]})
-    assert [r["body"]["status"] for r in out["replies"]] == ["running", "failed"]
+    assert [r["body"]["status"] for r in out["replies"]] == ["running", "running", "failed"]
     assert out["row"]["error_code"] == "plan_missing"
     assert out["row"]["result"] is None
 
 
 @pytest.mark.parametrize("answer", [{}, {"needs_action": True},
     {"needs_action": True, "plan": {**PLAN, "start_url": "javascript:alert(1)"}},
-    {"needs_action": True, "plan": {**PLAN, "summary": " "}},
     {"needs_action": True, "plan": {**PLAN, "steps": []}},
     {"needs_action": True, "plan": {**PLAN, "steps": ["step"] * 31}},
-    {"needs_action": True, "plan": {**PLAN, "steps": [123]}},
-    {"needs_action": True, "plan": {**PLAN, "action_kind": "bad"}}])
+    {"needs_action": True, "plan": {**PLAN, "steps": [123]}}])
 def test_invalid_prepare_fails(run, answer):
     out, = run({"row": {"mode": "do"}, "change": {"status": "completed", "answer": answer},
                 "requests": [{"body": {"action": "status", "task_id": ID}},
+                             {"body": {"action": "status", "task_id": ID}, "change": answered(answer, retry=True)},
                              {"body": {"action": "status", "task_id": ID}, "change": answered(answer, retry=True)}]})
     assert out["row"]["status"] == "failed" and out["row"]["error_code"] == "plan_missing"
 
@@ -1199,6 +1208,132 @@ def test_empty_links_and_link_caps(run):
     assert all(len(link["title"]) == 200 for link in capped["row"]["result"]["links"])
 
 
+@pytest.mark.parametrize("href", ["https://market.example/search?text=phone",
+    "https://market.example/recherche", "https://market.example/category/phones",
+    "https://market.example/?q=phone", "https://market.example/phones"])
+def test_listing_search_links_are_downgraded_and_markdown_relabelled(run, href):
+    markdown = "\n".join(f"{i}. [Voir l'annonce]({href})" for i in range(1, 4))
+    out, = run({"change": answered({"markdown": markdown, "links": [
+        {"title": "Voir l'annonce", "url": href}] * 3})})
+    assert out["row"]["result"]["links"] == [{"title": "Voir l'annonce (search results)", "url": href, "kind": "search"}]
+    assert out["row"]["result"]["markdown"].count("(search results)") == 3
+
+
+def test_distinct_item_links_remain_listings_without_double_counting_markdown(run):
+    links = [{"title": "View listing", "url": f"https://market.example/ad/{i}"} for i in [123, 456, 789]]
+    markdown = "\n".join(f"[{link['title']}]({link['url']})" for link in links)
+    out, = run({"change": answered({"markdown": markdown, "links": links})})
+    assert [link["kind"] for link in out["row"]["result"]["links"]] == ["listing"] * 3
+    assert out["row"]["result"]["markdown"] == markdown
+
+
+@pytest.mark.parametrize("title", ["View listing", "Search results (search results)", "x" * 200])
+def test_search_link_titles_are_honest_bounded_and_relabelled_only_once(run, title):
+    out, = run({"change": answered({"markdown": "Found", "links": [
+        {"title": title, "url": "https://market.example/search?q=phone"}]})})
+    link, = out["row"]["result"]["links"]
+    assert link["kind"] == "search"
+    assert link["title"].count("(search results)") == 1
+    assert len(link["title"]) <= 200
+
+
+def test_duplicate_item_urls_presented_as_different_listings_are_search(run):
+    out, = run({"change": answered({"markdown": "Best deals:\n1. [Phone A](https://market.example/ad/123)\n"
+        "2. [Phone B](https://market.example/ad/123)"})})
+    assert out["row"]["result"]["links"][0]["kind"] == "search"
+    assert out["row"]["result"]["markdown"].count("(search results)") == 2
+
+
+def test_result_link_kinds_handle_empty_links_and_source_citations(run):
+    empty, source = run({"change": answered({"markdown": "Nothing found"})},
+        {"change": answered({"markdown": "[Documentation](https://docs.example/guide)"})})
+    assert empty["row"]["result"]["links"] == []
+    assert source["row"]["result"]["links"][0]["kind"] == "source"
+
+
+def source_observation(url, mode="textual_web"):
+    return {"type": "AgentEvent", "data": {"kind": "observation_event", "type": mode,
+            "metadata": {"url": url, "title": "Source page"}}}
+
+
+def test_research_links_use_private_sources_across_polls_ranked_and_capped(run):
+    events = [source_observation("https://apple.com/page/" + str(i)) for i in range(10)]
+    events += [source_observation("https://apple.com/page/0?token=private#secret", "web")]
+    out, = run({"requests": [
+        {"body": {"action": "status", "task_id": ID}, "change": {"status": "running", "new_events": events}},
+        {"body": {"action": "status", "task_id": ID}, "change": answered({"markdown": "Found it", "links": []})}]})
+    links = out["row"]["result"]["links"]
+    assert [link["url"] for link in links] == ["https://apple.com/page/0"] + [
+        "https://apple.com/page/" + str(i) for i in range(9, 2, -1)]
+    assert len(out["run"]["plan"]["source_visits"]) == 10
+    assert "source_visits" not in json.dumps(out["replies"])
+    assert "private" not in json.dumps(out["run"]["plan"])
+
+
+@pytest.mark.parametrize("href", ["about:blank", "javascript:alert(1)", "file:///private",
+    "https://google.com/search?q=apple", "https://www.google.fr/?q=apple",
+    "https://bing.com/search?q=apple", "https://duckduckgo.com/?q=apple",
+    "https://search.yahoo.com/search?p=apple"])
+def test_source_links_exclude_search_and_non_http_urls(run, href):
+    out, = run({"change": {**answered({"markdown": "No source"}),
+        "new_events": [source_observation(href)]}})
+    assert out["row"]["result"]["links"] == []
+
+
+def test_source_links_keep_item_query_ids_and_dedupe_after_removing_sensitive_params(run):
+    private = "https://shop.example/product?id=42&variant=blue&utm_source=ad&fbclid=x&gclid=y&" \
+        "access_token=secret&session_id=s&auth=a&api_key=k&sig=z&signature=z&code=c&password=p&email=e#fragment"
+    out, = run({"change": {**answered({"markdown": "Found product"}), "new_events": [
+        source_observation(private), source_observation("https://shop.example/product?variant=blue&id=42&utm_medium=social")]}})
+    assert out["row"]["result"]["links"][0]["url"] == "https://shop.example/product?id=42"
+    visits = out["run"]["plan"]["source_visits"]
+    assert len(visits) == 1 and visits[0]["count"] == 2
+    assert "secret" not in json.dumps(visits) and "fragment" not in json.dumps(visits)
+
+
+@pytest.mark.parametrize("query,kept", [
+    ("id=42", "?id=42"), ("secret=x", ""), ("ticket=x", ""),
+    ("id=42&token=y", "?id=42"), ("id=42&secret=x&ticket=x", "?id=42"),
+    ("item_id=abc-12_3.4", "?item_id=abc-12_3.4"), ("id=" + "a" * 64, "?id=" + "a" * 64),
+    ("id=" + "a" * 65, ""), ("id=has%20spaces", ""), ("id=alice%40example.com", ""),
+    ("id=", ""), ("id=abc%2Fdef", ""),
+])
+def test_source_queries_only_allow_short_safe_item_ids(run, query, kept):
+    out, = run({"change": {**answered("Found"), "new_events": [
+        source_observation("https://shop.example/product?" + query + "#fragment")]}})
+    assert out["row"]["result"]["links"][0]["url"] == "https://shop.example/product" + kept
+
+
+def test_source_links_include_navigation_tool_urls_and_preserve_authored_links(run):
+    event = {"type": "AgentEvent", "data": {"kind": "policy_event", "tool_reqs": [
+        {"tool_name": "go_to_web", "args": {"url": "https://apple.com/mac/?private=yes"}},
+        {"tool_name": "browser", "args": {"actions": [{"url": "https://apple.com/ipad/"}]}}]}}
+    fallback, authored = run({"change": {**answered("Result"), "new_events": [event]}},
+        {"change": {**answered({"markdown": "See https://cited.example/page"}), "new_events": [event]}})
+    assert [link["url"] for link in fallback["row"]["result"]["links"]] == [
+        "https://apple.com/mac/", "https://apple.com/ipad/"]
+    assert [link["url"] for link in authored["row"]["result"]["links"]] == ["https://cited.example/page"]
+
+
+@pytest.mark.parametrize("new_visits", [True, False])
+def test_continued_research_links_prefer_after_message_or_fall_back_to_history(run, new_visits):
+    followup_events = [source_observation("https://stale.example/before-message"), retry_message_event()]
+    if new_visits:
+        followup_events += [source_observation("https://apple.com/mac/"), source_observation("https://apple.com/iphone/")]
+    followup_events += answered({"markdown": "Follow-up result"})["new_events"]
+    out, = run({"requests": [
+        {"body": {"action": "status", "task_id": ID}, "change": {**answered("Original result"),
+            "new_events": [source_observation("https://apple.com/mac/")] * 3}},
+        {"body": {"action": "continue", "task_id": ID, "message": "Next"}},
+        {"body": {"action": "status", "task_id": ID}, "change": {"status": "completed",
+            "answer": {"markdown": "Follow-up result"}, "new_events": followup_events}}]})
+    assert out["row"]["status"] == "completed"
+    urls = [link["url"] for link in out["row"]["result"]["links"]]
+    assert urls == (["https://apple.com/iphone/", "https://apple.com/mac/"] if new_visits else [
+        "https://apple.com/mac/", "https://stale.example/before-message"])
+    assert out["run"]["plan"]["source_visits"]
+
+
 @pytest.mark.parametrize("length,expected", [(2000, "awaiting_confirmation"), (2001, "failed")])
 def test_step_length_boundary_never_truncates(run, length, expected):
     step = " " + "x" * (length - 2) + " "
@@ -1206,7 +1341,8 @@ def test_step_length_boundary_never_truncates(run, length, expected):
         "markdown": "Plan", "needs_action": True, "plan": {**PLAN, "steps": [step]}}},
         "requests": [{"body": {"action": "status", "task_id": ID}},
                      {"body": {"action": "status", "task_id": ID}, "change": answered({
-                         "markdown": "Plan", "needs_action": True, "plan": {**PLAN, "steps": [step]}}, retry=True)}]})
+                         "markdown": "Plan", "needs_action": True, "plan": {**PLAN, "steps": [step]}}, retry=True)},
+                     {"body": {"action": "status", "task_id": ID}, "change": answered({"plan": {**PLAN, "steps": [step]}}, retry=True)}]})
     assert out["row"]["status"] == expected
     if expected == "failed":
         assert out["row"]["error_code"] == "plan_missing"
@@ -1238,14 +1374,15 @@ def test_timezone_survives_start_prepare_and_execute(run, timezone):
 
 
 @pytest.mark.parametrize("answer", ["I cannot submit; fill it manually.", "{invalid json"])
-def test_prose_prepare_retries_once_then_fails(run, answer):
+def test_prose_prepare_retries_twice_then_fails(run, answer):
     out, = run({"row": {"mode": "do"}, "change": {"status": "completed", "answer": answer},
                 "requests": [{"body": {"action": "status", "task_id": ID}},
+                             {"body": {"action": "status", "task_id": ID}, "change": answered(answer, retry=True)},
                              {"body": {"action": "status", "task_id": ID}, "change": answered(answer, retry=True)}]})
-    assert [r["body"]["status"] for r in out["replies"]] == ["running", "failed"]
+    assert [r["body"]["status"] for r in out["replies"]] == ["running", "running", "failed"]
     assert out["row"]["error_code"] == "plan_missing" and out["row"]["result"] is None
     retries = [c for c in out["calls"] if c["method"] == "POST"]
-    assert len(retries) == 1
+    assert len(retries) == 2
     retry = retries[0]
     assert retry["url"].endswith("/sessions/session1/messages")
     assert retry["body"]["type"] == "user_message"
@@ -1427,6 +1564,59 @@ def test_string_steps_are_normalized(run, steps):
     assert out["row"]["confirmation"] == PLAN
 
 
+@pytest.mark.parametrize("key", ["steps", "plan_steps", "actions", "instructions"])
+@pytest.mark.parametrize("step,expected", [
+    ({"action": "Fill", "field": "name", "value": "Alice"}, "Fill — name — Alice"),
+    ({"description": "Click Send"}, "Click Send"),
+])
+def test_prepare_accepts_aliases_and_object_steps(run, key, step, expected):
+    out, = run({"row": {"mode": "do"}, "change": answered({
+        "title": "Send", "url": "https://example.com/send", key: [step]})})
+    assert out["row"]["status"] == "awaiting_confirmation"
+    assert out["row"]["confirmation"]["steps"] == [expected]
+    assert out["row"]["confirmation"]["summary"] == "Send"
+    assert out["row"]["confirmation"]["start_url"] == "https://example.com/send"
+
+
+@pytest.mark.parametrize("payload", [
+    {"answer": PLAN}, {"status": {"answer": PLAN}}, {"latest_answer": PLAN},
+])
+def test_failed_prepare_reads_session_raw_answer_locations(run, payload):
+    out, = run({"row": {"mode": "do"}, "sessionPayload": payload, "change": {
+        "status": "failed", "error_code": "answer_validation", "new_events": [
+            {"type": "AgentErrorEvent", "data": {"error": "validation failed"}}]}})
+    assert out["row"]["confirmation"] == PLAN
+    assert out["row"]["status"] == "awaiting_confirmation"
+
+
+@pytest.mark.parametrize("answer,reason", [
+    (None, "answer was empty"), ({}, "steps missing"),
+    ("{not json", "answer was not valid JSON"),
+    ({**PLAN, "start_url": "javascript:alert(1)"}, "start_url not http(s)"),
+])
+def test_prepare_two_retries_echo_rejection_reason(run, answer, reason):
+    out, = run({"row": {"mode": "do"}, "requests": [
+        {"body": {"action": "status", "task_id": ID}, "change": answered(answer)},
+        {"body": {"action": "status", "task_id": ID}, "change": answered(answer, retry=True)},
+        {"body": {"action": "status", "task_id": ID}, "change": answered("Still no steps", retry=True)}]})
+    messages = [c["body"]["message"] for c in out["calls"] if c["url"].endswith("/messages")]
+    assert len(messages) == 2
+    assert all(reason in text for text in messages)
+    assert out["row"]["error_code"] == "plan_missing"
+    assert not any(reason in line for line in out["logs"])
+
+
+def test_final_fallback_uses_unheaded_list_from_earlier_running_answer(run):
+    out, = run({"row": {"mode": "do"}, "run": {"plan": {"instruction": "Submit https://example.com/send"}},
+        "requests": [
+            {"body": {"action": "status", "task_id": ID}, "change": answered("1. Fill name\n2. Submit", "running")},
+            {"body": {"action": "status", "task_id": ID}, "change": answered("Formatting failed")},
+            {"body": {"action": "status", "task_id": ID}, "change": answered("No plan", retry=True)},
+            {"body": {"action": "status", "task_id": ID}, "change": answered("No plan", retry=True)}]})
+    assert [r["body"]["status"] for r in out["replies"]] == ["running", "running", "running", "awaiting_confirmation"]
+    assert out["row"]["confirmation"]["steps"] == ["Fill name", "Submit"]
+
+
 @pytest.mark.parametrize("source", ["answer", "latest", "event"])
 def test_answer_validation_failure_salvages_raw_text(run, source):
     text = "Proposed action at https://example.com/send\nPlan:\n1. Recipient Alice\n2. Amount $10\n3. Click Send"
@@ -1444,13 +1634,27 @@ def test_answer_validation_failure_salvages_raw_text(run, source):
     assert out["row"]["error_code"] is None
 
 
+@pytest.mark.parametrize("code", ["insufficient_credit", "internal", "environment_error", "no_answer"])
+@pytest.mark.parametrize("after_retry", [False, True])
+def test_non_format_prepare_failure_does_not_retry_or_become_plan_missing(run, code, after_retry):
+    requests = [{"body": {"action": "status", "task_id": ID}, "change": {
+        "status": "failed", "error_code": code, "answer": None, "new_events": []}}]
+    if after_retry:
+        requests.insert(0, {"body": {"action": "status", "task_id": ID}, "change": answered("Cannot plan")})
+    out, = run({"row": {"mode": "do"}, "requests": requests})
+    assert out["row"]["status"] == "failed"
+    assert out["row"]["error_code"] == ("insufficient_credit" if code == "insufficient_credit" else "upstream_error")
+    assert len([c for c in out["calls"] if c["url"].endswith("/messages")]) == int(after_retry)
+
+
 def test_answer_validation_without_salvage_retries_then_plan_missing(run):
     failure = {**answered("No actionable plan"), "status": "failed", "error_code": "answer_validation"}
     retry_failure = {**answered("Still no plan", retry=True), "status": "failed", "error_code": "answer_validation"}
     out, = run({"row": {"mode": "do"}, "requests": [
         {"body": {"action": "status", "task_id": ID}, "change": failure},
+        {"body": {"action": "status", "task_id": ID}, "change": retry_failure},
         {"body": {"action": "status", "task_id": ID}, "change": retry_failure}]})
-    assert [r["body"]["status"] for r in out["replies"]] == ["running", "failed"]
+    assert [r["body"]["status"] for r in out["replies"]] == ["running", "running", "failed"]
     assert out["row"]["error_code"] == "plan_missing"
     message = next(c["body"]["message"] for c in out["calls"] if c["url"].endswith("/messages"))
     assert "plain top-level strings" in message and "array of strings" in message
@@ -1473,12 +1677,13 @@ def test_string_steps_still_reject_oversized_values(run, steps):
     answer = {**PLAN, "steps": steps}
     out, = run({"row": {"mode": "do"}, "requests": [
         {"body": {"action": "status", "task_id": ID}, "change": answered(answer)},
+        {"body": {"action": "status", "task_id": ID}, "change": answered(answer, retry=True)},
         {"body": {"action": "status", "task_id": ID}, "change": answered(answer, retry=True)}]})
     assert out["row"]["status"] == "failed" and out["row"]["error_code"] == "plan_missing"
 
 
 @pytest.mark.parametrize("latest,expected", [
-    (None, "failed"),
+    (None, "running"),
     ("https://example.com/send\nProposed steps\n1. Recipient Alice\n2. Amount $10\n3. Click Send", "awaiting_confirmation"),
 ])
 def test_retry_validation_failure_without_answer_event(run, latest, expected):
@@ -1499,15 +1704,16 @@ def test_retry_validation_failure_without_answer_event(run, latest, expected):
     "I can't do this because:\n- the browser is read-only\n- forms can't be filled",
     "Plan:\nI can't do this because:\n- the browser is read-only\n- forms can't be filled",
 ])
-def test_refusal_bullets_are_not_salvaged_as_a_plan(run, text):
+def test_refusal_bullets_wait_for_retries_then_are_shown_for_approval(run, text):
     out, = run({"row": {"mode": "do"},
         "run": {"plan": {"instruction": "Submit https://example.com/send"}},
         "requests": [
             {"body": {"action": "status", "task_id": ID}, "change": answered({"markdown": text})},
-            {"body": {"action": "status", "task_id": ID}, "change": answered({"markdown": text}, retry=True)}]})
-    assert [r["body"]["status"] for r in out["replies"]] == ["running", "failed"]
-    assert out["row"]["error_code"] == "plan_missing"
-    assert out["row"]["confirmation"] is None
+            {"body": {"action": "status", "task_id": ID}, "change": answered({"markdown": text}, retry=True)},
+            {"body": {"action": "status", "task_id": ID}, "change": answered("No plan", retry=True)}]})
+    assert [r["body"]["status"] for r in out["replies"]] == ["running", "running", "awaiting_confirmation"]
+    assert out["row"]["error_code"] is None
+    assert out["row"]["confirmation"]["steps"] == ["the browser is read-only", "forms can't be filled"]
 
 
 def test_structured_plan_uses_markdown_url_when_instruction_has_none(run):
