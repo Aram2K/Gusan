@@ -7,17 +7,16 @@ import GusanKit
 /// "Gusan Screen": a ReplayKit broadcast upload extension that never uploads.
 /// It keeps a second or two of downscaled frames in memory and hands one to
 /// the keyboard only when the keyboard asks (a `ScreenRequest` on the channel).
-/// While the Gusan keyboard is up it freezes the last frame from before the
-/// keyboard appeared, so the keyboard itself is never in the picture.
+/// Each request waits briefly for a fresh frame and crops the keyboard band.
 /// Nothing is written, logged or sent continuously; the broadcast ends itself
 /// after the configured idle period.
 final class SampleHandler: RPBroadcastSampleHandler {
     /// Frames are accepted at the fast rate for this long after the keyboard or a request shows up, then once a second.
     static let fastWindow: TimeInterval = 10
     /// A request that arrives between frames (right after a pause, say) waits this long for the next one.
-    static let pendingWindow: TimeInterval = 4
+    static let pendingWindow: TimeInterval = 1
     private let queue = DispatchQueue(label: "com.aram2k.gusan.screen", qos: .userInitiated)
-    private let frames = ScreenFrameStore(fastInterval: 0.4, idleInterval: 1.0, capacity: 4)
+    private let frames = ScreenFrameStore(fastInterval: 0.1, idleInterval: 1.0, capacity: 4)
     private let ciContext = CIContext(options: [.cacheIntermediates: false, .priorityRequestLow: true])
     private let lanczos = CIFilter.lanczosScaleTransform()
     private var channel: ScreenChannel?
@@ -63,6 +62,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
     override func broadcastFinished() { end() }
 
     override func processSampleBuffer(_ sampleBuffer: CMSampleBuffer, with sampleBufferType: RPSampleBufferType) {
+        let capturedAt = Date()
         guard sampleBufferType == .video, !paused, frames.shouldAccept(), let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         var image = CIImage(cvPixelBuffer: pixelBuffer)
         if let raw = CMGetAttachment(sampleBuffer, key: RPVideoSampleOrientationKey as CFString, attachmentModeOut: nil) as? NSNumber,
@@ -77,7 +77,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
             image = scaled
         }
         guard let cgImage = ciContext.createCGImage(image, from: image.extent.integral) else { return }
-        frames.store(cgImage)
+        frames.store(cgImage, at: capturedAt)
         queue.async {
             self.size = (cgImage.width, cgImage.height)
             if self.pending != nil { self.answerPending() }
@@ -93,20 +93,14 @@ final class SampleHandler: RPBroadcastSampleHandler {
             finishBroadcastWithError(NSError(domain: "com.aram2k.gusan.screen", code: 1, userInfo: [NSLocalizedDescriptionKey: "Gusan Screen stopped: \(minutes) minutes without a question."]))
             return
         }
-        if let pending, Date().timeIntervalSince(pending.issuedAt) > Self.pendingWindow { self.pending = nil }
         keyboardChanged()
         answerRequest()
         publishStatus()
     }
-    /// The keyboard came up or went away: freeze the last pre-keyboard frame, or let go of it.
+    /// The keyboard came up: briefly accept frames at the faster rate.
     private func keyboardChanged() {
         guard !isFinished, let channel else { return }
-        if let keyboard = channel.readKeyboard() {
-            if frames.frozen == nil { frames.boost(until: Date().addingTimeInterval(Self.fastWindow)) }
-            frames.freeze(before: keyboard.shownAt)
-        } else {
-            frames.unfreeze()
-        }
+        if channel.readKeyboard() != nil { frames.boost(until: Date().addingTimeInterval(Self.fastWindow)) }
     }
     /// Answers a pending keyboard request with the right frame, once. A request
     /// that finds no frame (right after a pause) is kept until the next frame arrives.
@@ -117,11 +111,16 @@ final class SampleHandler: RPBroadcastSampleHandler {
         logMemory("request")
         pending = request
         answerPending()
+        queue.asyncAfter(deadline: .now() + Self.pendingWindow) { [weak self] in
+            guard self?.pending?.id == request.id else { return }
+            self?.answerPending(allowFallback: true)
+            self?.pending = nil
+        }
         publishStatus()
     }
-    private func answerPending() {
+    private func answerPending(allowFallback: Bool = false) {
         guard let channel, let request = pending else { return }
-        guard let frame = frames.frame(for: request.id, keyboard: channel.readKeyboard()) else { return }
+        guard let frame = frames.frame(for: request, keyboard: channel.readKeyboard(), allowFallback: allowFallback) else { return }
         pending = nil
         channel.write(frame: frame)
         channel.post(.frame)

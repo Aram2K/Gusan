@@ -19,11 +19,13 @@ public struct ScreenStatus: Codable, Equatable {
     public var hasFrame: Bool { width > 0 && height > 0 }
 }
 
-/// The keyboard asks for the current frame; nothing is captured without it.
+/// The keyboard asks for a current frame from the live broadcast.
 public struct ScreenRequest: Codable, Equatable {
+    public enum Phase: String, Codable { case start, finish }
     public let id: UUID
     public let issuedAt: Date
-    public init(id: UUID = UUID(), issuedAt: Date = Date()) { self.id = id; self.issuedAt = issuedAt }
+    public let phase: Phase?
+    public init(id: UUID = UUID(), issuedAt: Date = Date(), phase: Phase = .start) { self.id = id; self.issuedAt = issuedAt; self.phase = phase }
 }
 
 /// Keyboard ↔ broadcast extension transport. Every packet is written to every
@@ -131,12 +133,13 @@ public struct ScreenChannelFrameProvider: ScreenFrameProvider {
     /// When the keyboard came up; a frozen frame must be from just before that, a live one from just now.
     public let keyboardShownAt: Date?
     public let maxAge: TimeInterval
-    public init(channel: ScreenChannel, pollInterval: TimeInterval = 0.2, keyboardShownAt: Date? = nil, maxAge: TimeInterval = ScreenFrame.maxAge) {
-        self.channel = channel; self.pollInterval = pollInterval; self.keyboardShownAt = keyboardShownAt; self.maxAge = maxAge
+    public let phase: ScreenRequest.Phase
+    public init(channel: ScreenChannel, pollInterval: TimeInterval = 0.2, keyboardShownAt: Date? = nil, maxAge: TimeInterval = ScreenFrame.maxAge, phase: ScreenRequest.Phase = .start) {
+        self.channel = channel; self.pollInterval = pollInterval; self.keyboardShownAt = keyboardShownAt; self.maxAge = maxAge; self.phase = phase
     }
     public func frame(timeout: TimeInterval = 5) async throws -> ScreenFrame {
         guard channel.isLive() else { throw ScreenError.notLive }
-        let request = ScreenRequest()
+        let request = ScreenRequest(phase: phase)
         channel.clearFrame()
         guard channel.write(request: request) else { throw ScreenError.channelUnavailable }
         channel.post(.request)
@@ -144,6 +147,7 @@ public struct ScreenChannelFrameProvider: ScreenFrameProvider {
         while Date() < deadline {
             try Task.checkCancellation()
             if let frame = channel.consumeFrame(requestID: request.id) {
+                guard frame.phase == nil || frame.phase == phase else { continue }
                 guard frame.isFresh(keyboardShownAt: keyboardShownAt, maxAge: maxAge) else { throw ScreenError.noFrame }
                 return frame
             }

@@ -13,12 +13,14 @@ public struct ScreenFrame: Codable, Equatable {
     public let width: Int
     public let height: Int
     public let jpeg: Data
+    public var phase: ScreenRequest.Phase?
     /// Captured just before the Gusan keyboard came up, so the keyboard is not in the picture.
     public var frozen: Bool
     /// The keyboard's band was cut off the bottom because no pre-keyboard picture existed.
     public var cropped: Bool
-    public init(requestID: UUID, capturedAt: Date, width: Int, height: Int, jpeg: Data, frozen: Bool = false, cropped: Bool = false) {
+    public init(requestID: UUID, capturedAt: Date, width: Int, height: Int, jpeg: Data, frozen: Bool = false, cropped: Bool = false, phase: ScreenRequest.Phase? = nil) {
         self.requestID = requestID; self.capturedAt = capturedAt; self.width = width; self.height = height; self.jpeg = jpeg; self.frozen = frozen; self.cropped = cropped
+        self.phase = phase
     }
     public var dataURL: String { "data:image/jpeg;base64," + jpeg.base64EncodedString() }
     /// How long a picture may be trusted to show what the user is asking about.
@@ -57,8 +59,7 @@ public enum ScreenFrameGeometry {
     }
 }
 
-/// Where the Gusan keyboard is on screen, published by the keyboard while it is up
-/// so the extension can hand over a picture from before it appeared, or crop it out.
+/// Where the Gusan keyboard is on screen, so its band can be cropped out.
 public struct ScreenKeyboardState: Codable, Equatable {
     public let shownAt: Date
     public let keyboardHeight: Double
@@ -69,10 +70,7 @@ public struct ScreenKeyboardState: Codable, Equatable {
     public var bottomFraction: Double { screenHeight > 0 ? min(ScreenFrameGeometry.maxBottomCrop, max(0, keyboardHeight / screenHeight)) : 0 }
 }
 
-/// Holds the last few pictures (newest first, a second or two of history) and
-/// rate-limits how often a new one is accepted so the extension doesn't scale
-/// 60 frames a second. While the keyboard is up it also keeps one frozen copy
-/// taken before the keyboard appeared, which is what requests get.
+/// Keeps bounded recent pictures and rate-limits scaling of broadcast frames.
 public final class ScreenFrameStore {
     public struct Snapshot: Equatable {
         public let image: CGImage
@@ -82,7 +80,6 @@ public final class ScreenFrameStore {
     public let idleInterval: TimeInterval
     public let capacity: Int
     private var recent: [Snapshot] = []
-    private var frozenSnapshot: Snapshot?
     private var lastAccepted: Date?
     private var fastUntil = Date.distantPast
     private var count = 0
@@ -94,7 +91,6 @@ public final class ScreenFrameStore {
     public var latest: CGImage? { lock.lock(); defer { lock.unlock() }; return recent.first?.image }
     public var capturedAt: Date? { lock.lock(); defer { lock.unlock() }; return recent.first?.capturedAt }
     public var accepted: Int { lock.lock(); defer { lock.unlock() }; return count }
-    public var frozen: Snapshot? { lock.lock(); defer { lock.unlock() }; return frozenSnapshot }
     /// The interval in force at `now`: fast right after the keyboard or a request showed up, idle otherwise.
     public func minimumInterval(at now: Date = Date()) -> TimeInterval { lock.lock(); defer { lock.unlock() }; return now < fastUntil ? fastInterval : idleInterval }
     /// Accept frames at the fast rate until `until`.
@@ -112,37 +108,25 @@ public final class ScreenFrameStore {
         lastAccepted = now; count += 1
     }
     /// Drops every kept picture (pause, end).
-    public func clear() { lock.lock(); defer { lock.unlock() }; recent = []; frozenSnapshot = nil; lastAccepted = nil }
+    public func clear() { lock.lock(); defer { lock.unlock() }; recent = []; lastAccepted = nil }
     /// The newest picture captured at or before `instant`, or nil when nothing that old is left.
     public func snapshot(before instant: Date) -> Snapshot? { lock.lock(); defer { lock.unlock() }; return recent.first { $0.capturedAt <= instant } }
-    /// Keeps the newest picture from before the keyboard appeared. Returns false
-    /// when none is left, in which case requests fall back to cropping.
-    @discardableResult public func freeze(before instant: Date) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        if let frozenSnapshot, frozenSnapshot.capturedAt <= instant { return true }
-        guard let match = recent.first(where: { $0.capturedAt <= instant }) else { return false }
-        frozenSnapshot = match; return true
-    }
-    public func unfreeze() { lock.lock(); defer { lock.unlock() }; frozenSnapshot = nil }
     /// The latest picture as a frame for `requestID`, or nil when nothing was captured yet.
     public func frame(for requestID: UUID, budgetBytes: Int = ScreenFrameEncoder.defaultBudget) -> ScreenFrame? {
         frame(for: requestID, keyboard: nil, budgetBytes: budgetBytes)
     }
-    /// The frame answering a request while the keyboard described by `keyboard`
-    /// is up: the frozen pre-keyboard picture when there is one, otherwise the
-    /// latest picture with the keyboard's band cropped off.
+    /// The newest picture, with the keyboard's band cropped off.
     public func frame(for requestID: UUID, keyboard: ScreenKeyboardState?, budgetBytes: Int = ScreenFrameEncoder.defaultBudget) -> ScreenFrame? {
-        if let keyboard {
-            if freeze(before: keyboard.shownAt), let snapshot = frozen {
-                return Self.encode(snapshot, requestID: requestID, frozen: true, cropBottom: 0, budgetBytes: budgetBytes)
-            }
-            lock.lock(); let newest = recent.first; lock.unlock()
-            guard let newest else { return nil }
-            return Self.encode(newest, requestID: requestID, frozen: false, cropBottom: keyboard.bottomFraction, budgetBytes: budgetBytes)
-        }
         lock.lock(); let newest = recent.first; lock.unlock()
         guard let newest else { return nil }
-        return Self.encode(newest, requestID: requestID, frozen: false, cropBottom: 0, budgetBytes: budgetBytes)
+        return Self.encode(newest, requestID: requestID, frozen: false, cropBottom: keyboard?.bottomFraction ?? 0, budgetBytes: budgetBytes)
+    }
+    public func frame(for request: ScreenRequest, keyboard: ScreenKeyboardState?, allowFallback: Bool = false, budgetBytes: Int = ScreenFrameEncoder.defaultBudget) -> ScreenFrame? {
+        lock.lock(); let newest = recent.first; lock.unlock()
+        guard let newest, allowFallback || newest.capturedAt >= request.issuedAt else { return nil }
+        var frame = Self.encode(newest, requestID: request.id, frozen: false, cropBottom: keyboard?.bottomFraction ?? 0, budgetBytes: budgetBytes)
+        frame?.phase = request.phase
+        return frame
     }
     static func encode(_ snapshot: Snapshot, requestID: UUID, frozen: Bool, cropBottom: Double, budgetBytes: Int) -> ScreenFrame? {
         var image = snapshot.image
