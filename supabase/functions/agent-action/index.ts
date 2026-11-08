@@ -129,6 +129,7 @@ function task(row: Obj) {
   for (
     const k of [
       "mode",
+      "provider",
       "status",
       "title",
       "steps",
@@ -623,6 +624,152 @@ function taskRPCResult(data: Obj, error: Obj) {
     throw new Failure(code, status);
   }
   return Array.isArray(data) ? data[0] : data;
+}
+let devinOrg: Promise<string> | undefined;
+async function devinRequest(path: string, method = "GET", body?: Obj) {
+  const key = env("Devin_API_key");
+  if (!key) throw new Failure("devin_not_configured", 503);
+  const response = await fetch(`https://api.devin.ai${path}`, {
+    method, redirect: "error", signal: AbortSignal.timeout(30000),
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  if (!response.ok) throw new Failure("devin_error", 502);
+  if (response.status === 204) return {};
+  const text = await response.text();
+  return text ? JSON.parse(text) : {};
+}
+async function devinConfig() {
+  const key = env("Devin_API_key");
+  if (!key) throw new Failure("devin_not_configured", 503);
+  if (!key.startsWith("cog_")) return { devin_api: "v1", devin_org_id: null };
+  devinOrg ??= devinRequest("/v3/self").then((self) => {
+    if (!self.org_id || typeof self.org_id !== "string") throw new Failure("devin_not_configured", 503);
+    return self.org_id as string;
+  }).catch((error) => { devinOrg = undefined; throw error; });
+  return { devin_api: "v3", devin_org_id: await devinOrg };
+}
+function devinPath(run: Obj) {
+  const base = run.devin_api === "v3"
+    ? `/v3/organizations/${encodeURIComponent(run.devin_org_id)}/sessions`
+    : "/v1/sessions";
+  return run.devin_session_id ? `${base}/${encodeURIComponent(run.devin_session_id)}` : base;
+}
+function devinURL(run: Obj) {
+  if (typeof run.devin_session_url === "string" && run.devin_session_url.startsWith("https://")) return run.devin_session_url;
+  return `https://app.devin.ai/sessions/${encodeURIComponent(run.devin_session_id)}`;
+}
+async function terminateDevin(run: Obj) {
+  if (!run.devin_session_id) return;
+  try { await devinRequest(devinPath(run), "DELETE"); } catch { /* Local cancellation is authoritative. */ }
+}
+async function startDevin(db: any, userId: string, body: Obj) {
+  const config = await devinConfig();
+  const instruction = body.instruction.trim();
+  const { data, error } = await db.rpc("begin_agent_task", {
+    p_user_id: userId, p_mode: "research", p_title: instruction.slice(0, 120),
+    p_max_active: 2, p_max_per_day: 40, p_deadline_s: 86400,
+  });
+  let row = taskRPCResult(data, error);
+  let run: Obj = config;
+  try {
+    row = await save(db, row, { provider: "devin" });
+    await saveRun(db, row, config);
+    const session = await devinRequest(devinPath(config), "POST", {
+      prompt: `${prompt(instruction, body.context)}\n\nYou were asked from the Gusan iPhone keyboard. Do not merge PRs, deploy, spend money or delete data; open PRs for code changes and finish with a short plain-text summary for a phone screen.`,
+      max_acu_limit: 10,
+    });
+    if (typeof session.session_id !== "string" || !session.session_id) throw new Failure("devin_error", 502);
+    run = { ...config, devin_session_id: session.session_id, devin_session_url: session.url ?? null };
+    await saveRun(db, row, run);
+    row = await loadTask(db, row.id, userId);
+    if (terminal(row)) { await terminateDevin(run); return row; }
+    return await save(db, row, { steps: [{ at: new Date().toISOString(), text: `Devin session started: ${devinURL(run)}` }] }, true);
+  } catch (error) {
+    // The Devin session must not outlive a task that reports failure.
+    await terminateDevin(run);
+    await save(db, row, { status: "failed", error_code: "devin_error", finished_at: new Date().toISOString() }, true);
+    throw error;
+  }
+}
+async function syncDevin(db: any, row: Obj, run: Obj) {
+  if (terminal(row)) return row;
+  if (Date.now() > Date.parse(row.deadline_at)) {
+    await terminateDevin(run);
+    return save(db, row, { status: "timed_out", error_code: "timeout", finished_at: new Date().toISOString() }, true);
+  }
+  const session = await devinRequest(devinPath(run));
+  let messages = session.messages ?? [];
+  if (run.devin_api === "v3") {
+    messages = [];
+    let cursor: string | undefined;
+    const cursors = new Set<string>();
+    do {
+      const page = await devinRequest(`${devinPath(run)}/messages?first=200${cursor ? `&after=${encodeURIComponent(cursor)}` : ""}`);
+      messages.push(...(page.items ?? []));
+      if (!page.has_next_page) break;
+      if (!page.end_cursor || cursors.has(page.end_cursor)) throw new Failure("devin_error", 502);
+      cursor = page.end_cursor;
+      cursors.add(cursor!);
+    } while (true);
+  }
+  const own = messages.filter((m: Obj) => (run.devin_api === "v3" ? m.source === "devin" : m.type === "devin_message") && typeof m.message === "string");
+  const status = run.devin_api === "v3" ? session.status : session.status_enum ?? session.status;
+  const detail = session.status_detail;
+  let mapped = "running", errorCode = null;
+  if (["new", "claimed"].includes(status)) mapped = "queued";
+  else if (status === "expired") mapped = "timed_out";
+  else if (status === "error" || status === "suspended" && !["inactivity", "user_request"].includes(detail)) {
+    mapped = "failed"; errorCode = status === "suspended" ? "devin_suspended" : "devin_error";
+  } else if (["exit", "blocked", "finished"].includes(status) || status === "suspended" ||
+    status === "running" && ["waiting_for_user", "waiting_for_approval", "finished"].includes(detail)) mapped = "completed";
+  const now = new Date().toISOString();
+  const links = [{ title: "Open in Devin", url: devinURL(run), kind: "source" },
+    ...(run.devin_api === "v3" ? session.pull_requests ?? [] : session.pull_request ? [session.pull_request] : [])
+      .map((pr: Obj) => ({ title: "Pull request", url: pr.pr_url ?? pr.url, kind: "pr" }))]
+    .filter((link) => typeof link.url === "string" && /^https:\/\//.test(link.url));
+  const text = own.at(-1)?.message ?? "";
+  return save(db, row, {
+    status: mapped, error_code: errorCode,
+    steps: [{ at: row.created_at, text: `Devin session started: ${devinURL(run)}` },
+      ...own.slice(-9).map((m: Obj) => ({ at: now, text: m.message.slice(0, 300) }))],
+    result: mapped === "completed" ? { text, markdown: text, links } : null,
+    outcome: mapped === "completed" ? "success" : null,
+    finished_at: ["completed", "failed", "timed_out"].includes(mapped) ? now : null,
+  }, true);
+}
+async function devinAction(db: any, row: Obj, body: Obj) {
+  const run = await loadRun(db, row);
+  if (body.action === "status") return json(task(await syncDevin(db, row, run)));
+  if (body.action === "confirm") return json({ error: "not_awaiting_confirmation" }, 409);
+  if (body.action === "continue") {
+    // Follow-ups are paid Devin work: same active/daily caps as a new task, claimed before posting.
+    const wasActive = !terminal(row);
+    const previousDeadline = row.deadline_at;
+    const claimed = await db.rpc("claim_agent_follow_up", {
+      p_user_id: row.user_id, p_task_id: row.id, p_max_active: 2, p_max_per_day: 40, p_deadline_s: 86400,
+    });
+    row = taskRPCResult(claimed.data, claimed.error);
+    try {
+      await devinRequest(run.devin_api === "v3" ? `${devinPath(run)}/messages`
+        : `/v1/session/${encodeURIComponent(run.devin_session_id)}/message`, "POST", { message: body.message.trim() });
+    } catch (error) {
+      // A reopened task has no tracked work left, so its session is stopped rather than left running untracked.
+      // A task that was still running keeps its original work; the follow-up itself was not delivered.
+      if (wasActive) { await save(db, row, { status: "running", deadline_at: previousDeadline }, true); throw error; }
+      await terminateDevin(run);
+      await save(db, row, { status: "failed", error_code: "devin_error", finished_at: new Date().toISOString() }, true);
+      throw error;
+    }
+    return json(task(row));
+  }
+  await terminateDevin(run);
+  if (body.action === "delete") {
+    const removed = await db.from("agent_tasks").delete().eq("id", row.id).eq("user_id", row.user_id);
+    if (removed.error) throw new Failure("storage_error", 500);
+    return json({ deleted: true });
+  }
+  return json(task(terminal(row) ? row : await save(db, row, { status: "cancelled", finished_at: new Date().toISOString() })));
 }
 async function startTask(db: any, userId: string, body: Obj, reservedRow?: Obj, continuationClaim?: string, restarting = false) {
   const instruction = body.instruction.trim();
@@ -1532,13 +1679,13 @@ Deno.serve(async (req: Request) => {
       // Deleting your own sessions must keep working after Pro ends.
       if (!pro.data && body.action !== "delete") return json({ error: "pro_required" }, 403);
     }
-    if (!KEY) return json({ error: "agent_not_configured" }, 503);
     const db = createClient(
       env("SUPABASE_URL"),
       env("SUPABASE_SERVICE_ROLE_KEY"),
       { auth: { persistSession: false } },
     );
     if (webhook) {
+      if (!KEY) return json({ error: "agent_not_configured" }, 503);
       const sid = body.data?.session_id;
       if (typeof sid !== "string") return json({ ok: true });
       const { data: run, error } = await db.from("agent_task_runs").select().eq(
@@ -1548,7 +1695,7 @@ Deno.serve(async (req: Request) => {
       if (error) throw new Failure("storage_error", 500);
       if (run) {
         const row = await loadTask(db, run.task_id);
-        const work = sync(db, row).catch(() => {
+        const work = (row.provider === "devin" ? Promise.resolve(row) : sync(db, row)).catch(() => {
           console.log("agent-action", row.id, "sync_failed");
         });
         if (typeof EdgeRuntime !== "undefined") EdgeRuntime.waitUntil(work);
@@ -1576,6 +1723,8 @@ Deno.serve(async (req: Request) => {
       if (body.images !== undefined && !validImages(body.images)) {
         return bad("images");
       }
+      if (body.provider === "devin") return json(task(await startDevin(db, userId, body)), 201);
+      if (!KEY) return json({ error: "agent_not_configured" }, 503);
       return json(task(await startTask(db, userId, body)), 201);
     }
     if (!["status", "confirm", "cancel", "continue", "stop", "delete"].includes(body.action)) {
@@ -1598,6 +1747,8 @@ Deno.serve(async (req: Request) => {
       .eq("user_id", userId).maybeSingle();
     if (loaded.error) throw new Failure("storage_error", 500);
     if (!loaded.data) return json({ error: "not_found" }, 404);
+    if (loaded.data.provider === "devin") return await devinAction(db, loaded.data, body);
+    if (!KEY) return json({ error: "agent_not_configured" }, 503);
     if (body.action === "delete") {
       await stopTask(db, loaded.data);
       const removed = await db.from("agent_tasks").delete().eq("id", body.task_id)
