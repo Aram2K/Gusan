@@ -212,7 +212,16 @@ final class CalendarTests: XCTestCase {
             let text = action == .mode(.smartAuto) ? "Check my calendar" : "Hello"
             let json = try body(client.request(text: text, action: action, accessToken: "test"))
             XCTAssertNotNil(json["calendar"] as? String)
-            XCTAssertEqual(json["messages"] as? [[String: String]], try Prompts.messages(text: text, action: action).map { ["role": $0.role, "content": $0.content] })
+            let expected = try Prompts.messages(text: text, action: action).map { ["role": $0.role, "content": $0.content] }
+            let messages = try XCTUnwrap(json["messages"] as? [[String: String]])
+            if case .voiceSmart = action {
+                XCTAssertEqual(messages.first, expected.first)
+                XCTAssertEqual(messages.last?["role"], "user")
+                let content = try XCTUnwrap(messages.last?["content"]?.data(using: .utf8))
+                XCTAssertEqual(try JSONSerialization.jsonObject(with: content) as? [String: String], ["speech": "Am I free?", "text": "Hello"])
+            } else {
+                XCTAssertEqual(messages, expected)
+            }
         }
         XCTAssertNil(try body(client.request(text: "Hello", action: .rephrase, accessToken: "test"))["calendar"])
         XCTAssertNotNil(try body(client.request(instruction: "Am I free?", text: "Hello", accessToken: "test"))["calendar"])
