@@ -132,7 +132,11 @@ final class KeyboardViewController: UIInputViewController {
         let active = working || [.recording, .transcribing, .thinking].contains(voice.phase)
         let hint = screenHint && !active && voice.message == nil
         let actionTitle = voice.canUndo(in: snapshot) ? "Undo" : hint ? "Open" : voice.actionTitle == "Undo" ? nil : voice.actionTitle
-        strip.update(agent: preferences.keyboardMode == .agent, screenOn: preferences.keyboardScreenEnabled, live: screen.live && !secure, context: title, phase: working ? .thinking : voice.phase, level: voice.level, message: working ? voice.message ?? "Working…" : pendingInsert != nil ? "Result ready" : voice.message ?? agentMessage ?? (hint ? "Gusan Screen is off" : nil), action: pendingInsert != nil && !active ? "Insert" : actionTitle, theme: theme, pendingInsert: pendingInsert != nil && !active)
+        // A task waiting on the user outranks stale strip text, but never an active take or a Smart result/error.
+        let attention = active || voice.message != nil ? nil : agent.task.flatMap { AgentKeyboardAttention.resolve($0) }
+        let agentStatus = !working && pendingInsert == nil && (attention != nil || (voice.message == nil && agentMessage != nil))
+        let message = working ? voice.message ?? "Working…" : pendingInsert != nil ? "Result ready" : attention?.text ?? voice.message ?? agentMessage ?? (hint ? "Gusan Screen is off" : nil)
+        strip.update(agent: preferences.keyboardMode == .agent, screenOn: preferences.keyboardScreenEnabled, live: screen.live && !secure, context: title, phase: working ? .thinking : voice.phase, level: voice.level, message: message, action: pendingInsert != nil && !active ? "Insert" : actionTitle, theme: theme, pendingInsert: pendingInsert != nil && !active, agentStatus: agentStatus)
     }
     @objc private func toggleMode() {
         guard !working, ![.recording, .transcribing, .thinking].contains(voice.phase) else { return }
@@ -165,7 +169,11 @@ final class KeyboardViewController: UIInputViewController {
         else if screenHint && voice.message == nil { openContainingApp(URL(string: "gusan://screen")!) }
         else { voice.performAction() }
     }
-    @objc private func statusPressed() { if agent.isActive { agent.show() } }
+    @objc private func statusPressed() {
+        if let task = agent.task, let attention = AgentKeyboardAttention.resolve(task) {
+            openContainingApp(attention.url)
+        } else if agent.isActive { agent.show() }
+    }
     @objc private func hideAgent() { agent.hide() }
     private func beginTake() -> VoiceAction? {
         retryTake = nil

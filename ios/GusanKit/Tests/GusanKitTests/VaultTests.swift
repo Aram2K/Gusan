@@ -93,7 +93,7 @@ final class VaultTests: XCTestCase {
         XCTAssertNil(list.logins.first?.usernameHint)
         XCTAssertEqual(list.logins.first?.hasTOTP, false)
     }
-    func testNewLoginSaveRollsBackOnlyOnFailure() async throws {
+    func testNewLoginSaveFailureNeverDeletesCloudLogin() async throws {
         let fake = Keychain(), store = VaultStore(keychain: fake), service = Service()
         let login = try await service.add(hostname: "example.com", usernameHint: nil, hasTOTP: false)
         fake.addStatus = errSecNotAvailable
@@ -102,16 +102,16 @@ final class VaultTests: XCTestCase {
                                              previousLogins: [], store: store, service: service)
             XCTFail("Expected save failure")
         } catch { XCTAssertEqual(error.localizedDescription, "Set a device passcode to use Vault") }
-        XCTAssertEqual(service.deleted, [login.id])
-        let rolledBack = try await service.list()
-        XCTAssertTrue(rolledBack.logins.isEmpty)
+        XCTAssertTrue(service.deleted.isEmpty)
+        let retained = try await service.list()
+        XCTAssertEqual(retained.logins.map(\.id), [login.id])
         XCTAssertNil(fake.data)
         XCTAssertTrue(fake.deleted.isEmpty)
         fake.addStatus = nil
         let saved = try await service.add(hostname: "example.com", usernameHint: nil, hasTOTP: false)
         try await VaultLoginChanges.save(VaultCredential(username: "u", password: "p"), loginID: saved.id,
                                          previousLogins: [], store: store, service: service)
-        XCTAssertEqual(service.deleted, [login.id])
+        XCTAssertTrue(service.deleted.isEmpty)
         XCTAssertEqual(try store.read(loginID: saved.id, context: LAContext()).password, "p")
     }
     func testCloudDeleteMustSucceedBeforeKeychainDelete() async throws {
@@ -135,19 +135,19 @@ final class VaultTests: XCTestCase {
         let removed = try await service.list()
         XCTAssertTrue(removed.logins.isEmpty)
     }
-    func testRollbackFailureSurfacesStorageAndCloudError() async throws {
+    func testFailedImportDoesNotTryDeletingAnotherDevicesLogin() async throws {
         let fake = Keychain(), store = VaultStore(keychain: fake), service = Service()
         let login = try await service.add(hostname: "example.com", usernameHint: nil, hasTOTP: false)
         fake.addStatus = errSecNotAvailable; service.deleteFails = true
         do {
             try await VaultLoginChanges.save(VaultCredential(username: "u", password: "p"), loginID: login.id,
                                              previousLogins: [], store: store, service: service)
-            XCTFail("Expected rollback failure")
+            XCTFail("Expected storage failure")
         } catch {
-            XCTAssertTrue(error is VaultLoginChangeError)
-            XCTAssertTrue(error.localizedDescription.contains("Set a device passcode to use Vault"))
-            XCTAssertTrue(error.localizedDescription.contains("cloud entry couldn't be removed"))
+            XCTAssertTrue(error is VaultStoreError)
+            XCTAssertEqual(error.localizedDescription, "Set a device passcode to use Vault")
         }
+        XCTAssertTrue(service.deleted.isEmpty)
         XCTAssertNil(fake.data)
         let retained = try await service.list()
         XCTAssertEqual(retained.logins.map(\.id), [login.id])

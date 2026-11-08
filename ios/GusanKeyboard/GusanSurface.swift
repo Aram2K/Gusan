@@ -36,6 +36,7 @@ final class GusanStrip: UIView {
         let action: String?
         let dark: Bool
         let pending: Bool
+        let agentStatus: Bool
     }
     private var presentation: Presentation?
     private var waveformLevel: Float?
@@ -59,17 +60,18 @@ final class GusanStrip: UIView {
         [waveform, mode, context, status, dot, spinner, screen, cancel, mic, action].forEach { addSubview($0) }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    func update(agent: Bool, screenOn: Bool, live: Bool, context title: String, phase: VoicePhase, level: Float, message: String?, action titleAction: String?, theme: KeyboardTheme, pendingInsert: Bool = false) {
+    func update(agent: Bool, screenOn: Bool, live: Bool, context title: String, phase: VoicePhase, level: Float, message: String?, action titleAction: String?, theme: KeyboardTheme, pendingInsert: Bool = false, agentStatus: Bool = false) {
         if phase == .recording && (waveformLevel != level || presentation?.phase != phase) {
             waveformLevel = level; waveform.update(level: level, animated: true)
         }
-        let value = Presentation(agent: agent, screenOn: screenOn, live: live, context: title, phase: phase, message: message, action: titleAction, dark: theme.dark, pending: pendingInsert)
+        let value = Presentation(agent: agent, screenOn: screenOn, live: live, context: title, phase: phase, message: message, action: titleAction, dark: theme.dark, pending: pendingInsert, agentStatus: agentStatus)
         guard value != presentation else { return }
         let previous = presentation
         presentation = value
         listening = phase == .recording; working = phase == .thinking || phase == .transcribing
         pendingOffer = pendingInsert
-        agentPill = agent && !listening && !working && message != nil && titleAction == nil && !pendingInsert
+        // Keep the mode chip beside a status in Agent mode, and beside an Agent task status in either mode.
+        agentPill = (agent || agentStatus) && !listening && !working && message != nil && titleAction == nil && !pendingInsert
         let accent = theme.dark ? UIColor(red: 77/255, green: 163/255, blue: 1, alpha: 1) : UIColor(red: 0, green: 88/255, blue: 184/255, alpha: 1)
         let indigo = UIColor(red: 94/255, green: 92/255, blue: 230/255, alpha: 1)
         let indigoText = theme.dark ? UIColor(red: 132/255, green: 130/255, blue: 1, alpha: 1) : indigo
@@ -92,7 +94,7 @@ final class GusanStrip: UIView {
         status.isHidden = listening || message == nil
         if status.title(for: .normal) != message { status.setTitle(message, for: .normal) }
         status.setTitleColor(message == "Inserted" || pendingInsert ? .systemGreen : agent ? indigoText : theme.foreground, for: .normal)
-        status.backgroundColor = agentPill ? indigo.withAlphaComponent(0.12) : .clear
+        status.backgroundColor = agentPill && agentStatus ? indigo.withAlphaComponent(0.12) : .clear
         status.layer.cornerRadius = 12
         cancel.isHidden = !listening && !working && !pendingInsert; cancel.tintColor = theme.foreground; cancel.backgroundColor = theme.special
         cancel.accessibilityLabel = pendingInsert ? "Dismiss result" : "Cancel voice instruction"

@@ -24,7 +24,7 @@ for(let i=0;i<scenarios.length;i++){
  const id='11111111-1111-1111-1111-111111111111', login='22222222-2222-2222-2222-222222222222', nonce='33333333-3333-3333-3333-333333333333';
  const row={id,user_id:'u1',title:'Sign in',status:'awaiting_login',login_request:{hostname:'example.com'},...s.row};
  const run={task_id:id,h_session_id:'session1',h_vault_id:'vault1',release_nonce:nonce,release_nonce_expires_at:new Date(Date.now()+900000).toISOString(),release_count:0,tool_req:{call:{id:'call1',tool_name:'request_login',args:{hostname:'example.com'}},hostname:'example.com',login_id:login,page_url:'https://example.com/login'},...s.run};
- const tables={agent_tasks:s.tasks??[row],agent_task_runs:[run],vault_logins:s.logins??[{id:login,user_id:'u1',hostname:'example.com',username_hint:null,has_totp:false,...s.login}],vault_events:[]};
+ const tables={agent_tasks:s.tasks??[row],agent_task_runs:[run],agent_session_cleanups:s.cleanups??[],vault_logins:s.logins??[{id:login,user_id:'u1',hostname:'example.com',username_hint:null,has_totp:false,...s.login}],vault_events:[]};
  globalThis.__db={auth:{getUser:async()=>({data:{user:s.noUser?null:{id:'u1'}},error:null})},rpc:async()=>({data:s.pro??true,error:s.proError?{}:null}),from:table=>{
   let mode='select',patch=null, filters=[],single=false,limit=null,columns='*';
   const q={select:c=>{columns=c??'*';return q},eq:(k,v)=>{filters.push(r=>r[k]===v);return q},lt:(k,v)=>{filters.push(r=>r[k]<v);return q},gt:(k,v)=>{filters.push(r=>r[k]>v);return q},
@@ -51,6 +51,7 @@ for(let i=0;i<scenarios.length;i++){
  globalThis.fetch=async(url,init)=>{
   calls.push({url,method:init.method,body:init.body?JSON.parse(init.body):null});
   if(s.hFailure&&url.includes(s.hFailure))return new Response('untrusted',{status:500});
+  if(url.endsWith('/pause'))return new Response(null,{status:s.pauseStatus??202});
   if(init.method==='GET'){
    const offset=Number(new URL(url).searchParams.get('offset'));
    return new Response(JSON.stringify(s.pages?.[offset/100]??{total:(s.vaults??[]).length,vaults:s.vaults??[]}));
@@ -240,6 +241,79 @@ def test_list_pending_delete(run):
     assert deleted["replies"][0]["body"] == {"deleted": True}
     assert deleted["tables"]["vault_events"][0]["event"] == "deleted"
     assert empty["replies"][0]["body"] == {"logins": [], "events": []}
+
+
+@pytest.mark.parametrize("pause_status", [202, 404, 409])
+def test_sweep_retries_pending_session_even_without_vault(run, pause_status):
+    out, = run({"body": {"action": "sweep"}, "headers": {"X-Gusan-Sweep-Secret": "sweep-test"},
+                "row": {"status": "cancelled"}, "run": {"session_cleanup_pending": True, "h_vault_id": None},
+                "pauseStatus": pause_status})
+    assert [(c["method"], c["url"].split("/api/v2")[-1]) for c in out["calls"][:2]] == [
+        ("POST", "/sessions/session1/pause"), ("DELETE", "/sessions/session1")]
+    assert out["tables"]["agent_task_runs"][0]["session_cleanup_pending"] is False
+
+
+@pytest.mark.parametrize("failure", ["pause", "delete"])
+def test_sweep_failed_session_cleanup_retains_marker(run, failure):
+    out, = run({"body": {"action": "sweep"}, "headers": {"X-Gusan-Sweep-Secret": "sweep-test"},
+                "row": {"status": "cancelled"}, "run": {"session_cleanup_pending": True},
+                **({"pauseStatus": 500} if failure == "pause" else {"deleteStatus": 500})})
+    assert out["replies"][0]["status"] == 200
+    assert out["tables"]["agent_task_runs"][0]["session_cleanup_pending"] is True
+    assert out["tables"]["agent_task_runs"][0]["h_session_id"] == "session1"
+    assert "agent-vault session_cleanup_failed" in out["logs"]
+
+
+def test_sweep_does_not_stop_active_or_unmarked_sessions(run):
+    active, unmarked = run(
+        {"body": {"action": "sweep"}, "headers": {"X-Gusan-Sweep-Secret": "sweep-test"},
+         "run": {"session_cleanup_pending": True}},
+        {"body": {"action": "sweep"}, "headers": {"X-Gusan-Sweep-Secret": "sweep-test"},
+         "row": {"status": "cancelled"}})
+    for out in [active, unmarked]:
+        assert not any("/sessions/" in c["url"] for c in out["calls"])
+
+
+def test_pending_session_cleanup_survives_task_and_account_deletion():
+    sql = (ROOT / "supabase/migrations/202611080002_agent_session_cleanup.sql").read_text().lower()
+    table = sql.split("create table public.agent_session_cleanups (")[1].split(");")[0]
+    assert "h_session_id text primary key" in table
+    assert "created_at timestamptz default now()" in table
+    assert "references" not in table and "user_id" not in table and "task_id" not in table
+    assert "alter table public.agent_session_cleanups enable row level security" in sql
+    assert "revoke all on public.agent_session_cleanups from public, anon, authenticated" in sql
+    assert "grant all on public.agent_session_cleanups to service_role" in sql
+    assert "create policy" not in sql and "agent_task_deletion_allowed" not in sql
+    guard = sql.split("create function public.preserve_pending_session_cleanup()")[1].split("$$;")[0]
+    assert "security definer set search_path = ''" in guard
+    assert "if old.session_cleanup_pending and old.h_session_id is not null then" in guard
+    assert "insert into public.agent_session_cleanups (h_session_id)" in guard
+    assert "values (old.h_session_id) on conflict do nothing" in guard
+    assert "raise" not in guard and "return old" in guard
+    assert "before delete on public.agent_task_runs" in sql
+    deletion = (ROOT / "supabase/functions/delete-account/index.ts").read_text()
+    assert "session_cleanup_pending" not in deletion
+    assert deletion.index("cancelStripe") < deletion.index("svc.auth.admin.deleteUser")
+
+
+@pytest.mark.parametrize("delete_status", [204, 404])
+def test_sweep_cleans_queued_session_after_task_deletion(run, delete_status):
+    out, = run({"body": {"action": "sweep"}, "headers": {"X-Gusan-Sweep-Secret": "sweep-test"},
+                "tasks": [], "cleanups": [{"h_session_id": "orphan/session"}], "deleteStatus": delete_status})
+    assert out["replies"][0]["status"] == 200
+    assert [(c["method"], c["url"].split("/api/v2")[-1]) for c in out["calls"][:2]] == [
+        ("POST", "/sessions/orphan%2Fsession/pause"), ("DELETE", "/sessions/orphan%2Fsession")]
+    assert out["tables"]["agent_session_cleanups"] == []
+
+
+@pytest.mark.parametrize("failure", [{"pauseStatus": 500}, {"deleteStatus": 500}])
+def test_sweep_retains_queued_session_on_failure(run, failure):
+    entry = {"h_session_id": "orphan"}
+    out, = run({"body": {"action": "sweep"}, "headers": {"X-Gusan-Sweep-Secret": "sweep-test"},
+                "tasks": [], "cleanups": [entry], **failure})
+    assert out["replies"][0]["status"] == 200
+    assert out["tables"]["agent_session_cleanups"] == [entry]
+    assert not any(w["table"] == "agent_session_cleanups" for w in out["writes"])
 
 
 def test_sweep_auth_and_scope(run):
