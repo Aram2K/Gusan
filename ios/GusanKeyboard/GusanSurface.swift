@@ -44,6 +44,8 @@ final class GusanStrip: UIView {
         super.init(frame: frame)
         mode.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
         mode.layer.cornerRadius = 12
+        mode.imageEdgeInsets = UIEdgeInsets(top: 0, left: -2, bottom: 0, right: 2)
+        mode.titleEdgeInsets = UIEdgeInsets(top: 0, left: 2, bottom: 0, right: -2)
         screen.layer.cornerRadius = 16; mic.layer.cornerRadius = 16; cancel.layer.cornerRadius = 16
         mic.backgroundColor = UIColor(red: 10/255, green: 132/255, blue: 1, alpha: 1)
         mic.tintColor = .white; mic.setImage(UIImage(systemName: "mic.fill"), for: .normal)
@@ -76,7 +78,12 @@ final class GusanStrip: UIView {
         let indigo = UIColor(red: 94/255, green: 92/255, blue: 230/255, alpha: 1)
         let indigoText = theme.dark ? UIColor(red: 132/255, green: 130/255, blue: 1, alpha: 1) : indigo
         dot.backgroundColor = agent ? indigo : accent
-        if previous?.agent != agent { mode.setTitle(agent ? "Agent" : "Smart", for: .normal) }
+        if previous?.agent != agent {
+            mode.setTitle(agent ? "Agent" : "Smart", for: .normal)
+            let symbol = UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+            mode.setImage(UIImage(systemName: agent ? "laptopcomputer" : "wand.and.stars", withConfiguration: symbol), for: .normal)
+        }
+        mode.tintColor = agent ? indigoText : theme.foreground
         mode.setTitleColor(agent ? indigoText : theme.foreground, for: .normal)
         mode.backgroundColor = agent ? indigo.withAlphaComponent(0.12) : theme.letter.withAlphaComponent(0.6)
         mode.accessibilityLabel = "Mode: " + (agent ? "Agent" : "Smart")
@@ -115,7 +122,7 @@ final class GusanStrip: UIView {
         super.layoutSubviews()
         let w = bounds.width
         dot.frame = CGRect(x: 8, y: 19, width: 8, height: 8)
-        mode.frame = CGRect(x: 22, y: 10, width: 62, height: 26)
+        mode.frame = CGRect(x: 22, y: 10, width: 82, height: 26)
         mic.frame = CGRect(x: w - 40, y: 6.5, width: 32, height: 32)
         screen.frame = CGRect(x: w - 85, y: 6.5, width: 32, height: 32)
         cancel.frame = CGRect(x: w - (working || pendingOffer ? 40 : 85), y: 6.5, width: 32, height: 32)
@@ -123,9 +130,9 @@ final class GusanStrip: UIView {
         let actionWidth = min(125, max(44, action.intrinsicContentSize.width + 8))
         action.frame = CGRect(x: w - 48 - actionWidth, y: 1, width: actionWidth, height: 44)
         let end = working ? w - 50 : action.isHidden ? w - 96 : action.frame.minX - 4
-        let start: CGFloat = working ? 48 : agentPill ? 90 : 22
+        let start: CGFloat = working ? 48 : agentPill ? 110 : 22
         status.frame = CGRect(x: start, y: 0.5, width: max(0, end - start), height: 44)
-        context.frame = CGRect(x: listening ? 22 : 90, y: listening ? 29 : 1, width: max(0, w - (listening ? 120 : 186)), height: listening ? 14 : 44)
+        context.frame = CGRect(x: listening ? 22 : 110, y: listening ? 29 : 1, width: max(0, w - (listening ? 120 : 206)), height: listening ? 14 : 44)
         waveform.frame = CGRect(x: 22, y: 3, width: max(0, w - 120), height: 24)
     }
 }
