@@ -17,7 +17,7 @@ targets:
     type: application
     platform: iOS
     deploymentTarget: "17.0"
-    sources: [Gusan, GusanKeyboard/AgentKeyboard.swift, GusanKeyboard/KeyboardTheme.swift, GusanActivity/RecordingActivityAttributes.swift, GusanActivity/AgentActivityAttributes.swift, GusanActivity/VoiceIntents.swift]
+    sources: [Gusan, GusanKeyboard/AgentKeyboard.swift, GusanKeyboard/KeyboardTheme.swift, GusanActivity/RecordingActivityAttributes.swift, GusanActivity/AgentActivityAttributes.swift, GusanActivity/VoiceIntents.swift, GusanActivity/AgentActivityIntents.swift]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.aram2k.gusan
