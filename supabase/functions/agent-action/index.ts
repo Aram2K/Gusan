@@ -548,8 +548,7 @@ async function startTask(db: any, userId: string, body: Obj, reservedRow?: Obj, 
   }
   await saveRun(db, row, {
     phase: "prepare",
-    plan: { instruction, ...(body.context ? { context: body.context } : {}),
-      ...(body.timezone ? { timezone: body.timezone } : {}),
+    plan: { instruction, ...(body.timezone ? { timezone: body.timezone } : {}),
       ...(continuationClaim ? { continuation_claim: continuationClaim } : {}) },
   });
   let session;
@@ -583,7 +582,7 @@ async function continueTask(db: any, row: Obj, run: Obj, message: string, client
     await startTask(db, row.user_id, storedPlan ? {
       instruction: storedPlan.instruction, mode: reservedRow.mode,
       context: storedPlan.context ?? body.context,
-      ...(storedPlan.timezone ? { timezone: storedPlan.timezone } : {}),
+      ...((storedPlan.timezone ?? body.timezone) ? { timezone: storedPlan.timezone ?? body.timezone } : {}),
     } : body, reservedRow, marker, restarting), 201,
   );
   const claim = async (operation: string) => {
@@ -604,7 +603,8 @@ async function continueTask(db: any, row: Obj, run: Obj, message: string, client
     else throw error;
   }
   const claimedRun = await loadRun(db, resumed);
-  if (resumed.id !== row.id && resumed.status === "queued" && !claimedRun.h_session_id) {
+  if (resumed.id !== row.id && resumed.status === "queued" && !claimedRun.h_session_id &&
+      claimedRun.plan?.continuation_claim !== marker) {
     return fresh(resumed, true, claimedRun.plan);
   }
   if (claimedRun.plan?.continuation_claim !== marker) return response(resumed);
