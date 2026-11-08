@@ -69,6 +69,7 @@ final class KeyboardViewController: UIInputViewController {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         preferences = KeyboardSettingsSnapshot(defaults: sharedDefaults)
+        agentTake = preferences.keyboardMode == .agent
         scheduleUpdate()
     }
     override func viewDidAppear(_ animated: Bool) {

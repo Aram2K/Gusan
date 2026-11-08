@@ -5,8 +5,10 @@ public struct KeyboardVoiceState: Codable, Equatable {
     public var context: VoiceContext?
     public var insertedID: UUID?
     public var startedAt: Date
-    public init(requestID: UUID? = nil, context: VoiceContext? = nil, insertedID: UUID? = nil, startedAt: Date = Date()) {
+    public var action: VoiceAction?
+    public init(requestID: UUID? = nil, context: VoiceContext? = nil, insertedID: UUID? = nil, startedAt: Date = Date(), action: VoiceAction? = nil) {
         self.requestID = requestID; self.context = context; self.insertedID = insertedID; self.startedAt = startedAt
+        self.action = action
     }
     public func isStale(status: VoiceStatus, now: Date = Date()) -> Bool {
         now.timeIntervalSince(status.heartbeat) >= 600 || now.timeIntervalSince(startedAt) >= 600

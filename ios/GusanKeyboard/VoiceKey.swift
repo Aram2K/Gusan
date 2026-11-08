@@ -103,7 +103,7 @@ final class VoiceKeyController: NSObject {
         #if DEBUG
         preview = UserDefaults(suiteName: store.resolution.chosen)?.bool(forKey: "debugVoicePreview") == true
         #endif
-        if !preview, let saved = channel.readKeyboardState() { pending = saved }
+        if !preview, let saved = channel.readKeyboardState() { pending = saved; action = saved.action }
         observer = channel.observe(.status) { [weak self] in self?.load() }
         updateFallbackTimer()
         load()
@@ -160,6 +160,7 @@ final class VoiceKeyController: NSObject {
         pending = KeyboardVoiceState(requestID: UUID(), context: currentContext())
         deadline = KeyboardVoiceDeadline()
         action = onStart?()
+        pending.action = action
         updateFallbackTimer()
         if !preview { do { try channel.write(keyboard: pending) } catch { show(error.localizedDescription); return }; send(.start) }
     }
