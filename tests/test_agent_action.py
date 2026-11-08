@@ -489,13 +489,23 @@ def test_execute_uses_the_visible_approved_plan(run):
 
 
 @pytest.mark.parametrize("code,error,status", [(429, "agent_busy", 503), (500, "upstream_error", 502)])
-def test_execute_creation_failure_retryable(run, code, error, status):
-    out, = run(waiting(createFailure=code, requests=[{"body": {"action": "confirm", "task_id": ID}}] * 2))
+@pytest.mark.parametrize("with_login", [False, True])
+def test_execute_creation_failure_retryable(run, code, error, status, with_login):
+    out, = run(waiting(createFailure=code, logins=[LOGIN] if with_login else [],
+                       requests=[{"body": {"action": "confirm", "task_id": ID}}] * 2))
     assert out["replies"][0] == {"status": status, "body": {"error": error}}
     assert out["snapshots"][0]["row"]["status"] == "awaiting_confirmation"
     assert out["snapshots"][0]["run"]["phase"] == "prepare"
     assert out["replies"][1]["body"]["status"] == "running"
-    assert out["calls"][0]["headers"]["Idempotency-Key"] == out["calls"][1]["headers"]["Idempotency-Key"]
+    sessions = [c for c in out["calls"] if c["url"].endswith("/sessions")]
+    assert len(sessions) == 2
+    assert sessions[0]["headers"]["Idempotency-Key"] == sessions[1]["headers"]["Idempotency-Key"]
+    if with_login:
+        assert out["snapshots"][0]["run"]["h_vault_id"] == "vault1"
+        assert out["run"]["h_vault_id"] == "vault1"
+        assert len([c for c in out["calls"] if c["url"].endswith("/vaults")]) == 1
+        assert all(c["body"]["overrides"]["agent.environments[kind=web].vault_id"] == "vault1" for c in sessions)
+        assert not any(c["method"] == "DELETE" for c in out["calls"])
 
 
 def test_cancel_awaiting_is_local(run):

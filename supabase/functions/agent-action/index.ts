@@ -1112,7 +1112,6 @@ Deno.serve(async (req: Request) => {
           return json(task(row));
         }
       }
-      try {
       const session = await h(
         "/sessions",
         "POST",
@@ -1139,11 +1138,6 @@ Deno.serve(async (req: Request) => {
         event_index: 0,
         deadline_at: new Date(Date.now() + (600 + 180) * 1000).toISOString(),
       });
-      } catch (error) {
-        if (!run.h_vault_id) throw error;
-        row = await save(db, row, { status: "failed", error_code: "vault_error", finished_at: new Date().toISOString() });
-        await cleanupVault(db, row, run);
-      }
     } else if (!terminal(row)) {
       const currentRun = await loadRun(db, row);
       const awaiting = row.status === "awaiting_confirmation";
