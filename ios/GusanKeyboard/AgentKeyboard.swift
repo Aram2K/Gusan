@@ -85,7 +85,6 @@ final class AgentKeyboardController {
     func appear() {
         visible = true
         settings.refresh()
-        if settings.privacyMode { if isActive { dismiss() }; return }
         #if DEBUG
         // Simulator screenshots: the app seeds a demo instruction on a named pasteboard (`--gusan-keyboard-agent-demo`).
         if task == nil, let board = UIPasteboard(name: UIPasteboard.Name("gusan.debug.agentDemo"), create: false), let demo = board.string, let intent = AgentIntent.detect(demo) {
@@ -229,6 +228,7 @@ final class AgentKeyboardController {
     private func update(_ fresh: AgentTask) {
         let previous = task?.status
         task = fresh
+        if !showingCard { onStatus?(toolbarLine(fresh), nil) }
         tracker.activeTaskID = fresh.status.isTerminal ? nil : fresh.id
         tracker.markNotified(fresh)
         if previous != fresh.status, previous != nil, fresh.status == .awaitingConfirmation || fresh.status.isTerminal {
@@ -245,7 +245,7 @@ final class AgentKeyboardController {
 
     private func toolbarLine(_ task: AgentTask) -> String {
         switch task.status {
-        case .queued, .running: return (task.mode == .research ? "Researching… " : "Working on it… ") + (task.latestStep ?? "")
+        case .queued, .running: return "Agent · " + (task.latestStep ?? "Starting…")
         case .awaitingConfirmation: return "Agent needs your OK"
         case .completed: return "Agent result ready"
         case .failed, .timedOut: return "Agent task failed"
@@ -375,7 +375,7 @@ final class AgentCardView: UIView {
         body.textColor = theme.foreground
         minimise.tintColor = KeyboardTheme.blue
         buttons = []
-        spinner.color = theme.dark ? .white : .gray
+        spinner.color = UIColor(red: 94/255, green: 92/255, blue: 230/255, alpha: 1)
         var announce: String?
         switch state {
         case .empty:
@@ -408,7 +408,7 @@ final class AgentCardView: UIView {
             case .queued, .running:
                 status.text = task.mode == .research ? "Research · read-only" : "Do-it task · asks before acting"
                 body.text = task.latestStep.map { "Latest: " + $0 } ?? "Starting an agent…"
-                buttons = [(secondary, "Cancel task", false)]   // left half only: Confirm later appears on the right, never here
+                buttons = [(secondary, "Stop", false)]
             case .awaitingConfirmation:
                 icon.image = UIImage(systemName: "hand.raised.fill"); icon.tintColor = theme.brandOrange
                 status.text = (reconfirm ? "Confirm again · " : (task.confirmation?.kindLabel ?? "Needs your OK") + " · ") + "nothing happens until you confirm"
@@ -505,7 +505,7 @@ final class AgentCardView: UIView {
         case "Retry", "Run again": onRetry?()
         case "Run": onRun?()
         case "Edit text instead": onEditInstead?()
-        case "Cancel", "Cancel task": onCancel?()
+        case "Cancel", "Cancel task", "Stop": onCancel?()
         case "Insert": onInsert?()
         case "Open in app": onOpenApp?()
         default: onDismiss?()

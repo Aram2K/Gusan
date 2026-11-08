@@ -36,8 +36,17 @@ public enum ScreenPrompts {
     /// `selected` is the user's selection in the field, `text` the field text the
     /// keyboard sees. The model is told which one it got, so "this" is unambiguous.
     public static func messages(instruction: String, text: String, selected: String = "", frame: ScreenFrame) throws -> [ScreenChatMessage] {
+        try messages(instruction: instruction, text: text, selected: selected, frames: [frame])
+    }
+    public static func uniqueFrames(_ frames: [ScreenFrame]) -> [ScreenFrame] {
+        var hashes = Set<[UInt8]>()
+        return Array(frames.filter { hashes.insert(SHA256.digest(Array($0.jpeg))).inserted }.prefix(2))
+    }
+    public static func messages(instruction: String, text: String, selected: String = "", frames: [ScreenFrame]) throws -> [ScreenChatMessage] {
         let instruction = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !instruction.isEmpty else { throw GusanError.emptyInput }
+        let frames = uniqueFrames(frames)
+        guard !frames.isEmpty else { throw ScreenError.noFrame }
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let selected = selected.trimmingCharacters(in: .whitespacesAndNewlines)
         let field: String
@@ -46,7 +55,7 @@ public enum ScreenPrompts {
         else { field = "Text near the cursor in the field, for context only (nothing is selected; \"this\" in the instruction means the screen):\n\(text)" }
         return [
             ScreenChatMessage(role: "system", content: .text(system)),
-            ScreenChatMessage(role: "user", content: .parts([.text("Instruction: \(instruction)\n\n\(field)"), .imageURL(frame.dataURL)]))
+            ScreenChatMessage(role: "user", content: .parts([.text("Instruction: \(instruction)\n\n\(field)")] + frames.map { .imageURL($0.dataURL) }))
         ]
     }
 }
@@ -57,7 +66,10 @@ public struct ScreenActionClient {
     public let transport: HTTPTransport
     public init(transport: HTTPTransport = URLSession.shared) { self.transport = transport }
     public func request(instruction: String, text: String, selected: String = "", frame: ScreenFrame, accessToken: String) throws -> URLRequest {
-        let messages = try ScreenPrompts.messages(instruction: instruction, text: text, selected: selected, frame: frame)
+        try request(instruction: instruction, text: text, selected: selected, frames: [frame], accessToken: accessToken)
+    }
+    public func request(instruction: String, text: String, selected: String = "", frames: [ScreenFrame], accessToken: String) throws -> URLRequest {
+        let messages = try ScreenPrompts.messages(instruction: instruction, text: text, selected: selected, frames: frames)
         var request = URLRequest(url: SmartActionClient.url, timeoutInterval: 60)
         request.httpMethod = "POST"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
@@ -67,7 +79,10 @@ public struct ScreenActionClient {
         return request
     }
     public func run(instruction: String, text: String, selected: String = "", frame: ScreenFrame, accessToken: String) async throws -> String {
-        let req = try request(instruction: instruction, text: text, selected: selected, frame: frame, accessToken: accessToken)
+        try await run(instruction: instruction, text: text, selected: selected, frames: [frame], accessToken: accessToken)
+    }
+    public func run(instruction: String, text: String, selected: String = "", frames: [ScreenFrame], accessToken: String) async throws -> String {
+        let req = try request(instruction: instruction, text: text, selected: selected, frames: frames, accessToken: accessToken)
         do {
             try Task.checkCancellation()
             let (data, response) = try await transport.data(for: req)
@@ -90,11 +105,15 @@ public struct ScreenInstructionJob: GusanJob {
     private let selected: String
     private let accessToken: String
     private let kind: JobResult.Kind
-    private let frames: ScreenFrameProvider
+    private let frames: ScreenFrameProvider?
+    private let capturedFrames: [ScreenFrame]
     private let client: ScreenActionClient
     private let frameTimeout: TimeInterval
     public init(instruction: String, text: String, selected: String = "", accessToken: String, kind: JobResult.Kind, frames: ScreenFrameProvider, client: ScreenActionClient = ScreenActionClient(), frameTimeout: TimeInterval = 5) {
-        self.instruction = instruction; self.text = text; self.selected = selected; self.accessToken = accessToken; self.kind = kind; self.frames = frames; self.client = client; self.frameTimeout = frameTimeout
+        self.instruction = instruction; self.text = text; self.selected = selected; self.accessToken = accessToken; self.kind = kind; self.frames = frames; self.client = client; self.frameTimeout = frameTimeout; self.capturedFrames = []
+    }
+    public init(instruction: String, text: String, selected: String = "", accessToken: String, kind: JobResult.Kind, capturedFrames: [ScreenFrame], client: ScreenActionClient = ScreenActionClient()) {
+        self.instruction = instruction; self.text = text; self.selected = selected; self.accessToken = accessToken; self.kind = kind; self.frames = nil; self.client = client; self.frameTimeout = 5; self.capturedFrames = capturedFrames
     }
     public func run() -> AsyncThrowingStream<JobEvent, Error> {
         AsyncThrowingStream { continuation in
@@ -103,10 +122,12 @@ public struct ScreenInstructionJob: GusanJob {
                     guard !instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw GusanError.emptyInput }
                     try Task.checkCancellation()
                     continuation.yield(.progress("Looking at your screen…"))
-                    let frame = try await frames.frame(timeout: frameTimeout)
+                    let pictures: [ScreenFrame]
+                    if let frames { pictures = [try await frames.frame(timeout: frameTimeout)] }
+                    else { pictures = capturedFrames }
                     try Task.checkCancellation()
                     continuation.yield(.progress("Thinking…"))
-                    let answer = try await client.run(instruction: instruction, text: text, selected: selected, frame: frame, accessToken: accessToken)
+                    let answer = try await client.run(instruction: instruction, text: text, selected: selected, frames: pictures, accessToken: accessToken)
                     try Task.checkCancellation()
                     guard !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw GusanError.invalidResponse }
                     continuation.yield(.result(JobResult(text: answer, kind: kind))); continuation.finish()
