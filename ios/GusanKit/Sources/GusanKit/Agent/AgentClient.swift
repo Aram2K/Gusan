@@ -16,6 +16,7 @@ public protocol AgentService: AnyObject {
 }
 
 public final class AgentClient: AgentService {
+    private enum ActionFailure: Error { case unsupported }
     public static let functionURL = URL(string: AuthClient.baseURL + "/functions/v1/agent-action")!
     public static let tableURL = URL(string: AuthClient.baseURL + "/rest/v1/agent_tasks")!
     public static let seenRPCURL = URL(string: AuthClient.baseURL + "/rest/v1/rpc/mark_agent_task_seen")!
@@ -89,8 +90,8 @@ public final class AgentClient: AgentService {
 
     public func continueTask(_ id: UUID, message: String) async throws -> AgentTask {
         do {
-            return try await task(["action": "continue", "task_id": id.uuidString.lowercased(), "message": message])
-        } catch AgentError.code("bad_request", status: 400) {
+            return try await task(["action": "continue", "task_id": id.uuidString.lowercased(), "message": message], detectUnsupportedAction: true)
+        } catch ActionFailure.unsupported {
             let previous = try await status(id, waitSeconds: 0)
             let summary = "Earlier in this session:\n" + previous.title + "\n" + (previous.result?.plainText ?? "")
             return try await start(AgentIntent(mode: previous.mode, instruction: message), context: String(summary.prefix(18_000)))
@@ -98,8 +99,8 @@ public final class AgentClient: AgentService {
     }
 
     public func stop(_ id: UUID) async throws -> AgentTask {
-        do { return try await task(["action": "stop", "task_id": id.uuidString.lowercased()]) }
-        catch AgentError.code(_, status: 400) { return try await cancel(id) }
+        do { return try await task(["action": "stop", "task_id": id.uuidString.lowercased()], detectUnsupportedAction: true) }
+        catch ActionFailure.unsupported { return try await cancel(id) }
     }
 
     public func list(limit: Int = 50) async throws -> [AgentTask] {
@@ -121,9 +122,14 @@ public final class AgentClient: AgentService {
         try Self.check(data, response)
     }
 
-    private func task(_ body: [String: Any]) async throws -> AgentTask {
+    private func task(_ body: [String: Any], detectUnsupportedAction: Bool = false) async throws -> AgentTask {
         let request = try Self.actionRequest(body, token: try await token())
         let (data, response) = try await transport.data(for: request)
+        if detectUnsupportedAction, (response as? HTTPURLResponse)?.statusCode == 400,
+           let error = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+           error["error"] as? String == "bad_request", error["field"] as? String == "action" {
+            throw ActionFailure.unsupported
+        }
         try Self.check(data, response)
         return try Self.decodeTask(data)
     }

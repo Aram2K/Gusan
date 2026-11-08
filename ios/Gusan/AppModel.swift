@@ -10,6 +10,7 @@ final class AppModel: NSObject, ObservableObject, ASWebAuthenticationPresentatio
     lazy var auth = AuthClient(store: store)
     lazy var settings = SettingsStore(group: store.resolution.chosen)
     @Published var session: Session?
+    @Published private(set) var restoringSession = true
     @Published var isPro = false
     @Published var loadingPlan = false
     @Published var planError: String?
@@ -56,16 +57,23 @@ final class AppModel: NSObject, ObservableObject, ASWebAuthenticationPresentatio
     func refreshDiagnostics() { diagnostics = store.diagnostics() }
     func update() async {
         guard !updating else { return }; updating = true
-        defer { updating = false; loadingPlan = false; refreshDiagnostics() }
-        session = store.read(); planError = nil
+        defer { updating = false; restoringSession = false; if loadingPlan { loadingPlan = false }; refreshDiagnostics() }
+        let stored = store.read()
+        if session != stored { session = stored }
+        if planError != nil { planError = nil }
         guard session != nil else { isPro = false; return }
         #if DEBUG
         if session?.accessToken == "gusan-debug-no-network" { isPro = ProcessInfo.processInfo.arguments.contains("--gusan-debug-pro"); return }
         #endif
         loadingPlan = true
         do {
-            session = try await auth.refresh()
-            if let session { isPro = try await auth.entitlement(accessToken: session.accessToken).isPro }
+            let restored = try await auth.refresh()
+            if session != restored { session = restored }
+            if restoringSession { restoringSession = false }
+            if let session {
+                let entitled = try await auth.entitlement(accessToken: session.accessToken).isPro
+                if isPro != entitled { isPro = entitled }
+            }
         } catch GusanError.unauthorized { session = store.read(); isPro = false }
         catch { planError = friendly(error) }
     }

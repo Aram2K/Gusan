@@ -46,6 +46,7 @@ final class VoiceLiveActivity {
         let text = phase == .failed ? status.message : phase == .done ? status.result : heard
         state.text = text.map { String($0.prefix(300)) }
         state.copied = copied
+        guard state != last else { return }
         // ActivityKit budgets updates: phase changes go out at once, waveform levels at most once a second.
         if state.phase == last?.phase, state.text == last?.text, state.copied == last?.copied, Date().timeIntervalSince(lastUpdate) < 1 { return }
         last = state; lastUpdate = Date()

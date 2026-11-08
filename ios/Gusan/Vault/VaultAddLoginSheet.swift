@@ -10,16 +10,25 @@ struct VaultAddLoginSheet: View {
     @State private var username = ""
     @State private var password = ""
     @State private var authenticator = ""
+    @State private var saving = false
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Button("Cancel") { clear(); dismiss() }.disabled(vault.busy)
+                Button { clear(); dismiss() } label: {
+                    Text("Cancel").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                }.disabled(vault.busy || saving)
                 Spacer()
                 Text("Add login").font(.headline)
                 Spacer()
-                Button("Save") { Task { await save() } }
-                    .bold().disabled(vault.busy || hostname.isEmpty || password.isEmpty)
+                Button {
+                    guard !saving, !vault.busy else { return }
+                    saving = true
+                    Task { defer { saving = false }; await save() }
+                } label: {
+                    HStack { if saving { ProgressView() }; Text("Save") }
+                        .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                }.bold().disabled(vault.busy || saving || hostname.isEmpty || password.isEmpty)
             }.padding(20)
             Form {
                 Section("Site and login") {
@@ -39,9 +48,9 @@ struct VaultAddLoginSheet: View {
                 if vault.busy { ProgressView("Saving securely…") }
                 if let error = vault.error { Section { Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(Theme.danger) } }
             }
-            .disabled(vault.busy)
+            .disabled(vault.busy || saving)
         }
-        .interactiveDismissDisabled(vault.busy)
+        .interactiveDismissDisabled(vault.busy || saving)
         .onDisappear { clear() }
     }
 

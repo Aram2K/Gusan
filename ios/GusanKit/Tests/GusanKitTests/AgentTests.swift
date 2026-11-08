@@ -124,6 +124,147 @@ final class AgentTests: XCTestCase {
         catch { XCTAssertEqual(transport.bodies.count, count + 1) }
     }
 
+    private final class ActionTransport: HTTPTransport {
+        var responses: [(Int, String)] = []
+        var bodies: [[String: Any]] = []
+        func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+            bodies.append(try JSONSerialization.jsonObject(with: request.httpBody!) as! [String: Any])
+            guard !responses.isEmpty else { throw URLError(.notConnectedToInternet) }
+            let (status, json) = responses.removeFirst()
+            return (Data(json.utf8), HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
+        }
+    }
+
+    func testLiveContinuationAndStopResponseShapes() async throws {
+        let transport = ActionTransport()
+        let client = AgentClient(tokenProvider: { "jwt" }, transport: transport)
+        let id = UUID(), child = UUID()
+        transport.responses = [
+            (200, """
+            {"task_id":"\(id)","mode":"research","status":"running","title":"Next option","steps":[],"confirmation":null,"result":null,"outcome":null,"error_code":null,"created_at":"2026-11-08T01:00:00Z","updated_at":"2026-11-08T01:02:00Z","finished_at":null,"deadline_at":"2026-11-08T01:10:00Z"}
+            """),
+            (201, """
+            {"task_id":"\(child)","continued_from":"\(id)","mode":"do","status":"queued","title":"Book the next option","steps":[],"confirmation":null,"result":null}
+            """),
+            (200, """
+            {"task_id":"\(child)","mode":"do","status":"cancelled","title":"Book the next option","steps":[],"confirmation":null,"login_request":null,"result":null,"error_code":null,"finished_at":"2026-11-08T01:03:00Z"}
+            """),
+            (200, """
+            {"task_id":"\(id)","mode":"research","status":"completed","title":"Next option","result":{"markdown":"Saved answer","links":[],"images":[]}}
+            """)
+        ]
+        let resumed = try await client.continueTask(id, message: "Compare the next option")
+        XCTAssertEqual(resumed.id, id)
+        XCTAssertEqual(resumed.phase, .working)
+        XCTAssertNil(resumed.result)
+        XCTAssertNil(resumed.finishedAt)
+        let next = try await client.continueTask(id, message: "Book the next option")
+        XCTAssertEqual(next.id, child)
+        XCTAssertEqual(next.mode, .do)
+        XCTAssertEqual(next.status, .queued)
+        let stopped = try await client.stop(child)
+        XCTAssertEqual(stopped.id, child)
+        XCTAssertEqual(stopped.status, .cancelled)
+        XCTAssertNotNil(stopped.finishedAt)
+        let terminal = try await client.stop(id)
+        XCTAssertEqual(terminal.status, .completed)
+        XCTAssertEqual(terminal.result?.plainText, "Saved answer")
+        XCTAssertEqual(transport.bodies.map { $0["action"] as! String }, ["continue", "continue", "stop", "stop"])
+        XCTAssertEqual(Set(transport.bodies[0].keys), Set(["action", "task_id", "message"]))
+        XCTAssertEqual(transport.bodies[0]["task_id"] as? String, id.uuidString.lowercased())
+        XCTAssertEqual(transport.bodies[0]["message"] as? String, "Compare the next option")
+        XCTAssertEqual(Set(transport.bodies[2].keys), Set(["action", "task_id"]))
+    }
+
+    func testContinueAndStopDoNotFallbackForValidationOrServiceFailures() async throws {
+        for action in ["continue", "stop"] {
+            for (status, json) in [
+                (400, #"{"error":"bad_request","field":"message"}"#),
+                (400, #"{"error":"bad_request","field":"task_id"}"#),
+                (400, #"{"error":"bad_request"}"#),
+                (400, #"{"error":"plan_missing","field":"action"}"#),
+                (409, #"{"error":"task_active"}"#),
+                (429, #"{"error":"too_many_active"}"#),
+                (503, #"{"error":"bad_request","field":"action"}"#),
+                (200, "{}")
+            ] {
+                let transport = ActionTransport()
+                transport.responses = [(status, json)]
+                let client = AgentClient(tokenProvider: { "jwt" }, transport: transport)
+                do {
+                    if action == "continue" { _ = try await client.continueTask(UUID(), message: " ") }
+                    else { _ = try await client.stop(UUID()) }
+                    XCTFail("Invalid response must throw")
+                } catch { XCTAssertEqual(transport.bodies.count, 1, "\(action): \(status) \(json)") }
+            }
+            let transport = ActionTransport()
+            let client = AgentClient(tokenProvider: { "jwt" }, transport: transport)
+            do {
+                if action == "continue" { _ = try await client.continueTask(UUID(), message: "Next") }
+                else { _ = try await client.stop(UUID()) }
+                XCTFail("Network failure must throw")
+            } catch { XCTAssertEqual(transport.bodies.count, 1) }
+        }
+    }
+
+    func testFailedSameTaskFollowupRetriesThroughContinue() async throws {
+        let transport = ActionTransport()
+        let client = AgentClient(tokenProvider: { "jwt" }, transport: transport)
+        let id = UUID()
+        transport.responses = [
+            (200, """
+            {"task_id":"\(id)","mode":"research","status":"running","title":"Follow up","result":null}
+            """),
+            (200, """
+            {"task_id":"\(id)","mode":"research","status":"failed","title":"Follow up","result":null,"error_code":"internal"}
+            """),
+            (200, """
+            {"task_id":"\(id)","mode":"research","status":"running","title":"Follow up","result":null,"error_code":null}
+            """)
+        ]
+        let first = try await client.continueTask(id, message: "Compare the next option")
+        XCTAssertEqual(first.id, id)
+        let failed = try await client.status(id, waitSeconds: 0)
+        XCTAssertEqual(failed.phase, .failed)
+        let retry = try await client.continueTask(failed.id, message: "Compare the next option")
+        XCTAssertEqual(retry.id, id)
+        XCTAssertEqual(retry.phase, .working)
+        XCTAssertEqual(transport.bodies.map { $0["action"] as! String }, ["continue", "status", "continue"])
+        XCTAssertEqual(transport.bodies.first?["message"] as? String, transport.bodies.last?["message"] as? String)
+    }
+
+    func testInPlaceContinuationPreservesChatAndRestoresLegacyRecords() throws {
+        let suite = "AgentSameTaskTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = AgentSessionStore(defaults: defaults)
+        let original = AgentTask(mode: .research, status: .completed, title: "Original", result: AgentResult(markdown: "First answer"))
+        defaults.set(Data("""
+        [{"id":"\(original.id)","sessionID":"\(original.id)","message":"Original instruction","date":0}]
+        """.utf8), forKey: "gusan.agent.sessions")
+        XCTAssertNil(store.records.first?.previousTurns)
+        var resumed = original
+        resumed.status = .running; resumed.result = nil
+        XCTAssertEqual(store.recordContinuation(previous: original, task: resumed, message: "Next"), original.id)
+        let restored = AgentSessionStore(defaults: defaults)
+        XCTAssertEqual(restored.records.count, 1)
+        XCTAssertEqual(restored.records.first?.message, "Next")
+        XCTAssertEqual(restored.records.first?.previousTurns?.first?.message, "Original instruction")
+        XCTAssertEqual(restored.records.first?.previousTurns?.first?.task.result?.plainText, "First answer")
+        XCTAssertEqual(restored.threads(for: [resumed]).count, 1)
+        let child = AgentTask(mode: .do, status: .queued, title: "Book")
+        XCTAssertEqual(restored.recordContinuation(previous: resumed, task: child, message: "Book"), original.id)
+        XCTAssertEqual(restored.records.count, 2)
+        XCTAssertEqual(restored.sessionID(for: child.id), original.id)
+        for _ in 0..<55 { restored.recordContinuation(previous: original, task: resumed, message: "Again") }
+        XCTAssertEqual(restored.records.first?.previousTurns?.count, 50)
+        restored.clear()
+        XCTAssertTrue(restored.records.isEmpty)
+        defaults.set(Data("invalid".utf8), forKey: "gusan.agent.sessions")
+        XCTAssertEqual(restored.recordContinuation(previous: original, task: resumed, message: "Recovered"), original.id)
+        XCTAssertEqual(restored.records.first?.previousTurns?.first?.message, "Original")
+    }
+
     func testSessionThreadsPersistAndCap() throws {
         let suite = "AgentSessionTests." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

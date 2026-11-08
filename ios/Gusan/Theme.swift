@@ -59,6 +59,7 @@ struct PrimaryButton: View {
                 else if let icon { Image(systemName: icon) }
                 Text(title).multilineTextAlignment(.center)
             }.font(.headline).frame(maxWidth: .infinity, minHeight: 52).padding(.horizontal, 16)
+                .contentShape(Rectangle())
         }.buttonStyle(.plain).foregroundStyle(.white)
             .background(tint, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .disabled(busy).accessibilityHint(busy ? "Please wait" : title)

@@ -9,16 +9,14 @@ struct HomeView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var mode: StripMode = .smart
     @AppStorage("gusan.setup.dismissed") private var setupDismissed = false
+    @AppStorage("gusan.setup.completed") private var setupCompleted = false
     @State private var instruction = ""
     @State private var starting = false
     @State private var error: String?
     @State private var lastResult: SmartHistory.Entry?
     @State private var showScreen = false
-    private var notificationsAllowed: Bool {
-        [.authorized, .provisional, .ephemeral].contains(agent.notificationStatus)
-    }
     private var setupComplete: Bool {
-        model.session != nil && model.keyboardAdded && model.fullAccess == true && notificationsAllowed
+        !model.restoringSession && model.session != nil && model.keyboardAdded && model.fullAccess == true && voice.permission == .granted
     }
 
     var body: some View {
@@ -31,15 +29,15 @@ struct HomeView: View {
             } header: { Text("Mode") } footer: {
                 Text("The strip opens in this mode. You can also switch from the chip in the strip.")
             }
-            if !setupDismissed && !setupComplete { setupChecklist }
+            if !model.restoringSession && !setupDismissed && !setupCompleted && !setupComplete { setupChecklist }
             if mode == .agent { agentSections } else { smartSections }
             Section {
                 NavigationLink { KeyboardSetupView() } label: {
                     HStack {
-                        Text("Keyboard · Full Access · Mic")
+                        Text("Keyboard")
                         Spacer()
-                        Text(model.ready && voice.permission == .granted ? "On" : "Set up")
-                            .foregroundStyle(model.ready && voice.permission == .granted ? Theme.success : Theme.accent)
+                        Text(model.keyboardAdded && model.fullAccess == true ? "On" : "Settings")
+                            .foregroundStyle(model.keyboardAdded && model.fullAccess == true ? Theme.success : Theme.accent)
                     }
                 }
             }
@@ -66,6 +64,7 @@ struct HomeView: View {
             model.refreshDiagnostics(); voice.refreshPermission()
             lastResult = SmartHistory(group: model.store.resolution.chosen).entries.last
             if model.openScreenPage { showScreen = true; model.openScreenPage = false }
+            if setupComplete { setupCompleted = true }
         }
         .onChange(of: scenePhase) {
             if $0 == .active { model.settings.refresh(); mode = model.settings.stripMode }
@@ -75,20 +74,31 @@ struct HomeView: View {
         }
         .onChange(of: model.session) { _ in lastResult = SmartHistory(group: model.store.resolution.chosen).entries.last }
         .onChange(of: model.openScreenPage) { if $0 { showScreen = true; model.openScreenPage = false } }
+        .onChange(of: setupComplete) { if $0 { setupCompleted = true } }
+        .onChange(of: scenePhase) { if $0 == .active { voice.refreshPermission(); model.refreshDiagnostics() } }
         .task { await agent.refreshNotificationStatus() }
     }
 
     private var setupChecklist: some View {
         Section {
-            checklistRow("Sign in", complete: model.session != nil) { model.showingSignIn = true }
-            NavigationLink { KeyboardSetupView() } label: {
-                checklistLabel("Add keyboard", complete: model.keyboardAdded)
+            if model.session == nil {
+                checklistRow("Sign in", complete: false) { model.showingSignIn = true }
             }
-            checklistRow("Allow Full Access", complete: model.fullAccess == true) { Theme.openSettings() }
-            checklistRow("Allow notifications", complete: notificationsAllowed) {
-                if agent.notificationStatus == .denied { Theme.openSettings() }
-                else { Task { await agent.requestNotifications() } }
+            if voice.permission != .granted {
+                Button {
+                    if voice.permission == .denied { Theme.openSettings() }
+                    else { voice.requestMicrophonePermission() }
+                } label: {
+                    HStack {
+                        checklistLabel("Allow microphone", complete: false)
+                        if voice.requestingMicrophone { ProgressView() }
+                    }.contentShape(Rectangle())
+                }.disabled(voice.requestingMicrophone)
             }
+            if !model.keyboardAdded {
+                NavigationLink { KeyboardSetupView() } label: { checklistLabel("Add keyboard", complete: false) }
+            }
+            if model.fullAccess != true { checklistRow("Allow Full Access", complete: false) { Theme.openSettings() } }
             Button("Dismiss checklist") { setupDismissed = true }.font(.footnote)
         } header: { Text("Get ready") } footer: {
             Text("Open the Gusan keyboard once to check keyboard setup and Full Access.")
@@ -100,7 +110,8 @@ struct HomeView: View {
     }
     private func checklistLabel(_ title: String, complete: Bool) -> some View {
         Label(title, systemImage: complete ? "checkmark.circle.fill" : "circle")
-            .foregroundStyle(complete ? Theme.success : Theme.accent).frame(minHeight: 36)
+            .foregroundStyle(complete ? Theme.success : Theme.accent)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
     }
 
     @ViewBuilder private var smartSections: some View {
@@ -129,9 +140,10 @@ struct HomeView: View {
         Section {
             TextField("What should Gusan do?", text: $instruction, axis: .vertical).lineLimit(2...5)
             Button {
+                guard !starting else { return }
                 let text = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+                starting = true; error = nil
                 Task {
-                    starting = true; error = nil
                     defer { starting = false }
                     do {
                         let intent = AgentIntent.detect(text) ?? AgentIntent(mode: .research, instruction: text)

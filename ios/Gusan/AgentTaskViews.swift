@@ -22,7 +22,8 @@ struct TaskRow: View {
                 Circle().fill(Theme.agent).frame(width: 8, height: 8).accessibilityLabel("Needs attention")
             }
             Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
-        }.padding(.vertical, 5).accessibilityElement(children: .combine)
+        }.frame(maxWidth: .infinity, minHeight: 44).padding(.vertical, 5)
+            .contentShape(Rectangle()).accessibilityElement(children: .combine)
     }
 
     private var phaseLabel: String {

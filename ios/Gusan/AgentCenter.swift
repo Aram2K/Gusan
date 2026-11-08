@@ -23,7 +23,11 @@ final class AgentCenter: NSObject, ObservableObject {
     @Published private(set) var loading = false
     @Published var error: String?
     @Published private(set) var notificationStatus: UNAuthorizationStatus = .notDetermined
-    @Published var lastRefresh: Date?
+    @Published private(set) var requestingNotifications = false
+    private(set) var lastRefresh: Date?
+    private var refreshing = false
+    private var revision = 0
+    private var mutating = 0
 
     private unowned let model: AppModel
     private var service: AgentService?
@@ -55,7 +59,7 @@ final class AgentCenter: NSObject, ObservableObject {
     /// Tasks the user confirmed from this device; if one is awaiting again, the server is asking to confirm again.
     @Published private(set) var confirmedIDs: Set<UUID> = []
     /// Full instructions of tasks started on this device (the server keeps only a 120-char title).
-    private var instructions: [UUID: (instruction: String, context: String?)] = [:]
+    private var instructions: [UUID: (instruction: String, context: String?, continuation: Bool)] = [:]
     /// Whether "Run again" can reproduce the original request faithfully.
     func canRunAgain(_ task: AgentTask) -> Bool { instructions[task.id] != nil }
     var threads: [AgentSessionStore.Thread] { sessionStore.threads(for: tasks) }
@@ -113,9 +117,12 @@ final class AgentCenter: NSObject, ObservableObject {
     // MARK: Loading and polling
 
     func refresh() async {
-        guard let service = currentService() else { tasks = []; return }
-        loading = tasks.isEmpty
-        defer { loading = false }
+        guard !refreshing, mutating == 0 else { return }
+        guard let service = currentService() else { if !tasks.isEmpty { tasks = [] }; return }
+        refreshing = true
+        let version = revision
+        if tasks.isEmpty && !loading { loading = true }
+        defer { refreshing = false; if loading { loading = false } }
         do {
             var fetched = try await service.list(limit: 100)
             let listedIDs = Set(fetched.map(\.id))
@@ -127,12 +134,16 @@ final class AgentCenter: NSObject, ObservableObject {
                 if let full = try? await service.status(fetched[index].id, waitSeconds: 0) { fetched[index] = full }
             }
             let fetchedIDs = Set(fetched.map(\.id))
-            tasks = (fetched + tasks.filter { !fetchedIDs.contains($0.id) }).sorted { $0.createdAt > $1.createdAt }
+            guard version == revision, !Task.isCancelled else { return }
+            let updated = (fetched + tasks.filter { !fetchedIDs.contains($0.id) }).sorted { $0.createdAt > $1.createdAt }
+            if tasks != updated { tasks = updated }
             lastRefresh = Date()
-            error = nil
+            if error != nil { error = nil }
             await deliver(tracker.consumeEvents(from: fetched))
         } catch {
-            self.error = (error as? AgentError)?.errorDescription ?? error.localizedDescription
+            guard version == revision, !Task.isCancelled else { return }
+            let message = (error as? AgentError)?.errorDescription ?? error.localizedDescription
+            if self.error != message { self.error = message }
         }
     }
 
@@ -141,7 +152,7 @@ final class AgentCenter: NSObject, ObservableObject {
         self.active = active
         poller?.cancel(); poller = nil
         guard active else { scheduleBackgroundRefresh(); return }
-        if notificationStatus == .notDetermined, tracker.activeTaskID != nil { Task { await requestNotifications() } }
+        if notificationStatus == .notDetermined, tracker.activeTaskID != nil { requestNotifications() }
         poller = Task { @MainActor [weak self] in
             while let self, self.active, !Task.isCancelled {
                 await self.refresh()
@@ -153,6 +164,8 @@ final class AgentCenter: NSObject, ObservableObject {
 
     func sessionChanged() {
         let userID = model.session.map { $0.userID ?? $0.accessToken }
+        guard userID != activityUserID else { return }
+        revision += 1
         if userID != activityUserID, #available(iOS 16.1, *) {
             (liveActivities as? AgentLiveActivityController)?.dismissAll()
         }
@@ -167,11 +180,11 @@ final class AgentCenter: NSObject, ObservableObject {
     func start(_ intent: AgentIntent, context: String? = nil, continuing parentID: UUID? = nil) async throws -> AgentTask {
         guard let service = currentService() else { throw AgentError.unauthorized }
         let task = try await service.start(intent, context: context)
-        instructions[task.id] = (intent.instruction, context)
+        instructions[task.id] = (intent.instruction, context, false)
         sessionStore.record(taskID: task.id, message: intent.instruction, continuing: parentID, date: task.createdAt)
         tracker.markNotified(task)
         tasks.insert(task, at: 0)
-        if notificationStatus == .notDetermined { await requestNotifications() }
+        Task { @MainActor [weak self] in self?.requestNotifications() }
         return task
     }
 
@@ -185,17 +198,27 @@ final class AgentCenter: NSObject, ObservableObject {
         guard let original = instructions[task.id] else {
             throw NSError(domain: "Gusan.AgentRetry", code: 1, userInfo: [NSLocalizedDescriptionKey: "The original input is no longer available. Start again from Home."])
         }
+        if original.continuation { return try await continueTask(task.id, message: original.instruction) }
         return try await start(AgentIntent(mode: task.mode, instruction: original.instruction), context: original.context, continuing: task.id)
     }
 
     @discardableResult
     func continueTask(_ id: UUID, message: String) async throws -> AgentTask {
         guard let service = currentService() else { throw AgentError.unauthorized }
+        let previous: AgentTask
+        if let loaded = task(id) { previous = loaded }
+        else { previous = try await service.status(id, waitSeconds: 0) }
+        mutating += 1; revision += 1
+        defer { mutating -= 1; revision += 1 }
+        let context = instructions[id]?.context
         let task = try await service.continueTask(id, message: message)
-        sessionStore.record(taskID: task.id, message: message, continuing: id, date: task.createdAt)
+        sessionStore.recordContinuation(previous: previous, task: task, message: message)
+        if task.id == id { instructions[id] = (message, context, true) }
+        else { instructions[task.id] = nil }
         tracker.markNotified(task)
         if let index = tasks.firstIndex(where: { $0.id == task.id }) { tasks[index] = task }
         else { tasks.insert(task, at: 0) }
+        Task { @MainActor [weak self] in self?.requestNotifications() }
         return task
     }
 
@@ -226,12 +249,19 @@ final class AgentCenter: NSObject, ObservableObject {
 
     private func mutate(_ id: UUID, _ operation: (AgentService) async throws -> AgentTask) async {
         guard let service = currentService() else { return }
+        mutating += 1; revision += 1
+        let userID = activityUserID
+        defer { mutating -= 1; revision += 1 }
         do {
             let updated = try await operation(service)
+            guard userID == activityUserID else { return }
             tracker.markNotified(updated)
-            if let index = tasks.firstIndex(where: { $0.id == id }) { tasks[index] = updated } else { tasks.insert(updated, at: 0) }
+            if let index = tasks.firstIndex(where: { $0.id == id }) {
+                if tasks[index] != updated { tasks[index] = updated }
+            } else { tasks.insert(updated, at: 0) }
             UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id.uuidString])
         } catch {
+            guard userID == activityUserID else { return }
             self.error = (error as? AgentError)?.errorDescription ?? error.localizedDescription
             if !active {
                 let content = UNMutableNotificationContent()
@@ -246,12 +276,24 @@ final class AgentCenter: NSObject, ObservableObject {
     // MARK: Notifications
 
     func refreshNotificationStatus() async {
-        notificationStatus = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+        let status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+        if notificationStatus != status { notificationStatus = status }
     }
 
-    func requestNotifications() async {
-        _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
-        await refreshNotificationStatus()
+    func requestNotifications() {
+        guard !requestingNotifications, notificationStatus == .notDetermined else { return }
+        requestingNotifications = true
+        Task.detached { [weak self] in
+            let center = UNUserNotificationCenter.current()
+            _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
+            let status = await center.notificationSettings().authorizationStatus
+            await self?.finishNotificationRequest(status)
+        }
+    }
+
+    private func finishNotificationRequest(_ status: UNAuthorizationStatus) {
+        if notificationStatus != status { notificationStatus = status }
+        requestingNotifications = false
     }
 
     private func deliver(_ events: [AgentTaskTracker.Event]) async {

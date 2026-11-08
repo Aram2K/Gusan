@@ -30,8 +30,9 @@ struct SettingsView: View {
                 LabeledContent("Notifications", value: notificationsLabel)
                 Button(agent.notificationStatus == .denied ? "Open notification settings" : "Allow notifications") {
                     if agent.notificationStatus == .denied { Theme.openSettings() }
-                    else { Task { await agent.requestNotifications() } }
-                }.disabled([.authorized, .provisional, .ephemeral].contains(agent.notificationStatus))
+                    else { agent.requestNotifications() }
+                }.disabled(agent.requestingNotifications || [.authorized, .provisional, .ephemeral].contains(agent.notificationStatus))
+                if agent.requestingNotifications { ProgressView("Requesting permission…") }
             } footer: { Text("Session finished or needs you. On sideloaded builds, notifications arrive when Gusan next checks for updates.") }
             Section {
                 NavigationLink { KeyboardSetupView() } label: { Label("Keyboard setup", systemImage: "keyboard") }
@@ -68,18 +69,6 @@ struct KeyboardSetupView: View {
                 StatusRow(title: "Keyboard added", detail: model.keyboardCheck, confirmed: model.keyboardAdded)
                 StatusRow(title: "Full Access", detail: model.fullAccess == true ? "On at the last check" : "Open the Gusan keyboard to check", confirmed: model.fullAccess == true)
                 Button("Check again") { model.refreshDiagnostics() }
-            }
-            Section("Microphone") {
-                Text("The Gusan app records for the keyboard. The first mic tap may briefly open Gusan on a sideloaded build.")
-                Button(voice.permission == .denied ? "Open microphone settings" : "Set up microphone") {
-                    if voice.permission == .denied { Theme.openSettings() } else { voice.presented = true }
-                }
-            }
-            Section {
-                Button("Show Home checklist") {
-                    UserDefaults.standard.set(false, forKey: "gusan.setup.dismissed")
-                    model.selectedTab = .home
-                }
             }
         }
         .navigationTitle("Keyboard setup").navigationBarTitleDisplayMode(.inline)

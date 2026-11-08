@@ -34,6 +34,9 @@ final class VoiceSession: ObservableObject {
     @Published private(set) var status = VoiceStatus()
     @Published private(set) var error = ""
     @Published private(set) var permission = AVAudioSession.sharedInstance().recordPermission
+    @Published private(set) var requestingMicrophone = false
+    @Published private(set) var starting = false
+    private var microphoneRequest: Task<Bool, Never>?
     @Published var presented = false
     @Published private(set) var keyboardActivation = false
     let store: SessionStore
@@ -50,11 +53,10 @@ final class VoiceSession: ObservableObject {
     private var startup: Task<Void, Never>?
     private var consumed: UUID?
     private var tapped = false
-    private var hostBundleID: String?
     /// The take started by a system trigger (Control Center, Action button, Siri, Live Activity): its result goes to the clipboard.
     private var systemRequestID: UUID?
     let activity = VoiceLiveActivity()
-    var alive: Bool { status.isAlive() }
+    var alive: Bool { machine.phase != .off }
 
     init(store: SessionStore = SessionStore()) {
         self.store = store; auth = AuthClient(store: store)
@@ -78,25 +80,44 @@ final class VoiceSession: ObservableObject {
         if machine.phase == .off { error = ""; status = VoiceStatus() }
         if channel.consumeLaunch(nonce: items?.first { $0.name == "nonce" }?.value) {
             keyboardActivation = true
-            hostBundleID = items?.first { $0.name == "return" }?.value
             start(pendingWithin: 60)
-        } else { hostBundleID = nil }
+        }
     }
-    func refreshPermission() { permission = AVAudioSession.sharedInstance().recordPermission }
+    func closePresentation() { keyboardActivation = false; presented = false }
+    func refreshPermission() {
+        let current = AVAudioSession.sharedInstance().recordPermission
+        if permission != current { permission = current }
+    }
+    @discardableResult
+    func requestMicrophonePermission() -> Task<Bool, Never> {
+        if let microphoneRequest { return microphoneRequest }
+        refreshPermission()
+        guard permission == .undetermined else { return Task { permission == .granted } }
+        requestingMicrophone = true
+        let request = Task { @MainActor in
+            defer { requestingMicrophone = false; microphoneRequest = nil }
+            let allowed = await withCheckedContinuation { continuation in
+                if #available(iOS 17.0, *) { AVAudioApplication.requestRecordPermission { continuation.resume(returning: $0) } }
+                else { AVAudioSession.sharedInstance().requestRecordPermission { continuation.resume(returning: $0) } }
+            }
+            refreshPermission()
+            return allowed
+        }
+        microphoneRequest = request
+        return request
+    }
     func start(pendingWithin: TimeInterval = 15) {
-        if machine.phase != .off { receive(); scheduleReturn(); return }
+        if machine.phase != .off { receive(); return }
         guard startup == nil else { return }
+        starting = true
         error = ""
         status = VoiceStatus()
         startup = Task {
-            defer { startup = nil }
+            defer { startup = nil; starting = false }
             do {
                 if let error = store.sessionState(fullAccess: store.diagnostics().peer?.fullAccess).voiceError { throw error }
                 guard let session = store.read() else { throw VoiceError.notSignedIn }
-                let allowed = await withCheckedContinuation { continuation in
-                    if #available(iOS 17.0, *) { AVAudioApplication.requestRecordPermission { continuation.resume(returning: $0) } }
-                    else { AVAudioSession.sharedInstance().requestRecordPermission { continuation.resume(returning: $0) } }
-                }
+                let allowed = await requestMicrophonePermission().value
                 refreshPermission()
                 try Task.checkCancellation()
                 guard allowed else { throw VoiceError.micPermissionDenied }
@@ -115,8 +136,9 @@ final class VoiceSession: ObservableObject {
                         if self.machine.phase != .off { self.publish() }
                     }
                 }
-                if let command = channel.readCommand(), Date().timeIntervalSince(command.sentAt) <= pendingWithin { receive() }
-                scheduleReturn()
+                if let command = channel.readCommand(), Date().timeIntervalSince(command.sentAt) <= pendingWithin {
+                    receive(acceptPendingStart: pendingWithin > 15)
+                }
             } catch is CancellationError {} catch {
                 self.error = error.localizedDescription
                 let failure = channel.failureStatus(message: self.error)
@@ -150,7 +172,7 @@ final class VoiceSession: ObservableObject {
             if let level = audio.append(output) {
                 Task { @MainActor in
                     guard let self, self.machine.phase == .recording else { return }
-                    self.status.level = level; self.publish()
+                    self.publish(level: level)
                 }
             }
         }
@@ -167,13 +189,16 @@ final class VoiceSession: ObservableObject {
         status = VoiceStatus(phase: .failed, requestID: requestID, heartbeat: .distantPast, message: error)
         try? channel.write(status: status); channel.post(.status)
     }
-    private func receive() {
+    private func receive(acceptPendingStart: Bool = false) {
         if let id = channel.consumeReceipt() {
             if status.phase == .failed && status.requestID == id { error = ""; if machine.phase == .off { status = VoiceStatus() } }
             execute(machine.handle(.acknowledged(id)))
         }
         guard machine.phase != .off else { return }
-        guard let command = channel.consumeCommand(), command.id != consumed else { return }
+        guard var command = channel.consumeCommand(), command.id != consumed else { return }
+        if acceptPendingStart, command.kind == .start, (0...60).contains(Date().timeIntervalSince(command.sentAt)) {
+            command.sentAt = Date()
+        }
         consumed = command.id
         if command.kind == .start { error = ""; systemRequestID = nil; machine.action = command.action ?? settings.defaultAction }
         execute(machine.handle(.command(command, Date())))
@@ -260,14 +285,17 @@ final class VoiceSession: ObservableObject {
         systemRequestID = nil
         execute(machine.handle(.acknowledged(id)))
     }
-    private func publish() {
+    private func publish(level: Float? = nil) {
         if machine.phase != .off && !channel.available { error = channel.unavailableError.localizedDescription; stop(); return }
         let readyUntil = machine.idleTimeout.isFinite ? machine.lastActivity.addingTimeInterval(machine.idleTimeout) : nil
-        status = VoiceStatus(phase: machine.phase, requestID: machine.requestID, sessionEndsAt: machine.phase == .recording ? machine.recordingStarted?.addingTimeInterval(machine.maxRecording) : readyUntil, level: status.level, message: machine.message, result: machine.result, replacesSelection: machine.replacesSelection, resultKind: machine.resultKind)
-        try? channel.write(status: status); channel.post(.status)
+        let updated = VoiceStatus(phase: machine.phase, requestID: machine.requestID, sessionEndsAt: machine.phase == .recording ? machine.recordingStarted?.addingTimeInterval(machine.maxRecording) : readyUntil, level: level ?? status.level, message: machine.message, result: machine.result, replacesSelection: machine.replacesSelection, resultKind: machine.resultKind)
+        var presentation = updated
+        presentation.heartbeat = status.heartbeat
+        if presentation != status { status = presentation }
+        try? channel.write(status: updated); channel.post(.status)
         if !(status.phase == .done && status.requestID == systemRequestID) {
             let heard = [.thinking, .transcribing].contains(status.phase) ? channel.readTranscript().flatMap { $0.requestID == status.requestID ? $0.text : nil } : nil
-            activity.update(status, heard: heard)
+            activity.update(updated, heard: heard)
         }
         if status.phase == .failed, let id = status.requestID, id == systemRequestID { systemRequestID = nil; execute(machine.handle(.acknowledged(id))) }
     }
@@ -304,7 +332,7 @@ final class VoiceSession: ObservableObject {
         if tapped { engine.inputNode.removeTap(onBus: 0); tapped = false }
         _ = audio.finish(); _ = machine.handle(.sessionStopped); systemRequestID = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        status.level = 0; publish()
+        publish(level: 0)
         activity.end()
     }
     private func interrupted(_ notification: Notification) {
@@ -318,22 +346,5 @@ final class VoiceSession: ObservableObject {
                 if machine.phase != .off { try resumeCapture() }
             } catch { audioFailure(error.localizedDescription) }
         }
-    }
-    private func scheduleReturn() {
-        guard settings.autoReturn, let bundleID = hostBundleID, !bundleID.isEmpty else { return }
-        hostBundleID = nil
-        Task { try? await Task.sleep(nanoseconds: 500_000_000); if alive { returnToHost(bundleID: bundleID) } }
-    }
-    func returnToHost(bundleID: String) {
-        #if GUSAN_SIDELOAD
-        guard settings.autoReturn, let cls = NSClassFromString("LSApplicationWorkspace") as? NSObject.Type else { return }
-        let selector = NSSelectorFromString("defaultWorkspace")
-        guard cls.responds(to: selector), let workspace = cls.perform(selector)?.takeUnretainedValue() as? NSObject else { return }
-        let open = NSSelectorFromString("openApplicationWithBundleID:")
-        guard workspace.responds(to: open) else { return }
-        typealias Open = @convention(c) (AnyObject, Selector, NSString) -> Bool
-        let invoke = unsafeBitCast(workspace.method(for: open), to: Open.self)
-        _ = invoke(workspace, open, bundleID as NSString)
-        #endif
     }
 }

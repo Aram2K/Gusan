@@ -16,12 +16,14 @@ final class VaultController: ObservableObject {
     private var account: String?
     private var generation = 0
     private var refreshing = false
+    private var loaded = false
     var isDemo: Bool { ProcessInfo.processInfo.arguments.contains("--gusan-vault-demo") }
 
     func configure(model: AppModel) {
         let key = isDemo ? "vault-demo" : model.session?.userID ?? model.session?.accessToken
         guard key != account || service == nil else { return }
         generation += 1; account = key
+        loaded = false
         logins = []; events = []; pending = []; error = nil
         guard key != nil else { service = nil; return }
         if isDemo { service = StubVaultService.demo(); return }
@@ -37,16 +39,24 @@ final class VaultController: ObservableObject {
 
     func refresh() async {
         guard !refreshing, !busy, let service else { return }
-        refreshing = true; loading = true
+        refreshing = true
+        if !loaded { loading = true }
         let version = generation
-        defer { refreshing = false; loading = false }
+        defer { refreshing = false; if loading { loading = false } }
         do {
             let list = try await service.list()
             let requests = try await service.pending()
             guard version == generation, !Task.isCancelled else { return }
-            logins = list.logins; events = list.events; pending = requests; error = nil
+            if logins != list.logins { logins = list.logins }
+            if events != list.events { events = list.events }
+            if pending != requests { pending = requests }
+            loaded = true
+            if error != nil { error = nil }
         } catch {
-            if version == generation, !Task.isCancelled { self.error = Self.message(error) }
+            if version == generation, !Task.isCancelled {
+                let message = Self.message(error)
+                if self.error != message { self.error = message }
+            }
         }
     }
 
