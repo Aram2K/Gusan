@@ -720,7 +720,6 @@ def test_flat_and_legacy_encoded_plans_are_accepted(run, answer):
 
 
 @pytest.mark.parametrize("steps", ["1. Recipient Alice\n2. Amount $10\n3. Click Send",
-                                  "1. Recipient Alice 2. Amount $10 3. Click Send",
                                   "Recipient Alice\nAmount $10\nClick Send"])
 def test_string_steps_are_normalized(run, steps):
     out, = run({"row": {"mode": "do"}, "change": {
@@ -819,3 +818,14 @@ def test_structured_plan_uses_markdown_url_before_instruction(run, instruction):
                 "change": answered(answer)})
     assert out["row"]["status"] == "awaiting_confirmation"
     assert out["row"]["confirmation"] == PLAN
+
+
+@pytest.mark.parametrize("prose", [False, True])
+def test_numbered_option_is_preserved_within_a_step(run, prose):
+    steps = "1. Open page\n2. Choose 2. Express shipping\n3. Submit"
+    answer = "Plan:\n" + steps if prose else {**PLAN, "steps": steps}
+    out, = run({"row": {"mode": "do"},
+        "run": {"plan": {"instruction": "Submit https://example.com/send"}},
+        "change": answered(answer)})
+    assert out["row"]["status"] == "awaiting_confirmation"
+    assert out["row"]["confirmation"]["steps"] == ["Open page", "Choose 2. Express shipping", "Submit"]

@@ -332,7 +332,7 @@ function decodePlanJSON(value: unknown): unknown {
 function planSteps(value: unknown) {
   const decoded = decodePlanJSON(value);
   if (typeof decoded !== "string") return decoded;
-  return decoded.replace(/\s+(?=\d+[.)]\s+)/g, "\n").split(/\r?\n/)
+  return decoded.split(/\r?\n/)
     .map((line) => line.trim().replace(/^(?:[-*•]|\d+[.)])\s+/, ""))
     .filter(Boolean);
 }
@@ -378,8 +378,7 @@ function preparePlan(
       if (plan) return plan;
     }
     // Only an explicit step list can become a prose-derived approval plan.
-    const lines = text.replace(/\s+(?=\d+[.)]\s+)/g, "\n");
-    const list = lines.match(
+    const list = text.match(
       /(?:^|\n)[ \t]*(?:#{1,6}[ \t]+)?(?:proposed[ \t]+)?(?:plan|steps)[ \t]*:?[ \t]*\r?\n((?:[ \t]*(?:[-*•]|\d+[.)])[ \t]+[^\r\n]+(?:\r?\n|$))+)/i,
     )?.[1] ?? "";
     const steps = [
