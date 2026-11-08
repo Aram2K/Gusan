@@ -1214,6 +1214,17 @@ def test_source_links_exclude_search_and_non_http_urls(run, href):
     assert out["row"]["result"]["links"] == []
 
 
+def test_source_links_keep_item_query_ids_and_dedupe_after_removing_sensitive_params(run):
+    private = "https://shop.example/product?id=42&variant=blue&utm_source=ad&fbclid=x&gclid=y&" \
+        "access_token=secret&session_id=s&auth=a&api_key=k&sig=z&signature=z&code=c&password=p&email=e#fragment"
+    out, = run({"change": {**answered({"markdown": "Found product"}), "new_events": [
+        source_observation(private), source_observation("https://shop.example/product?variant=blue&id=42&utm_medium=social")]}})
+    assert out["row"]["result"]["links"][0]["url"] == "https://shop.example/product?id=42&variant=blue"
+    visits = out["run"]["plan"]["source_visits"]
+    assert len(visits) == 1 and visits[0]["count"] == 2
+    assert "secret" not in json.dumps(visits) and "fragment" not in json.dumps(visits)
+
+
 def test_source_links_include_navigation_tool_urls_and_preserve_authored_links(run):
     event = {"type": "AgentEvent", "data": {"kind": "policy_event", "tool_reqs": [
         {"tool_name": "go_to_web", "args": {"url": "https://apple.com/mac/?private=yes"}},

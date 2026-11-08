@@ -864,7 +864,15 @@ function sourceURL(value: unknown) {
     (/(^|\.)(bing\.com|search\.yahoo\.com|search\.brave\.com|ecosia\.org|yandex\.[a-z.]+)$/.test(host) && path.startsWith("/search")) ||
     (/(^|\.)duckduckgo\.com$/.test(host) && ["/", "/html", "/html/", "/lite", "/lite/"].includes(path)) ||
     (/(^|\.)baidu\.com$/.test(host) && path === "/s")) return null;
-  return clean;
+  const params = new URL(value).searchParams;
+  for (const key of [...params.keys()]) {
+    if (/^utm_|^(?:fbclid|gclid)$|token|session|auth|key|sig|signature|code|password|email/i.test(key)) {
+      params.delete(key);
+    }
+  }
+  params.sort();
+  const query = params.toString();
+  return clean + (query ? `?${query}` : "");
 }
 function collectSources(plan: Obj, events: Obj[], fromIndex: number) {
   const previous = plan.continuation_previous_plan;
