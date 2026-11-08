@@ -1,6 +1,6 @@
 import Foundation
 
-public struct BusyBlock: Codable, Equatable {
+public struct BusyBlock: Codable, Equatable, Sendable {
     public var start: Date
     public var end: Date
     public var isAllDay: Bool
@@ -10,7 +10,7 @@ public struct BusyBlock: Codable, Equatable {
     }
 }
 
-public struct CalendarSnapshot: Codable, Equatable {
+public struct CalendarSnapshot: Codable, Equatable, Sendable {
     public var generatedAt: Date
     public var windowStart: Date
     public var windowEnd: Date
@@ -35,7 +35,12 @@ public final class CalendarSnapshotStore {
         set {
             let saved = snapshot
             defaults?.set(newValue, forKey: "calendarIncludeTitles")
-            if !newValue, let saved { write(saved) }
+            if !newValue {
+                if let saved { write(saved) }
+                for source in ["iphone", "google"] {
+                    if let value = sourceSnapshot(source) { save(value, key: sourceKey(source)) }
+                }
+            }
         }
     }
     public var calendarIPhoneEnabled: Bool {
@@ -47,8 +52,12 @@ public final class CalendarSnapshotStore {
         set { setConnection("calendarGoogleEnabled", enabled: newValue) }
     }
     private func setConnection(_ key: String, enabled: Bool) {
-        if defaults?.bool(forKey: key) != enabled { defaults?.removeObject(forKey: self.key) }
+        if defaults?.bool(forKey: key) != enabled {
+            defaults?.removeObject(forKey: self.key)
+            if !enabled { defaults?.removeObject(forKey: sourceKey(key == "calendarIPhoneEnabled" ? "iphone" : "google")) }
+        }
         defaults?.set(enabled, forKey: key)
+        rebuild()
     }
     public var snapshot: CalendarSnapshot? {
         guard let data = defaults?.data(forKey: key),
@@ -60,12 +69,38 @@ public final class CalendarSnapshotStore {
         return snapshot
     }
     public func write(_ snapshot: CalendarSnapshot) {
+        save(snapshot, key: key)
+    }
+    private func save(_ snapshot: CalendarSnapshot, key: String) {
         var snapshot = snapshot
         if !calendarIncludeTitles { snapshot.blocks = snapshot.blocks.map { BusyBlock(start: $0.start, end: $0.end, isAllDay: $0.isAllDay) } }
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         defaults?.set(data, forKey: key)
     }
+    private func sourceKey(_ source: String) -> String { "gusan.calendar.source." + source }
+    private func sourceSnapshot(_ source: String) -> CalendarSnapshot? {
+        guard let data = defaults?.data(forKey: sourceKey(source)) else { return nil }
+        return try? JSONDecoder().decode(CalendarSnapshot.self, from: data)
+    }
+    public func replaceSource(_ source: String, snapshot: CalendarSnapshot?) {
+        guard ["iphone", "google"].contains(source) else { return }
+        defaults?.removeObject(forKey: key)
+        if let snapshot, snapshot.sources == [source] { save(snapshot, key: sourceKey(source)) }
+        else { defaults?.removeObject(forKey: sourceKey(source)) }
+        rebuild()
+    }
+    private func rebuild() {
+        let snapshots = ["iphone", "google"].compactMap { source -> CalendarSnapshot? in
+            guard source == "iphone" ? calendarIPhoneEnabled : calendarGoogleEnabled else { return nil }
+            return sourceSnapshot(source)
+        }
+        guard let first = snapshots.first else { return }
+        let combined = CalendarSnapshot(generatedAt: snapshots.map(\.generatedAt).min()!, windowStart: snapshots.map(\.windowStart).max()!,
+                                        windowEnd: snapshots.map(\.windowEnd).min()!, timeZoneID: first.timeZoneID,
+                                        sources: snapshots.flatMap(\.sources), blocks: snapshots.flatMap(\.blocks))
+        write(combined)
+    }
     public func clear() {
-        for key in [key, "calendarIncludeTitles", "calendarIPhoneEnabled", "calendarGoogleEnabled"] { defaults?.removeObject(forKey: key) }
+        for key in [key, sourceKey("iphone"), sourceKey("google"), "calendarIncludeTitles", "calendarIPhoneEnabled", "calendarGoogleEnabled"] { defaults?.removeObject(forKey: key) }
     }
 }
