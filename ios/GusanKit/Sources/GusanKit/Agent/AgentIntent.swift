@@ -3,11 +3,22 @@ import Foundation
 /// Decides whether a typed or spoken request is an agent task (something to go and do on the web)
 /// rather than a text edit, and which mode it needs. Pure and deterministic so the keyboard can
 /// judge instantly before any network call.
+/// Who runs an Agent task: H Company's computer-use agent (default) or a Devin session for coding/repo work.
+public enum AgentProvider: String, Codable, Equatable {
+    case h, devin
+}
+
 public struct AgentIntent: Equatable {
     public let mode: AgentMode
     public let instruction: String
+    public let provider: AgentProvider
 
-    public init(mode: AgentMode, instruction: String) { self.mode = mode; self.instruction = instruction }
+    public init(mode: AgentMode, instruction: String, provider: AgentProvider = .h) {
+        self.mode = mode; self.instruction = instruction; self.provider = provider
+    }
+
+    /// Addressing Devin by name routes the whole request to Devin, whatever the verb.
+    static let devinPrefixes = ["hey devin, ", "hey devin ", "ask devin to ", "ask devin ", "tell devin to ", "tell devin ", "devin, ", "devin: ", "devin "]
 
     static let doVerbs = ["book", "order", "buy", "purchase", "reserve", "schedule", "sign up", "sign me up", "register", "subscribe", "unsubscribe", "cancel my", "send", "submit", "post", "apply for", "apply to", "pay", "renew", "return", "rsvp", "add to cart", "checkout", "check out", "fill in", "fill out", "file", "transfer", "donate", "enroll", "enrol"]
     static let researchVerbs = ["find", "research", "look up", "lookup", "search", "search for", "compare", "check", "investigate", "list", "get me", "tell me", "what is", "what's", "what are", "who is", "who's", "when is", "when does", "where is", "where can", "how much", "how many", "how do", "how does", "which", "is there", "are there", "show me", "give me", "recommend", "suggest", "summarize the latest", "news about", "price of", "best", "cheapest", "nearest", "reviews of", "reviews for"]
@@ -21,6 +32,13 @@ public struct AgentIntent: Equatable {
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard text.count >= 6, text.count <= 4000 else { return nil }
         var lowered = text.lowercased()
+        for prefix in researchPrefixes where lowered.hasPrefix(prefix) && devinPrefixes.contains(where: { lowered.dropFirst(prefix.count).hasPrefix($0) }) {
+            text = String(text.dropFirst(prefix.count)); lowered = text.lowercased()
+        }
+        if let prefix = devinPrefixes.first(where: { lowered.hasPrefix($0) }) {
+            let task = String(text.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            return task.count >= 3 ? AgentIntent(mode: .research, instruction: task, provider: .devin) : nil
+        }
         for prefix in researchPrefixes where lowered.hasPrefix(prefix) {
             text = String(text.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
             lowered = text.lowercased()

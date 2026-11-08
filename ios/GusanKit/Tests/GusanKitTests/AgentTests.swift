@@ -2,6 +2,18 @@ import XCTest
 @testable import GusanKit
 
 final class AgentTests: XCTestCase {
+    func testAddressingDevinRoutesToDevinProvider() {
+        for text in ["Devin, fix the typo in my README", "hey Devin add a dark mode toggle to settings", "please ask Devin to rewrite the login page in SwiftUI"] {
+            let intent = AgentIntent.detect(text)
+            XCTAssertEqual(intent?.provider, .devin, text)
+            XCTAssertEqual(intent?.mode, .research, text)
+            XCTAssertFalse(intent?.instruction.lowercased().contains("devin") ?? true, text)
+        }
+        XCTAssertNil(AgentIntent.detect("Devin, hi"))
+        XCTAssertEqual(AgentIntent.detect("find the cheapest flights to Rome")?.provider, .h)
+        XCTAssertEqual(AgentIntent(mode: .do, instruction: "book it").provider, .h)
+    }
+
     func testElapsedFreezesAtFinishedThenUpdatedTimestamp() {
         let start = Date(timeIntervalSince1970: 100)
         for status in [AgentStatus.completed, .failed, .cancelled, .timedOut] {

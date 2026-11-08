@@ -54,10 +54,10 @@ public final class AgentClient: AgentService {
         return request
     }
 
-    public static func listRequest(limit: Int, token: String) -> URLRequest {
+    public static func listRequest(limit: Int, token: String, includeProvider: Bool = true) -> URLRequest {
         var components = URLComponents(url: tableURL, resolvingAgainstBaseURL: false)!
         components.queryItems = [
-            URLQueryItem(name: "select", value: "id,mode,status,title,steps,confirmation,result,outcome,error_code,created_at,updated_at,finished_at,deadline_at,seen_at"),
+            URLQueryItem(name: "select", value: "id,mode,\(includeProvider ? "provider," : "")status,title,steps,confirmation,result,outcome,error_code,created_at,updated_at,finished_at,deadline_at,seen_at"),
             URLQueryItem(name: "order", value: "created_at.desc"),
             URLQueryItem(name: "limit", value: String(max(1, min(limit, 100)))),
         ]
@@ -72,6 +72,7 @@ public final class AgentClient: AgentService {
 
     public func start(_ intent: AgentIntent, context: String?) async throws -> AgentTask {
         var body: [String: Any] = ["action": "start", "instruction": intent.instruction, "mode": intent.mode.rawValue]
+        if intent.provider == .devin { body["provider"] = AgentProvider.devin.rawValue }
         let calendar = CalendarContext.schedulingSummary(texts: [intent.instruction], store: calendarStore)
         if let context = CalendarContext.prepending(calendar, to: context?.trimmingCharacters(in: .whitespacesAndNewlines)) {
             body["context"] = context
@@ -101,7 +102,7 @@ public final class AgentClient: AgentService {
         } catch ActionFailure.unsupported {
             let previous = try await status(id, waitSeconds: 0)
             let summary = "Earlier in this session:\n" + previous.title + "\n" + (previous.result?.plainText ?? "")
-            return try await start(AgentIntent(mode: previous.mode, instruction: message), context: String(summary.prefix(18_000)))
+            return try await start(AgentIntent(mode: previous.mode, instruction: message, provider: previous.provider), context: String(summary.prefix(18_000)))
         }
     }
 
@@ -111,8 +112,12 @@ public final class AgentClient: AgentService {
     }
 
     public func list(limit: Int = 50) async throws -> [AgentTask] {
-        let request = Self.listRequest(limit: limit, token: try await token())
-        let (data, response) = try await transport.data(for: request)
+        let token = try await token()
+        var (data, response) = try await transport.data(for: Self.listRequest(limit: limit, token: token))
+        // A backend without the provider column (migration not yet applied) rejects the select with 400.
+        if (response as? HTTPURLResponse)?.statusCode == 400 {
+            (data, response) = try await transport.data(for: Self.listRequest(limit: limit, token: token, includeProvider: false))
+        }
         try Self.check(data, response)
         return try AgentTask.dateDecoder.decode([AgentTask].self, from: data)
     }
@@ -261,7 +266,7 @@ public final class StubAgentService: AgentService {
         let previous = try locked { () throws -> AgentTask in
             guard let task = tasks[id] else { throw AgentError.notFound }; return task
         }
-        let next = try await start(AgentIntent(mode: previous.mode, instruction: message), context: previous.result?.plainText)
+        let next = try await start(AgentIntent(mode: previous.mode, instruction: message, provider: previous.provider), context: previous.result?.plainText)
         locked { parentTaskIDs[next.id] = id }
         return next
     }

@@ -46,7 +46,7 @@ struct AgentSessionView: View {
             }
         }
         .background(Theme.surface)
-        .navigationTitle(tasks.first?.title ?? "Agent session")
+        .navigationTitle((tasks.first?.provider == .devin ? "Devin · " : "") + (tasks.first?.title ?? "Agent session"))
         .navigationBarTitleDisplayMode(.inline)
         .tint(Theme.agent)
         .safeAreaInset(edge: .bottom) { composer }
