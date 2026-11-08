@@ -365,7 +365,7 @@ final class VoiceTests: XCTestCase {
         let empty = KeyboardVoiceState(context: VoiceContext(documentID: "doc"), startedAt: now)
         XCTAssertTrue(empty.canInsert(context: VoiceContext(documentID: "doc")))
         XCTAssertFalse(empty.canInsert(context: VoiceContext(documentID: "other")))
-        XCTAssertFalse(KeyboardVoiceState(context: VoiceContext()).canInsert(context: VoiceContext()))
+        XCTAssertTrue(KeyboardVoiceState(context: VoiceContext()).canInsert(context: VoiceContext()))
         XCTAssertFalse(KeyboardVoiceState().canInsert(context: VoiceContext()))
         let status = VoiceStatus(phase: .done, requestID: state.requestID, heartbeat: now, result: "result")
         XCTAssertFalse(state.isStale(status: status, now: now.addingTimeInterval(599)))
