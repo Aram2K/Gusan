@@ -19,7 +19,9 @@ public enum VoiceAction: Hashable, Codable {
 public final class VoiceSettings {
     private let defaults: UserDefaults
     public static let languages: [(code: String, name: String)] = [("auto", "Detect automatically"), ("en", "English"), ("hy", "Armenian"), ("ru", "Russian"), ("fr", "French"), ("de", "German"), ("es", "Spanish"), ("it", "Italian"), ("pt", "Portuguese"), ("ar", "Arabic")]
-    public static let idleOptions = [1, 2, 5, 15, 30, 60]
+    /// How long the app stays ready (microphone warm, orange dot) after the last take; 0 = until the user stops it.
+    public static let idleOptions = [15, 60, 0]
+    public static let defaultIdleMinutes = 15
     public init(group: String?) { defaults = group.flatMap(UserDefaults.init(suiteName:)) ?? .standard }
     public var language: String {
         get { let code = defaults.string(forKey: "voiceLanguage") ?? "auto"; return Self.languages.contains { $0.code == code } ? code : "auto" }
@@ -30,9 +32,11 @@ public final class VoiceSettings {
         set { defaults.set(try? JSONEncoder().encode(newValue), forKey: "voiceDefaultAction") }
     }
     public var idleMinutes: Int {
-        get { let value = defaults.integer(forKey: "voiceIdleMinutes"); return Self.idleOptions.contains(value) ? value : 2 }
+        get { let value = defaults.integer(forKey: "voiceIdleMinutes"); return defaults.object(forKey: "voiceIdleMinutes") != nil && Self.idleOptions.contains(value) ? value : Self.defaultIdleMinutes }
         set { defaults.set(newValue, forKey: "voiceIdleMinutes") }
     }
+    /// The ready window in seconds; infinite for "until I stop".
+    public var idleTimeout: TimeInterval { idleMinutes == 0 ? .infinity : TimeInterval(idleMinutes * 60) }
     public var autoReturn: Bool {
         get { defaults.object(forKey: "voiceAutoReturn") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "voiceAutoReturn") }
