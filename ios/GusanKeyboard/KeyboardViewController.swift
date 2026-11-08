@@ -95,7 +95,8 @@ final class KeyboardViewController: UIInputViewController {
         let title = selected.isEmpty ? "Near cursor" : "Selected · \(selected.split(whereSeparator: { $0.isWhitespace }).count) words"
         let active = working || [.recording, .transcribing, .thinking].contains(voice.phase)
         let hint = screenHint && !active && voice.message == nil
-        strip.update(agent: settings.keyboardMode == .agent, screenOn: settings.keyboardScreenEnabled, live: screen.live, context: title, phase: working ? .thinking : voice.phase, level: voice.level, message: working ? voice.message ?? "Working…" : voice.message ?? agentMessage ?? (hint ? "Gusan Screen is off" : nil), action: voice.canUndo ? "Undo" : hint ? "Open" : voice.actionTitle, theme: theme)
+        let actionTitle = voice.canUndo ? "Undo" : hint ? "Open" : voice.actionTitle == "Undo" ? nil : voice.actionTitle
+        strip.update(agent: settings.keyboardMode == .agent, screenOn: settings.keyboardScreenEnabled, live: screen.live, context: title, phase: working ? .thinking : voice.phase, level: voice.level, message: working ? voice.message ?? "Working…" : voice.message ?? agentMessage ?? (hint ? "Gusan Screen is off" : nil), action: actionTitle, theme: theme)
     }
     @objc private func toggleMode() {
         guard !working, ![.recording, .transcribing, .thinking].contains(voice.phase) else { return }

@@ -65,7 +65,10 @@ final class VoiceKeyController: NSObject {
     private(set) var message: String?
     private(set) var actionTitle: String?
     private var actionURL: URL?
-    var canUndo: Bool { Date() < undoExpires && undoRecord != nil }
+    var canUndo: Bool {
+        guard Date() < undoExpires, let current = currentContext() else { return false }
+        return undoRecord?.step(context: current) != nil
+    }
     init(host: UIInputViewController, store: SessionStore) {
         self.host = host; self.store = store; channel = store.makeVoiceChannel()
         super.init()
@@ -149,7 +152,10 @@ final class VoiceKeyController: NSObject {
     func show(_ text: String, action: String? = nil, url: String? = nil) {
         message = text; actionTitle = action; actionURL = url.flatMap(URL.init(string:)); onChange?()
     }
-    func performAction() { if canUndo { undo() } else if let actionURL { open(actionURL) } else { toggle() } }
+    func performAction() {
+        if actionTitle == "Undo" { if canUndo { undo() }; return }
+        if let actionURL { open(actionURL) }
+    }
     private func refresh() {
         documentDidChange()
         if Date() >= undoExpires, inserted != nil { inserted = nil; undoRecord = nil; message = nil }
