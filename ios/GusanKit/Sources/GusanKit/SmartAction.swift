@@ -131,7 +131,11 @@ extension URLSession: HTTPTransport {
 public struct SmartActionClient {
     public static let url = URL(string: "https://hftcelxzfoubheqeoool.supabase.co/functions/v1/smart-action")!
     public let transport: HTTPTransport
-    public init(transport: HTTPTransport = URLSession.shared) { self.transport = transport }
+    let calendarStore: CalendarSnapshotStore
+    public init(transport: HTTPTransport = URLSession.shared, calendarStore: CalendarSnapshotStore? = nil) {
+        self.transport = transport
+        self.calendarStore = calendarStore ?? CalendarSnapshotStore(group: AppGroupResolver.resolve().chosen)
+    }
     public func request(text: String, mode: SmartActionMode, accessToken: String, target: String = "en") throws -> URLRequest {
         try request(text: text, action: .mode(mode), accessToken: accessToken, target: target)
     }
@@ -141,8 +145,15 @@ public struct SmartActionClient {
         request.httpMethod = "POST"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        struct Body: Encodable { let messages: [ChatMessage]; let max_tokens: Int; let mode: String }
-        request.httpBody = try JSONEncoder().encode(Body(messages: messages, max_tokens: action.maxTokens, mode: action.wireMode.rawValue))
+        var texts = [text]
+        switch action {
+        case .custom(let instruction): texts.append(instruction)
+        case .voiceSmart(let transcript): texts.append(transcript)
+        default: break
+        }
+        let calendar = CalendarContext.schedulingSummary(texts: texts, store: calendarStore)
+        struct Body: Encodable { let messages: [ChatMessage]; let max_tokens: Int; let mode: String; let calendar: String? }
+        request.httpBody = try JSONEncoder().encode(Body(messages: messages, max_tokens: action.maxTokens, mode: action.wireMode.rawValue, calendar: calendar))
         return request
     }
     public func run(text: String, mode: SmartActionMode, accessToken: String, target: String = "en") async throws -> String {
