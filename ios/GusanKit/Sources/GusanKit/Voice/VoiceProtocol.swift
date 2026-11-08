@@ -118,7 +118,7 @@ public struct VoiceChannel {
     public var diagnosticsDescription: String {
         switch route() {
         case .file: return "App Group"
-        case .pasteboard: return available ? "Pasteboard fallback" : "Unavailable (pasteboard read/write denied)"
+        case .pasteboard: return available ? "Shared \(pasteboard?.name ?? "pasteboard")" : "Unavailable (shared storage read/write denied)"
         case .disabled: return "Unavailable (pasteboard fallback is off)"
         case .fullAccessRequired: return "Unavailable (Full Access is off)"
         case .unavailable: return "Unavailable (no shared voice storage)"
