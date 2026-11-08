@@ -6560,15 +6560,9 @@ class AppController(QObject):
                 self._mouse_listener = listener
                 logger.info("Registered mouse hotkey: %s", hotkey)
             elif sys.platform == "win32":
-                import keyboard as kbd_lib
-                # `keyboard` accepts the same "alt+r" / "ctrl+shift+space"
-                # syntax we already produce in settings.py.
-                kbd_lib.add_hotkey(
-                    hotkey,
-                    lambda: self.sig_hotkey.emit(),
-                    suppress=False,
-                    trigger_on_release=False,
-                )
+                # Registered with Windows (the app in front never sees the keys), else the hook;
+                # both take the "alt+r" / "ctrl+shift+space" syntax settings.py produces.
+                AppController._add_win_hotkey(self, hotkey, lambda: self.sig_hotkey.emit())
                 self._registered_kbd_hotkey = hotkey
                 logger.info("Registered keyboard hotkey: %s", hotkey)
             else:
@@ -6599,8 +6593,7 @@ class AppController(QObject):
         tears down the other."""
         if self._registered_assist_hotkey is not None:
             try:
-                import keyboard as kbd_lib
-                kbd_lib.remove_hotkey(self._registered_assist_hotkey)
+                AppController._remove_win_hotkey(self, self._registered_assist_hotkey)
             except Exception:
                 pass
             self._registered_assist_hotkey = None
@@ -6618,9 +6611,7 @@ class AppController(QObject):
             return False
         try:
             if sys.platform == "win32":
-                import keyboard as kbd_lib
-                kbd_lib.add_hotkey(hotkey, lambda: self.sig_assist_hotkey.emit(),
-                                   suppress=False, trigger_on_release=False)
+                AppController._add_win_hotkey(self, hotkey, lambda: self.sig_assist_hotkey.emit())
                 self._registered_assist_hotkey = hotkey
             else:
                 from pynput import keyboard as pynput_keyboard
@@ -6641,8 +6632,7 @@ class AppController(QObject):
         hk = getattr(self, "_registered_smart_hotkey", None)
         if hk is not None:
             try:
-                import keyboard as kbd_lib
-                kbd_lib.remove_hotkey(hk)
+                AppController._remove_win_hotkey(self, hk)
             except Exception:
                 pass
             self._registered_smart_hotkey = None
@@ -6669,9 +6659,7 @@ class AppController(QObject):
             return False
         try:
             if sys.platform == "win32":
-                import keyboard as kbd_lib
-                kbd_lib.add_hotkey(hotkey, lambda: self.sig_smart_hotkey.emit(),
-                                   suppress=False, trigger_on_release=False)
+                AppController._add_win_hotkey(self, hotkey, lambda: self.sig_smart_hotkey.emit())
                 self._registered_smart_hotkey = hotkey
             else:
                 from pynput import keyboard as pynput_keyboard
@@ -6777,8 +6765,7 @@ class AppController(QObject):
     def _unregister_kbd_hotkey(self):
         if self._registered_kbd_hotkey is not None:
             try:
-                import keyboard as kbd_lib
-                kbd_lib.remove_hotkey(self._registered_kbd_hotkey)
+                AppController._remove_win_hotkey(self, self._registered_kbd_hotkey)
             except Exception:
                 pass
             self._registered_kbd_hotkey = None
@@ -6857,6 +6844,32 @@ class AppController(QObject):
             self._start()
         else:
             threading.Thread(target=self._stop, daemon=True).start()
+
+    def _add_win_hotkey(self, hotkey, emit):
+        """Windows: a global shortcut registered with the system (win_hotkeys): Windows takes the combination, so the
+        app in front never sees it - with the old hook (suppress=False) Alt+S also typed an "s" in a text box (the
+        founder, 2026-11-08). A combination another program already has keeps the hook. True when Windows took it."""
+        import win_hotkeys
+        hid = win_hotkeys.register(hotkey, emit)
+        if hid is not None:
+            ids = getattr(self, "_win_hotkey_ids", None)
+            if ids is None:
+                ids = self._win_hotkey_ids = {}
+            ids[hotkey] = hid
+            return True
+        import keyboard as kbd_lib
+        kbd_lib.add_hotkey(hotkey, emit, suppress=False, trigger_on_release=False)
+        return False
+
+    def _remove_win_hotkey(self, hotkey):
+        """Undo _add_win_hotkey for ``hotkey`` (Windows' registration, or the hook)."""
+        hid = (getattr(self, "_win_hotkey_ids", None) or {}).pop(hotkey, None)
+        if hid is not None:
+            import win_hotkeys
+            win_hotkeys.unregister(hid)
+            return
+        import keyboard as kbd_lib
+        kbd_lib.remove_hotkey(hotkey)
 
     def _stop_without_sound(self):
         """GUI thread: the microphone sent no sound (AudioRecorder._watch_for_sound) - stop the take the way the

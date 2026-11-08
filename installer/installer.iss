@@ -237,6 +237,15 @@ function FindWindowByTitle(ClassName: LongWord; WindowName: String): LongWord;
   external 'FindWindowW@user32.dll stdcall';
 function PostMessageW(hWnd, Msg, wParam, lParam: LongWord): BOOL;
   external 'PostMessageW@user32.dll stdcall';
+// The Gusan icon on the taskbar while an update installs: the in-app update runs Setup /SILENT, and Inno's progress
+// window then shows Inno's own default icon on its taskbar button (the founder, 2026-11-08). Its window and the
+// window that owns the taskbar button are given the icon of this Setup file (SetupIconFile, assets\icon.ico).
+function ExtractIconW(hInst: LongWord; FileName: String; IconIndex: LongWord): LongWord;
+  external 'ExtractIconW@shell32.dll stdcall';
+function SendMessageW(hWnd, Msg, wParam, lParam: LongWord): LongWord;
+  external 'SendMessageW@user32.dll stdcall';
+function GetWindowLongW(hWnd: LongWord; Index: Integer): LongWord;
+  external 'GetWindowLongW@user32.dll stdcall';
 
 const
   // The window titles of the video player (installer\player\GusanSlides.cs).
@@ -534,8 +543,26 @@ begin
   end;
 end;
 
+procedure SetGusanIcon(Wnd: LongWord);
+var
+  Icon: LongWord;
+begin
+  if Wnd = 0 then
+    Exit;
+  Icon := ExtractIconW(0, ExpandConstant('{srcexe}'), 0);
+  if Icon <= 1 then
+    Exit;                                     // 0: no icon in the file, 1: not a program file
+  SendMessageW(Wnd, $0080, 1, Icon);          // WM_SETICON, ICON_BIG (the taskbar, Alt+Tab)
+  SendMessageW(Wnd, $0080, 0, Icon);          // WM_SETICON, ICON_SMALL (the title bar)
+end;
+
 procedure InitializeWizard;
 begin
+  // The taskbar button belongs to the window that owns the wizard (GWL_HWNDPARENT = -8): both get the Gusan icon,
+  // in a silent update too (InitializeWizard runs then as well).
+  SetGusanIcon(WizardForm.Handle);
+  SetGusanIcon(GetWindowLongW(WizardForm.Handle, -8));
+  SetGusanIcon(MainForm.Handle);
   AnalyticsPage := CreateInputOptionPage(
     wpSelectTasks,
     'Privacy',

@@ -578,3 +578,20 @@ class TestNamesExistingInstallsDependOn(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestUpdateTaskbarIcon(unittest.TestCase):
+    """A silent update (the in-app update runs Setup /SILENT) showed Inno's default icon on the taskbar (the founder,
+    2026-11-08): the wizard window and the window that owns the taskbar button get the Gusan icon of the Setup file."""
+
+    def test_the_wizard_and_its_owner_get_the_setup_files_icon(self):
+        from pathlib import Path
+        iss = (Path(__file__).resolve().parent.parent / "installer" / "installer.iss").read_text(encoding="utf-8")
+        self.assertIn(r"SetupIconFile=..\assets\icon.ico", iss)
+        self.assertIn("external 'ExtractIconW@shell32.dll stdcall';", iss)
+        self.assertIn("Icon := ExtractIconW(0, ExpandConstant('{srcexe}'), 0);", iss)
+        self.assertIn("SendMessageW(Wnd, $0080, 1, Icon);", iss)
+        init = iss.split("procedure InitializeWizard;", 1)[1].split("end;", 1)[0]
+        for line in ("SetGusanIcon(WizardForm.Handle);", "SetGusanIcon(GetWindowLongW(WizardForm.Handle, -8));",
+                     "SetGusanIcon(MainForm.Handle);"):
+            self.assertIn(line, init)
