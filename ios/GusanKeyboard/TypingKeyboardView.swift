@@ -45,6 +45,7 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
     private var renderedReturnType: UIReturnKeyType?
     private var renderedReturnTitle: String?
     private var active: [UITouch: Int] = [:]
+    private var committed = Set<UITouch>()
     private var previews: [UITouch: UILabel] = [:]
     private var deleteTimer: Timer?
     private var deleteStarted: TimeInterval = 0
@@ -60,13 +61,14 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func updateContext(before: String?, capitalization: UITextAutocapitalizationType?, returnType: UIReturnKeyType?, appearance: UIKeyboardAppearance?, needsGlobe: Bool) {
+        let oldShift = shift, oldReturn = self.returnType, oldGlobe = showGlobe, oldDark = theme.dark
         self.before = before ?? ""
         self.capitalization = capitalization ?? .sentences
         self.returnType = returnType ?? .default
         showGlobe = needsGlobe
         theme = KeyboardTheme(appearance: appearance, traits: traitCollection)
         updateAutomaticShift()
-        setNeedsLayout()
+        if oldShift != shift || oldReturn != self.returnType || oldGlobe != showGlobe || oldDark != theme.dark { setNeedsLayout() }
     }
     private func updateAutomaticShift() {
         guard shift != .locked, !manualShift else { return }
@@ -84,6 +86,7 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
         shift = shouldCapitalize ? .once : .off
     }
     func applyTheme(_ value: KeyboardTheme) {
+        guard theme.dark != value.dark else { return }
         theme = value
         setNeedsLayout()
     }
@@ -140,7 +143,7 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
                         guard let self, self.inputEnabled, self.slots.indices.contains(slotIndex) else { return }
                         let current = self.slots[slotIndex].key
                         if self.keyClicks { UIDevice.current.playInputClick() }
-                        if current == .delete { self.onDelete?() } else { self.press(current) }
+                        if current == .delete { self.deleteOnce() } else { self.press(current) }
                     }
                     caps.append(cap); addSubview(cap)
                 }
@@ -236,21 +239,26 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
     }
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard inputEnabled else { return }
-        for touch in touches {
+        for touch in touches.sorted(by: { $0.timestamp < $1.timestamp }) {
             guard let index = nearest(touch.location(in: self)) else { continue }
             active[touch] = index
             if keyClicks { UIDevice.current.playInputClick() }
-            if slots[index].key == .delete { onDelete?(); startDeleteRepeat() }
             showPreview(touch, index: index)
+            switch slots[index].key {
+            case .text, .space:
+                committed.insert(touch); press(slots[index].key)
+            case .delete:
+                committed.insert(touch); deleteOnce(); startDeleteRepeat()
+            default: break
+            }
         }
         updateHighlights()
     }
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        for touch in touches where active[touch] != nil {
+        for touch in touches where active[touch] != nil && !committed.contains(touch) {
             guard let index = nearest(touch.location(in: self)), active[touch] != index else { continue }
             if let previous = active[touch], slots[previous].key == .delete { deleteTimer?.invalidate() }
             active[touch] = index
-            if slots[index].key == .delete { onDelete?(); startDeleteRepeat() }
             showPreview(touch, index: index)
         }
         updateHighlights()
@@ -260,13 +268,15 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
             guard let index = active.removeValue(forKey: touch) else { continue }
             previews.removeValue(forKey: touch)?.removeFromSuperview()
             let key = slots[index].key
+            let wasCommitted = committed.remove(touch) != nil
             if key == .delete { deleteTimer?.invalidate() }
-            else if inputEnabled { press(key) }
+            else if inputEnabled && !wasCommitted { press(key) }
         }
         updateHighlights()
     }
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
+            committed.remove(touch)
             if let index = active.removeValue(forKey: touch), slots[index].key == .delete { deleteTimer?.invalidate() }
             previews.removeValue(forKey: touch)?.removeFromSuperview()
         }
@@ -274,7 +284,7 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
     }
     func cancelTouches() {
         deleteTimer?.invalidate(); deleteTimer = nil
-        active.removeAll(); previews.values.forEach { $0.removeFromSuperview() }; previews.removeAll()
+        active.removeAll(); committed.removeAll(); previews.values.forEach { $0.removeFromSuperview() }; previews.removeAll()
         updateHighlights()
     }
     private func updateHighlights() {
@@ -286,13 +296,14 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
         let cap = slots[index].cap
         let preview = UILabel(frame: CGRect(x: max(2, min(bounds.width - 58, cap.frame.midX - 28)), y: cap.frame.minY - 53, width: 56, height: 68))
         preview.backgroundColor = theme.letter; preview.textColor = theme.foreground
-        preview.font = .systemFont(ofSize: 34); preview.textAlignment = .center; preview.text = cap.text
+        preview.font = .systemFont(ofSize: 34); preview.textAlignment = .center; preview.text = title(slots[index].key)
         preview.layer.cornerRadius = 9; preview.clipsToBounds = true
         preview.layer.borderColor = theme.shadow.cgColor; preview.layer.borderWidth = 0.5
         preview.isUserInteractionEnabled = false
         addSubview(preview); previews[touch] = preview
     }
     private func press(_ key: Key) {
+        let oldShift = shift, oldLayer = layerMode
         if key != .space { lastSpaceTap = 0 }
         if key != .shift { lastShiftTap = 0 }
         switch key {
@@ -303,6 +314,7 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
         case .text(let value):
             let text = layerMode == .letters && shift != .off ? value.uppercased() : value
             if shift != .locked { shift = .off; manualShift = false }
+            before += text; updateAutomaticShift()
             onInsert?(text)
         case .shift:
             let now = Date.timeIntervalSinceReferenceDate
@@ -315,13 +327,22 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
         case .space:
             let now = Date.timeIntervalSinceReferenceDate
             if doubleSpacePeriod && now - lastSpaceTap < 0.35 && before.last == " " && before.dropLast().last.map({ $0.isLetter || $0.isNumber }) == true {
+                before.removeLast(); before += ". "
                 onDoubleSpace?(); lastSpaceTap = 0
-            } else { onInsert?(" "); lastSpaceTap = now }
-            if layerMode != .letters { layerMode = .letters; updateAutomaticShift() }
-        case .enter: onReturn?(); manualShift = false; updateAutomaticShift()
+            } else { before += " "; onInsert?(" "); lastSpaceTap = now }
+            if layerMode != .letters { layerMode = .letters }
+            manualShift = false; updateAutomaticShift()
+        case .enter: before += "\n"; onReturn?(); manualShift = false; updateAutomaticShift()
         case .delete, .globe: break
         }
-        setNeedsLayout()
+        if oldShift != shift || oldLayer != layerMode { setNeedsLayout() }
+    }
+    private func deleteOnce() {
+        let oldShift = shift
+        if !before.isEmpty { before.removeLast() }
+        lastSpaceTap = 0; updateAutomaticShift()
+        onDelete?()
+        if oldShift != shift { setNeedsLayout() }
     }
     private func startDeleteRepeat() {
         deleteTimer?.invalidate(); deleteStarted = Date.timeIntervalSinceReferenceDate
@@ -331,7 +352,7 @@ final class TypingKeyboardView: UIView, UIInputViewAudioFeedback {
             let elapsed = Date.timeIntervalSinceReferenceDate - self.deleteStarted
             guard elapsed > 0.4 else { return }
             ticks += 1
-            if elapsed > 1 || ticks % 2 == 0 { self.onDelete?(); if self.keyClicks { UIDevice.current.playInputClick() } }
+            if elapsed > 1 || ticks % 2 == 0 { self.deleteOnce(); if self.keyClicks { UIDevice.current.playInputClick() } }
         }
     }
 }
