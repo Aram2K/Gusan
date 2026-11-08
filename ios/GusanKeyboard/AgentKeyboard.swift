@@ -247,6 +247,7 @@ final class AgentKeyboardController {
         switch task.status {
         case .queued, .running: return String(task.title.prefix(16)) + " · " + (task.latestStep ?? "Starting…")
         case .awaitingConfirmation: return "Agent needs your OK"
+        case .awaitingLogin: return "Agent needs a login · open Vault in the app"
         case .completed: return "Agent result ready"
         case .failed, .timedOut: return "Agent task failed"
         case .cancelled: return "Agent task cancelled"
@@ -421,6 +422,11 @@ final class AgentCardView: UIView {
                 buttons = [(secondary, "Cancel task", false), (primary, reconfirm ? "Confirm again" : "Confirm", true)]
                 announce = (reconfirm ? "Confirm again. " : "Needs your OK. ") + (task.confirmation?.summary ?? "")
                 if !wasAwaiting { armConfirm() }
+            case .awaitingLogin:
+                icon.image = UIImage(systemName: "lock.shield.fill"); icon.tintColor = theme.brandOrange
+                status.text = "Needs a login"
+                body.text = "Open Vault in the Gusan app to approve a saved login with Face ID. The agent never sees your password."
+                buttons = [(secondary, "Cancel task", false), (primary, "Open in app", true)]
             case .completed:
                 icon.image = UIImage(systemName: "checkmark.circle.fill"); icon.tintColor = theme.success
                 status.text = "Done · " + (task.mode == .research ? "Research" : "Do-it task")
