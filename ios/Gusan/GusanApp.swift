@@ -38,6 +38,7 @@ struct GusanApp: App {
                     })
                 } else { AppRootView() }
             }.environmentObject(model).environmentObject(voice).environmentObject(agent).environmentObject(screen).environmentObject(connections).tint(Theme.accent)
+                .background(KeyboardDismissal())
                 .onAppear { voice.agentHandoff = { intent, context in try await agent.start(intent, context: context) } }
                 .onChange(of: scenePhase) { agent.setActive($0 == .active); connections.sceneChanged($0) }
                 #if DEBUG
