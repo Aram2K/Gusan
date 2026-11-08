@@ -159,6 +159,10 @@ targets:
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
 schemes:
+  GusanKeyboardPreview:
+    build:
+      targets:
+        GusanKeyboardPreview: all
   Gusan:
     build:
       targets:

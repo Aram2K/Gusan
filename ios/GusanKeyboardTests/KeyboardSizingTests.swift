@@ -4,14 +4,16 @@ import UIKit
 
 @MainActor
 final class KeyboardSizingTests: XCTestCase {
-    func testInputViewOwnsOneRequiredHeight() throws {
+    func testInputViewOwnsOneHostCompatibleHeight() throws {
         let keyboard = KeyboardViewController()
         keyboard.loadViewIfNeeded()
         let input = try XCTUnwrap(keyboard.inputView)
         XCTAssertTrue(input.allowsSelfSizing)
+        XCTAssertFalse(input.translatesAutoresizingMaskIntoConstraints)
+        XCTAssertEqual(input.autoresizingMask, [.flexibleWidth])
         let heights = input.constraints.filter { $0.firstAttribute == .height && $0.secondItem == nil }
         XCTAssertEqual(heights.count, 1)
-        XCTAssertEqual(heights.first?.priority, .required)
+        XCTAssertEqual(heights.first?.priority, UILayoutPriority(999))
         XCTAssertEqual(heights.first?.constant, 262)
     }
 
@@ -24,6 +26,8 @@ final class KeyboardSizingTests: XCTestCase {
             keyboard.beginAppearanceTransition(true, animated: false)
             keyboard.endAppearanceTransition()
             keyboard.viewWillLayoutSubviews()
+            let keys = try XCTUnwrap(input.subviews.first { $0 is TypingKeyboardView })
+            XCTAssertEqual(keys.frame.maxY, 262)
             let fitting = input.systemLayoutSizeFitting(CGSize(width: 402, height: height), withHorizontalFittingPriority: .required, verticalFittingPriority: .fittingSizeLevel)
             XCTAssertEqual(fitting.height, 262)
             XCTAssertEqual(input.constraints.filter { $0.firstAttribute == .height && $0.secondItem == nil }.count, 1)
