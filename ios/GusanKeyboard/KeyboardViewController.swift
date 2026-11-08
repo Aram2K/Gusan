@@ -103,7 +103,9 @@ final class KeyboardViewController: UIInputViewController {
         let actionTitle = voice.canUndo ? "Undo" : hint ? "Open" : voice.actionTitle == "Undo" ? nil : voice.actionTitle
         // A task waiting on the user outranks stale strip text, but never an active take or a Smart result/error.
         let attention = active || voice.message != nil ? nil : agent.task.flatMap { AgentKeyboardAttention.resolve($0) }
-        strip.update(agent: settings.keyboardMode == .agent, screenOn: settings.keyboardScreenEnabled, live: screen.live && !screen.secureField, context: title, phase: working ? .thinking : voice.phase, level: voice.level, message: working ? voice.message ?? "Working…" : pendingInsert != nil ? "Result ready" : attention?.text ?? voice.message ?? agentMessage ?? (hint ? "Gusan Screen is off" : nil), action: pendingInsert != nil && !active ? "Insert" : actionTitle, theme: theme, pendingInsert: pendingInsert != nil && !active)
+        let agentStatus = !working && pendingInsert == nil && (attention != nil || (voice.message == nil && agentMessage != nil))
+        let message = working ? voice.message ?? "Working…" : pendingInsert != nil ? "Result ready" : attention?.text ?? voice.message ?? agentMessage ?? (hint ? "Gusan Screen is off" : nil)
+        strip.update(agent: settings.keyboardMode == .agent, screenOn: settings.keyboardScreenEnabled, live: screen.live && !screen.secureField, context: title, phase: working ? .thinking : voice.phase, level: voice.level, message: message, action: pendingInsert != nil && !active ? "Insert" : actionTitle, theme: theme, pendingInsert: pendingInsert != nil && !active, agentStatus: agentStatus)
     }
     @objc private func toggleMode() {
         guard !working, ![.recording, .transcribing, .thinking].contains(voice.phase) else { return }
