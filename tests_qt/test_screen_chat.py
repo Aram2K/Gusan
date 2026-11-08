@@ -211,6 +211,7 @@ def test_copy_and_paste_restore_target_or_copy_fallback(chat, monkeypatch):
     w.open_chat(target)
     w.copy_answer("Draft reply")
     assert QApplication.clipboard().text() == "Draft reply"
+    QApplication.clipboard().setText("Original clipboard")
     restore = Mock(return_value=True)
     monkeypatch.setattr(ui.foreground, "restore", restore)
     w.paste_answer("Ready to paste")
@@ -218,6 +219,7 @@ def test_copy_and_paste_restore_target_or_copy_fallback(chat, monkeypatch):
     restore.assert_called_once_with(target)
     wait_until(lambda: app.paste_text.called)
     app.paste_text.assert_called_once_with("Ready to paste")
+    assert QApplication.clipboard().text() == "Original clipboard"
     restore.return_value = False
     w.paste_answer("Fallback")
     assert w.isVisible() and "Copied — press Ctrl+V" == w.banner.text()

@@ -452,9 +452,9 @@ class ScreenChatWindow(QWidget):
         self._notice("Copied to clipboard")
 
     def paste_answer(self, text):
-        QApplication.clipboard().setText(text)
         self.hide()
         if not foreground.restore(self.target):
+            QApplication.clipboard().setText(text)
             self._notice("Copied — press " + ("Cmd+V" if sys.platform == "darwin" else "Ctrl+V"))
             self._show()
             return
