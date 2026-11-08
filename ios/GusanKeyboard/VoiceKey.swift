@@ -125,7 +125,7 @@ final class VoiceKeyController: NSObject {
     }
     private func currentContext() -> VoiceContext? {
         guard let proxy = host?.textDocumentProxy else { return nil }
-        return VoiceContext(selected: proxy.selectedText ?? "", before: proxy.documentContextBeforeInput ?? "", after: proxy.documentContextAfterInput ?? "", documentID: proxy.documentID.uuidString)
+        return VoiceContext(selected: proxy.selectedText ?? "", before: proxy.documentContextBeforeInput ?? "", after: proxy.documentContextAfterInput ?? "", documentID: proxy.documentID?.uuidString)
     }
     func toggle() {
         if preview {

@@ -4,11 +4,11 @@ import UIKit
 
 @MainActor
 final class DocumentProxyTests: XCTestCase {
-    func testNilIdentifierUsesStableFallback() {
+    func testNilIdentifierRemainsUnknownAcrossReadsAndFields() {
         let proxy = StubDocumentProxy()
-        let fallback = proxy.documentID
-        XCTAssertEqual(proxy.documentID, fallback)
-        XCTAssertEqual(StubDocumentProxy().documentID, fallback)
+        XCTAssertNil(proxy.documentID)
+        XCTAssertNil(proxy.documentID)
+        XCTAssertNil(StubDocumentProxy().documentID)
     }
 
     func testObjectiveCIdentifierIsPreserved() {
@@ -18,11 +18,10 @@ final class DocumentProxyTests: XCTestCase {
         XCTAssertEqual(proxy.documentID, identifier)
     }
 
-    func testUnexpectedIdentifierTypeUsesFallback() {
+    func testUnexpectedIdentifierTypeRemainsUnknown() {
         let proxy = StubDocumentProxy()
-        let fallback = proxy.documentID
         proxy.rawIdentifier = "not a UUID"
-        XCTAssertEqual(proxy.documentID, fallback)
+        XCTAssertNil(proxy.documentID)
     }
 }
 

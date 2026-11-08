@@ -28,7 +28,7 @@ final class KeyboardViewController: UIInputViewController {
     private var pendingInsert: VoicePendingInsert?
     private var sharedDefaults: UserDefaults { UserDefaults(suiteName: store.resolution.chosen) ?? .standard }
     private var context: VoiceContext {
-        VoiceContext(selected: textDocumentProxy.selectedText ?? "", before: textDocumentProxy.documentContextBeforeInput ?? "", after: textDocumentProxy.documentContextAfterInput ?? "", documentID: textDocumentProxy.documentID.uuidString)
+        VoiceContext(selected: textDocumentProxy.selectedText ?? "", before: textDocumentProxy.documentContextBeforeInput ?? "", after: textDocumentProxy.documentContextAfterInput ?? "", documentID: textDocumentProxy.documentID?.uuidString)
     }
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -140,7 +140,7 @@ final class KeyboardViewController: UIInputViewController {
     private func update() {
         guard isViewLoaded else { return }
         let proxy = textDocumentProxy
-        let snapshot = VoiceContext(selected: proxy.selectedText ?? "", before: proxy.documentContextBeforeInput ?? "", after: proxy.documentContextAfterInput ?? "", documentID: proxy.documentID.uuidString)
+        let snapshot = VoiceContext(selected: proxy.selectedText ?? "", before: proxy.documentContextBeforeInput ?? "", after: proxy.documentContextAfterInput ?? "", documentID: proxy.documentID?.uuidString)
         let appearance = proxy.keyboardAppearance
         let capitalization = proxy.autocapitalizationType
         let returnType = proxy.returnKeyType

@@ -17,4 +17,13 @@ final class VoiceInsertionTests: XCTestCase {
         XCTAssertEqual(VoiceInsertionDestination.resolve(snapshot: VoiceContext(), current: VoiceContext()), .clipboard)
         XCTAssertEqual(VoiceInsertionDestination.resolve(snapshot: VoiceContext(documentID: ""), current: VoiceContext(documentID: "")), .clipboard)
     }
+
+    func testNilIdentifierNeverMatchesPendingSelectionOrCursor() {
+        let unknown = VoiceContext(selected: "original", before: "a", after: "b")
+        let known = VoiceContext(selected: "original", before: "a", after: "b", documentID: "one")
+        for (snapshot, current) in [(unknown, unknown), (known, unknown), (unknown, known), (unknown, VoiceContext())] {
+            XCTAssertEqual(VoiceInsertionDestination.resolve(snapshot: snapshot, current: current), .clipboard)
+            XCTAssertFalse(KeyboardVoiceState(context: snapshot).canInsert(context: current))
+        }
+    }
 }
