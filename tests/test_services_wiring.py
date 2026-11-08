@@ -108,6 +108,19 @@ class TestConfigMigration(unittest.TestCase):
             self.assertEqual(d[key], value, key)
         self.assertNotIn("launch_at_login", d)                # autostart decides it
 
+    def test_screen_chat_default_yields_to_existing_shortcuts(self):
+        for version in (2, 3):
+            for key in ("hotkey", "live_assist_hotkey", "smart_actions_hotkey"):
+                with self.subTest(version=version, key=key):
+                    cfg = self._load({"config_schema_version": version, key: "Ctrl + Alt + G"})
+                    self.assertEqual(cfg[key], "Ctrl + Alt + G")
+                    self.assertEqual(cfg["screen_chat_hotkey"], "")
+        for saved in ("", "ctrl+alt+h"):
+            cfg = self._load({"config_schema_version": 3, "screen_chat_hotkey": saved})
+            self.assertEqual(cfg["screen_chat_hotkey"], saved)
+        self.assertEqual(self._load({"config_schema_version": 3})["screen_chat_hotkey"],
+                         main.DEFAULT["screen_chat_hotkey"])
+
 
 # ── the speech model ──────────────────────────────────────────────────────────
 

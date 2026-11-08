@@ -552,6 +552,11 @@ def load_config():
         data = {}
     loaded = {**DEFAULT, **data}
     _migrate_config(loaded, data)
+    if "screen_chat_hotkey" not in data:
+        taken = {settings_apply.norm_hotkey(loaded.get(key))
+                 for key in ("hotkey", "live_assist_hotkey", "smart_actions_hotkey")}
+        if settings_apply.norm_hotkey(loaded["screen_chat_hotkey"]) in taken:
+            loaded["screen_chat_hotkey"] = ""
     # Keep initial_prompt in step with the structured vocabulary list, so a
     # hand-edited or older config self-heals on load.
     vocabulary.sync_config(loaded)
