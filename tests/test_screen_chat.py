@@ -60,7 +60,7 @@ class TestTurn(unittest.TestCase):
 
     def test_own_key_engine_ignores_live_assistant_routing_preferences(self):
         stream = mock.Mock(return_value="Answer")
-        cfg = {"action_api_key": "own-key",
+        cfg = {"action_api_key": "own-key", "live_assist_writer": "local",
                "_managed_token": "token", "_live_session_id": "meeting"}
         self.call(model=actions.API_OPENAI_ID, cfg=cfg, stream=stream)
         self.assertEqual(stream.call_args.kwargs["model"], actions.API_OPENAI_ID)
@@ -76,8 +76,7 @@ class TestTurn(unittest.TestCase):
     def test_pro_local_choices_never_upload(self):
         stream = mock.Mock()
         with mock.patch.dict(actions.ACTION_MODELS, {"test_local": {"kind": "local_llm"}}):
-            for model, writer in (("test_local", ""), (actions.API_MANAGED_ID, "local"),
-                                  (actions.API_OPENAI_ID, "local")):
+            for model, writer in (("test_local", ""), (actions.API_GEMINI_ID, "local")):
                 with self.subTest(model=model, writer=writer):
                     cfg = {"_managed_token": "pro-token", "action_api_key": "own-key",
                            "live_assist_writer": writer}
