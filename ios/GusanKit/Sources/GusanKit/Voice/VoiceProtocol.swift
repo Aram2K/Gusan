@@ -51,7 +51,10 @@ public struct VoiceCommand: Codable, Equatable {
     public var requestID: UUID
     public var context: VoiceContext?
     public var sentAt: Date
-    public init(id: UUID = UUID(), kind: Kind, requestID: UUID, context: VoiceContext? = nil, sentAt: Date = Date()) { self.id = id; self.kind = kind; self.requestID = requestID; self.context = context; self.sentAt = sentAt }
+    /// What the app does with the take; nil = the app's default (Smart). The keyboard sends
+    /// `.transcribeOnly` when it finishes the request itself (Agent mode, screen frames).
+    public var action: VoiceAction?
+    public init(id: UUID = UUID(), kind: Kind, requestID: UUID, context: VoiceContext? = nil, sentAt: Date = Date(), action: VoiceAction? = nil) { self.id = id; self.kind = kind; self.requestID = requestID; self.context = context; self.sentAt = sentAt; self.action = action }
 }
 public enum VoicePhase: String, Codable { case off, ready, recording, transcribing, thinking, done, failed }
 public struct VoiceStatus: Codable, Equatable {
