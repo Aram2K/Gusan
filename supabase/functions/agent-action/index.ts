@@ -5,7 +5,13 @@
 //          timezone (IANA-like, <=64).
 //   status: task_id UUID, wait_s (integer 0..20).
 //   confirm / cancel: task_id UUID, always scoped to the verified owner.
-//   continue: task_id UUID, message (trimmed 1..4000). Active tasks: 409 task_active.
+//   continue: task_id UUID, message (trimmed 1..4000), optional client_message_id
+//     (1..64 ASCII letters/digits/_/-; UUIDs accepted). Same task/id returns the
+//     current task or previously created child, without another send or charge.
+//     Without an id, an identical message dedupes only while its task is active.
+//     Other active tasks: 409 task_active. Research resume clears seen_at.
+//     Ambiguous /messages delivery (network/5xx) stays running and correlated;
+//     only explicit 4xx rejections restore the old task (404/410 start a new one).
 //     Finished research sessions <24h old restart in place (200); otherwise a
 //     new task uses untrusted prior instruction/result context (201, continued_from).
 //     Do tasks always start a new prepare/approval flow, never restart execute.
@@ -528,7 +534,7 @@ function taskRPCResult(data: Obj, error: Obj) {
   }
   return Array.isArray(data) ? data[0] : data;
 }
-async function startTask(db: any, userId: string, body: Obj, reservedRow?: Obj) {
+async function startTask(db: any, userId: string, body: Obj, reservedRow?: Obj, continuationClaim?: string) {
   const instruction = body.instruction.trim();
   const mode = body.mode ?? "research";
   let row: Obj;
@@ -542,7 +548,8 @@ async function startTask(db: any, userId: string, body: Obj, reservedRow?: Obj) 
   }
   await saveRun(db, row, {
     phase: "prepare",
-    plan: { instruction, ...(body.timezone ? { timezone: body.timezone } : {}) },
+    plan: { instruction, ...(body.timezone ? { timezone: body.timezone } : {}),
+      ...(continuationClaim ? { continuation_claim: continuationClaim } : {}) },
   });
   let session;
   try {
@@ -561,36 +568,39 @@ async function startTask(db: any, userId: string, body: Obj, reservedRow?: Obj) 
   if (terminal(row)) await h(`/sessions/${encodeURIComponent(session.id)}`, "DELETE");
   return row;
 }
-async function continueTask(db: any, row: Obj, run: Obj, message: string) {
-  if (!terminal(row)) throw new Failure("task_active", 409);
+async function continueTask(db: any, row: Obj, run: Obj, message: string, clientMessageId?: string) {
   const previous = `Prior instruction:\n${run.plan?.instruction ?? row.title}\n\nPrior result:\n${row.result?.markdown ?? ""}`;
   const body = {
     instruction: message, mode: row.mode, context: previous.slice(0, 20000),
     ...(run.plan?.timezone ? { timezone: run.plan.timezone } : {}),
   };
-  const fresh = async (reservedRow?: Obj) => json({
-    ...task(await startTask(db, row.user_id, body, reservedRow)), continued_from: row.id,
-  }, 201);
-  if (
-    row.mode !== "research" || !["completed", "failed"].includes(row.status) ||
-    !run.h_session_id || run.plan?.session_stopped ||
-    !(Date.parse(row.finished_at) > Date.now() - 24 * 60 * 60 * 1000)
-  ) return fresh();
   const marker = `gusan-continue:${crypto.randomUUID()}`;
+  const response = (current: Obj, status = 200) => json({
+    ...task(current), ...(current.id !== row.id ? { continued_from: row.id } : {}),
+  }, status);
+  const fresh = async (reservedRow: Obj) => response(
+    await startTask(db, row.user_id, body, reservedRow, marker), 201,
+  );
   const claim = async (operation: string) => {
     const { data, error } = await db.rpc("continue_agent_task", {
       p_user_id: row.user_id, p_task_id: row.id, p_message: message,
       p_marker: marker, p_operation: operation,
+      p_client_message_id: clientMessageId ?? null,
     });
     return taskRPCResult(data, error);
   };
   let resumed;
-  try { resumed = await claim("resume"); }
+  const reusable = row.mode === "research" && ["completed", "failed"].includes(row.status) &&
+    run.h_session_id && !run.plan?.session_stopped &&
+    Date.parse(row.finished_at) > Date.now() - 24 * 60 * 60 * 1000;
+  try { resumed = await claim(reusable ? "resume" : "begin"); }
   catch (error) {
-    if (error instanceof Failure && error.code === "session_unavailable") return fresh();
-    throw error;
+    if (error instanceof Failure && error.code === "session_unavailable") resumed = await claim("begin");
+    else throw error;
   }
   const claimedRun = await loadRun(db, resumed);
+  if (claimedRun.plan?.continuation_claim !== marker) return response(resumed);
+  if (resumed.id !== row.id) return fresh(resumed);
   const path = `/sessions/${encodeURIComponent(claimedRun.h_session_id)}`;
   try {
     await h(`${path}/messages`, "POST", {
@@ -598,10 +608,12 @@ async function continueTask(db: any, row: Obj, run: Obj, message: string) {
     });
   } catch (error) {
     const gone = error instanceof HFailure && [404, 410].includes(error.httpStatus);
-    const restored = await claim(gone ? "fallback" : "restore");
-    if (gone && restored.id !== row.id) return fresh(restored);
-    if (restored.status === "cancelled") return json(task(restored));
-    throw error;
+    if (error instanceof HFailure && error.httpStatus >= 400 && error.httpStatus < 500) {
+      const restored = await claim(gone ? "fallback" : "restore");
+      if (gone && restored.id !== row.id) return fresh(restored);
+      if (restored.status === "cancelled") return response(restored);
+      throw error;
+    }
   }
   resumed = await loadTask(db, row.id, row.user_id);
   if (terminal(resumed)) {
@@ -1330,6 +1342,9 @@ Deno.serve(async (req: Request) => {
     if (body.action === "continue" && (
       typeof body.message !== "string" || !body.message.trim() || body.message.trim().length > 4000
     )) return bad("message");
+    if (body.action === "continue" && body.client_message_id !== undefined && (
+      typeof body.client_message_id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(body.client_message_id)
+    )) return bad("client_message_id");
     if (
       body.action === "status" && body.wait_s !== undefined &&
       (!Number.isInteger(body.wait_s) || body.wait_s < 0 || body.wait_s > 20)
@@ -1340,7 +1355,7 @@ Deno.serve(async (req: Request) => {
     if (!loaded.data) return json({ error: "not_found" }, 404);
     if (body.action === "stop") return json(task(await stopTask(db, loaded.data)));
     const run = await loadRun(db, loaded.data);
-    if (body.action === "continue") return await continueTask(db, loaded.data, run, body.message.trim());
+    if (body.action === "continue") return await continueTask(db, loaded.data, run, body.message.trim(), body.client_message_id);
     let row = await expire(db, loaded.data, run);
     if (body.action === "status") row = await sync(db, row, body.wait_s ?? 0);
     else if (body.action === "confirm") {

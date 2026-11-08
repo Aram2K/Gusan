@@ -36,11 +36,12 @@ for (let i=0; i<scenarios.length; i++) {
  let createFailure=s.createFailure;
  let runReads=0;
  let ledgerEntries=0;
+ const continuations=new Map();
  const continuing=s.body?.action==='continue'||s.requests?.some(r=>r.body?.action==='continue');
  const createTask=(mode,title)=>{
   if(continuing)priorTasks.push(structuredClone({row,run}));
   row={...row,id:continuing?'22222222-2222-2222-2222-222222222222':id,status:'queued',mode,title,
-   steps:[],result:null,outcome:null,error_code:null,finished_at:null,deadline_at:new Date(Date.now()+480000).toISOString()};
+   steps:[],result:null,outcome:null,error_code:null,finished_at:null,seen_at:null,deadline_at:new Date(Date.now()+480000).toISOString()};
   run={task_id:row.id,phase:'prepare',h_session_id:null,plan:{}};
   return structuredClone(row);
  };
@@ -50,17 +51,30 @@ for (let i=0; i<scenarios.length; i++) {
    dbCalls.push({name,args});
    if(name==='is_pro')return {data:s.pro??true,error:s.proError?{}:null};
    if(name==='continue_agent_task'){
-    if(args.p_user_id!==row.user_id)return {data:null,error:{code:'P0004'}};
-    if(args.p_operation==='resume'){
-     if(s.continueClaimError)return {data:null,error:{code:s.continueClaimError}};
-     if(!['completed','failed','cancelled','timed_out'].includes(row.status))return {data:null,error:{code:'P0003'}};
+    const source=row.id===args.p_task_id?{row,run}:priorTasks.find(p=>p.row.id===args.p_task_id);
+    if(!source||args.p_user_id!==source.row.user_id)return {data:null,error:{code:'P0004'}};
+    const key=args.p_task_id+':'+(args.p_client_message_id?'id:'+args.p_client_message_id:'message:'+args.p_message);
+    if(['resume','begin'].includes(args.p_operation)){
+     const targetId=continuations.get(key);
+     const target=row.id===targetId?{row,run}:priorTasks.find(p=>p.row.id===targetId);
+     if(target&&(args.p_client_message_id||(['queued','running','awaiting_confirmation','awaiting_login'].includes(target.row.status)&&target.run.plan?.instruction===args.p_message)))return {data:structuredClone(target.row),error:null};
+     if(s.continueClaimError&&args.p_operation==='resume')return {data:null,error:{code:s.continueClaimError}};
+     if(!['completed','failed','cancelled','timed_out'].includes(source.row.status))return {data:null,error:{code:'P0003'}};
      if(s.quota)return {data:null,error:{code:s.quota}};
      ledgerEntries++;
+     if(args.p_operation==='begin'){
+      const data=createTask(source.row.mode,args.p_message);
+      run.plan={instruction:args.p_message,continuation_claim:args.p_marker};
+      continuations.set(key,row.id);
+      return {data,error:null};
+     }
      run.plan={instruction:args.p_message,timezone:run.plan?.timezone??null,prepare_retry:'creating',prepare_retry_kind:'continue',
       prepare_retry_marker:args.p_marker,prepare_retry_from_index:row.event_index,
+      continuation_claim:args.p_marker,client_message_id:args.p_client_message_id,
       continuation_previous_task:structuredClone(row),continuation_previous_plan:structuredClone(run.plan)};
      row={...row,status:'running',steps:[],result:null,outcome:null,error_code:null,finished_at:null,confirmation:null,
-      confirmation_at:null,deadline_at:new Date(Date.now()+480000).toISOString()};
+      confirmation_at:null,seen_at:null,deadline_at:new Date(Date.now()+480000).toISOString()};
+     continuations.set(key,row.id);
      return {data:structuredClone(row),error:null};
     }
     if(row.status!=='running')return {data:structuredClone(row),error:null};
@@ -68,7 +82,10 @@ for (let i=0; i<scenarios.length; i++) {
     run.plan=structuredClone(run.plan.continuation_previous_plan);
     if(args.p_operation==='restore')return {data:structuredClone(row),error:null};
     run.h_session_id=null;
-    return {data:createTask(row.mode,args.p_message),error:null};
+    const data=createTask(row.mode,args.p_message);
+    run.plan={instruction:args.p_message,continuation_claim:args.p_marker};
+    continuations.set(key,row.id);
+    return {data,error:null};
    }
    if(s.quota)return {data:null,error:{code:s.quota}};
    ledgerEntries++;
@@ -82,7 +99,11 @@ for (let i=0; i<scenarios.length; i++) {
     if(table==='vault_logins')return {data:s.logins??[],error:null};
     if(table==='vault_events')return {data:null,error:null};
     if(s.notFound)return {data:null,error:null};
-    if(table==='agent_tasks' && filters.some(([k,v])=>['id','user_id'].includes(k)&&row[k]!==v))return {data:null,error:null};
+    const matches=record=>filters.every(([k,v])=>!['id','user_id','task_id'].includes(k)||record[k]===v);
+    if(['agent_tasks','agent_task_runs'].includes(table)&&!matches(table==='agent_tasks'?row:run)){
+     const prior=priorTasks.find(p=>matches(table==='agent_tasks'?p.row:p.run));
+     return {data:prior?structuredClone(table==='agent_tasks'?prior.row:prior.run):null,error:null};
+    }
     if(table==='agent_tasks' && patch && allowedStatuses){
      if(s.cancelBeforeRetrySave){s.cancelBeforeRetrySave=false;row={...row,status:'cancelled'};}
      if(!allowedStatuses.includes(row.status))return {data:null,error:null};
@@ -118,7 +139,10 @@ for (let i=0; i<scenarios.length; i++) {
    await handler(new Request('https://edge.test/',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer aaa.bbb.ccc'},body:JSON.stringify({action,task_id:id})}));
   }
   if((url.endsWith('/sessions') || url.endsWith('/messages')) && createFailure){const code=createFailure;createFailure=null;return new Response('failure',{status:code});}
-  if(url.endsWith('/messages'))return new Response(null,{status:202});
+  if(url.endsWith('/messages')){
+   if(s.messageNetworkFailure){s.messageNetworkFailure=false;throw new TypeError('private network failure');}
+   return new Response(null,{status:202});
+  }
   if(init.method==='DELETE'){
    if(url.includes('/sessions/')&&s.sessionDeleteNetworkFailure)throw new Error('untrusted network failure detail');
    const status=url.includes('/sessions/')&&s.sessionDeleteStatuses?.length?s.sessionDeleteStatuses.shift():s.deleteFailure??204;
@@ -558,7 +582,7 @@ def test_continue_ineligible_session_starts_through_normal_path(run, previous):
     assert out["replies"][0]["body"]["task_id"] != ID
     assert out["row"]["status"] == "queued" and out["run"]["phase"] == "prepare"
     assert out["run"]["plan"]["instruction"] == "Next"
-    assert any(c.get("name") == "begin_agent_task" for c in out["dbCalls"])
+    assert any(c.get("name") == "continue_agent_task" and c["args"]["p_operation"] == "begin" for c in out["dbCalls"])
     assert not any(c["url"].endswith("/messages") for c in out["calls"])
     request, = [c["body"] for c in out["calls"] if c["url"].endswith("/sessions")]
     assert request["overrides"]["agent.environments[kind=web].mode"]["type"] == "text"
@@ -641,18 +665,104 @@ def test_continue_enforces_start_limits_before_h(run, quota, code, live):
 
 def test_concurrent_continue_claims_only_one_restart(run):
     out, = run(finished_research(requests=[{"body": {"action": "continue", "task_id": ID, "message": "Next"}, "concurrent": 2}]))
-    assert sorted(r["status"] for r in out["replies"]) == [200, 409]
+    assert sorted(r["status"] for r in out["replies"]) == [200, 200]
     assert len([c for c in out["calls"] if c["url"].endswith("/messages")]) == 1
     assert out["ledgerEntries"] == 1
 
 
-@pytest.mark.parametrize("failure,code", [(429, "agent_busy"), (500, "upstream_error")])
+@pytest.mark.parametrize("failure,code", [(429, "agent_busy"), (400, "upstream_error")])
 def test_continue_restart_rejection_restores_prior_terminal_task(run, failure, code):
     out, = run(finished_research(body={"action": "continue", "task_id": ID, "message": "Next"}, createFailure=failure))
     assert out["replies"][0]["body"] == {"error": code}
     assert out["row"]["status"] == "completed" and out["row"]["result"]["markdown"] == "Previous private answer"
     assert out["run"]["plan"] == {"instruction": "SECRET instruction"}
     assert out["ledgerEntries"] == 1
+
+
+def test_continue_resume_clears_seen_marker(run):
+    scenario = finished_research(body={"action": "continue", "task_id": ID, "message": "Next"})
+    scenario["row"]["seen_at"] = "2026-11-01T00:00:00Z"
+    out, = run(scenario)
+    assert out["row"]["seen_at"] is None
+
+
+@pytest.mark.parametrize("failure", ["timeout", 500, 503])
+@pytest.mark.parametrize("client_id", ["followup-1", None])
+def test_ambiguous_continue_stays_running_and_retry_does_not_resend(run, failure, client_id):
+    body = {"action": "continue", "task_id": ID, "message": "Next"}
+    if client_id is not None:
+        body["client_message_id"] = client_id
+    out, = run(finished_research(messageNetworkFailure=failure == "timeout",
+        createFailure=failure if isinstance(failure, int) else None,
+        requests=[{"body": body}, {"body": body},
+                  {"body": {"action": "status", "task_id": ID}, "change": answered({"markdown": "New"}, retry=True)}]))
+    assert [r["status"] for r in out["replies"]] == [200, 200, 200]
+    assert [r["body"]["status"] for r in out["replies"]] == ["running", "running", "completed"]
+    assert out["row"]["result"]["markdown"] == "New"
+    assert out["snapshots"][0]["run"]["plan"]["prepare_retry"] == "running"
+    assert len([c for c in out["calls"] if c["url"].endswith("/messages")]) == 1
+    assert out["ledgerEntries"] == 1
+    assert not any(c.get("name") == "continue_agent_task" and c["args"]["p_operation"] == "restore" for c in out["dbCalls"])
+
+
+def test_ambiguous_continue_without_delivery_expires_at_deadline(run):
+    out, = run(finished_research(messageNetworkFailure=True, requests=[
+        {"body": {"action": "continue", "task_id": ID, "message": "Next", "client_message_id": ID}},
+        {"body": {"action": "status", "task_id": ID}, "advanceMs": 481000}]))
+    assert out["replies"][0]["body"]["status"] == "running"
+    assert out["row"]["status"] == "timed_out"
+    assert any(c["method"] == "DELETE" and "/sessions/" in c["url"] for c in out["calls"])
+
+
+def test_continue_same_id_after_definite_rejection_does_not_charge_or_send_again(run):
+    body = {"action": "continue", "task_id": ID, "message": "Next", "client_message_id": "rejected-1"}
+    scenario = finished_research(createFailure=400, requests=[{"body": body}, {"body": body}])
+    scenario["row"]["seen_at"] = "2026-11-01T00:00:00Z"
+    out, = run(scenario)
+    assert out["replies"][0]["status"] == 502 and out["replies"][1]["status"] == 200
+    assert out["row"]["status"] == "completed" and out["row"]["seen_at"] == "2026-11-01T00:00:00Z"
+    assert out["ledgerEntries"] == 1
+    assert len([c for c in out["calls"] if c["url"].endswith("/messages")]) == 1
+
+
+@pytest.mark.parametrize("gone", [404, 410, None])
+def test_continue_fallback_same_id_returns_original_child_and_starts_unread(run, gone):
+    body = {"action": "continue", "task_id": ID, "message": "Next", "client_message_id": "child-1"}
+    scenario = finished_research(createFailure=gone, requests=[{"body": body}, {"body": body}])
+    scenario["row"]["seen_at"] = "2026-11-01T00:00:00Z"
+    if gone is None:
+        scenario["row"]["mode"] = "do"
+    out, = run(scenario)
+    assert [r["status"] for r in out["replies"]] == [201, 200]
+    assert out["replies"][0]["body"]["task_id"] == out["replies"][1]["body"]["task_id"] != ID
+    assert all(r["body"]["continued_from"] == ID for r in out["replies"])
+    assert out["row"]["seen_at"] is None and out["ledgerEntries"] == 1
+    assert len([c for c in out["calls"] if c["url"].endswith("/sessions")]) == 1
+
+
+def test_concurrent_continue_with_same_id_sends_and_charges_once(run):
+    out, = run(finished_research(requests=[{"body": {"action": "continue", "task_id": ID,
+        "message": "Next", "client_message_id": ID}, "concurrent": 2}]))
+    assert all(r["status"] == 200 for r in out["replies"])
+    assert out["ledgerEntries"] == 1
+    assert len([c for c in out["calls"] if c["url"].endswith("/messages")]) == 1
+
+
+@pytest.mark.parametrize("client_id", ["", "a" * 65, None, 7, "has spaces", "a/b", "é"])
+def test_continue_client_message_id_validation(run, client_id):
+    out, = run({"body": {"action": "continue", "task_id": ID, "message": "Next", "client_message_id": client_id}})
+    assert out["replies"] == [{"status": 400, "body": {"error": "bad_request", "field": "client_message_id"}}]
+    assert not out["calls"]
+
+
+def test_delivery_migration_is_private_atomic_and_resets_seen():
+    sql = (ROOT / "supabase/migrations/202611080003_continue_delivery.sql").read_text().lower()
+    assert "seen_at = null" in sql and "seen_at = previous.seen_at" in sql
+    assert "deadline_at, seen_at)" in sql
+    assert "pg_advisory_xact_lock(hashtextextended(p_user_id::text, 0))" in sql
+    assert "primary key (task_id, message_key)" in sql
+    assert "enable row level security" in sql and "from public, anon, authenticated" in sql
+    assert sql.index("if found then return target") < sql.index("insert into public.agent_task_starts")
 
 
 def test_stop_during_continue_cancels_restarted_session(run):
