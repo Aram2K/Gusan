@@ -43,12 +43,16 @@ public enum CalendarContext {
                 } else { merged.append(clipped) }
             }
             if !merged.isEmpty {
-                let ranges = merged.map { block in
-                    let time = block.isAllDay ? "all day" : "\(timeFormat.string(from: block.start))–\(block.end == next ? "24:00" : timeFormat.string(from: block.end))"
-                    let title = includeTitles ? block.title.map { " (\(String($0.prefix(80))))" } ?? "" : ""
-                    return time + title
-                }.joined(separator: "; ")
-                let line = "\n\(dayFormat.string(from: day)): \(ranges)"
+                func renderedLine(titles: Bool) -> String {
+                    let ranges = merged.map { block in
+                        let time = block.isAllDay ? "all day" : "\(timeFormat.string(from: block.start))–\(block.end == next ? "24:00" : timeFormat.string(from: block.end))"
+                        let title = titles ? block.title.map { " (\(String($0.prefix(80))))" } ?? "" : ""
+                        return time + title
+                    }.joined(separator: "; ")
+                    return "\n\(dayFormat.string(from: day)): \(ranges)"
+                }
+                var line = renderedLine(titles: includeTitles)
+                if output.count + line.count + omitted.count > 1_200 { line = renderedLine(titles: false) }
                 guard output.count + line.count + omitted.count <= 1_200 else { return output + omitted }
                 output += line
             }

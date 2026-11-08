@@ -49,6 +49,17 @@ final class CalendarTests: XCTestCase {
         XCTAssertFalse(store.calendarIncludeTitles)
     }
 
+    func testSummaryKeepsBusyTimesWhenTitlesExceedCap() throws {
+        let now = date("2026-11-08T00:00:00Z")
+        let blocks = (0..<24).map { hour in
+            BusyBlock(start: now.addingTimeInterval(Double(hour * 3600)), end: now.addingTimeInterval(Double(hour * 3600 + 1800)), title: String(repeating: "Private", count: 20))
+        }
+        let result = try XCTUnwrap(CalendarContext.summary(snapshot: snapshot(now: now, blocks: blocks), now: now, includeTitles: true))
+        XCTAssertTrue(result.contains("23:00–23:30"))
+        XCTAssertFalse(result.contains("Private"))
+        XCTAssertLessThanOrEqual(result.count, 1200)
+    }
+
     func testUnavailableAndCorruptStorage() throws {
         let unavailable = CalendarSnapshotStore(defaults: nil)
         unavailable.calendarIPhoneEnabled = true; unavailable.write(snapshot())
