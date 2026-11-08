@@ -21,6 +21,7 @@ struct SettingsView: View {
                     } icon: { Image(systemName: "person.crop.circle") }
                 }
             }
+            MakeGusanKeyboardSection()
             VoiceSettingsSection(voice: voice)
             Section {
                 NavigationLink { ConnectionsView() } label: { Label("Connections", systemImage: "link") }
