@@ -93,6 +93,7 @@ final class KeyboardViewController: UIInputViewController {
         super.viewWillDisappear(animated)
         appeared = false
         keyArea.cancelTouches(); voice.disappear(); screen.disappear(); agent.disappear()
+        firstFrame?.cancel(); lastFrame?.cancel(); firstFrame = nil; lastFrame = nil
         collapse?.invalidate()
     }
     override func viewWillLayoutSubviews() {
@@ -196,6 +197,8 @@ final class KeyboardViewController: UIInputViewController {
         lastFrame = Task { try? await provider.frame(timeout: 3) }
     }
     private func process(_ text: String, context: VoiceContext) {
+        let first = firstFrame, last = lastFrame
+        firstFrame = nil; lastFrame = nil
         retryTake = (text, context)
         if agentTake {
             let intent = AgentIntent.detect(text) ?? AgentIntent(mode: .research, instruction: text)
@@ -205,7 +208,6 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
         working = true; voice.show(text)
-        let first = firstFrame, last = lastFrame
         job = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { working = false; scheduleUpdate() }

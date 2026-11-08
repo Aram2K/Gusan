@@ -31,6 +31,7 @@ public struct ScreenRequest: Codable, Equatable {
 /// so it keeps working when Sideloadly breaks the App Group. Frames are removed
 /// as soon as the keyboard takes them and expire on their own otherwise.
 public struct ScreenChannel {
+    public static let maximumFramePayloadBytes = 8 * 1024 * 1024
     public enum Notification: String { case status, request, frame, keyboard }
     struct Packet<Value: Codable>: Codable { let issuedAt: Date; let value: Value }
     public static let keys = ["status", "request", "frame", "keyboard"]
@@ -66,7 +67,9 @@ public struct ScreenChannel {
         let lifetime = Self.lifetimes[key] ?? 60
         var newest: Packet<T>?
         for store in stores {
-            guard let data = store.read(key).data, let packet = try? JSONDecoder().decode(Packet<T>.self, from: data) else { continue }
+            guard let data = store.read(key).data,
+                  key != "frame" || data.count <= Self.maximumFramePayloadBytes,
+                  let packet = try? JSONDecoder().decode(Packet<T>.self, from: data) else { continue }
             let age = now().timeIntervalSince(packet.issuedAt)
             guard age < lifetime, age > -60 else { store.clear(key); continue }
             if newest == nil || packet.issuedAt > newest!.issuedAt { newest = packet }
