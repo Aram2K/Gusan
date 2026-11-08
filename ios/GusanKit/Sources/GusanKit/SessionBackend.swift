@@ -160,7 +160,8 @@ final class LayeredSessionBackend: SessionBackend {
     }
     func write(_ data: Data, key: String) -> Bool {
         for (index, layer) in layers.enumerated() where layer.write(data, key: key) {
-            for other in layers.dropFirst(index + 1) { other.clear(key) }
+            // Only one layer may hold a key, or a reader could pick up a stale packet from another layer.
+            for (other, backend) in layers.enumerated() where other != index { backend.clear(key) }
             return true
         }
         return false

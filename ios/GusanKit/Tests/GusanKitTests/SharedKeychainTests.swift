@@ -27,6 +27,8 @@ final class SharedKeychainTests: XCTestCase {
         keychain.accepts = false
         XCTAssertTrue(layered.write(Data([2]), key: "status"))
         XCTAssertEqual(board.items["status"], Data([2]))
+        XCTAssertNil(keychain.items["status"])
+        XCTAssertEqual(layered.read("status").data, Data([2]))
         layered.clear("status")
         XCTAssertNil(layered.read("status").data)
     }
