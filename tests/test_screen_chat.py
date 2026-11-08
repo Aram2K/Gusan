@@ -59,8 +59,8 @@ class TestTurn(unittest.TestCase):
         stream = mock.Mock(return_value="Answer")
         cfg = {"action_api_key": "own-key", "live_assist_writer": "local",
                "_managed_token": "token", "_live_session_id": "meeting"}
-        self.call(model="api_openai", cfg=cfg, stream=stream)
-        self.assertEqual(stream.call_args.kwargs["model"], "api_openai")
+        self.call(model=actions.API_OPENAI_ID, cfg=cfg, stream=stream)
+        self.assertEqual(stream.call_args.kwargs["model"], actions.API_OPENAI_ID)
         self.assertNotIn("_live_session_id", stream.call_args.kwargs["config"])
             self.assertEqual(screen_chat.can_capture({"privacy_mode": True}, False), "privacy")
         with mock.patch.object(sys, "platform", "linux"):

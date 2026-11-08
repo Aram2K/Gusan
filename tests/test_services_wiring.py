@@ -44,14 +44,14 @@ class _Inline:
 
 class TestScreenChatEngine(unittest.TestCase):
     def test_free_meeting_does_not_override_screen_chat_own_key(self):
-        app = SimpleNamespace(cfg={"action_model": "api_openai", "action_api_key": "own-key"},
+        app = SimpleNamespace(cfg={"action_model": main.actions.API_OPENAI_ID, "action_api_key": "own-key"},
                               is_pro=lambda: False, _live_session_id="meeting",
                               auth=SimpleNamespace(get_access_token=lambda: "token"))
         model, cfg = main.AppController._resolve_action_engine(app)
         self.assertEqual(model, main.actions.API_MANAGED_ID)
         self.assertEqual(cfg["_live_session_id"], "meeting")
         model, cfg = main.AppController._resolve_action_engine(app, allow_live_session=False)
-        self.assertEqual(model, "api_openai")
+        self.assertEqual(model, main.actions.API_OPENAI_ID)
         self.assertNotIn("_live_session_id", cfg)
         self.assertNotIn("_managed_token", cfg)
 
