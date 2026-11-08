@@ -30,14 +30,15 @@
 // Do/execute: new visual session, 600s/120 steps, only after plan approval.
 // Deadlines add 180s grace. A prepared plan waits up to 15 minutes for approval;
 // expiration cancels locally. Progress retains 25 short steps, saved per sync.
-// Do/prepare never completes: invalid/missing plans get one read-only
+// Do/prepare never completes: invalid/missing plans get up to two read-only
 // same-session restart, then fail with plan_missing. Restart failures fail
-// with agent_busy (429) or upstream_error. No automatic second retry.
+// with agent_busy (429) or upstream_error. Each retry names the rejection reason.
 // Restart completion waits for an answer after its matching user message_event;
 // stale terminal status stays running until that answer or the deadline.
 // Prepare output is flat: markdown, summary, action_kind, start_url, steps.
 // Legacy JSON and explicit prose step lists are salvaged before plan_missing;
-// H answer_validation failures follow the same salvage/one-retry flow.
+// after retries, any step list in accumulated answers can be shown for approval.
+// H answer_validation failures follow the same salvage/two-retry flow.
 // Plans contain 1–30 steps of at most 2000 characters; oversized steps fail.
 // Execute is submit-once. Sync reactively stops duplicate_action and
 // off_plan_navigation from observable events; this is not a pre-action gate.
@@ -354,6 +355,12 @@ function decodePlanJSON(value: unknown): unknown {
 }
 function planSteps(value: unknown) {
   const decoded = decodePlanJSON(value);
+  if (Array.isArray(decoded)) return decoded.map((step) => {
+    if (!step || typeof step !== "object") return step;
+    return ["description", "action", "field", "value", "target", "text", "url"]
+      .filter((key) => ["string", "number", "boolean"].includes(typeof step[key]))
+      .map((key) => String(step[key])).join(" — ");
+  });
   if (typeof decoded !== "string") return decoded;
   return decoded.split(/\r?\n/)
     .map((line) => line.trim().replace(/^(?:[-*•]|\d+[.)])\s+/, ""))
@@ -369,6 +376,7 @@ function preparePlan(
   answer: unknown,
   instruction: string,
   depth = 0,
+  loose = false,
 ): ReturnType<typeof validPlan> {
   const decoded = decodePlanJSON(answer);
   const object =
@@ -380,29 +388,32 @@ function preparePlan(
     : decodePlanJSON(object.plan);
   if (nested && typeof nested === "object" && !Array.isArray(nested)) {
     const p = nested as Obj;
-    if (p.steps !== undefined) {
-      return validPlan({
-        summary: p.summary ?? p.title,
-        action_kind: p.action_kind ?? "other",
-        start_url: p.start_url ?? p.site ?? planURL(instruction) ??
+    const steps = p.steps ?? p.plan_steps ?? p.actions ?? p.instructions;
+    if (steps !== undefined) {
+      const plan = validPlan({
+        summary: p.summary?.trim?.() || p.title?.trim?.() || instruction,
+        action_kind: kinds.includes(p.action_kind) ? p.action_kind : "other",
+        start_url: (loose && !pageURL(p.start_url ?? p.site ?? p.url)
+          ? undefined : p.start_url ?? p.site ?? p.url) ?? planURL(instruction) ??
           (typeof object?.markdown === "string"
             ? planURL(object.markdown)
             : undefined),
-        steps: planSteps(p.steps),
+        steps: planSteps(steps),
       });
+      if (plan) return plan;
     }
   }
-  const texts = [decoded, object?.markdown, object?.plan].filter((text) =>
+  const texts = [decoded, object?.markdown, object?.plan, object?.text, object?.content].filter((text) =>
     typeof text === "string"
   ) as string[];
   for (const text of texts) {
     const json = decodePlanJSON(text);
     if (depth < 3 && json && typeof json === "object") {
-      const plan = preparePlan(json, instruction, depth + 1);
+      const plan = preparePlan(json, instruction, depth + 1, loose);
       if (plan) return plan;
     }
     // Only an explicit step list can become a prose-derived approval plan.
-    const list = text.match(
+    const list = loose ? text : text.match(
       /(?:^|\n)[ \t]*(?:#{1,6}[ \t]+)?(?:proposed[ \t]+)?(?:plan|steps)[ \t]*:?[ \t]*\r?\n((?:[ \t]*(?:[-*•]|\d+[.)])[ \t]+[^\r\n]+(?:\r?\n|$)|[ \t]*\r?\n)+)/i,
     )?.[1] ?? "";
     const steps = [
@@ -410,15 +421,38 @@ function preparePlan(
     ]
       .map((match) => match[1].trim());
     const plan = validPlan({
-      summary: object?.summary ?? object?.title ?? instruction,
-      action_kind: object?.action_kind ?? "other",
-      start_url: object?.start_url ?? object?.site ?? planURL(instruction) ??
+      summary: object?.summary?.trim?.() || object?.title?.trim?.() || instruction,
+      action_kind: kinds.includes(object?.action_kind) ? object?.action_kind : "other",
+      start_url: (loose && !pageURL(object?.start_url ?? object?.site ?? object?.url)
+        ? undefined : object?.start_url ?? object?.site ?? object?.url) ?? planURL(instruction) ??
         planURL(text),
       steps,
     });
     if (plan) return plan;
   }
   return null;
+}
+function answerTexts(value: unknown, depth = 0): string[] {
+  if (depth > 6) return [];
+  if (typeof value === "string") return [value];
+  if (!value || typeof value !== "object") return [];
+  return Object.values(value).flatMap((part) => answerTexts(part, depth + 1));
+}
+function planRejection(answer: unknown, instruction: string): string {
+  if (answer == null || answer === "") return "answer was empty";
+  const decoded = decodePlanJSON(answer);
+  if (typeof decoded === "string") return "answer was not valid JSON or an explicit step list";
+  const object = decoded as Obj;
+  const p = decodePlanJSON(object?.plan ?? object) as Obj;
+  const steps = planSteps(p?.steps ?? p?.plan_steps ?? p?.actions ?? p?.instructions);
+  if (!Array.isArray(steps) || !steps.length) return "steps missing";
+  if (steps.length > 30 || steps.some((s) => typeof s !== "string" || !s.trim() || s.length > 2000)) {
+    return "steps must be 1–30 nonempty strings of at most 2000 characters";
+  }
+  const start = p?.start_url ?? p?.site ?? p?.url ?? planURL(instruction) ??
+    planURL(answerTexts(answer).join("\n"));
+  if (!pageURL(start)) return "start_url not http(s)";
+  return "plan fields were invalid";
 }
 function executePrompt(plan: Obj) {
   const { instruction, ...approved } = plan;
@@ -681,13 +715,18 @@ async function stopTask(db: any, row: Obj) {
   }
   return row;
 }
-async function retryPrepare(db: any, row: Obj, run: Obj, patch: Obj) {
+async function retryPrepare(db: any, row: Obj, run: Obj, patch: Obj, reason: string, answers: unknown[]) {
   const plan = {
     ...run.plan,
     prepare_retry: "creating",
+    prepare_retry_count: (run.plan?.prepare_retry_count ?? (run.plan?.prepare_retry ? 1 : 0)) + 1,
+    prepare_answers: answers,
+    prepare_retry_failed: false,
     prepare_retry_from_index: patch.event_index,
     prepare_retry_marker: `gusan-prepare-retry:${crypto.randomUUID()}`,
   };
+  delete plan.prepare_retry_answer;
+  delete plan.prepare_retry_message_index;
   // Compare the entire private plan and session: only one sync owns the retry.
   const claim = await db.from("agent_task_runs").update({ plan })
     .eq("task_id", row.id).eq("h_session_id", run.h_session_id)
@@ -707,6 +746,7 @@ async function retryPrepare(db: any, row: Obj, run: Obj, patch: Obj) {
   let failure: string | null = null;
   try {
     const message = `[${plan.prepare_retry_marker}]\n` +
+      `Previous answer rejected: ${reason}.\n` +
       "Your previous preparation failed to return a valid plan. This is a mandatory correction: return ONLY plain top-level strings markdown, summary, action_kind, start_url and steps as an array of strings. Do not nest a plan object or encode JSON in strings. Never return a prose-only refusal.\n\n" +
       PLANNING_ONLY;
     await h(
@@ -939,6 +979,19 @@ async function sync(db: any, row: Obj, wait = 0) {
   );
   if (!change) return row;
   const events = Array.isArray(change.new_events) ? change.new_events : [];
+  if (row.mode === "do" && run.phase === "prepare") {
+    const answers = events.filter((e: Obj) => e.type === "AgentEvent" && e.data?.kind === "answer_event")
+      .map((e: Obj) => e.data.answer ?? e.data.content).filter((a: unknown) => a != null);
+    if (answers.length) {
+      const plan = { ...run.plan, prepare_answers: [...(run.plan?.prepare_answers ?? []), ...answers]
+        .filter((a) => JSON.stringify(a).length <= 131072).slice(-30) };
+      const claimed = await db.from("agent_task_runs").update({ plan }).eq("task_id", row.id)
+        .eq("plan", JSON.stringify(run.plan)).select().maybeSingle();
+      if (claimed.error) throw new Failure("storage_error", 500);
+      if (!claimed.data) return loadTask(db, row.id, row.user_id);
+      run.plan = plan;
+    }
+  }
   try {
   if (run.phase === "execute" && run.h_vault_id) {
     const page_url = events.filter((e: Obj) => e.type === "AgentEvent" &&
@@ -1073,14 +1126,16 @@ async function sync(db: any, row: Obj, wait = 0) {
           ...(retryAnswer ? { prepare_retry_answer: retryAnswer } : {}),
         },
       });
+      run.plan = { ...run.plan, prepare_retry_message_index: messageIndex,
+        prepare_retry_failed: retryFailed, prepare_retry_answer: retryAnswer };
     }
     if (
       ["completed", "failed", "cancelled", "timed_out"].includes(
         patch.status,
       ) &&
       !retryAnswer &&
-      !(retryFailed && patch.status === "failed" &&
-        change.error_code === "answer_validation")
+      !(Number.isInteger(messageIndex) && patch.status === "failed" &&
+        (retryFailed || change.error_code === "answer_validation"))
     ) {
       patch.status = "running";
       return save(db, row, patch, true);
@@ -1128,16 +1183,14 @@ async function sync(db: any, row: Obj, wait = 0) {
     ["completed", "failed", "cancelled", "timed_out"].includes(patch.status)
   ) {
     const prepareResult = row.mode === "do" && run.phase === "prepare" &&
-      (patch.status === "completed" ||
-        (patch.status === "failed" &&
-          change.error_code === "answer_validation"));
+      ["completed", "failed"].includes(patch.status);
     // /changes may report completion before the page containing the answer.
     const answerEvent = run.plan?.prepare_retry
       ? retryAnswer
       : events.findLast((event: Obj) =>
         event.type === "AgentEvent" && event.data?.kind === "answer_event"
       )?.data;
-    const final = (prepareResult || continuation) && answerEvent
+    let final = (prepareResult || continuation) && answerEvent
       ? {
         ...answerEvent,
         answer: answerEvent.answer ?? (await h(path)).latest_answer,
@@ -1145,6 +1198,10 @@ async function sync(db: any, row: Obj, wait = 0) {
       : (patch.status === "completed" || prepareResult) && change.answer == null
       ? await h(path)
       : change;
+    if (prepareResult && final.answer == null && final.latest_answer == null) {
+      const session = await h(path);
+      final = { ...final, answer: session.latest_answer ?? session.answer ?? session.status?.answer };
+    }
     patch.result = patch.status === "completed"
       ? safeResult(final.answer ?? final.latest_answer)
       : null;
@@ -1158,18 +1215,29 @@ async function sync(db: any, row: Obj, wait = 0) {
     patch.finished_at = new Date().toISOString();
     if (prepareResult) {
       {
-        const plan = preparePlan(
-          final.answer ?? final.latest_answer,
-          run.plan?.instruction ?? "",
-        );
+        const answer = final.answer ?? final.latest_answer ?? final.content;
+        const instruction = run.plan?.instruction ?? "";
+        const attempts = [...(run.plan?.prepare_answers ?? []),
+          ...events.filter((e: Obj) => e.type === "AgentEvent" && e.data?.kind === "answer_event")
+            .map((e: Obj) => e.data.answer ?? e.data.content), answer].filter((a) => a != null);
+        const retries = run.plan?.prepare_retry_count ?? (run.plan?.prepare_retry ? 1 : 0);
+        let plan = preparePlan(answer, instruction);
+        if (!plan && retries >= 2) {
+          for (const prior of attempts) {
+            plan = preparePlan(prior, instruction, 0, true);
+            if (plan) break;
+          }
+          if (!plan) plan = preparePlan(answerTexts(attempts).join("\n"), instruction, 0, true);
+        }
         patch.result = null;
         patch.outcome = null;
         if (!plan || typeof run.plan?.instruction !== "string") {
           if (
-            !run.plan?.prepare_retry &&
+            retries < 2 &&
             typeof run.plan?.instruction === "string"
           ) {
-            return retryPrepare(db, row, run, patch);
+            return retryPrepare(db, row, run, patch,
+              planRejection(answer, instruction), attempts);
           }
           patch.status = "failed";
           patch.error_code = "plan_missing";

@@ -160,7 +160,7 @@ for (let i=0; i<scenarios.length; i++) {
   }
   if(url.includes('/tool_results'))return new Response(null,{status:202});
   if(url.includes('/changes'))return s.empty?new Response(null,{status:204}):new Response(JSON.stringify(s.change??{status:'running',new_events:[]}));
-  return new Response(JSON.stringify({id:init.headers['Idempotency-Key']?.endsWith(':prepare-retry')?'retry-session':'session1',latest_answer:s.latest}));
+  return new Response(JSON.stringify({id:init.headers['Idempotency-Key']?.endsWith(':prepare-retry')?'retry-session':'session1',latest_answer:s.latest,...s.sessionPayload}));
  };
  await import(`${process.argv[2]}/proxy.mts?${i}`);
  const replies=[], snapshots=[];
@@ -984,22 +984,22 @@ def test_prepare_no_action_retries_then_fails(run):
     out, = run({"row": {"mode": "do"}, "change": {"status": "completed", "answer": {
         "markdown": "Nothing to do", "needs_action": False}},
         "requests": [{"body": {"action": "status", "task_id": ID}},
+                     {"body": {"action": "status", "task_id": ID}, "change": answered(answer, retry=True)},
                      {"body": {"action": "status", "task_id": ID}, "change": answered(answer, retry=True)}]})
-    assert [r["body"]["status"] for r in out["replies"]] == ["running", "failed"]
+    assert [r["body"]["status"] for r in out["replies"]] == ["running", "running", "failed"]
     assert out["row"]["error_code"] == "plan_missing"
     assert out["row"]["result"] is None
 
 
 @pytest.mark.parametrize("answer", [{}, {"needs_action": True},
     {"needs_action": True, "plan": {**PLAN, "start_url": "javascript:alert(1)"}},
-    {"needs_action": True, "plan": {**PLAN, "summary": " "}},
     {"needs_action": True, "plan": {**PLAN, "steps": []}},
     {"needs_action": True, "plan": {**PLAN, "steps": ["step"] * 31}},
-    {"needs_action": True, "plan": {**PLAN, "steps": [123]}},
-    {"needs_action": True, "plan": {**PLAN, "action_kind": "bad"}}])
+    {"needs_action": True, "plan": {**PLAN, "steps": [123]}}])
 def test_invalid_prepare_fails(run, answer):
     out, = run({"row": {"mode": "do"}, "change": {"status": "completed", "answer": answer},
                 "requests": [{"body": {"action": "status", "task_id": ID}},
+                             {"body": {"action": "status", "task_id": ID}, "change": answered(answer, retry=True)},
                              {"body": {"action": "status", "task_id": ID}, "change": answered(answer, retry=True)}]})
     assert out["row"]["status"] == "failed" and out["row"]["error_code"] == "plan_missing"
 
@@ -1150,7 +1150,8 @@ def test_step_length_boundary_never_truncates(run, length, expected):
         "markdown": "Plan", "needs_action": True, "plan": {**PLAN, "steps": [step]}}},
         "requests": [{"body": {"action": "status", "task_id": ID}},
                      {"body": {"action": "status", "task_id": ID}, "change": answered({
-                         "markdown": "Plan", "needs_action": True, "plan": {**PLAN, "steps": [step]}}, retry=True)}]})
+                         "markdown": "Plan", "needs_action": True, "plan": {**PLAN, "steps": [step]}}, retry=True)},
+                     {"body": {"action": "status", "task_id": ID}, "change": answered({"plan": {**PLAN, "steps": [step]}}, retry=True)}]})
     assert out["row"]["status"] == expected
     if expected == "failed":
         assert out["row"]["error_code"] == "plan_missing"
@@ -1182,14 +1183,15 @@ def test_timezone_survives_start_prepare_and_execute(run, timezone):
 
 
 @pytest.mark.parametrize("answer", ["I cannot submit; fill it manually.", "{invalid json"])
-def test_prose_prepare_retries_once_then_fails(run, answer):
+def test_prose_prepare_retries_twice_then_fails(run, answer):
     out, = run({"row": {"mode": "do"}, "change": {"status": "completed", "answer": answer},
                 "requests": [{"body": {"action": "status", "task_id": ID}},
+                             {"body": {"action": "status", "task_id": ID}, "change": answered(answer, retry=True)},
                              {"body": {"action": "status", "task_id": ID}, "change": answered(answer, retry=True)}]})
-    assert [r["body"]["status"] for r in out["replies"]] == ["running", "failed"]
+    assert [r["body"]["status"] for r in out["replies"]] == ["running", "running", "failed"]
     assert out["row"]["error_code"] == "plan_missing" and out["row"]["result"] is None
     retries = [c for c in out["calls"] if c["method"] == "POST"]
-    assert len(retries) == 1
+    assert len(retries) == 2
     retry = retries[0]
     assert retry["url"].endswith("/sessions/session1/messages")
     assert retry["body"]["type"] == "user_message"
@@ -1371,6 +1373,59 @@ def test_string_steps_are_normalized(run, steps):
     assert out["row"]["confirmation"] == PLAN
 
 
+@pytest.mark.parametrize("key", ["steps", "plan_steps", "actions", "instructions"])
+@pytest.mark.parametrize("step,expected", [
+    ({"action": "Fill", "field": "name", "value": "Alice"}, "Fill — name — Alice"),
+    ({"description": "Click Send"}, "Click Send"),
+])
+def test_prepare_accepts_aliases_and_object_steps(run, key, step, expected):
+    out, = run({"row": {"mode": "do"}, "change": answered({
+        "title": "Send", "url": "https://example.com/send", key: [step]})})
+    assert out["row"]["status"] == "awaiting_confirmation"
+    assert out["row"]["confirmation"]["steps"] == [expected]
+    assert out["row"]["confirmation"]["summary"] == "Send"
+    assert out["row"]["confirmation"]["start_url"] == "https://example.com/send"
+
+
+@pytest.mark.parametrize("payload", [
+    {"answer": PLAN}, {"status": {"answer": PLAN}}, {"latest_answer": PLAN},
+])
+def test_failed_prepare_reads_session_raw_answer_locations(run, payload):
+    out, = run({"row": {"mode": "do"}, "sessionPayload": payload, "change": {
+        "status": "failed", "error_code": "answer_validation", "new_events": [
+            {"type": "AgentErrorEvent", "data": {"error": "validation failed"}}]}})
+    assert out["row"]["confirmation"] == PLAN
+    assert out["row"]["status"] == "awaiting_confirmation"
+
+
+@pytest.mark.parametrize("answer,reason", [
+    (None, "answer was empty"), ({}, "steps missing"),
+    ("{not json", "answer was not valid JSON"),
+    ({**PLAN, "start_url": "javascript:alert(1)"}, "start_url not http(s)"),
+])
+def test_prepare_two_retries_echo_rejection_reason(run, answer, reason):
+    out, = run({"row": {"mode": "do"}, "requests": [
+        {"body": {"action": "status", "task_id": ID}, "change": answered(answer)},
+        {"body": {"action": "status", "task_id": ID}, "change": answered(answer, retry=True)},
+        {"body": {"action": "status", "task_id": ID}, "change": answered("Still no steps", retry=True)}]})
+    messages = [c["body"]["message"] for c in out["calls"] if c["url"].endswith("/messages")]
+    assert len(messages) == 2
+    assert all(reason in text for text in messages)
+    assert out["row"]["error_code"] == "plan_missing"
+    assert not any(reason in line for line in out["logs"])
+
+
+def test_final_fallback_uses_unheaded_list_from_earlier_running_answer(run):
+    out, = run({"row": {"mode": "do"}, "run": {"plan": {"instruction": "Submit https://example.com/send"}},
+        "requests": [
+            {"body": {"action": "status", "task_id": ID}, "change": answered("1. Fill name\n2. Submit", "running")},
+            {"body": {"action": "status", "task_id": ID}, "change": answered("Formatting failed")},
+            {"body": {"action": "status", "task_id": ID}, "change": answered("No plan", retry=True)},
+            {"body": {"action": "status", "task_id": ID}, "change": answered("No plan", retry=True)}]})
+    assert [r["body"]["status"] for r in out["replies"]] == ["running", "running", "running", "awaiting_confirmation"]
+    assert out["row"]["confirmation"]["steps"] == ["Fill name", "Submit"]
+
+
 @pytest.mark.parametrize("source", ["answer", "latest", "event"])
 def test_answer_validation_failure_salvages_raw_text(run, source):
     text = "Proposed action at https://example.com/send\nPlan:\n1. Recipient Alice\n2. Amount $10\n3. Click Send"
@@ -1393,8 +1448,9 @@ def test_answer_validation_without_salvage_retries_then_plan_missing(run):
     retry_failure = {**answered("Still no plan", retry=True), "status": "failed", "error_code": "answer_validation"}
     out, = run({"row": {"mode": "do"}, "requests": [
         {"body": {"action": "status", "task_id": ID}, "change": failure},
+        {"body": {"action": "status", "task_id": ID}, "change": retry_failure},
         {"body": {"action": "status", "task_id": ID}, "change": retry_failure}]})
-    assert [r["body"]["status"] for r in out["replies"]] == ["running", "failed"]
+    assert [r["body"]["status"] for r in out["replies"]] == ["running", "running", "failed"]
     assert out["row"]["error_code"] == "plan_missing"
     message = next(c["body"]["message"] for c in out["calls"] if c["url"].endswith("/messages"))
     assert "plain top-level strings" in message and "array of strings" in message
@@ -1417,12 +1473,13 @@ def test_string_steps_still_reject_oversized_values(run, steps):
     answer = {**PLAN, "steps": steps}
     out, = run({"row": {"mode": "do"}, "requests": [
         {"body": {"action": "status", "task_id": ID}, "change": answered(answer)},
+        {"body": {"action": "status", "task_id": ID}, "change": answered(answer, retry=True)},
         {"body": {"action": "status", "task_id": ID}, "change": answered(answer, retry=True)}]})
     assert out["row"]["status"] == "failed" and out["row"]["error_code"] == "plan_missing"
 
 
 @pytest.mark.parametrize("latest,expected", [
-    (None, "failed"),
+    (None, "running"),
     ("https://example.com/send\nProposed steps\n1. Recipient Alice\n2. Amount $10\n3. Click Send", "awaiting_confirmation"),
 ])
 def test_retry_validation_failure_without_answer_event(run, latest, expected):
@@ -1443,15 +1500,16 @@ def test_retry_validation_failure_without_answer_event(run, latest, expected):
     "I can't do this because:\n- the browser is read-only\n- forms can't be filled",
     "Plan:\nI can't do this because:\n- the browser is read-only\n- forms can't be filled",
 ])
-def test_refusal_bullets_are_not_salvaged_as_a_plan(run, text):
+def test_refusal_bullets_wait_for_retries_then_are_shown_for_approval(run, text):
     out, = run({"row": {"mode": "do"},
         "run": {"plan": {"instruction": "Submit https://example.com/send"}},
         "requests": [
             {"body": {"action": "status", "task_id": ID}, "change": answered({"markdown": text})},
-            {"body": {"action": "status", "task_id": ID}, "change": answered({"markdown": text}, retry=True)}]})
-    assert [r["body"]["status"] for r in out["replies"]] == ["running", "failed"]
-    assert out["row"]["error_code"] == "plan_missing"
-    assert out["row"]["confirmation"] is None
+            {"body": {"action": "status", "task_id": ID}, "change": answered({"markdown": text}, retry=True)},
+            {"body": {"action": "status", "task_id": ID}, "change": answered("No plan", retry=True)}]})
+    assert [r["body"]["status"] for r in out["replies"]] == ["running", "running", "awaiting_confirmation"]
+    assert out["row"]["error_code"] is None
+    assert out["row"]["confirmation"]["steps"] == ["the browser is read-only", "forms can't be filled"]
 
 
 def test_structured_plan_uses_markdown_url_when_instruction_has_none(run):
