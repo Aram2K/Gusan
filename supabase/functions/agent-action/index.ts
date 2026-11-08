@@ -40,6 +40,8 @@
 // Legacy JSON and explicit prose step lists are salvaged before plan_missing;
 // after retries, any step list in accumulated answers can be shown for approval.
 // H answer_validation failures follow the same salvage/two-retry flow.
+// Other prepare failures do not retry: insufficient_credit remains the task
+// error_code for exhausted H credit; other upstream failures use upstream_error.
 // Plans contain 1–30 steps of at most 2000 characters; oversized steps fail.
 // Missing research links fall back to up to 8 private trajectory sources,
 // ranked by visit count then recency, excluding search result pages. Follow-ups
@@ -1362,7 +1364,8 @@ async function sync(db: any, row: Obj, wait = 0) {
     patch.error_code = ["failed", "timed_out"].includes(patch.status)
       ? (errors.includes(change.error_code) ? change.error_code : "internal")
       : null;
-    if (prepareUpstreamFailure) patch.error_code = "upstream_error";
+    if (prepareUpstreamFailure) patch.error_code = change.error_code === "insufficient_credit"
+      ? "insufficient_credit" : "upstream_error";
     patch.finished_at = new Date().toISOString();
     if (prepareResult) {
       {

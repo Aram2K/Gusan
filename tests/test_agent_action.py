@@ -1587,7 +1587,7 @@ def test_non_format_prepare_failure_does_not_retry_or_become_plan_missing(run, c
         requests.insert(0, {"body": {"action": "status", "task_id": ID}, "change": answered("Cannot plan")})
     out, = run({"row": {"mode": "do"}, "requests": requests})
     assert out["row"]["status"] == "failed"
-    assert out["row"]["error_code"] == "upstream_error"
+    assert out["row"]["error_code"] == ("insufficient_credit" if code == "insufficient_credit" else "upstream_error")
     assert len([c for c in out["calls"] if c["url"].endswith("/messages")]) == int(after_retry)
 
 
