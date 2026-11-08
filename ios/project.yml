@@ -16,7 +16,7 @@ targets:
   Gusan:
     type: application
     platform: iOS
-    sources: [Gusan]
+    sources: [Gusan, GusanKeyboard/AgentKeyboard.swift, GusanKeyboard/KeyboardTheme.swift]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.aram2k.gusan
@@ -30,7 +30,8 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         GusanAppGroup: group.com.aram2k.gusan
         NSMicrophoneUsageDescription: Gusan records your voice only while you dictate, to transcribe it with Gusan Cloud.
-        UIBackgroundModes: [audio]
+        UIBackgroundModes: [audio, fetch]
+        BGTaskSchedulerPermittedIdentifiers: [com.aram2k.gusan.agent-refresh]
         UILaunchScreen: {}
         CFBundleURLTypes:
           - CFBundleURLSchemes: [gusan]

@@ -352,7 +352,7 @@ public final class SettingsStore {
     private let lock = NSLock()
     private var cached: [String: Any] = [:]
     private var lastRead = Date.distantPast
-    private let keys = ["defaultAction", "translateTarget", "keyClicks", "autoCapitalization", "doubleSpacePeriod", "haptics", "pasteboardFallback"]
+    private let keys = ["defaultAction", "translateTarget", "keyClicks", "autoCapitalization", "doubleSpacePeriod", "haptics", "pasteboardFallback", "privacyMode"]
     public init(group: String?, pasteboardAccessAllowed: @escaping () -> Bool = { true }) {
         defaults = group.flatMap(UserDefaults.init(suiteName:)) ?? .standard
         shared = NamedSessionPasteboard(namespace: "com.aram2k.gusan.settings", accessAllowed: pasteboardAccessAllowed)
@@ -427,6 +427,11 @@ public final class SettingsStore {
     public var pasteboardFallback: Bool {
         get { preference("pasteboardFallback") as? Bool ?? true }
         set { setPreference(newValue, key: "pasteboardFallback") }
+    }
+    /// Privacy Mode: no agent tasks at all (nothing is sent to Gusan Cloud agents; agent actions are hidden).
+    public var privacyMode: Bool {
+        get { preference("privacyMode") as? Bool ?? false }
+        set { setPreference(newValue, key: "privacyMode") }
     }
 }
 

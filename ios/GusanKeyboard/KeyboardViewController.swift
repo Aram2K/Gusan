@@ -21,6 +21,7 @@ final class KeyboardViewController: UIInputViewController {
     private lazy var store = SessionStore(role: .keyboard, pasteboardAccessAllowed: { [weak self] in self?.hasFullAccess == true })
     private lazy var voice = VoiceKeyController(host: self, store: store, micKey: toolbar.mic)
     private lazy var auth = AuthClient(store: store)
+    private lazy var agent = AgentKeyboardController(store: store, auth: auth, host: self)
     private lazy var settings = SettingsStore(group: store.resolution.chosen, pasteboardAccessAllowed: { [weak self] in self?.hasFullAccess == true })
     private let toolbar = GusanToolbar()
     private let panel = GusanPanel()
@@ -77,6 +78,13 @@ final class KeyboardViewController: UIInputViewController {
             if UIAccessibility.isReduceMotionEnabled { changes() }
             else { UIView.transition(with: self.view, duration: 0.2, options: [.transitionCrossDissolve, .allowAnimatedContent], animations: changes) }
         }
+        view.addSubview(agent.card)
+        agent.onSurfaceChange = { [weak self] in self?.updateSurface() }
+        agent.onOpenApp = { [weak self] in self?.openContainingApp($0) }
+        agent.onStatus = { [weak self] text, accessory in
+            guard let self else { return }
+            if let text { self.showMessage(text, accessory: accessory) } else if self.accessory == "View" || self.accessory == "Undo insert" || self.message == nil { self.message = nil; self.accessory = nil; self.updateContext() }
+        }
         voice.bar.backgroundColor = .secondarySystemBackground; voice.bar.layer.cornerRadius = 8
         toolbar.accessory.addTarget(self, action: #selector(accessoryPressed), for: .touchUpInside)
         toolbar.message.addTarget(self, action: #selector(expandMessage), for: .touchUpInside)
@@ -98,7 +106,7 @@ final class KeyboardViewController: UIInputViewController {
     private var currentContext: Context {
         Context(document: textDocumentProxy.documentIdentifier, selected: textDocumentProxy.selectedText ?? "", before: textDocumentProxy.documentContextBeforeInput ?? "", after: textDocumentProxy.documentContextAfterInput ?? "")
     }
-    override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); updateSurface(); voice.appear() }
+    override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); updateSurface(); voice.appear(); agent.appear() }
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated); connected = true
         accessState = store.sessionState(fullAccess: hasFullAccess)
@@ -116,6 +124,7 @@ final class KeyboardViewController: UIInputViewController {
         keyArea.frame = CGRect(x: 0, y: barHeight + extra, width: width, height: max(0, view.bounds.height - barHeight - extra))
         panel.frame = CGRect(x: 0, y: barHeight, width: width, height: max(0, view.bounds.height - barHeight))
         explanationScroll.frame = panel.frame
+        agent.card.frame = panel.frame
         let explanationHeight = max(panel.bounds.height - 24, explanation.sizeThatFits(CGSize(width: width - 36, height: .greatestFiniteMagnitude)).height)
         explanation.frame = CGRect(x: 18, y: 12, width: width - 36, height: explanationHeight)
         explanationScroll.contentSize = CGSize(width: width, height: explanationHeight + 24)
@@ -128,7 +137,7 @@ final class KeyboardViewController: UIInputViewController {
     override func selectionDidChange(_ textInput: UITextInput?) { super.selectionDidChange(textInput); updateContext() }
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated); task?.cancel(); keyArea.cancelTouches()
-        voice.disappear()
+        voice.disappear(); agent.disappear()
     }
     private func updateContext() {
         guard connected else { return }
@@ -152,7 +161,9 @@ final class KeyboardViewController: UIInputViewController {
         explanation.textColor = theme.foreground
         toolbar.context.setTitle(context.summary, for: .normal)
         toolbar.context.accessibilityValue = context.summary
-        toolbar.message.setTitle(snapshotReturnSurface != nil ? "Text snapshot" : message ?? "", for: .normal)
+        toolbar.message.setTitle(agent.showingCard ? agent.toolbarStatus : (snapshotReturnSurface != nil ? "Text snapshot" : message ?? ""), for: .normal)
+        toolbar.mic.isHidden = agent.showingCard
+        toolbar.context.isHidden = agent.showingCard
         let statusAction = snapshotReturnSurface != nil ? "Back" : accessory ?? (undoRecord == nil ? nil : undoIsRedo ? "Redo" : "Undo")
         toolbar.accessory.setTitle(statusAction, for: .normal); toolbar.accessory.isHidden = statusAction == nil
         if compactInstruction { toolbar.accessory.isHidden = true }
@@ -163,6 +174,7 @@ final class KeyboardViewController: UIInputViewController {
         toolbar.setNeedsLayout()
     }
     private func applyTheme(_ theme: KeyboardTheme) {
+        agent.apply(theme)
         view.backgroundColor = theme.background
         keyArea.applyTheme(theme)
         toolbar.apply(theme)
@@ -173,6 +185,7 @@ final class KeyboardViewController: UIInputViewController {
         panel.isHidden = surface != .panel; explanationScroll.isHidden = surface != .explanation
         instructionHeader.isHidden = surface != .instruction
         keyArea.isHidden = surface == .panel || surface == .explanation
+        if agent.showingCard { panel.isHidden = true; explanationScroll.isHidden = true; instructionHeader.isHidden = true; keyArea.isHidden = true }
         keyArea.inputEnabled = true
         height.constant = keyboardHeight
         updateContext(); view.setNeedsLayout()
@@ -252,6 +265,8 @@ final class KeyboardViewController: UIInputViewController {
         case "How to enable", "Details": expandMessage()
         case "See plans": openContainingApp(URL(string: "https://gusan.aibuben.xyz")!)
         case "Retry": if let retryAction, let retryContext { run(retryAction, context: retryContext) }
+        case "View": agent.show()
+        case "Undo insert": agent.undoInsert()
         default: break
         }
     }
@@ -282,6 +297,13 @@ final class KeyboardViewController: UIInputViewController {
         if let error = access.actionError {
             if surface != .instruction { showTyping() }
             showMessage(error == .notSignedIn ? "Sign in to use Gusan" : "Gusan can't read shared sign-in", detail: store.diagnostics().summary, accessory: error == .notSignedIn ? "Sign in" : "Details"); return
+        }
+        if !agent.consumeSkip(), !settings.privacyMode, let request = action.agentRequest(contextText: context.text), let intent = AgentIntent.detect(request) {
+            instructionContext = nil; instruction = ""; showTyping()
+            agent.propose(intent, context: AgentIntent.referencesDraft(intent.instruction) ? context.text : "", fallback: { [weak self] in
+                self?.agent.skipDetectionOnce = true; self?.run(action, context: context)
+            })
+            return
         }
         #if DEBUG
         if !previewActions, store.read()?.accessToken == "gusan-debug-no-network" {

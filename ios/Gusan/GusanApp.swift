@@ -2,12 +2,26 @@ import SwiftUI
 
 @main
 struct GusanApp: App {
-    @StateObject private var model = AppModel()
+    @StateObject private var model: AppModel
     @StateObject private var voice = VoiceSession()
+    @StateObject private var agent: AgentCenter
+    @Environment(\.scenePhase) private var scenePhase
+    init() {
+        let model = AppModel()
+        let agent = AgentCenter(model: model)
+        _model = StateObject(wrappedValue: model); _agent = StateObject(wrappedValue: agent)
+        AgentCenter.registerBackgroundRefresh(agent)
+    }
     @State private var voiceSignInRequested = false
     var body: some Scene {
         WindowGroup {
-            AppRootView().environmentObject(model).environmentObject(voice).tint(Theme.accent)
+            AppRootView().environmentObject(model).environmentObject(voice).environmentObject(agent).tint(Theme.accent)
+                .onAppear { voice.agentHandoff = { intent, context in try await agent.start(intent, context: context) } }
+                .onChange(of: scenePhase) { agent.setActive($0 == .active) }
+                #if DEBUG
+                .overlay(alignment: .bottom) { AgentCardPreview() }
+                #endif
+                .onChange(of: model.pendingTaskID) { if let id = $0 { agent.openTaskID = id; model.pendingTaskID = nil } }
                 .onOpenURL { if $0.host == "voice" { voice.handleURL($0) } else { model.handleURL($0) } }
                 .sheet(isPresented: $voice.presented, onDismiss: {
                     if voiceSignInRequested {
@@ -15,7 +29,7 @@ struct GusanApp: App {
                         model.handleURL(URL(string: "gusan://signin")!)
                     }
                 }) { VoiceReadyView(voice: voice, onSignIn: { voiceSignInRequested = true }).tint(Theme.accent) }
-                .onChange(of: model.session) { if $0 == nil { voice.stop() } }
+                .onChange(of: model.session) { if $0 == nil { voice.stop() }; agent.sessionChanged() }
         }
     }
 }
