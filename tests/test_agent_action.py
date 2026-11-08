@@ -113,7 +113,10 @@ for (let i=0; i<scenarios.length; i++) {
   }
   if((url.endsWith('/sessions') || url.endsWith('/messages')) && createFailure){const code=createFailure;createFailure=null;return new Response('failure',{status:code});}
   if(url.endsWith('/messages'))return new Response(null,{status:202});
-  if(init.method==='DELETE')return s.deleteFailure?new Response('failure',{status:s.deleteFailure}):new Response(null,{status:204});
+  if(init.method==='DELETE'){
+   const status=url.includes('/sessions/')&&s.sessionDeleteStatuses?.length?s.sessionDeleteStatuses.shift():s.deleteFailure??204;
+   return status===204?new Response(null,{status}):new Response('failure',{status});
+  }
   if(url.includes('/tool_results'))return new Response(null,{status:202});
   if(url.includes('/changes'))return s.empty?new Response(null,{status:204}):new Response(JSON.stringify(s.change??{status:'running',new_events:[]}));
   return new Response(JSON.stringify({id:init.headers['Idempotency-Key']?.endsWith(':prepare-retry')?'retry-session':'session1',latest_answer:s.latest}));
@@ -621,6 +624,23 @@ def test_stop_during_continue_cancels_restarted_session(run):
     assert out["row"]["status"] == "cancelled"
     assert out["calls"][-1]["method"] == "DELETE"
     assert out["calls"][-1]["url"].endswith("/sessions/session1")
+
+
+def test_stop_retry_deletes_same_session_only_once(run):
+    out, = run({"run": {"plan": {"prepare_retry": "running"}},
+        "sessionDeleteStatuses": [204, 410], "body": {"action": "stop", "task_id": ID}})
+    assert out["replies"][0]["status"] == 200 and out["row"]["status"] == "cancelled"
+    deletes = [c for c in out["calls"] if c["method"] == "DELETE"]
+    assert len(deletes) == 1 and deletes[0]["url"].endswith("/sessions/session1")
+
+
+@pytest.mark.parametrize("gone", [404, 410])
+def test_stop_deletes_each_distinct_session_and_tolerates_gone_replacement(run, gone):
+    out, = run({"swapRunAfterFirstLoad": True, "sessionDeleteStatuses": [204, gone],
+        "body": {"action": "stop", "task_id": ID}})
+    assert out["replies"][0]["status"] == 200 and out["row"]["status"] == "cancelled"
+    deletes = [c["url"].rsplit("/", 1)[-1] for c in out["calls"] if c["method"] == "DELETE"]
+    assert deletes == ["session1", "current-session"]
 
 
 @pytest.mark.parametrize("status,phase,session", [

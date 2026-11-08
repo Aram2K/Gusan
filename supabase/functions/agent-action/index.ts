@@ -617,13 +617,23 @@ async function continueTask(db: any, row: Obj, run: Obj, message: string) {
 }
 async function stopTask(db: any, row: Obj) {
   const run = await loadRun(db, row);
+  const deleted = new Set<string>();
+  const deleteSession = async (id?: string) => {
+    if (!id || deleted.has(id)) return;
+    try {
+      await h(`/sessions/${encodeURIComponent(id)}`, "DELETE");
+    } catch (error) {
+      if (!(error instanceof HFailure && [404, 410].includes(error.httpStatus))) throw error;
+    }
+    deleted.add(id);
+  };
   let failure;
   try {
     if (run.h_session_id && row.status !== "awaiting_confirmation") {
-      await h(`/sessions/${encodeURIComponent(run.h_session_id)}`, "DELETE");
+      await deleteSession(run.h_session_id);
     }
   } catch (error) {
-    if (!(error instanceof HFailure && error.httpStatus === 410)) failure = error;
+    failure = error;
   }
   await cleanupVault(db, row, run);
   row = await loadTask(db, row.id, row.user_id);
@@ -645,9 +655,7 @@ async function stopTask(db: any, row: Obj) {
     if (cancelled.error) throw new Failure("storage_error", 500);
     row = cancelled.data ?? await loadTask(db, row.id, row.user_id);
     const latestRun = await loadRun(db, row);
-    if (latestRun.h_session_id && (latestRun.plan?.prepare_retry || latestRun.h_session_id !== run.h_session_id)) {
-      await h(`/sessions/${encodeURIComponent(latestRun.h_session_id)}`, "DELETE");
-    }
+    await deleteSession(latestRun.h_session_id);
   }
   return row;
 }
