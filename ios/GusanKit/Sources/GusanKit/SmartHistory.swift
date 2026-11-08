@@ -18,6 +18,7 @@ public final class SmartHistory {
         guard let data = defaults.data(forKey: key) else { return [] }
         return (try? JSONDecoder().decode([Entry].self, from: data)) ?? []
     }
+    public func clear() { defaults.removeObject(forKey: key) }
     public func append(instruction: String, result: String, sourceApp: String? = nil, date: Date = Date()) {
         guard !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let entry = Entry(id: UUID(), date: date, instruction: String(instruction.prefix(4_000)), result: String(result.prefix(20_000)), sourceApp: sourceApp)

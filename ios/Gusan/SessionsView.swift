@@ -54,6 +54,7 @@ struct SessionsView: View {
         .refreshable { reloadHistory(); await agent.refresh() }
         .onAppear { reloadHistory(); openPendingSession() }
         .onChange(of: model.openSessionID) { _ in openPendingSession() }
+        .onChange(of: model.session) { _ in reloadHistory(); selectedID = nil }
     }
 
     private func reloadHistory() { history = SmartHistory(group: model.store.resolution.chosen).entries }

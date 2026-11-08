@@ -83,6 +83,9 @@ final class AppModel: NSObject, ObservableObject, ASWebAuthenticationPresentatio
         #else
         await auth.signOut()
         #endif
+        SmartHistory(group: store.resolution.chosen).clear()
+        AgentSessionStore(defaults: UserDefaults(suiteName: store.resolution.chosen) ?? .standard).clear()
+        openSessionID = nil
         session = store.read(); isPro = false; planError = nil; authError = nil; authBusy = false; refreshDiagnostics()
     }
     func google() {

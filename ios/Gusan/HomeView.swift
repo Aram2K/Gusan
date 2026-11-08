@@ -67,6 +67,7 @@ struct HomeView: View {
             if model.openScreenPage { showScreen = true; model.openScreenPage = false }
         }
         .onChange(of: mode) { model.settings.stripMode = $0 }
+        .onChange(of: model.session) { _ in lastResult = SmartHistory(group: model.store.resolution.chosen).entries.last }
         .onChange(of: model.openScreenPage) { if $0 { showScreen = true; model.openScreenPage = false } }
         .task { await agent.refreshNotificationStatus() }
     }

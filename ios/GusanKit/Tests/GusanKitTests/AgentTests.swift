@@ -2,6 +2,29 @@ import XCTest
 @testable import GusanKit
 
 final class AgentTests: XCTestCase {
+    func testClearingHistoriesRemovesPersistedPrivateData() throws {
+        let suite = "AgentHistoryClearTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let history = SmartHistory(defaults: defaults), sessions = AgentSessionStore(defaults: defaults)
+        history.clear(); sessions.clear()
+        XCTAssertTrue(history.entries.isEmpty); XCTAssertTrue(sessions.records.isEmpty)
+        defaults.set("agent", forKey: "stripMode")
+        history.append(instruction: "Private request", result: "Private answer")
+        sessions.record(taskID: UUID(), message: "Private agent request")
+        XCTAssertEqual(history.entries.count, 1); XCTAssertEqual(sessions.records.count, 1)
+        history.clear(); sessions.clear()
+        XCTAssertTrue(SmartHistory(defaults: defaults).entries.isEmpty)
+        XCTAssertTrue(AgentSessionStore(defaults: defaults).records.isEmpty)
+        XCTAssertNil(defaults.data(forKey: "gusan.smart.history"))
+        XCTAssertNil(defaults.data(forKey: "gusan.agent.sessions"))
+        XCTAssertEqual(defaults.string(forKey: "stripMode"), "agent")
+        defaults.set(Data("corrupt".utf8), forKey: "gusan.smart.history")
+        defaults.set(Data("corrupt".utf8), forKey: "gusan.agent.sessions")
+        history.clear(); sessions.clear()
+        XCTAssertNil(defaults.data(forKey: "gusan.smart.history"))
+        XCTAssertNil(defaults.data(forKey: "gusan.agent.sessions"))
+    }
     func testSessionThreadResolutionAndGrouping() throws {
         let suite = "AgentThreadTests." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
