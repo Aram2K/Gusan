@@ -18,6 +18,9 @@ public final class AgentSessionStore {
     private let key = "gusan.agent.sessions"
     public init(defaults: UserDefaults) { self.defaults = defaults }
     public func clear() { defaults.removeObject(forKey: key) }
+    public func remove(_ id: UUID) {
+        if let data = try? JSONEncoder().encode(records.filter { $0.id != id }) { defaults.set(data, forKey: key) }
+    }
     public var records: [Record] {
         guard let data = defaults.data(forKey: key) else { return [] }
         return (try? JSONDecoder().decode([Record].self, from: data)) ?? []

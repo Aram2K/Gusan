@@ -28,10 +28,20 @@ struct SessionsView: View {
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                         }
+                        .swipeActions(edge: .trailing) {
+                            Button(role: .destructive) {
+                                history.removeAll { $0.id == entry.id }
+                                SmartHistory(group: model.store.resolution.chosen).remove(entry.id)
+                            } label: { Label("Delete", systemImage: "trash") }
+                        }
                     }
                 }
             } else {
                 Section {
+                    Button("Clear finished", role: .destructive) {
+                        let ids = Set(agent.tasks.filter { $0.status.isTerminal }.map(\.id))
+                        Task { await agent.deleteTasks(ids) }
+                    }.disabled(!agent.tasks.contains { $0.status.isTerminal })
                     if agent.loading { ProgressView("Loading sessions…").tint(Theme.agent) }
                     if let error = agent.error { Text(error).foregroundStyle(Theme.danger) }
                     if agent.tasks.isEmpty && !agent.loading { Text("No agent sessions yet").foregroundStyle(.secondary) }
@@ -40,6 +50,12 @@ struct SessionsView: View {
                             Button { selectedID = thread.id } label: {
                                 TaskRow(task: latest, attention: thread.needsAttention, title: thread.tasks.first?.title)
                             }.buttonStyle(.plain)
+                                .swipeActions(edge: .trailing) {
+                                    Button(role: .destructive) {
+                                        let ids = Set(thread.tasks.map(\.id))
+                                        Task { await agent.deleteTasks(ids) }
+                                    } label: { Label("Delete", systemImage: "trash") }
+                                }
                         }
                     }
                 }

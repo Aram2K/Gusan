@@ -129,7 +129,8 @@ public struct AgentTask: Codable, Equatable, Identifiable {
     private static func coarseStatus(_ value: String) -> AgentStatus {
         switch value {
         case "idle": return .completed
-        case "interrupted": return .cancelled
+        case "interrupted", "stopped": return .cancelled
+        case "expired": return .timedOut
         default: return AgentStatus(rawValue: value) ?? .running
         }
     }
@@ -186,6 +187,11 @@ public struct AgentTask: Codable, Equatable, Identifiable {
     }
 
     public var latestStep: String? { steps.last?.text }
+    public var elapsedIsRunning: Bool { [.queued, .working, .needsConfirmation].contains(phase) }
+    public var elapsedEnd: Date { max(createdAt, finishedAt ?? updatedAt ?? createdAt) }
+    public func elapsed(at now: Date = Date()) -> TimeInterval {
+        max(0, (elapsedIsRunning ? now : elapsedEnd).timeIntervalSince(createdAt))
+    }
     /// Cancelled because the 15-minute confirmation window (capped at the task deadline) ran out.
     public var confirmationExpired: Bool { status == .cancelled && errorCode == "confirmation_expired" }
     /// Server limits (PR #18): at most this many non-terminal tasks per user, and starts per rolling 24 h.

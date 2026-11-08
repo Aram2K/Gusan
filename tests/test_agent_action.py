@@ -35,6 +35,8 @@ for (let i=0; i<scenarios.length; i++) {
  let conflict=s.conflict;
  let createFailure=s.createFailure;
  let runReads=0;
+ let rowDeleted=false;
+ const cleanupQueue=[];
  let ledgerEntries=0;
  const continuations=new Map();
  const continuing=s.body?.action==='continue'||s.requests?.some(r=>r.body?.action==='continue');
@@ -99,17 +101,22 @@ for (let i=0; i<scenarios.length; i++) {
    return {data:createTask(args.p_mode,args.p_title),error:null};
   },
   from:(table)=>{
-   let patch=null, filters=[], allowedStatuses=null;
+   let patch=null, filters=[], allowedStatuses=null, deleting=false;
    const q={select:()=>q,limit:()=>q,is:(k,v)=>{filters.push([k,v]);return q},insert:p=>{patch=p;return q},update:p=>{patch=p;return q},eq:(k,v)=>{filters.push([k,v]);return q},
-    in:(k,v)=>{filters.push([k,v]);allowedStatuses=v;return q},maybeSingle:async()=>{
-    dbCalls.push({table,patch,filters});
+    delete:()=>{deleting=true;return q},in:(k,v)=>{filters.push([k,v]);allowedStatuses=v;return q},maybeSingle:async()=>{
+    dbCalls.push({table,patch,filters,deleting});
     if(table==='vault_logins')return {data:s.logins??[],error:null};
     if(table==='vault_events')return {data:null,error:null};
-    if(s.notFound)return {data:null,error:null};
+    if(s.notFound||rowDeleted)return {data:null,error:null};
     const matches=record=>filters.every(([k,v])=>!['id','user_id','task_id'].includes(k)||record[k]===v);
     if(['agent_tasks','agent_task_runs'].includes(table)&&!matches(table==='agent_tasks'?row:run)){
      const prior=priorTasks.find(p=>matches(table==='agent_tasks'?p.row:p.run));
      return {data:prior?structuredClone(table==='agent_tasks'?prior.row:prior.run):null,error:null};
+    }
+    if(table==='agent_tasks'&&deleting){
+     if(s.databaseDeleteError)return {data:null,error:{code:'42501'}};
+     if(run.session_cleanup_pending&&run.h_session_id)cleanupQueue.push(run.h_session_id);
+     rowDeleted=true;return {data:{id:row.id},error:null};
     }
     if(table==='agent_tasks' && patch && allowedStatuses){
      if(s.cancelBeforeRetrySave){s.cancelBeforeRetrySave=false;row={...row,status:'cancelled'};}
@@ -188,7 +195,7 @@ for (let i=0; i<scenarios.length; i++) {
   replies.push(...await Promise.all(Array.from({length:r.concurrent??1},respond)));
   snapshots.push(structuredClone({row,run}));
  }
- results.push({replies,calls,logs,dbCalls,row,run,snapshots,priorTasks,ledgerEntries});
+ results.push({replies,calls,logs,dbCalls,row,run,snapshots,priorTasks,ledgerEntries,rowDeleted,cleanupQueue});
 }
 Date.now=realNow;console.log=log;log(JSON.stringify(results));
 '''
@@ -905,6 +912,55 @@ def test_stop_terminal_returns_task_even_when_cleanup_fails(run):
     assert out["replies"][0]["status"] == 200 and out["row"]["status"] == "completed"
     assert out["run"]["release_nonce"] is None and out["run"]["h_vault_id"] == "vault1"
     assert any(c["patch"]["event"] == "vault_delete_failed" for c in out["dbCalls"] if c.get("table") == "vault_events")
+
+
+@pytest.mark.parametrize("status", ["queued", "running", "awaiting_confirmation", "awaiting_login", "completed", "failed", "cancelled", "timed_out"])
+def test_delete_stops_session_and_deletes_owner_task(run, status):
+    out, = run({"row": {"status": status}, "body": {"action": "delete", "task_id": ID}})
+    assert out["replies"] == [{"status": 200, "body": {"deleted": True}}]
+    assert out["rowDeleted"]
+    assert any(c["method"] == "DELETE" and "/sessions/" in c["url"] for c in out["calls"])
+    deletion = next(c for c in out["dbCalls"] if c.get("deleting"))
+    assert ["user_id", "u1"] in deletion["filters"]
+
+
+@pytest.mark.parametrize("scenario", [{"row": {"user_id": "other"}}, {"notFound": True}])
+def test_delete_rejects_other_owner_and_missing_tasks(run, scenario):
+    out, = run({**scenario, "body": {"action": "delete", "task_id": ID}})
+    assert out["replies"] == [{"status": 404, "body": {"error": "not_found"}}]
+    assert not out["rowDeleted"] and not out["calls"]
+
+
+def test_delete_preserves_task_when_active_session_cannot_stop(run):
+    out, = run({"deleteFailure": 500, "body": {"action": "delete", "task_id": ID}})
+    assert out["replies"][0]["status"] == 502
+    assert not out["rowDeleted"]
+
+
+def test_delete_terminal_preserves_session_cleanup_queue_on_failure(run):
+    out, = run({"row": {"status": "completed"}, "deleteFailure": 500,
+                "body": {"action": "delete", "task_id": ID}})
+    assert out["replies"][0]["status"] == 200 and out["rowDeleted"]
+    assert out["cleanupQueue"] == ["session1"]
+
+
+def test_delete_database_error_preserves_stopped_task(run):
+    out, = run({"databaseDeleteError": True, "body": {"action": "delete", "task_id": ID}})
+    assert out["replies"] == [{"status": 500, "body": {"error": "storage_error"}}]
+    assert not out["rowDeleted"] and out["row"]["status"] == "cancelled"
+
+
+def test_delete_task_without_session_and_repeat(run):
+    out, = run({"run": {"h_session_id": None},
+                "requests": [{"body": {"action": "delete", "task_id": ID}}] * 2})
+    assert [r["status"] for r in out["replies"]] == [200, 404]
+    assert out["rowDeleted"] and not out["calls"]
+
+
+def test_delete_requires_authenticated_owner(run):
+    out, = run({"noUser": True, "body": {"action": "delete", "task_id": ID}})
+    assert out["replies"] == [{"status": 401, "body": {"error": "unauthorized"}}]
+    assert not out["rowDeleted"] and not out["calls"]
 
 
 @pytest.mark.parametrize("failure", [404, 410, 500])
