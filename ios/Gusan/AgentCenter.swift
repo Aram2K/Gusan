@@ -24,7 +24,10 @@ final class AgentCenter: NSObject, ObservableObject {
     @Published var error: String?
     @Published private(set) var notificationStatus: UNAuthorizationStatus = .notDetermined
     @Published private(set) var requestingNotifications = false
-    @Published var lastRefresh: Date?
+    private(set) var lastRefresh: Date?
+    private var refreshing = false
+    private var revision = 0
+    private var mutating = 0
 
     private unowned let model: AppModel
     private var service: AgentService?
@@ -114,9 +117,12 @@ final class AgentCenter: NSObject, ObservableObject {
     // MARK: Loading and polling
 
     func refresh() async {
-        guard let service = currentService() else { tasks = []; return }
-        loading = tasks.isEmpty
-        defer { loading = false }
+        guard !refreshing, mutating == 0 else { return }
+        guard let service = currentService() else { if !tasks.isEmpty { tasks = [] }; return }
+        refreshing = true
+        let version = revision
+        if tasks.isEmpty && !loading { loading = true }
+        defer { refreshing = false; if loading { loading = false } }
         do {
             var fetched = try await service.list(limit: 100)
             let listedIDs = Set(fetched.map(\.id))
@@ -128,12 +134,16 @@ final class AgentCenter: NSObject, ObservableObject {
                 if let full = try? await service.status(fetched[index].id, waitSeconds: 0) { fetched[index] = full }
             }
             let fetchedIDs = Set(fetched.map(\.id))
-            tasks = (fetched + tasks.filter { !fetchedIDs.contains($0.id) }).sorted { $0.createdAt > $1.createdAt }
+            guard version == revision, !Task.isCancelled else { return }
+            let updated = (fetched + tasks.filter { !fetchedIDs.contains($0.id) }).sorted { $0.createdAt > $1.createdAt }
+            if tasks != updated { tasks = updated }
             lastRefresh = Date()
-            error = nil
+            if error != nil { error = nil }
             await deliver(tracker.consumeEvents(from: fetched))
         } catch {
-            self.error = (error as? AgentError)?.errorDescription ?? error.localizedDescription
+            guard version == revision, !Task.isCancelled else { return }
+            let message = (error as? AgentError)?.errorDescription ?? error.localizedDescription
+            if self.error != message { self.error = message }
         }
     }
 
@@ -154,6 +164,8 @@ final class AgentCenter: NSObject, ObservableObject {
 
     func sessionChanged() {
         let userID = model.session.map { $0.userID ?? $0.accessToken }
+        guard userID != activityUserID else { return }
+        revision += 1
         if userID != activityUserID, #available(iOS 16.1, *) {
             (liveActivities as? AgentLiveActivityController)?.dismissAll()
         }
@@ -226,12 +238,19 @@ final class AgentCenter: NSObject, ObservableObject {
 
     private func mutate(_ id: UUID, _ operation: (AgentService) async throws -> AgentTask) async {
         guard let service = currentService() else { return }
+        mutating += 1; revision += 1
+        let userID = activityUserID
+        defer { mutating -= 1; revision += 1 }
         do {
             let updated = try await operation(service)
+            guard userID == activityUserID else { return }
             tracker.markNotified(updated)
-            if let index = tasks.firstIndex(where: { $0.id == id }) { tasks[index] = updated } else { tasks.insert(updated, at: 0) }
+            if let index = tasks.firstIndex(where: { $0.id == id }) {
+                if tasks[index] != updated { tasks[index] = updated }
+            } else { tasks.insert(updated, at: 0) }
             UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id.uuidString])
         } catch {
+            guard userID == activityUserID else { return }
             self.error = (error as? AgentError)?.errorDescription ?? error.localizedDescription
             if !active {
                 let content = UNMutableNotificationContent()

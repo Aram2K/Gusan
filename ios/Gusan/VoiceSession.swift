@@ -54,7 +54,7 @@ final class VoiceSession: ObservableObject {
     /// The take started by a system trigger (Control Center, Action button, Siri, Live Activity): its result goes to the clipboard.
     private var systemRequestID: UUID?
     let activity = VoiceLiveActivity()
-    var alive: Bool { status.isAlive() }
+    var alive: Bool { machine.phase != .off }
 
     init(store: SessionStore = SessionStore()) {
         self.store = store; auth = AuthClient(store: store)
@@ -150,7 +150,7 @@ final class VoiceSession: ObservableObject {
             if let level = audio.append(output) {
                 Task { @MainActor in
                     guard let self, self.machine.phase == .recording else { return }
-                    self.status.level = level; self.publish()
+                    self.publish(level: level)
                 }
             }
         }
@@ -260,14 +260,17 @@ final class VoiceSession: ObservableObject {
         systemRequestID = nil
         execute(machine.handle(.acknowledged(id)))
     }
-    private func publish() {
+    private func publish(level: Float? = nil) {
         if machine.phase != .off && !channel.available { error = channel.unavailableError.localizedDescription; stop(); return }
         let readyUntil = machine.idleTimeout.isFinite ? machine.lastActivity.addingTimeInterval(machine.idleTimeout) : nil
-        status = VoiceStatus(phase: machine.phase, requestID: machine.requestID, sessionEndsAt: machine.phase == .recording ? machine.recordingStarted?.addingTimeInterval(machine.maxRecording) : readyUntil, level: status.level, message: machine.message, result: machine.result, replacesSelection: machine.replacesSelection, resultKind: machine.resultKind)
-        try? channel.write(status: status); channel.post(.status)
+        let updated = VoiceStatus(phase: machine.phase, requestID: machine.requestID, sessionEndsAt: machine.phase == .recording ? machine.recordingStarted?.addingTimeInterval(machine.maxRecording) : readyUntil, level: level ?? status.level, message: machine.message, result: machine.result, replacesSelection: machine.replacesSelection, resultKind: machine.resultKind)
+        var presentation = updated
+        presentation.heartbeat = status.heartbeat
+        if presentation != status { status = presentation }
+        try? channel.write(status: updated); channel.post(.status)
         if !(status.phase == .done && status.requestID == systemRequestID) {
             let heard = [.thinking, .transcribing].contains(status.phase) ? channel.readTranscript().flatMap { $0.requestID == status.requestID ? $0.text : nil } : nil
-            activity.update(status, heard: heard)
+            activity.update(updated, heard: heard)
         }
         if status.phase == .failed, let id = status.requestID, id == systemRequestID { systemRequestID = nil; execute(machine.handle(.acknowledged(id))) }
     }
@@ -304,7 +307,7 @@ final class VoiceSession: ObservableObject {
         if tapped { engine.inputNode.removeTap(onBus: 0); tapped = false }
         _ = audio.finish(); _ = machine.handle(.sessionStopped); systemRequestID = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        status.level = 0; publish()
+        publish(level: 0)
         activity.end()
     }
     private func interrupted(_ notification: Notification) {
