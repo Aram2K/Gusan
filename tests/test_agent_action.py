@@ -72,6 +72,7 @@ for (let i=0; i<scenarios.length; i++) {
  globalThis.fetch=async(url,init)=>{
   calls.push({url,method:init.method,headers:init.headers,body:init.body?JSON.parse(init.body):null});
   if(s.upstream) return new Response('untrusted error text',{status:s.upstream});
+  if(url.endsWith('/pause'))return new Response(null,{status:s.pauseStatus??202});
   if(url.endsWith('/vaults'))return s.vaultFailure?new Response('failure',{status:500}):new Response(JSON.stringify({id:'vault1'}));
   if(url.endsWith('/messages') && s.cancelDuringMessages){
    s.cancelDuringMessages=false;
@@ -230,6 +231,36 @@ def test_vault_cleanup_failure_is_best_effort(run):
     assert out["replies"][0]["body"]["status"] == "cancelled"
     assert out["run"]["h_vault_id"] == "vault1"  # kept so a later cleanup or the sweeper retries
     assert any(c.get("patch", {}).get("event") == "vault_delete_failed" for c in out["dbCalls"] if c.get("patch"))
+
+
+@pytest.mark.parametrize("pause_status", [202, 404, 409])
+def test_vault_cancel_stops_before_deleting_session_and_vault(run, pause_status):
+    out, = run({"run": {"h_vault_id": "vault1"}, "pauseStatus": pause_status,
+                "body": {"action": "cancel", "task_id": ID}})
+    assert [(c["method"], c["url"].split("/api/v2")[-1]) for c in out["calls"]] == [
+        ("POST", "/sessions/session1/pause"), ("DELETE", "/sessions/session1"), ("DELETE", "/vaults/vault1")]
+    assert out["row"]["status"] == "cancelled"
+    assert out["run"]["session_cleanup_pending"] is False
+
+
+@pytest.mark.parametrize("delete_failure", [None, 500])
+def test_vault_cancel_stop_failure_retains_session_for_sweeper(run, delete_failure):
+    out, = run({"run": {"h_vault_id": "vault1"}, "pauseStatus": 500, "deleteFailure": delete_failure,
+                "body": {"action": "cancel", "task_id": ID}})
+    assert out["row"]["status"] == "cancelled"
+    assert out["run"]["h_session_id"] == "session1"
+    assert out["run"]["session_cleanup_pending"] is True
+    assert out["run"]["h_vault_id"] == ("vault1" if delete_failure else None)
+    assert not any(c["method"] == "DELETE" and "/sessions/" in c["url"] for c in out["calls"])
+    assert any(c["method"] == "DELETE" and "/vaults/" in c["url"] for c in out["calls"])
+
+
+def test_vault_cancel_session_delete_failure_is_retryable(run):
+    out, = run({"run": {"h_vault_id": "vault1"}, "deleteFailure": 500,
+                "body": {"action": "cancel", "task_id": ID}})
+    assert out["row"]["status"] == "cancelled"
+    assert out["run"]["h_session_id"] == "session1"
+    assert out["run"]["session_cleanup_pending"] is True
 
 
 @pytest.mark.parametrize("scenario,status,error", [

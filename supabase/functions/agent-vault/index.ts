@@ -51,7 +51,8 @@ async function h(path: string, method = "GET", payload?: unknown) {
       headers: { Authorization: `Bearer ${KEY}`, "Content-Type": "application/json" },
       ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
     });
-    if (!response.ok && !(method === "DELETE" && response.status === 404)) throw 0;
+    if (!response.ok && !(method === "DELETE" && response.status === 404) &&
+      !(path.endsWith("/pause") && [404, 409].includes(response.status))) throw 0;
     // Never read a response body that could contain submitted credentials.
     if (method !== "GET") return null;
     return await response.json();
@@ -82,6 +83,18 @@ async function secretMatches(candidate: string, expected: string) {
   return different === 0;
 }
 async function sweep(db: any) {
+  const pending = checked(await db.from("agent_task_runs").select().eq("session_cleanup_pending", true));
+  for (const run of pending) {
+    const row = checked(await db.from("agent_tasks").select().eq("id", run.task_id).maybeSingle());
+    if (!row || !terminal(row) || !run.h_session_id) continue;
+    try {
+      const path = `/sessions/${encodeURIComponent(run.h_session_id)}`;
+      await h(`${path}/pause`, "POST");
+      await h(path, "DELETE");
+      checked(await db.from("agent_task_runs").update({ session_cleanup_pending: false })
+        .eq("task_id", run.task_id).eq("h_session_id", run.h_session_id));
+    } catch { console.log("agent-vault", "session_cleanup_failed"); }
+  }
   const vaults: Obj[] = [];
   for (let offset = 0;; offset += 100) {
     const page = await h(`/vaults?limit=100&offset=${offset}`);

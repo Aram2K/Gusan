@@ -51,6 +51,7 @@ for(let i=0;i<scenarios.length;i++){
  globalThis.fetch=async(url,init)=>{
   calls.push({url,method:init.method,body:init.body?JSON.parse(init.body):null});
   if(s.hFailure&&url.includes(s.hFailure))return new Response('untrusted',{status:500});
+  if(url.endsWith('/pause'))return new Response(null,{status:s.pauseStatus??202});
   if(init.method==='GET'){
    const offset=Number(new URL(url).searchParams.get('offset'));
    return new Response(JSON.stringify(s.pages?.[offset/100]??{total:(s.vaults??[]).length,vaults:s.vaults??[]}));
@@ -240,6 +241,37 @@ def test_list_pending_delete(run):
     assert deleted["replies"][0]["body"] == {"deleted": True}
     assert deleted["tables"]["vault_events"][0]["event"] == "deleted"
     assert empty["replies"][0]["body"] == {"logins": [], "events": []}
+
+
+@pytest.mark.parametrize("pause_status", [202, 404, 409])
+def test_sweep_retries_pending_session_even_without_vault(run, pause_status):
+    out, = run({"body": {"action": "sweep"}, "headers": {"X-Gusan-Sweep-Secret": "sweep-test"},
+                "row": {"status": "cancelled"}, "run": {"session_cleanup_pending": True, "h_vault_id": None},
+                "pauseStatus": pause_status})
+    assert [(c["method"], c["url"].split("/api/v2")[-1]) for c in out["calls"][:2]] == [
+        ("POST", "/sessions/session1/pause"), ("DELETE", "/sessions/session1")]
+    assert out["tables"]["agent_task_runs"][0]["session_cleanup_pending"] is False
+
+
+@pytest.mark.parametrize("failure", ["pause", "delete"])
+def test_sweep_failed_session_cleanup_retains_marker(run, failure):
+    out, = run({"body": {"action": "sweep"}, "headers": {"X-Gusan-Sweep-Secret": "sweep-test"},
+                "row": {"status": "cancelled"}, "run": {"session_cleanup_pending": True},
+                **({"pauseStatus": 500} if failure == "pause" else {"deleteStatus": 500})})
+    assert out["replies"][0]["status"] == 200
+    assert out["tables"]["agent_task_runs"][0]["session_cleanup_pending"] is True
+    assert out["tables"]["agent_task_runs"][0]["h_session_id"] == "session1"
+    assert "agent-vault session_cleanup_failed" in out["logs"]
+
+
+def test_sweep_does_not_stop_active_or_unmarked_sessions(run):
+    active, unmarked = run(
+        {"body": {"action": "sweep"}, "headers": {"X-Gusan-Sweep-Secret": "sweep-test"},
+         "run": {"session_cleanup_pending": True}},
+        {"body": {"action": "sweep"}, "headers": {"X-Gusan-Sweep-Secret": "sweep-test"},
+         "row": {"status": "cancelled"}})
+    for out in [active, unmarked]:
+        assert not any("/sessions/" in c["url"] for c in out["calls"])
 
 
 def test_sweep_auth_and_scope(run):

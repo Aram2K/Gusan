@@ -155,6 +155,7 @@ async function h(
     res.status === 204 || method === "DELETE" ||
     path.endsWith("/tool_results") ||
     path.endsWith("/messages")
+    || path.endsWith("/pause")
   ) return null;
   return res.json();
 }
@@ -1311,8 +1312,17 @@ Deno.serve(async (req: Request) => {
       const currentRun = await loadRun(db, row);
       const awaiting = row.status === "awaiting_confirmation";
       if (currentRun.h_session_id && !awaiting) {
+        if (currentRun.h_vault_id) await saveRun(db, row, { session_cleanup_pending: true });
         try {
+          if (currentRun.h_vault_id) {
+            try {
+              await h(`/sessions/${encodeURIComponent(currentRun.h_session_id)}/pause`, "POST");
+            } catch (error) {
+              if (!(error instanceof HFailure) || ![404, 409].includes(error.httpStatus)) throw error;
+            }
+          }
           await h(`/sessions/${encodeURIComponent(currentRun.h_session_id)}`, "DELETE");
+          if (currentRun.h_vault_id) await saveRun(db, row, { session_cleanup_pending: false });
         } catch (error) {
           if (!currentRun.h_vault_id) throw error;
           console.log("agent-action", "cancel_session_failed");
