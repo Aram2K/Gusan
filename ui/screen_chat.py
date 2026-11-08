@@ -235,7 +235,8 @@ class ScreenChatWindow(QWidget):
         self.banner.setVisible(bool(text))
 
     def _open_permission(self):
-        mac_permissions.open_settings(mac_permissions.SCREEN_RECORDING)
+        mac_permissions.request(mac_permissions.SCREEN_RECORDING)
+        self._apply_policy()
 
     def changeEvent(self, event):
         if (event.type() == QEvent.ActivationChange and self.isActiveWindow()

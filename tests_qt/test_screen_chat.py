@@ -100,13 +100,37 @@ def test_mac_permission_denied_no_capture_settings_button(chat, monkeypatch):
     w, capture, app = chat
     monkeypatch.setattr(screen_chat.sys, "platform", "darwin")
     monkeypatch.setattr(ui.mac_permissions, "screen_recording_granted", lambda: False)
-    request = Mock()
-    monkeypatch.setattr(ui.mac_permissions, "open_settings", request)
+    access = Mock(return_value=False)
+    settings = Mock()
+    monkeypatch.setattr(ui.mac_permissions, "IS_MAC", True)
+    monkeypatch.setattr(ui.mac_permissions, "_screen_access", access)
+    monkeypatch.setattr(ui.mac_permissions, "open_settings", settings)
     w.open_chat()
     capture.assert_not_called()
     assert w.permission_button.isVisible() and not w.input.isEnabled()
     w.permission_button.click()
-    request.assert_called_once_with(ui.mac_permissions.SCREEN_RECORDING)
+    access.assert_called_once_with("CGRequestScreenCaptureAccess")
+    settings.assert_called_once_with(ui.mac_permissions.SCREEN_RECORDING)
+
+
+def test_mac_permission_request_granted_does_not_open_settings(chat, monkeypatch):
+    w, capture, app = chat
+    monkeypatch.setattr(screen_chat.sys, "platform", "darwin")
+    granted = {"value": False}
+    monkeypatch.setattr(ui.mac_permissions, "screen_recording_granted", lambda: granted["value"])
+    monkeypatch.setattr(ui.mac_permissions, "IS_MAC", True)
+    def request_access(name):
+        assert name == "CGRequestScreenCaptureAccess"
+        granted["value"] = True
+        return True
+    monkeypatch.setattr(ui.mac_permissions, "_screen_access", request_access)
+    settings = Mock()
+    monkeypatch.setattr(ui.mac_permissions, "open_settings", settings)
+    w.open_chat()
+    w.permission_button.click()
+    settings.assert_not_called()
+    assert not w.permission_button.isVisible() and w.input.isEnabled()
+    capture.assert_not_called()
 
 
 def test_unknown_mac_permission_still_attempts_capture(chat, monkeypatch):
