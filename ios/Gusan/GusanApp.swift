@@ -1,4 +1,5 @@
 import SwiftUI
+import GusanKit
 
 @main
 struct GusanApp: App {
@@ -22,7 +23,7 @@ struct GusanApp: App {
             try await voice.perform(command)
         }
         AgentCenter.registerBackgroundRefresh(agent)
-        let connections = CalendarConnections(group: model.store.resolution.chosen)
+        let connections = CalendarConnections(group: model.store.resolution.chosen, client: CalendarClient(auth: model.auth), signedIn: model.session != nil)
         _connections = StateObject(wrappedValue: connections)
         CalendarConnections.registerBackgroundRefresh(connections)
     }
@@ -44,14 +45,14 @@ struct GusanApp: App {
                 #if DEBUG
                 .overlay(alignment: .bottom) { AgentCardPreview() }
                 #endif
-                .onOpenURL { if $0.host == "voice" { voice.handleURL($0) } else { model.handleURL($0) } }
+                .onOpenURL { if $0.host == "voice" { voice.handleURL($0) } else if $0.host == "calendar" { connections.handleGoogleCallback($0) } else { model.handleURL($0) } }
                 .sheet(isPresented: Binding(get: { voice.presented && !voice.keyboardActivation }, set: { voice.presented = $0 }), onDismiss: {
                     if voiceSignInRequested {
                         voiceSignInRequested = false
                         model.handleURL(URL(string: "gusan://signin")!)
                     }
                 }) { VoiceListeningView(voice: voice, onSignIn: { voiceSignInRequested = true; voice.closePresentation() }).tint(Theme.accent) }
-                .onChange(of: model.session) { if $0 == nil { voice.stop() }; agent.sessionChanged(); connections.sessionChanged() }
+                .onChange(of: model.session) { if $0 == nil { voice.stop() }; agent.sessionChanged(); connections.sessionChanged(signedIn: $0 != nil) }
         }
     }
 }

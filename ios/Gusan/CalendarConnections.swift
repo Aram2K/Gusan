@@ -1,4 +1,5 @@
 import BackgroundTasks
+import AuthenticationServices
 import EventKit
 import GusanKit
 import SwiftUI
@@ -30,7 +31,10 @@ private actor CalendarEventReader {
 }
 
 @MainActor
-final class CalendarConnections: ObservableObject {
+final class CalendarConnections: NSObject, ObservableObject, ASWebAuthenticationPresentationContextProviding {
+    enum GoogleState: String { case notConnected = "Not connected", connected = "Connected", reconnect = "Reconnect required", notConfigured = "Not set up yet" }
+    @Published private(set) var googleState: GoogleState = .notConnected
+    @Published private(set) var googleBusy = false
     enum State: Equatable {
         case notConnected, connected, denied, restricted
         var label: String {
@@ -58,11 +62,19 @@ final class CalendarConnections: ObservableObject {
     private var generation = 0
     private var refreshAgain = false
     private var requestingPermission = false
+    private let google: CalendarClient
+    private var signedIn: Bool
+    private var googleTask: Task<Void, Never>?
+    private var googleSession: ASWebAuthenticationSession?
+    private var googleRefreshing = false
+    private var googleRefreshAgain = false
 
-    init(group: String?) {
+    init(group: String?, client: CalendarClient, signedIn: Bool) {
         store = CalendarSnapshotStore(group: group)
+        google = client; self.signedIn = signedIn
         includeTitles = store.calendarIncludeTitles
         lastUpdated = store.snapshot?.generatedAt
+        super.init()
         syncState()
         observer = NotificationCenter.default.addObserver(forName: .EKEventStoreChanged, object: nil, queue: nil) { [weak self] _ in
             Task { @MainActor in self?.eventsChanged() }
@@ -132,10 +144,16 @@ final class CalendarConnections: ObservableObject {
         if connecting { connecting = false }
         if refreshing { refreshing = false }
         if error != nil { error = nil }
+        googleTask?.cancel(); googleTask = nil
+        googleSession?.cancel(); googleSession = nil
+        if googleBusy { googleBusy = false }
     }
 
-    func sessionChanged() {
+    func sessionChanged(signedIn: Bool) {
+        guard self.signedIn != signedIn else { return }
         invalidate()
+        self.signedIn = signedIn
+        if !signedIn, googleState != .notConnected { googleState = .notConnected }
         syncState()
         scheduleBackgroundRefresh()
     }
@@ -154,6 +172,12 @@ final class CalendarConnections: ObservableObject {
     }
 
     func refresh() async {
+        async let googleWork: Void = refreshGoogle()
+        await refreshIPhone()
+        await googleWork
+    }
+
+    private func refreshIPhone() async {
         syncState()
         guard store.calendarIPhoneEnabled else { return }
         guard state == .connected else {
@@ -201,12 +225,128 @@ final class CalendarConnections: ObservableObject {
     }
 
     private func scheduleBackgroundRefresh() {
-        guard store.calendarIPhoneEnabled else {
+        guard store.calendarIPhoneEnabled || store.calendarGoogleEnabled else {
             BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.refreshTaskID)
             return
         }
         let request = BGAppRefreshTaskRequest(identifier: Self.refreshTaskID)
         request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
         try? BGTaskScheduler.shared.submit(request)
+    }
+
+    func connectGoogle() {
+        guard !googleBusy else { return }
+        guard signedIn else { error = "Sign in to connect Google Calendar."; return }
+        googleBusy = true; error = nil
+        let version = generation
+        googleTask = Task {
+            do {
+                let url = try await google.start()
+                guard version == generation, !Task.isCancelled else { return }
+                let flow = ASWebAuthenticationSession(url: url, callbackURLScheme: "gusan") { [weak self] url, failure in
+                    Task { @MainActor in
+                        guard let self, version == self.generation else { return }
+                        self.googleSession = nil
+                        if let url { self.handleGoogleCallback(url) }
+                        else {
+                            self.googleBusy = false
+                            if (failure as? ASWebAuthenticationSessionError)?.code != .canceledLogin { self.error = "Google Calendar couldn't be connected. Try again." }
+                        }
+                    }
+                }
+                flow.presentationContextProvider = self
+                googleSession = flow
+                if !flow.start() { googleSession = nil; googleBusy = false; error = "Google sign-in couldn't be opened. Try again." }
+            } catch {
+                guard version == generation else { return }
+                googleBusy = false; googleFailure(error)
+            }
+        }
+    }
+
+    func handleGoogleCallback(_ url: URL) {
+        guard url.scheme == "gusan", url.host == "calendar" else { return }
+        guard googleBusy else { return }
+        if !CalendarClient.callbackConnected(url) {
+            googleBusy = false
+            let reason = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "reason" })?.value
+            if reason == "config" { googleState = .notConfigured }
+            else { error = reason == "denied" ? "Google Calendar access wasn't granted." : "Google Calendar couldn't be connected. Try again." }
+            return
+        }
+        let version = generation
+        googleTask = Task {
+            await refreshGoogle(force: true)
+            guard version == generation else { return }
+            googleBusy = false; scheduleBackgroundRefresh()
+        }
+    }
+
+    func disconnectGoogle() {
+        guard !googleBusy else { return }
+        invalidate()
+        googleBusy = true; error = nil
+        let version = generation
+        googleTask = Task {
+            do {
+                try await google.disconnect()
+                guard version == generation else { return }
+                store.calendarGoogleEnabled = false
+                googleState = .notConnected; syncState(); scheduleBackgroundRefresh()
+            } catch {
+                guard version == generation else { return }
+                googleFailure(error)
+            }
+            if version == generation { googleBusy = false }
+        }
+    }
+
+    private func refreshGoogle(force: Bool = false) async {
+        guard signedIn, force || !googleBusy else { return }
+        if googleRefreshing { googleRefreshAgain = true; return }
+        googleRefreshing = true
+        let version = generation, titles = includeTitles
+        defer {
+            googleRefreshing = false
+            if (version != generation || googleRefreshAgain), signedIn {
+                googleRefreshAgain = false
+                Task { await refreshGoogle() }
+            }
+        }
+        do {
+            let connected = try await google.status()
+            guard version == generation, !Task.isCancelled else { return }
+            let state: GoogleState = connected ? .connected : (googleState == .reconnect ? .reconnect : .notConnected)
+            if googleState != state { googleState = state }
+            store.calendarGoogleEnabled = connected
+            guard connected else { syncState(); return }
+            let calendar = Calendar.current, start = Calendar.current.startOfDay(for: Date())
+            guard let end = calendar.date(byAdding: .day, value: 8, to: start) else { return }
+            let blocks = try await google.busy(start: start, end: end, includeTitles: titles, timeZone: calendar.timeZone)
+            guard version == generation, !Task.isCancelled, store.calendarGoogleEnabled else { return }
+            store.replaceSource("google", snapshot: CalendarSnapshot(windowStart: start, windowEnd: end, timeZoneID: calendar.timeZone.identifier, sources: ["google"], blocks: blocks))
+            syncState(); scheduleBackgroundRefresh()
+        } catch {
+            guard version == generation, !Task.isCancelled else { return }
+            googleFailure(error)
+        }
+    }
+
+    private func googleFailure(_ failure: Error) {
+        if let failure = failure as? CalendarClientError {
+            if failure.code == "google_not_configured" || failure.code == "google_reconnect" {
+                store.calendarGoogleEnabled = false
+                let state: GoogleState = failure.code == "google_not_configured" ? .notConfigured : .reconnect
+                if googleState != state { googleState = state }
+                syncState(); scheduleBackgroundRefresh()
+                return
+            }
+        }
+        let message = "Google Calendar couldn't be updated. Check your connection and try again."
+        if error != message { error = message }
+    }
+
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows).first(where: \.isKeyWindow) ?? ASPresentationAnchor()
     }
 }
