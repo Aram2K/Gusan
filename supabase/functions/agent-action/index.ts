@@ -745,6 +745,7 @@ async function devinAction(db: any, row: Obj, body: Obj) {
   if (body.action === "continue") {
     // Follow-ups are paid Devin work: same active/daily caps as a new task, claimed before posting.
     const wasActive = !terminal(row);
+    const previousDeadline = row.deadline_at;
     const claimed = await db.rpc("claim_agent_follow_up", {
       p_user_id: row.user_id, p_task_id: row.id, p_max_active: 2, p_max_per_day: 40, p_deadline_s: 86400,
     });
@@ -755,7 +756,7 @@ async function devinAction(db: any, row: Obj, body: Obj) {
     } catch (error) {
       // A reopened task has no tracked work left, so its session is stopped rather than left running untracked.
       // A task that was still running keeps its original work; the follow-up itself was not delivered.
-      if (wasActive) { await save(db, row, { status: "running" }, true); throw error; }
+      if (wasActive) { await save(db, row, { status: "running", deadline_at: previousDeadline }, true); throw error; }
       await terminateDevin(run);
       await save(db, row, { status: "failed", error_code: "devin_error", finished_at: new Date().toISOString() }, true);
       throw error;
