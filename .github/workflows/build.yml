@@ -467,7 +467,7 @@ jobs:
           plist_set CFBundleShortVersionString "$VERSION"
           plist_set CFBundleVersion "$VERSION"
           plist_set NSMicrophoneUsageDescription "Gusan records your microphone to turn speech into text. Audio stays on your Mac unless you pick a cloud speech engine."
-          plist_set NSAudioCaptureUsageDescription "Gusan's Interpreter listens to your call's sound to translate it for you."
+          plist_set NSAudioCaptureUsageDescription "Gusan listens to your call's sound so the Interpreter can translate it for you."
           plist_set NSAppleEventsUsageDescription "Gusan pastes transcribed text into the focused window via simulated keystrokes."
           # Surface the global-hotkey requirement so macOS shows a clear
           # prompt under Privacy & Security → Accessibility.

@@ -579,7 +579,7 @@ class TestBuild(unittest.TestCase):
         self.assertIn('plist_set CFBundleVersion "$VERSION"', plist)
         self.assertIn('VERSION="${{ steps.version.outputs.app_version }}"', plist)
         usage = re.findall(r'plist_set NS\w+UsageDescription "([^"]+)"', plist)
-        self.assertEqual(len(usage), 3)
+        self.assertEqual(len(usage), 4)   # mic, Apple events, input monitoring, call sound (Interpreter)
         for text in usage:
             self.assertTrue(text.startswith("Gusan "), text)
         self.assertNotRegex(plist, r"['\"]Transcribe ")
