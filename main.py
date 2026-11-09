@@ -187,6 +187,7 @@ DEFAULT = {
     "privacy_mode": False,
     "save_history": True,
     "avatar": "",                       # ui/components/avatars.py: "" (Gusan blue + the letter), a preset, "photo"
+    "whats_new_seen": "",               # whats_new.py: the version whose "What's new" was shown (or first run)
     "analytics_enabled": True,
     "analytics_consent_applied": False,
     "analytics_endpoint": "https://hftcelxzfoubheqeoool.supabase.co/functions/v1/transcribe-analytics",
@@ -4486,6 +4487,8 @@ class AppController(QObject):
         if (cached_pending and self.cfg.get("onboarding_done", False)
                 and updater.should_prompt(self.cfg, cached_pending, APP_VERSION)):
             QTimer.singleShot(1500, lambda: self.sig_update_available.emit(cached_pending))
+        # Just updated? "What's new" once (before the check below clears where the update came from).
+        self._whats_new_check()
         # Just updated (the quiet install reopens Gusan without a word)? Or did the install stop?
         self._after_restart_checks()
 
@@ -6015,8 +6018,9 @@ class AppController(QObject):
                 return
             if not AppController._is_newer(tag):
                 self._clear_update_attempt()
-                QTimer.singleShot(2500, lambda: self.show_tray_hint(
-                    f"{APP_NAME} is up to date", f"Updated to version {APP_VERSION}."))
+                if not getattr(self, "_whats_new_coming", False):       # the window says it, with what changed
+                    QTimer.singleShot(2500, lambda: self.show_tray_hint(
+                        f"{APP_NAME} is up to date", f"Updated to version {APP_VERSION}."))
                 QTimer.singleShot(30_000, self._tidy_update_files)      # once Setup has surely exited
                 return
             if attempt.get("failed"):
@@ -6029,6 +6033,51 @@ class AppController(QObject):
             QTimer.singleShot(3000, lambda a=dict(attempt): self._show_update_failed_after_restart(a))
         except Exception:
             logger.warning("The after-update check failed", exc_info=True)
+
+    def _whats_new_check(self):
+        """At start: once after an update (whats_new.due - never on a fresh install, never twice) the "What's new"
+        window comes up 2.5 s later, on top but without taking the keyboard. This version is recorded as seen
+        either way. True when it is coming."""
+        import whats_new
+        try:
+            found = whats_new.due(self.cfg, APP_VERSION)
+        except Exception:
+            logger.warning("What's new: could not tell", exc_info=True)
+            found = None
+        if str(self.cfg.get(whats_new.SEEN_KEY) or "") != APP_VERSION:
+            self.cfg[whats_new.SEEN_KEY] = APP_VERSION
+            self.schedule_config_save()
+        self._whats_new_coming = bool(found)
+        if found:
+            previous, sections = found
+            logger.info("What's new: %d changes since %s", whats_new.count(sections), previous or "the last version")
+            QTimer.singleShot(2500, lambda p=previous, s=sections: self.show_whats_new(p, s, activate=False))
+        return bool(found)
+
+    def show_whats_new(self, previous="", sections=None, activate=True):
+        """The "What's new" window (ui/whats_new_window.py): after an update (``sections`` since ``previous``), or
+        every release's changes up to this one (Settings > Updates & about > What's new)."""
+        import whats_new
+        if sections is None:
+            sections, previous = whats_new.all_sections(APP_VERSION), ""
+        if not sections:
+            return None
+        try:
+            from ui.whats_new_window import WhatsNewWindow
+            old = getattr(self, "_whats_new_window", None)
+            if old is not None:
+                try:
+                    old.close()
+                except RuntimeError:
+                    pass
+            win = WhatsNewWindow(sections, current=APP_VERSION, previous=previous,
+                                 release_url=updater.release_page("v" + APP_VERSION))
+            self._whats_new_window = win
+            self._bring_to_front(win, activate=activate)
+            return win
+        except Exception:
+            logger.warning("What's new could not open", exc_info=True)
+            return None
 
     def _show_update_failed_after_restart(self, attempt):
         """The install stopped before it finished. Said once, and never over an update started since."""

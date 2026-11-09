@@ -117,8 +117,9 @@ class UpdatePanel(QWidget):
     install_requested = Signal()
     website_requested = Signal()
 
-    def __init__(self, tag="", status_label=None, dot=None, row_button=None, on_idle=None, parent=None):
+    def __init__(self, tag="", status_label=None, dot=None, row_button=None, on_idle=None, parent=None, extras=()):
         super().__init__(parent)
+        self._extras = tuple(w for w in (extras or ()) if w is not None)    # hidden while an update runs ("What's new")
         self.tag = ""
         self.stage = "idle"
         self._checking = False
@@ -212,6 +213,8 @@ class UpdatePanel(QWidget):
             b.setVisible(name in wanted)
         if self._row_button is not None:
             self._row_button.setVisible(False)
+        for w in self._extras:
+            w.setVisible(False)
         self.actions.setVisible(bool(wanted))
         self.setVisible(True)
         self.setAccessibleDescription(" ".join(x for x in (status, detail, note) if x))
@@ -299,6 +302,8 @@ class UpdatePanel(QWidget):
         self.actions.setVisible(False)
         if self._row_button is not None:
             self._row_button.setVisible(True)
+        for w in self._extras:
+            w.setVisible(True)
         if tell and callable(self._on_idle):
             try:
                 self._on_idle()

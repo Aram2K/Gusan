@@ -2915,6 +2915,16 @@ class SettingsPage(QWidget):
         self.update_status.setMinimumHeight(18)
         self.update_status.setAccessibleName("Update status")
         srow.addWidget(self.update_status, 0, Qt.AlignVCenter)
+        # "What's new": every release's changes - the window shown once after an update (whats_new.py).
+        self.whats_new_sep = text_label("·", 12.5, color="faint", parent=ver)
+        self.whats_new_sep.setAccessibleName("")
+        srow.addWidget(self.whats_new_sep, 0, Qt.AlignVCenter)
+        self.whats_new_button = Button("What's new", "link", "s", parent=ver)
+        self.whats_new_button.setFont(theme.font(12.5, 600))
+        self.whats_new_button.setFixedHeight(18)
+        self.whats_new_button.setAccessibleName("See what's new in %s" % APP_NAME)
+        self.whats_new_button.clicked.connect(lambda _=False: call(self.app, "show_whats_new"))
+        srow.addWidget(self.whats_new_button, 0, Qt.AlignVCenter)
         srow.addStretch(1)
         vcol.addLayout(srow)
         vl.addLayout(vcol, 1)
@@ -2925,7 +2935,8 @@ class SettingsPage(QWidget):
         # bar under it and its own buttons in the button's place - never a window of its own.
         from ui.update_panel import UpdatePanel
         self.update_panel = UpdatePanel(status_label=self.update_status, dot=self.update_dot,
-                                        row_button=self.update_button, on_idle=self._update_panel_idle, parent=ver)
+                                        row_button=self.update_button, on_idle=self._update_panel_idle, parent=ver,
+                                        extras=(self.whats_new_sep, self.whats_new_button))
         vcol.addWidget(self.update_panel)
         vl.addWidget(self.update_panel.actions, 0, Qt.AlignVCenter)
         self.version_row = ver

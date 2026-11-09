@@ -80,7 +80,8 @@ def ctl(qapp):
     import main
     import updater
     main.cfg.update(analytics_enabled=False, onboarding_done=True, account_gate_seen=True,
-                    install_updates_on_quit=False, macos_perms_guide_shown=True)
+                    install_updates_on_quit=False, macos_perms_guide_shown=True,
+                    whats_new_seen=main.APP_VERSION)          # not just updated: no "What's new" window at start
     patches = [
         # A test process has no Mac permissions: no "Let Gusan work on your Mac" guide at startup.
         mock.patch.object(main.AppController, "_mac_permissions_need_attention", lambda self: False),
