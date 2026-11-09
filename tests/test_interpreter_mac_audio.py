@@ -66,6 +66,34 @@ def test_a_refused_tap_raises_a_calm_code(code, err):
     assert e.value.code == err
 
 
+class SilentProc(FakeProc):
+    """A helper that runs but never writes (its output device isn't playing)."""
+
+    def __init__(self):
+        super().__init__()
+        self.stdout = mock.Mock()
+        self._gate = threading.Event()
+        self.stdout.read = lambda _n: self._gate.wait(5) and b""
+
+    def poll(self):
+        return -15 if self.terminated else None
+
+    def terminate(self):
+        self.terminated = True
+        self._gate.set()
+
+
+def test_a_silent_helper_never_freezes_the_start():
+    proc = SilentProc()
+    tap, _got = tap_with(proc)
+    tap.START_S = 0.2
+    t0 = time.monotonic()
+    with pytest.raises(InterpreterError) as e:
+        tap.start()
+    assert time.monotonic() - t0 < 2 and proc.terminated
+    assert e.value.code == "no_call_sound"
+
+
 def test_capture_status():
     ok = lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="granted\n")
     denied = lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="denied\n")

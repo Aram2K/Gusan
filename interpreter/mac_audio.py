@@ -113,9 +113,11 @@ class TapCapture:
         self.lost = False
         self._proc = proc = self._popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE, bufsize=0)
-        first = proc.stdout.read(CHUNK)          # the first sound, or nothing when it refused
+        first = self._first_chunk(proc)          # the first sound, or nothing when it refused
         if not first:
-            code = proc.wait(self.START_S) if proc.poll() is None else proc.returncode
+            if proc.poll() is None:              # running but silent: the output device isn't playing
+                self._end(proc)
+            code = proc.poll()
             err = (proc.stderr.read() or b"").decode("utf-8", "ignore").strip()
             logger.warning("interpreter: the call's sound can't be captured (%s) %s", code, err)
             self._proc = None
@@ -125,6 +127,27 @@ class TapCapture:
                                         daemon=True)
         self._thread.start()
         logger.info("interpreter capture: the Mac's sound (process tap, Gusan left out)")
+
+    def _first_chunk(self, proc):
+        """The helper's first 20 ms, or b"" when it refuses or says nothing within START_S (a device
+        that never runs must not freeze the start)."""
+        box = []
+        t = threading.Thread(target=lambda: box.append(proc.stdout.read(CHUNK)), daemon=True)
+        t.start()
+        t.join(self.START_S)
+        return box[0] if box else b""
+
+    @staticmethod
+    def _end(proc):
+        for step in (lambda: proc.stdin.close(), proc.terminate):
+            try:
+                step()
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            proc.wait(1.0)
+        except Exception:  # noqa: BLE001
+            proc.kill()
 
     def _pump(self, proc, first):
         chunk = first
@@ -146,15 +169,7 @@ class TapCapture:
         p, self._proc = self._proc, None
         if p is None:
             return
-        for step in (lambda: p.stdin.close(), p.terminate):
-            try:
-                step()
-            except Exception:  # noqa: BLE001
-                pass
-        try:
-            p.wait(1.0)
-        except Exception:  # noqa: BLE001
-            p.kill()
+        self._end(p)
         if self._thread:
             self._thread.join(1.0)
 
