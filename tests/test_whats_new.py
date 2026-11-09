@@ -24,6 +24,11 @@ class TestNotes(unittest.TestCase):
                 self.assertNotIn("limit", text)                     # the release-notes rules
                 self.assertIsNone(re.search(r"armenia", text), title)
 
+    def test_this_version_has_its_list(self):
+        """A release step: every version gets its "What's new" items (next to docs/release-notes)."""
+        import app_info
+        self.assertIn(app_info.APP_VERSION, dict(wn.NOTES))
+
     def test_newest_first(self):
         versions = [wn._v(v) for v, _items in wn.NOTES]
         self.assertEqual(versions, sorted(versions, reverse=True))
