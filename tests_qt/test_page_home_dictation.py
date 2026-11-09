@@ -662,6 +662,8 @@ def test_languages_you_mix(dict_page):
 
 def test_dictation_list_leaves_out_meetings_and_smart_actions(dict_page):
     page, _, _ = dict_page()
+    if page.earlier_toggle is not None:
+        page.earlier_toggle.click()                    # older than yesterday: under "Earlier", closed at first
     texts = [r.main.text() for r in page.shown_rows()]
     assert texts[0] == D_ANNA
     assert not any("Meeting Notes" in t or "domain renewal is done" in t for t in texts)
@@ -1156,3 +1158,29 @@ def test_a_very_long_recent_item_is_measured_fast(qapp):
         r.sizeHint()
     assert _time.perf_counter() - start < 0.5
     assert r.text() == long_text and r.accessibleName() == long_text
+
+
+def test_older_dictations_wait_under_one_closed_earlier_row(dict_page):
+    """The founder (2026-11-09): the list was far too long - "put everything under Earlier". Today and Yesterday as
+    they are; everything older under one "Earlier" row with its count, closed until it is clicked."""
+    from ui.pages.dictation import EarlierToggle
+    page, _, _ = dict_page()
+    texts = [r.main.text() for r in page.shown_rows()]
+    assert len(texts) == 3 and texts[0] == D_ANNA                       # today (2) and yesterday (1)
+    tog = page.earlier_toggle
+    assert isinstance(tog, EarlierToggle) and tog.count == 2 and not tog.isChecked()
+    assert tog.accessibleName() == "Earlier, 2 dictations, closed"
+    assert not page.more_button.isVisible()
+    tog.click()
+    assert [r.main.text() for r in page.shown_rows()][3:] == ["Remind me to renew the domain.", "Old one"]
+    assert page.earlier_toggle.isChecked() and page.earlier_toggle.accessibleName().endswith("open")
+    page.earlier_toggle.click()                                          # and closed again
+    assert len(page.shown_rows()) == 3
+    page.search.setText("renew")                                         # a search shows every match
+    page._render_list()
+    assert [r.main.text() for r in page.shown_rows()] == ["Remind me to renew the domain."]
+    assert page.earlier_toggle is None
+    page.search.setText("")
+    page._render_list()
+    assert page.highlight("2026-08-01 10:00:00")                         # jumping to an old one opens "Earlier"
+    assert page.earlier_toggle.isChecked()

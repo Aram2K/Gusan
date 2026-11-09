@@ -150,6 +150,9 @@ def test_a_dictation_row_has_a_trash_icon_that_asks_then_deletes_only_that_one(d
     import history
     page, app, _info = dict_page("pro")
     before = history.load()
+    if page.earlier_toggle is not None:
+        page.earlier_toggle.click()                    # older than yesterday: under "Earlier", closed at first
+        _spin(5)
     rows = page.shown_rows()
     assert rows and all(r.trash.accessibleName().startswith("Delete ") for r in rows)
     row = rows[1]

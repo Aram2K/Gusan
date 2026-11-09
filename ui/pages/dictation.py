@@ -435,6 +435,70 @@ class LangTag(QWidget):
         p.end()
 
 
+EARLIER = "Earlier"
+
+
+class EarlierToggle(QAbstractButton):
+    """The "Earlier" heading of the dictation list: everything older than yesterday sits under it, closed until it is
+    clicked (the founder, 2026-11-09: "not show every single recording, just put everything under Earlier").
+    "Earlier  126  >" closed, "Earlier  126  v" open."""
+
+    def __init__(self, count, opened=False, parent=None):
+        super().__init__(parent)
+        self.count = int(count)
+        self.setCheckable(True)
+        self.setChecked(bool(opened))
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setFixedHeight(34)
+        self.setAttribute(Qt.WA_Hover, True)
+        self.toggled.connect(lambda _on: self._name())
+        self._name()
+
+    def _name(self):
+        state = "open" if self.isChecked() else "closed"
+        self.setAccessibleName("Earlier, %d dictation%s, %s" % (self.count, "" if self.count == 1 else "s", state))
+        self.update()
+
+    def sizeHint(self):
+        return QSize(200, 34)
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        if self.underMouse() or self.hasFocus():
+            p.setPen(Qt.NoPen)
+            p.setBrush(theme.qcolor("bg2"))
+            p.drawRoundedRect(r, 8, 8)
+        x = 8
+        f = theme.font(12, 700)
+        p.setFont(f)
+        p.setPen(theme.qcolor("muted"))
+        fm = QFontMetricsF(f)
+        p.drawText(QRectF(x, 0, fm.horizontalAdvance(EARLIER) + 2, self.height()), Qt.AlignLeft | Qt.AlignVCenter,
+                   EARLIER)
+        x += fm.horizontalAdvance(EARLIER) + 8
+        # the count, in a soft pill
+        cf = theme.font(11, 700)
+        cfm = QFontMetricsF(cf)
+        num = str(self.count)
+        pw = cfm.horizontalAdvance(num) + 12
+        pill = QRectF(x, (self.height() - 18) / 2.0, pw, 18)
+        p.setPen(Qt.NoPen)
+        p.setBrush(theme.qcolor("bg2" if not (self.underMouse() or self.hasFocus()) else "line"))
+        p.drawRoundedRect(pill, 9, 9)
+        p.setFont(cf)
+        p.setPen(theme.qcolor("muted"))
+        p.drawText(pill, Qt.AlignCenter, num)
+        x += pw + 8
+        # the chevron: right while closed, down while open
+        from ui.components import icons
+        pm = icons.pixmap("chev_d" if self.isChecked() else "chev_r", 14, "muted", sw=2)
+        p.drawPixmap(int(x), int((self.height() - 14) / 2), pm)
+        p.end()
+
+
 class DictationRow(H._Hairline):
     """time · one line · EN · Copy · a trash icon while the pointer is on the row (46 px, plain on
     the window). The icon asks first (the page does) and the Delete key does the same from Copy."""
@@ -531,6 +595,7 @@ class DictationPage(QWidget):
         self._sig = None
         self._query = ""
         self._limit = LIST_PAGE
+        self._earlier_open = False          # "Earlier" (older than yesterday) stays closed until it is clicked
         self._syncing = False
 
         root = QVBoxLayout(self)
@@ -1292,25 +1357,65 @@ class DictationPage(QWidget):
             lb.setContentsMargins(2, 4, 2, 4)
             self.list_lay.addWidget(lb)
             return
-        shown = found[:self._limit]
+        searching = bool(self._query.strip())
+
+        def group_for(e):
+            g = H.group_of(H.parse_when(e.get("timestamp")), now)
+            return EARLIER if (g not in ("Today", "Yesterday") and not searching) else g
+
+        earlier_count = 0 if searching else sum(1 for e in found if group_for(e) == EARLIER)
+        recent = len(found) - earlier_count
+        # Closed "Earlier": only the recent ones (and the row); open: as many as "Show more" reached.
+        limit = self._limit if (searching or self._earlier_open) else recent
+        shown = found[:max(limit, recent)]
         group = None
         first_group = True
         first = True
+        self.earlier_toggle = None
         for e in shown:
-            g = H.group_of(H.parse_when(e.get("timestamp")), now)
+            g = group_for(e)
             if g != group:
                 group = g
-                lb = H.text_label(g, 12, 700, "muted", parent=self.list_box)
-                lb.setContentsMargins(2, 2 if first_group else 18, 2, 8)
-                self.list_lay.addWidget(lb)
-                first_group = False
-                first = True
+                if g == EARLIER:
+                    tog = EarlierToggle(earlier_count, self._earlier_open, self.list_box)
+                    tog.setContentsMargins(0, 0, 0, 0)
+                    tog.toggled.connect(self._toggle_earlier)
+                    if not first_group:
+                        self.list_lay.addSpacing(10)
+                    self.list_lay.addWidget(tog)
+                    self.earlier_toggle = tog
+                    first_group = False
+                    first = True
+                    if not self._earlier_open:
+                        break
+                else:
+                    lb = H.text_label(g, 12, 700, "muted", parent=self.list_box)
+                    lb.setContentsMargins(2, 2 if first_group else 18, 2, 8)
+                    self.list_lay.addWidget(lb)
+                    first_group = False
+                    first = True
             row = DictationRow(e, now, self.list_box, first=first)
             row.delete_requested.connect(self._ask_delete)
             self.list_lay.addWidget(row)
             first = False
-        self.more_button.setVisible(len(found) > len(shown))
+        if earlier_count and self.earlier_toggle is None and not self._earlier_open:
+            # (every recent row drawn: the closed "Earlier" row comes after them)
+            tog = EarlierToggle(earlier_count, False, self.list_box)
+            tog.toggled.connect(self._toggle_earlier)
+            self.list_lay.addSpacing(10)
+            self.list_lay.addWidget(tog)
+            self.earlier_toggle = tog
+        opened = searching or self._earlier_open
+        self.more_button.setVisible(opened and len(found) > len(shown))
         self._fix_tab_order()
+
+    def _toggle_earlier(self, on):
+        self._earlier_open = bool(on)
+        self._limit = LIST_PAGE
+        self._render_list()
+        tog = getattr(self, "earlier_toggle", None)
+        if tog is not None:
+            tog.setFocus(Qt.OtherFocusReason)
 
     def _poll_store(self):
         if not self.isVisible():
@@ -1334,6 +1439,9 @@ class DictationPage(QWidget):
             return False
         if idx >= self._limit:
             self._limit = idx + 1
+        g = H.group_of(H.parse_when(self._entries[idx].get("timestamp")), _now())
+        if g not in ("Today", "Yesterday"):
+            self._earlier_open = True           # it is under "Earlier": open it
         self._render_list()
         row = next((r for r in self.shown_rows() if r.timestamp() == timestamp), None)
         if row is None:
@@ -1523,6 +1631,12 @@ class DictationPage(QWidget):
         reached only after the list."""
         try:
             rows = [r.copy_button for r in self.shown_rows()]
+            tog = getattr(self, "earlier_toggle", None)
+            if tog is not None:
+                # where it is on screen: after the recent rows (closed) or before the older ones (open)
+                recent = [r.copy_button for r in self.shown_rows()
+                          if H.group_of(H.parse_when(r.timestamp()), _now()) in ("Today", "Yesterday")]
+                rows = recent + [tog] + [b for b in rows if b not in recent]
             list_part = [self.search, self.export_button] + rows + [self.more_button]
             rail = self._rail_focusables()
             chain = [self.runs_change] + (rail + list_part if self._stacked else list_part + rail)
