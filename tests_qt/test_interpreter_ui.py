@@ -290,7 +290,8 @@ def test_a_server_refusal_is_one_calm_sentence(page):
 def test_no_virtual_mic_says_so_with_a_set_up_link(page):
     p, app = page("pro")
     p.host.say("no_virtual_mic")
-    assert p.notice_label.text() == "Speak needs a virtual microphone. Hear works now."
+    from ui import interpreter_host as ih
+    assert p.notice_label.text() == ih.NO_VIRTUAL_MIC
     assert p.notice_link.isVisibleTo(p) and p.notice_link.text() == "Set up"
     p.notice_link.click()
     assert p.mic_hint.isVisibleTo(p)
@@ -436,8 +437,8 @@ def test_the_microphone_row(page, monkeypatch):
     from ui.pages import interpreter as ip_mod
     monkeypatch.setattr(ip_mod.QDesktopServices, "openUrl", lambda url: opened.append(url.toString()))
     p.mic_setup.click()
-    assert opened == ["https://vb-audio.com/Cable/"]
-    assert p.mic_hint.isVisibleTo(p) and "CABLE Output" in p.mic_hint.text()
+    assert opened == [ip_mod.CABLE_URL]
+    assert p.mic_hint.isVisibleTo(p) and p.mic_hint.text() == ip_mod.CABLE_HINT
     p._show_mic("CABLE Output")
     assert "CABLE Output" in p.mic_chip.text() and not p.mic_setup.isVisibleTo(p)
     p._show_mic("Gusan Microphone")
@@ -1345,7 +1346,8 @@ def test_pair_helpers():
     src = (pathlib.Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
     assert '"interpreter_their_language": "hy",' in src
     assert ih.minutes_text(2880) == "48 min" and ih.minutes_text(18000) == "5 h"
-    assert ih.message("no_virtual_mic") == "Speak needs a virtual microphone. Hear works now."
+    from ui import interpreter_host as ih
+    assert ih.message("no_virtual_mic") == ih.NO_VIRTUAL_MIC
 
 
 # ── the live card ──
@@ -1464,7 +1466,8 @@ def test_the_card_captions_can_be_off(card):
 def test_the_card_says_when_speak_needs_a_virtual_microphone(card):
     c, app = card("pro")
     app.interpreter.say("no_virtual_mic")
-    assert c.lbl_status.text() == "Speak needs a virtual microphone. Hear works now."
+    from ui import interpreter_host as ih
+    assert c.lbl_status.text() == ih.NO_VIRTUAL_MIC
     assert c.btn_interp_setup.isVisibleTo(c)
     c.btn_interp_setup.click()
     assert ("show_main", "interpreter", ("focus", "microphone")) in app.calls
