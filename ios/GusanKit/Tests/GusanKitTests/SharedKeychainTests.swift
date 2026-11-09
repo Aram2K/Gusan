@@ -9,6 +9,13 @@ final class SharedKeychainTests: XCTestCase {
         func write(_ data: Data, key: String) -> Bool { guard accepts else { return false }; items[key] = data; return true }
         func clear(_ key: String) { items[key] = nil }
     }
+    func testKeyboardBundleIDDerivation() {
+        XCTAssertEqual(SharedKeychain.keyboardBundleID(from: "com.aram2k.gusan.N88PGMQ3GH"), "com.aram2k.gusan.N88PGMQ3GH.keyboard")
+        XCTAssertEqual(SharedKeychain.keyboardBundleID(from: "com.aram2k.gusan.N88PGMQ3GH.keyboard"), "com.aram2k.gusan.N88PGMQ3GH.keyboard")
+        XCTAssertEqual(SharedKeychain.keyboardBundleID(from: "com.aram2k.gusan.N88PGMQ3GH.screen"), "com.aram2k.gusan.N88PGMQ3GH.keyboard")
+        XCTAssertNil(SharedKeychain.keyboardBundleID(from: nil))
+        XCTAssertNil(SharedKeychain.keyboardBundleID(from: ""))
+    }
     func testTeamPrefixParsing() {
         XCTAssertEqual(SharedKeychain.parsePrefix("N88PGMQ3GH.com.aram2k.gusan.N88PGMQ3GH"), "N88PGMQ3GH")
         XCTAssertNil(SharedKeychain.parsePrefix("com.aram2k.gusan"))
