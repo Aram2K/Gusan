@@ -658,7 +658,8 @@ def build_messages(text, mode, source_lang="auto", target_lang="en", vocab_block
     system = "You are an articulate, intelligent executive assistant. You write with clarity, depth, and polish. Never add conversational commentary, preambles, or explanations."
     if vocab_block:
         system = f"{system}\n\n{vocab_block}"
-    content = (notes_prompt.cloud_user_content(text) if mode == "meeting_notes"
+    content = (notes_prompt.cloud_user_content(text, language=notes_prompt.notes_language(source_lang))
+               if mode == "meeting_notes"
                else f"{instruction}\n\nText:\n{text}")
     return [
         {"role": "system", "content": system},

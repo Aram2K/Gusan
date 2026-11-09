@@ -164,8 +164,32 @@ LABELS_RULE = (
     "as if it were a name.\n")
 
 
-def cloud_instruction(plan):
-    """What a cloud engine is told to write (the user turn's first part: the transcript follows it)."""
+def notes_language(source_lang):
+    """The language the notes are written in when the meeting's own is known: "en" -> "English" (the meeting's
+    language is the one set for it, or the one most of its pieces were in). "" when it isn't (auto, mixed,
+    nothing): the prompt then asks for the language most of the meeting was held in.
+
+    Why: a meeting held almost all in English that opened with a few words of French ("Bonjour, enchanté")
+    got French notes and a French title (2026-11-09) - left to guess, the model followed the opening."""
+    import speech_langs
+    code = speech_langs.normalize(source_lang)
+    if code in ("", "auto", "multi"):
+        return ""
+    return speech_langs.WHISPER_NAMES.get(code, "")
+
+
+def _language_rule(language):
+    if language:
+        return ("- Write the notes in %s, the language of this meeting (a few greetings or phrases in another "
+                "language don't change that); the headings stay in English.\n" % language)
+    return ("- Write the notes in the language the meeting was held in (the one used for most of the transcript, "
+            "when several were - a few greetings or phrases in another language don't count); the headings stay "
+            "in English.\n")
+
+
+def cloud_instruction(plan, language=""):
+    """What a cloud engine is told to write (the user turn's first part: the transcript follows it).
+    ``language``: notes_language's name of the meeting's language, "" when it isn't known."""
     return (
         "You are writing the notes of a meeting from its transcript. Think carefully before writing:\n"
         "1. First mentally identify what mattered: the topics in the order they came up, decisions and the reasons behind "
@@ -200,8 +224,7 @@ def cloud_instruction(plan):
         "spellings.\n"
         "- Do not invent decisions, owners, dates, numbers or facts that aren't in the transcript. If unsure, omit rather "
         "than fabricate. Copy figures and dates as they were said.\n"
-        "- Write the notes in the language the meeting was held in (the one used most, when several were); the headings "
-        "stay in English.\n"
+        + _language_rule(language) +
         "- The transcript may contain `[speaker change]` markers indicating likely speaker transitions; use them to "
         "attribute who said what when names are available from the attendees list.\n"
         + LABELS_RULE +
@@ -217,25 +240,28 @@ def cloud_instruction(plan):
     ) % {"summary": plan.summary, "discussion": _discussion(plan), "length": _length(plan)}
 
 
-def closing(plan):
+def closing(plan, language=""):
     """Said again after the transcript: on a long input the top of the prompt is far away."""
     sections = "## Summary, ## Key decisions, ## Action items, ## Open questions" + (
         ", ## Discussion" if plan.discussion else "")
     size = (" The %s take about %d-%d words together." % ("Summary and Discussion" if plan.discussion else "Summary",
                                                           plan.lo, plan.hi)) if plan.hi else ""
-    return ("Now write the notes (%s) in the language of the meeting; the headings stay in English, exactly as written.%s "
-            "Leave out a section with nothing in it. Owners are people's names or left out." % (sections, size))
+    return ("Now write the notes (%s) in %s; the headings stay in English, exactly as written.%s "
+            "Leave out a section with nothing in it. Owners are people's names or left out."
+            % (sections, language or "the language of the meeting", size))
 
 
-def cloud_user_content(text, plan=None):
-    """The whole user turn of a cloud request: the instruction, the text, the closing reminder."""
+def cloud_user_content(text, plan=None, language=""):
+    """The whole user turn of a cloud request: the instruction, the text, the closing reminder. ``language``:
+    notes_language's name of the meeting's language ("" = not known)."""
     text = (text or "").strip()
     plan = plan or plan_for(text)
-    return "%s\n\nText:\n%s\n\n%s" % (cloud_instruction(plan), text, closing(plan))
+    return "%s\n\nText:\n%s\n\n%s" % (cloud_instruction(plan, language), text, closing(plan, language))
 
 
-def local_instruction(plan):
-    """The on-computer model's instruction: tighter than the cloud one (small models follow short, direct orders)."""
+def local_instruction(plan, language=""):
+    """The on-computer model's instruction: tighter than the cloud one (small models follow short, direct orders).
+    ``language``: notes_language's name of the meeting's language ("" = not known)."""
     topics = _LOCAL_TOPICS.get(plan.tier)
     disc = ("## Discussion  (### topic title, then 1-2 short bullets with the concrete details: numbers, dates, names, "
             "reasons; at most %d topics)\n" % topics) if topics else ""
@@ -248,7 +274,8 @@ def local_instruction(plan):
         "'I'll'/'name should'; never 'You', 'Them' or 'Speaker N': with no name write no Owner, with no date no Due)\n"
         "## Open questions  (bullets; only questions somebody asked that stayed unanswered; leave out if none)\n"
         "%s"
-        "Keep the headings in English; write the notes in the language of the meeting. Preserve names exactly, in any "
+        "Keep the headings in English; write the notes in " + (language or "the language of the meeting") + ". "
+        "Preserve names exactly, in any "
         "script. Don't invent facts. "
         "Lines may start with 'You:' (the person who recorded the meeting), "
         "'Speaker N:' (another person on the call) or 'Them:' (the other side of the "

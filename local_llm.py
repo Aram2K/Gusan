@@ -704,7 +704,8 @@ def _messages_for(mode, text, source_lang, target_lang, vocab_block="", notes_wo
         # short, direct instructions better than long bullet-point checklists.
         # A longer meeting also gets a short Discussion (notes_prompt.local_instruction).
         instruction = notes_prompt.local_instruction(notes_prompt.plan_from_words(
-            notes_prompt.effective_words(text) if notes_words is None else notes_words))
+            notes_prompt.effective_words(text) if notes_words is None else notes_words),
+            language=notes_prompt.notes_language(source_lang))
     elif mode == "meeting_title":
         instruction = meeting_titles.LOCAL_TITLE_INSTRUCTION
     elif mode == "live_recap":

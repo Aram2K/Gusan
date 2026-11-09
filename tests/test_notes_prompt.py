@@ -189,7 +189,34 @@ class TestCloudPrompt(unittest.TestCase):
     def test_the_language_is_the_one_of_the_meeting_and_the_headings_stay_english(self):
         body = self.instruction(5000)
         self.assertIn("in the language the meeting was held in", body)
+        self.assertIn("a few greetings or phrases in another language don't count", body)
         self.assertIn("the headings stay in English", body)
+
+    def test_a_known_meeting_language_is_named_so_a_french_hello_never_makes_french_notes(self):
+        """2026-11-09: an interview held almost all in English opened with "Bonjour, enchanté" and got French
+        notes and a French title. The meeting's language was known ("en") but never told to the model."""
+        self.assertEqual(np.notes_language("en"), "English")
+        self.assertEqual(np.notes_language("hy-AM"), "Armenian")
+        for unknown in ("", "auto", "multi", None, "xx"):
+            self.assertEqual(np.notes_language(unknown), "", unknown)
+        text = "You: Hello there. " * 400
+        content = np.cloud_user_content(text, language="English")
+        self.assertIn("Write the notes in English, the language of this meeting", content)
+        self.assertIn(") in English; the headings stay in English", content)          # said again after the text
+        self.assertNotIn("in the language the meeting was held in", content)
+        local = np.local_instruction(np.plan_for(text), language="English")
+        self.assertIn("write the notes in English.", local)
+
+    def test_the_app_passes_the_meeting_language_to_every_notes_engine(self):
+        import action_api
+        import local_llm
+        text = "You: Bonjour. Them: Hello, so about the project. " * 200
+        cloud = action_api.build_messages(text, "meeting_notes", source_lang="en")[-1]["content"]
+        self.assertIn("Write the notes in English", cloud)
+        unknown = action_api.build_messages(text, "meeting_notes", source_lang="auto")[-1]["content"]
+        self.assertIn("in the language the meeting was held in", unknown)
+        local = " ".join(m["content"] for m in local_llm._messages_for("meeting_notes", text, "en", "en"))
+        self.assertIn("write the notes in English.", local)
 
     def test_the_labels_are_explained(self):
         body = self.instruction(5000)
