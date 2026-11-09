@@ -9,7 +9,7 @@ struct SessionsView: View {
     @State private var selectedID: UUID?
 
     var body: some View {
-        List {
+        GlassList {
             Section {
                 Picker("Sessions", selection: $segment) {
                     Text("Smart").tag("smart")
@@ -18,14 +18,14 @@ struct SessionsView: View {
             }
             if segment == "smart" {
                 Section {
-                    if history.isEmpty { Text("No Smart results yet").foregroundStyle(.secondary) }
+                    if history.isEmpty { Text("No Smart results yet").foregroundStyle(Theme.secondaryText) }
                     ForEach(history.reversed()) { entry in
-                        NavigationLink { SmartHistoryDetailView(entry: entry) } label: {
+                        GlassNavigationLink { SmartHistoryDetailView(entry: entry) } label: {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(entry.instruction).lineLimit(1)
-                                Text(entry.result).lineLimit(1).foregroundStyle(.secondary)
+                                Text(entry.result).lineLimit(1).foregroundStyle(Theme.secondaryText)
                                 Text((entry.sourceApp.map { $0 + " · " } ?? "") + entry.date.formatted(date: .abbreviated, time: .shortened))
-                                    .font(.caption).foregroundStyle(.secondary)
+                                    .font(.caption).foregroundStyle(Theme.secondaryText)
                             }
                         }
                         .swipeActions(edge: .trailing) {
@@ -44,7 +44,7 @@ struct SessionsView: View {
                     }.disabled(!agent.tasks.contains { $0.status.isTerminal })
                     if agent.loading { ProgressView("Loading sessions…").tint(Theme.agent) }
                     if let error = agent.error { Text(error).foregroundStyle(Theme.danger) }
-                    if agent.tasks.isEmpty && !agent.loading { Text("No agent sessions yet").foregroundStyle(.secondary) }
+                    if agent.tasks.isEmpty && !agent.loading { Text("No agent sessions yet").foregroundStyle(Theme.secondaryText) }
                     ForEach(agent.threads) { thread in
                         if let latest = thread.tasks.last {
                             Button { selectedID = thread.id } label: {
@@ -84,7 +84,7 @@ struct SessionsView: View {
 private struct SmartHistoryDetailView: View {
     let entry: SmartHistory.Entry
     var body: some View {
-        List {
+        GlassList {
             Section("Instruction") { Text(entry.instruction).textSelection(.enabled) }
             Section("Result") {
                 Text(entry.result).textSelection(.enabled)
@@ -93,7 +93,7 @@ private struct SmartHistoryDetailView: View {
             Section {
                 Text(entry.date.formatted(date: .abbreviated, time: .shortened))
                 if let source = entry.sourceApp { Text(source) }
-            }.foregroundStyle(.secondary)
+            }.foregroundStyle(Theme.secondaryText)
         }.navigationTitle("Smart result").navigationBarTitleDisplayMode(.inline)
     }
 }

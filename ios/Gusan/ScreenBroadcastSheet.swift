@@ -19,7 +19,7 @@ struct ScreenBroadcastSheet: View {
             .controlSize(.large)
             Text("Pick Gusan, tap Start Broadcast, then swipe back to your app.")
                 .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.secondaryText)
                 .multilineTextAlignment(.center)
             Button("Close") { dismiss() }
         }

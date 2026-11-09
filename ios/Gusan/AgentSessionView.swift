@@ -25,7 +25,7 @@ struct AgentSessionView: View {
                 LazyVStack(alignment: .leading, spacing: 20) {
                     if loading { ProgressView("Loading session…").frame(maxWidth: .infinity) }
                     if tasks.isEmpty && !loading {
-                        Text("This session is unavailable. Sign in and try again.").foregroundStyle(.secondary)
+                        Text("This session is unavailable. Sign in and try again.").foregroundStyle(Theme.secondaryText)
                         Button("Try again") { Task { await agent.loadSession(id) } }
                     }
                     ForEach(tasks) { task in
@@ -45,7 +45,7 @@ struct AgentSessionView: View {
                 if let latest { proxy.scrollTo(latest.id, anchor: .bottom) }
             }
         }
-        .background(Theme.surface)
+        .background(GrainBackground())
         .navigationTitle((tasks.first?.provider == .devin ? "Devin · " : "") + (tasks.first?.title ?? "Agent session"))
         .navigationBarTitleDisplayMode(.inline)
         .tint(Theme.agent)
@@ -61,9 +61,9 @@ struct AgentSessionView: View {
     private var composer: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let latest, !latest.status.isTerminal {
-                Text("Send a follow-up when Gusan finishes, or stop the task first.").font(.caption).foregroundStyle(.secondary)
+                Text("Send a follow-up when Gusan finishes, or stop the task first.").font(.caption).foregroundStyle(Theme.secondaryText)
             }
-            if agent.atActiveLimit { Text("Wait for a running task to finish before sending.").font(.caption).foregroundStyle(.secondary) }
+            if agent.atActiveLimit { Text("Wait for a running task to finish before sending.").font(.caption).foregroundStyle(Theme.secondaryText) }
             if message.count > 4_000 { Text("Keep follow-ups under 4,000 characters.").font(.caption).foregroundStyle(Theme.danger) }
             HStack(alignment: .bottom) {
                 TextField("Message the agent…", text: $message, axis: .vertical)
@@ -113,13 +113,13 @@ private struct AgentSessionTurn: View {
                 Spacer(minLength: 36)
                 VStack(alignment: .leading, spacing: 6) {
                     Text(message ?? agent.message(for: task)).textSelection(.enabled)
-                    Text((date ?? agent.sessionStore.records.first { $0.id == task.id }?.date ?? task.createdAt).formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.secondary)
+                    Text((date ?? agent.sessionStore.records.first { $0.id == task.id }?.date ?? task.createdAt).formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(Theme.secondaryText)
                 }.padding(14).background(Theme.agent.opacity(0.12), in: RoundedRectangle(cornerRadius: 16))
             }
             if !task.steps.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(Array(task.steps.enumerated()), id: \.offset) { _, step in
-                        Label(step.text, systemImage: "circle.fill").font(.footnote).foregroundStyle(.secondary)
+                        Label(step.text, systemImage: "circle.fill").font(.footnote).foregroundStyle(Theme.secondaryText)
                     }
                 }
             }
@@ -134,13 +134,13 @@ private struct AgentSessionTurn: View {
             AppCard {
                 Text(agent.needsReconfirm(task) ? "Confirm again" : "Needs your OK").font(.headline).foregroundStyle(Theme.agent)
                 Text(task.confirmation?.summary ?? "Gusan needs your OK to continue.")
-                Text("Nothing is submitted, bought or sent until you confirm.").font(.footnote).foregroundStyle(.secondary)
+                Text("Nothing is submitted, bought or sent until you confirm.").font(.footnote).foregroundStyle(Theme.secondaryText)
                 DisclosureGroup("Details") {
                     if let url = task.confirmation?.startURL { Text(url.absoluteString).textSelection(.enabled) }
                     ForEach(Array((task.confirmation?.steps ?? []).enumerated()), id: \.offset) { index, step in
                         Text("\(index + 1). \(step)").font(.subheadline)
                     }
-                    if task.confirmation == nil { Text("Plan details are not available yet.").foregroundStyle(.secondary) }
+                    if task.confirmation == nil { Text("Plan details are not available yet.").foregroundStyle(Theme.secondaryText) }
                 }
                 HStack {
                     Button(role: .destructive) { perform("Cancel") { await agent.cancel(task.id) } } label: { actionLabel("Cancel") }.buttonStyle(.bordered)
@@ -161,7 +161,7 @@ private struct AgentSessionTurn: View {
         case .queued, .working:
             HStack {
                 ProgressView().tint(Theme.agent)
-                Text(task.phase == .queued ? "Queued" : "Working").foregroundStyle(.secondary)
+                Text(task.phase == .queued ? "Queued" : "Working").foregroundStyle(Theme.secondaryText)
                 Spacer()
                 Button(role: .destructive) { perform("Stop") { await agent.stop(task.id) } } label: { actionLabel("Stop") }
             }
@@ -192,7 +192,7 @@ private struct AgentSessionTurn: View {
                     ForEach(result.links, id: \.self) { link in
                         Link(link.title ?? link.url.host ?? link.url.absoluteString, destination: link.url)
                     }
-                } else { Text("Gusan finished without a text result.").foregroundStyle(.secondary) }
+                } else { Text("Gusan finished without a text result.").foregroundStyle(Theme.secondaryText) }
             }
         case .failed, .timedOut:
             AppCard {
@@ -203,11 +203,11 @@ private struct AgentSessionTurn: View {
                         perform("Try again") { do { try await agent.runAgain(task) } catch { self.error = error.localizedDescription } }
                     } label: { actionLabel("Try again") }.disabled(agent.atActiveLimit)
                 } else if !archived {
-                    Text("The original input is no longer available. Start again from Home.").font(.footnote).foregroundStyle(.secondary)
+                    Text("The original input is no longer available. Start again from Home.").font(.footnote).foregroundStyle(Theme.secondaryText)
                 }
             }
         case .stopped, .cancelled:
-            Label("Stopped", systemImage: "stop.circle").foregroundStyle(.secondary)
+            Label("Stopped", systemImage: "stop.circle").foregroundStyle(Theme.secondaryText)
         }
     }
 

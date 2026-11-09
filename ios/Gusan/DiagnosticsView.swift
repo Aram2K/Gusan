@@ -8,7 +8,7 @@ struct DiagnosticsView: View {
         ScreenContent {
             AppCard {
                 Text("Connection report").font(.title2).bold()
-                Text("This report contains connection checks, never your tokens or typed text.").font(.body).foregroundStyle(.secondary)
+                Text("This report contains connection checks, never your tokens or typed text.").font(.body).foregroundStyle(Theme.secondaryText)
                 Button { model.refreshDiagnostics(); copied = false } label: { Label("Refresh report", systemImage: "arrow.clockwise") }.frame(minHeight: 44)
                 Button { copyReport() } label: { Label(copied ? "Report copied" : "Copy report", systemImage: copied ? "checkmark" : "doc.on.doc") }.frame(minHeight: 44).disabled(model.diagnostics == nil)
             }
@@ -16,11 +16,11 @@ struct DiagnosticsView: View {
                 AppCard {
                     Text("Pasteboard fallback: " + diagnostics.pasteboardFallback).font(.headline)
                     Text("Voice: " + diagnostics.voiceChannel).font(.headline)
-                    if diagnostics.peer == nil { Text("Waiting for a keyboard report before enabling fallback.").font(.body).foregroundStyle(.secondary) }
+                    if diagnostics.peer == nil { Text("Waiting for a keyboard report before enabling fallback.").font(.body).foregroundStyle(Theme.secondaryText) }
                 }
                 groupCard("App", report: diagnostics.local)
                 if let peer = diagnostics.peer { groupCard("Keyboard", report: peer) }
-                else { AppCard { Text("Keyboard: no heartbeat yet").font(.headline); Text("Open the Gusan keyboard, then refresh this report.").font(.body).foregroundStyle(.secondary) } }
+                else { AppCard { Text("Keyboard: no heartbeat yet").font(.headline); Text("Open the Gusan keyboard, then refresh this report.").font(.body).foregroundStyle(Theme.secondaryText) } }
                 ForEach(diagnostics.local.stores, id: \.name) { store in
                     AppCard {
                         Text(store.name).font(.headline)
@@ -51,7 +51,7 @@ struct DiagnosticsView: View {
             Text(title).font(.subheadline).bold()
             if let health {
                 Text("Read: \(health.readable ? "Yes" : "No") · Write: \(health.writable ? "Yes" : "No") · Session: \(health.hasSession ? "Yes" : "No")").font(.footnote)
-            } else { Text("Not checked").font(.footnote).foregroundStyle(.secondary) }
+            } else { Text("Not checked").font(.footnote).foregroundStyle(Theme.secondaryText) }
         }.accessibilityElement(children: .combine)
     }
     private func location(_ report: SessionReport) -> String {
