@@ -157,6 +157,18 @@ st = AudioDeviceCreateIOProcIDWithBlock(&procID, aggID, ioQueue) { _, inData, _,
         let n = Float(abl.count)
         for i in 0..<frames { mono[i] /= n }
     }
+    // anti-alias before thinning: a box filter as wide as the step (3 samples at 48 kHz)
+    let k = max(1, Int(step.rounded(.down)))
+    if k > 1 && frames >= k {
+        var acc: Float = 0
+        var smooth = [Float](repeating: 0, count: frames)
+        for i in 0..<frames {
+            acc += mono[i]
+            if i >= k { acc -= mono[i - k] }
+            smooth[i] = acc / Float(min(i + 1, k))
+        }
+        mono = smooth
+    }
     var out = [Int16]()
     out.reserveCapacity(Int(Double(frames) / step) + 2)
     let end = consumed + Double(frames)
