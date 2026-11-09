@@ -9,7 +9,7 @@ struct SettingsView: View {
     @State private var haptics = true
 
     var body: some View {
-        Form {
+        GlassList {
             Section {
                 NavigationLink { AccountView() } label: {
                     Label {
@@ -62,7 +62,7 @@ struct KeyboardSetupView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var voice: VoiceSession
     var body: some View {
-        List {
+        GlassList {
             Section("Add Gusan") {
                 Text("1. Open Settings → General → Keyboard → Keyboards.")
                 Text("2. Tap Add New Keyboard, then choose Gusan.")
@@ -86,7 +86,7 @@ struct AdvancedSettingsView: View {
     @State private var doubleSpacePeriod = true
     @State private var pasteboardFallback = true
     var body: some View {
-        Form {
+        GlassList {
             Section("Typing") {
                 Toggle("Auto-capitalization", isOn: $autoCapitalization)
                 Toggle("Double-space for period", isOn: $doubleSpacePeriod)

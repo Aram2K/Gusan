@@ -9,7 +9,7 @@ struct SessionsView: View {
     @State private var selectedID: UUID?
 
     var body: some View {
-        List {
+        GlassList {
             Section {
                 Picker("Sessions", selection: $segment) {
                     Text("Smart").tag("smart")
@@ -84,7 +84,7 @@ struct SessionsView: View {
 private struct SmartHistoryDetailView: View {
     let entry: SmartHistory.Entry
     var body: some View {
-        List {
+        GlassList {
             Section("Instruction") { Text(entry.instruction).textSelection(.enabled) }
             Section("Result") {
                 Text(entry.result).textSelection(.enabled)

@@ -30,7 +30,7 @@ struct VaultAddLoginSheet: View {
                         .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
                 }.bold().disabled(vault.busy || saving || hostname.isEmpty || password.isEmpty)
             }.padding(20)
-            Form {
+            GlassList {
                 Section("Site and login") {
                     VaultAutoFillField(title: "Site or URL", text: $hostname, contentType: .URL, keyboardType: .URL)
                     VaultAutoFillField(title: "Username or email", text: $username, contentType: .username)
@@ -50,6 +50,7 @@ struct VaultAddLoginSheet: View {
             }
             .disabled(vault.busy || saving)
         }
+        .background(GrainBackground())
         .interactiveDismissDisabled(vault.busy || saving)
         .onDisappear { clear() }
     }

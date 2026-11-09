@@ -15,13 +15,40 @@ enum Theme {
     static let success = color(0x1D7A3B, 0x30D158)
     static let inactiveTab = color(0x8E8E93, 0x8E8E93)
     static let danger = color(0xDC2626, 0xEF4444)
-    static let surface = Color(uiColor: .systemGroupedBackground)
-    static let card = Color(uiColor: .secondarySystemGroupedBackground)
+    /// Background tint behind every screen. Switch to `.teal` or `.plum` here.
+    static let tint: Tint = .sand
+    struct Tint {
+        let lightTop: UInt32, lightBottom: UInt32, darkTop: UInt32, darkBottom: UInt32, glow: UInt32
+        static let sand = Tint(lightTop: 0xF7F1E6, lightBottom: 0xE8DBC4, darkTop: 0x1E1A15, darkBottom: 0x2B241A, glow: 0xE6C98F)
+        static let teal = Tint(lightTop: 0xE6F1F0, lightBottom: 0xCBE0DD, darkTop: 0x101C1D, darkBottom: 0x182B2C, glow: 0x7FB8B2)
+        static let plum = Tint(lightTop: 0xF2EAF0, lightBottom: 0xE0D2DC, darkTop: 0x1C1620, darkBottom: 0x2B1F2D, glow: 0xB58BAE)
+        var top: Color { Theme.color(lightTop, darkTop) }
+        var bottom: Color { Theme.color(lightBottom, darkBottom) }
+        var glowColor: Color { Theme.color(glow, glow) }
+    }
+    /// Tiled monochrome noise, generated once from a fixed seed (no asset, no network).
+    static let grain: UIImage = {
+        let side = 128
+        var state: UInt32 = 0x6D2B_79F5
+        var bytes = [UInt8](repeating: 0, count: side * side)
+        for index in bytes.indices {
+            state = state &* 1_664_525 &+ 1_013_904_223
+            bytes[index] = UInt8(truncatingIfNeeded: state >> 24)
+        }
+        guard let provider = CGDataProvider(data: Data(bytes) as CFData),
+              let image = CGImage(width: side, height: side, bitsPerComponent: 8, bitsPerPixel: 8, bytesPerRow: side,
+                                  space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+                                  provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+        else { return UIImage() }
+        return UIImage(cgImage: image, scale: 2, orientation: .up)
+    }()
     static let pro = LinearGradient(colors: [Color(red: 0x93 / 255, green: 0x33 / 255, blue: 0xEA / 255), Color(red: 0x7E / 255, green: 0x22 / 255, blue: 0xCE / 255)], startPoint: .topLeading, endPoint: .bottomTrailing)
     static let hero = LinearGradient(colors: [brandRed, brandBlue], startPoint: .topLeading, endPoint: .bottomTrailing)
     static let website = URL(string: "https://gusan.aibuben.xyz")!
     static let pricing = URL(string: "https://gusan.aibuben.xyz/#pricing")!
     static func configureTabBar() {
+        UITabBar.appearance().unselectedItemTintColor = UIColor(inactiveTab)
+        if #available(iOS 26, *) { return } // native Liquid Glass tab bar
         let appearance = UITabBarAppearance()
         appearance.configureWithDefaultBackground()
         for item in [appearance.stackedLayoutAppearance, appearance.inlineLayoutAppearance, appearance.compactInlineLayoutAppearance] {
@@ -41,9 +68,98 @@ struct BrandMark: View {
     }
 }
 
+/// Calm tint, a soft glow and a grainy texture; sits behind every screen in light and dark.
+struct GrainBackground: View {
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        ZStack {
+            LinearGradient(colors: [Theme.tint.top, Theme.tint.bottom], startPoint: .top, endPoint: .bottom)
+            RadialGradient(colors: [Theme.tint.glowColor.opacity(scheme == .dark ? 0.18 : 0.42), .clear],
+                           center: UnitPoint(x: 0.15, y: 0.05), startRadius: 0, endRadius: 420)
+            Image(uiImage: Theme.grain).resizable(resizingMode: .tile)
+                .opacity(scheme == .dark ? 0.2 : 0.12)
+                .blendMode(.overlay)
+        }
+        .compositingGroup()
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+/// Translucent row background for `List`/`Form` rows over the grain; `tint` adds a faint colour wash.
+struct GlassRowBackground: View {
+    var tint: Color? = nil
+    var body: some View {
+        #if compiler(>=6.2)
+        if #available(iOS 26, *), let tint {
+            Color.clear.glassEffect(.regular.tint(tint.opacity(0.22)), in: Rectangle())
+        } else {
+            material
+        }
+        #else
+        material
+        #endif
+    }
+    private var material: some View {
+        ZStack {
+            Rectangle().fill(.thinMaterial)
+            if let tint { tint.opacity(0.1) }
+        }
+    }
+}
+
+/// `List` whose rows sit on translucent glass over the grain background.
+struct GlassList<Content: View>: View {
+    @ViewBuilder var content: Content
+    var body: some View {
+        List { content.listRowBackground(GlassRowBackground()) }.listStyle(.insetGrouped).gusanScreen()
+    }
+}
+
+extension View {
+    /// Hides the system list background and shows the grain behind it.
+    func gusanScreen() -> some View { scrollContentBackground(.hidden).background(GrainBackground()) }
+
+    /// Liquid Glass on iOS 26+; blurred `.ultraThinMaterial` with a light edge highlight on iOS 17–25.
+    @ViewBuilder func glassSurface<S: InsettableShape>(_ shape: S, tint: Color? = nil, interactive: Bool = false) -> some View {
+        #if compiler(>=6.2)
+        if #available(iOS 26, *) {
+            glassEffect(Glass.gusan(tint: tint, interactive: interactive), in: shape)
+        } else {
+            materialGlass(shape, tint: tint)
+        }
+        #else
+        materialGlass(shape, tint: tint)
+        #endif
+    }
+
+    private func materialGlass<S: InsettableShape>(_ shape: S, tint: Color?) -> some View {
+        background {
+            ZStack {
+                shape.fill(.ultraThinMaterial)
+                if let tint { shape.fill(tint.opacity(0.85)) }
+                shape.strokeBorder(LinearGradient(colors: [.white.opacity(0.55), .white.opacity(0.08)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
+            }
+        }
+    }
+}
+
+#if compiler(>=6.2)
+@available(iOS 26, *)
+private extension Glass {
+    static func gusan(tint: Color?, interactive: Bool) -> Glass {
+        var glass = Glass.regular
+        if let tint { glass = glass.tint(tint) }
+        if interactive { glass = glass.interactive() }
+        return glass
+    }
+}
+#endif
+
 struct AppCard<Content: View>: View {
     @ViewBuilder var content: Content
-    var body: some View { VStack(alignment: .leading, spacing: 12) { content }.frame(maxWidth: .infinity, alignment: .leading).padding(16).background(Theme.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous)) }
+    var body: some View { VStack(alignment: .leading, spacing: 12) { content }.frame(maxWidth: .infinity, alignment: .leading).padding(16).glassSurface(RoundedRectangle(cornerRadius: 16, style: .continuous)) }
 }
 
 struct PrimaryButton: View {
@@ -61,7 +177,7 @@ struct PrimaryButton: View {
             }.font(.headline).frame(maxWidth: .infinity, minHeight: 52).padding(.horizontal, 16)
                 .contentShape(Rectangle())
         }.buttonStyle(.plain).foregroundStyle(.white)
-            .background(tint, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .glassSurface(RoundedRectangle(cornerRadius: 14, style: .continuous), tint: tint, interactive: true)
             .disabled(busy).accessibilityHint(busy ? "Please wait" : title)
     }
 }
@@ -71,7 +187,7 @@ struct PlanBadge: View {
     var body: some View {
         Text(pro ? "Gusan Pro" : "Free").font(.caption).bold().padding(.horizontal, 12).padding(.vertical, 8)
             .foregroundStyle(pro ? .white : .primary)
-            .background { if pro { Capsule().fill(Theme.pro) } else { Capsule().fill(Theme.surface) } }
+            .background { if pro { Capsule().fill(Theme.pro) } else { Capsule().fill(.thinMaterial) } }
     }
 }
 
@@ -90,6 +206,6 @@ struct StatusRow: View {
 struct ScreenContent<Content: View>: View {
     @ViewBuilder var content: Content
     var body: some View {
-        ScrollView { VStack(alignment: .leading, spacing: 12) { content }.padding(20).frame(maxWidth: 680).frame(maxWidth: .infinity) }.background(Theme.surface)
+        ScrollView { VStack(alignment: .leading, spacing: 12) { content }.padding(20).frame(maxWidth: 680).frame(maxWidth: .infinity) }.background(GrainBackground())
     }
 }

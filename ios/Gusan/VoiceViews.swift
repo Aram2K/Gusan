@@ -50,7 +50,7 @@ struct VoiceListeningView: View {
                     Button("Stop listening", role: .destructive) { voice.stop() }
                         .buttonStyle(.bordered).controlSize(.large)
                 }
-            }.padding(24)
+            }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity).background(GrainBackground())
                 .navigationTitle("Gusan").navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { voice.closePresentation() } } }
         }

@@ -18,7 +18,7 @@ struct HomeView: View {
     }
 
     var body: some View {
-        List {
+        GlassList {
             Section {
                 Picker("Mode", selection: $mode) {
                     Text("Smart").tag(StripMode.smart)
@@ -43,6 +43,7 @@ struct HomeView: View {
             } footer: {
                 Text("Keeps the microphone reserved in the background (orange dot) so you never leave your app. Stop it here when you're done.")
             }
+            .listRowBackground(GlassRowBackground(tint: Theme.accent))
             if !model.restoringSession && !setupDismissed && !setupCompleted && !setupComplete {
                 setupChecklist
                 MakeGusanKeyboardSection(compact: true)
@@ -59,7 +60,6 @@ struct HomeView: View {
                 }
             }
         }
-        .listStyle(.insetGrouped)
         .navigationTitle("Gusan")
         .toolbar { ToolbarItem(placement: .navigationBarTrailing) { BrandMark() } }
         .onAppear {

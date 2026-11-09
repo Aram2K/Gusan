@@ -15,7 +15,7 @@ struct VaultView: View {
     init() {}
 
     var body: some View {
-        List {
+        GlassList {
             Section {
                 Label("Logins the agent never sees", systemImage: "lock.shield")
                     .font(.headline)
@@ -70,7 +70,6 @@ struct VaultView: View {
                 if vault.loading { ProgressView("Refreshing Vault…") }
             }
         }
-        .listStyle(.insetGrouped)
         .navigationTitle("Vault")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {

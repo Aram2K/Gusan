@@ -45,7 +45,7 @@ struct AgentSessionView: View {
                 if let latest { proxy.scrollTo(latest.id, anchor: .bottom) }
             }
         }
-        .background(Theme.surface)
+        .background(GrainBackground())
         .navigationTitle((tasks.first?.provider == .devin ? "Devin · " : "") + (tasks.first?.title ?? "Agent session"))
         .navigationBarTitleDisplayMode(.inline)
         .tint(Theme.agent)

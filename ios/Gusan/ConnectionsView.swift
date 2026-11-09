@@ -4,7 +4,7 @@ struct ConnectionsView: View {
     @EnvironmentObject private var connections: CalendarConnections
 
     var body: some View {
-        List {
+        GlassList {
             Section {
                 Toggle(isOn: Binding(get: { connections.state == .connected || connections.connecting }, set: { connections.setIPhoneEnabled($0) })) {
                     HStack {

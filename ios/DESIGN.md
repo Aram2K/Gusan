@@ -23,8 +23,8 @@ All tokens live in one file per target (`Theme.swift` in the app, `KeyboardTheme
 | `pro` | #9333EA → #7E22CE gradient | same | Pro badge / upgrade only |
 | `success` | #16A34A | #22C55E | done states |
 | `danger` | #DC2626 | #EF4444 | errors, destructive |
-| `surface` | systemGroupedBackground | same | app backgrounds |
-| `card` | secondarySystemGroupedBackground | same | cards |
+| `tint` | sand #F7F1E6 → #E8DBC4 | #1E1A15 → #2B241A | app background (`GrainBackground`: tint + glow + seeded grain); one constant, presets `.sand`, `.teal`, `.plum` |
+| glass | Liquid Glass (`glassEffect`) on iOS 26+, `.ultraThinMaterial` + light edge on iOS 17–25 | same | `AppCard`, `PrimaryButton`, Voice switch row (`glassSurface`, `GlassRowBackground`); list rows use `.thinMaterial` |
 | `keyboardBg` | #D1D3D9 | #2C2C2E | keyboard background |
 | `key` | #FFFFFF | #6B6B6B | letter keys, action tiles |
 | `keySpecial` | #ACB3BC | #4A4A4A | shift, delete, 123, return |
