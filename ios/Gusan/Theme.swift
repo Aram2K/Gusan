@@ -10,7 +10,12 @@ enum Theme {
     static let brandRed = color(0xD91E18, 0xE5483F)
     static let brandBlue = color(0x0033A0, 0x4A6FD8)
     static let brandOrange = color(0xF2A815, 0xF2A815)
-    static let accent = color(0x0058B8, 0x0A84FF)
+    /// Links, chevrons, icons and tint: the dark value is bright enough for 4.5:1 on the dark grain and glass rows.
+    static let accent = color(0x0058B8, 0x5AA9FF)
+    /// Filled primary buttons (white label): the deeper dark blue keeps the white text readable.
+    static let accentFill = color(0x0058B8, 0x0A84FF)
+    /// Secondary text (footers, captions, hints): warm greys that reach 4.5:1 on the sand and the dark grain.
+    static let secondaryText = color(0x625C52, 0xD0C9BD)
     static let agent = color(0x5E5CE6, 0x8482FF)
     static let success = color(0x1D7A3B, 0x30D158)
     static let inactiveTab = color(0x8E8E93, 0x8E8E93)
@@ -157,6 +162,23 @@ private extension Glass {
 }
 #endif
 
+/// `NavigationLink` row with its own chevron in `Theme.secondaryText`; the system chevron is too faint on the dark grain.
+struct GlassNavigationLink<Destination: View, Label: View>: View {
+    @ViewBuilder var destination: Destination
+    @ViewBuilder var label: Label
+    var body: some View {
+        HStack(spacing: 8) {
+            label
+            Spacer(minLength: 0)
+            Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(Theme.secondaryText).accessibilityHidden(true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine).accessibilityAddTraits(.isButton)
+        .background { NavigationLink { destination } label: { EmptyView() }.opacity(0).accessibilityHidden(true) }
+    }
+}
+
 struct AppCard<Content: View>: View {
     @ViewBuilder var content: Content
     var body: some View { VStack(alignment: .leading, spacing: 12) { content }.frame(maxWidth: .infinity, alignment: .leading).padding(16).glassSurface(RoundedRectangle(cornerRadius: 16, style: .continuous)) }
@@ -166,7 +188,7 @@ struct PrimaryButton: View {
     let title: String
     var icon: String? = nil
     var busy = false
-    var tint: Color = Theme.accent
+    var tint: Color = Theme.accentFill
     let action: () -> Void
     var body: some View {
         Button(action: action) {
@@ -197,8 +219,8 @@ struct StatusRow: View {
     let confirmed: Bool
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: confirmed ? "checkmark.circle.fill" : "circle.dashed").foregroundStyle(confirmed ? Theme.success : .secondary).accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 4) { Text(title).font(.subheadline).bold(); Text(detail).font(.footnote).foregroundStyle(.secondary) }
+            Image(systemName: confirmed ? "checkmark.circle.fill" : "circle.dashed").foregroundStyle(confirmed ? Theme.success : Theme.secondaryText).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) { Text(title).font(.subheadline).bold(); Text(detail).font(.footnote).foregroundStyle(Theme.secondaryText) }
         }.accessibilityElement(children: .combine)
     }
 }

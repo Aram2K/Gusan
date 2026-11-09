@@ -11,12 +11,12 @@ struct SettingsView: View {
     var body: some View {
         GlassList {
             Section {
-                NavigationLink { AccountView() } label: {
+                GlassNavigationLink { AccountView() } label: {
                     Label {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(model.session?.email ?? "Sign in to Gusan")
                             Text(model.session == nil ? "Connect your keyboard" : model.isPro ? "Gusan Pro" : "Free")
-                                .font(.subheadline).foregroundStyle(.secondary)
+                                .font(.subheadline).foregroundStyle(Theme.secondaryText)
                         }
                     } icon: { Image(systemName: "person.crop.circle") }
                 }
@@ -24,12 +24,12 @@ struct SettingsView: View {
             MakeGusanKeyboardSection()
             VoiceSettingsSection(voice: voice)
             Section {
-                NavigationLink { ConnectionsView() } label: { Label("Connections", systemImage: "link") }
+                GlassNavigationLink { ConnectionsView() } label: { Label("Connections", systemImage: "link") }
             }
             Section {
                 Toggle("Keyboard sounds", isOn: $keyClicks)
                 Toggle("In-app haptics", isOn: $haptics)
-            } footer: { Text("Keyboard sounds follow iOS sound settings. Haptic feedback applies inside the Gusan app.") }
+            } footer: { Text("Keyboard sounds follow iOS sound settings. Haptic feedback applies inside the Gusan app.").foregroundStyle(Theme.secondaryText) }
             Section {
                 LabeledContent("Notifications", value: notificationsLabel)
                 Button(agent.notificationStatus == .denied ? "Open notification settings" : "Allow notifications") {
@@ -37,10 +37,10 @@ struct SettingsView: View {
                     else { agent.requestNotifications() }
                 }.disabled(agent.requestingNotifications || [.authorized, .provisional, .ephemeral].contains(agent.notificationStatus))
                 if agent.requestingNotifications { ProgressView("Requesting permission…") }
-            } footer: { Text("Session finished or needs you. On sideloaded builds, notifications arrive when Gusan next checks for updates.") }
+            } footer: { Text("Session finished or needs you. On sideloaded builds, notifications arrive when Gusan next checks for updates.").foregroundStyle(Theme.secondaryText) }
             Section {
-                NavigationLink { KeyboardSetupView() } label: { Label("Keyboard setup", systemImage: "keyboard") }
-                NavigationLink { AdvancedSettingsView() } label: { Label("Advanced", systemImage: "wrench.and.screwdriver") }
+                GlassNavigationLink { KeyboardSetupView() } label: { Label("Keyboard setup", systemImage: "keyboard") }
+                GlassNavigationLink { AdvancedSettingsView() } label: { Label("Advanced", systemImage: "wrench.and.screwdriver") }
             }
         }
         .navigationTitle("Settings")
@@ -93,8 +93,8 @@ struct AdvancedSettingsView: View {
             }
             Section {
                 Toggle("Share sign-in via pasteboard fallback", isOn: $pasteboardFallback)
-            } footer: { Text("Used only if sign-in or voice can't be shared after sideloading. Other apps signed with the same Apple ID could read it.") }
-            Section { NavigationLink { DiagnosticsView() } label: { Label("Diagnostics", systemImage: "stethoscope") } }
+            } footer: { Text("Used only if sign-in or voice can't be shared after sideloading. Other apps signed with the same Apple ID could read it.").foregroundStyle(Theme.secondaryText) }
+            Section { GlassNavigationLink { DiagnosticsView() } label: { Label("Diagnostics", systemImage: "stethoscope") } }
         }
         .navigationTitle("Advanced").navigationBarTitleDisplayMode(.inline)
         .onAppear {

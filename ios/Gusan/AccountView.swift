@@ -9,7 +9,7 @@ struct SignInCard: View {
     var body: some View {
         AppCard {
             Text("Your words, with a little help.").font(.title2).bold()
-            Text("Sign in to use Gusan Cloud from your keyboard. AI actions require Gusan Pro.").font(.body).foregroundStyle(.secondary)
+            Text("Sign in to use Gusan Cloud from your keyboard. AI actions require Gusan Pro.").font(.body).foregroundStyle(Theme.secondaryText)
             Button { model.impact(); model.google() } label: {
                 HStack(spacing: 12) {
                     if model.authBusy && model.usingGoogle { ProgressView().tint(.black) }
@@ -45,7 +45,7 @@ struct SignInSheet: View {
                     AppCard {
                         Image(systemName: "checkmark.circle.fill").font(.largeTitle).foregroundStyle(Theme.success).accessibilityHidden(true)
                         Text(model.fromKeyboard ? "You're signed in, switch back to your app" : "You're signed in").font(.title2).bold()
-                        Text(model.fromKeyboard ? "Use the ◀ back link at the top-left, or switch back to your app. Your Gusan keyboard is ready to reconnect." : "You're ready to set up your Gusan keyboard.").font(.body).foregroundStyle(.secondary)
+                        Text(model.fromKeyboard ? "Use the ◀ back link at the top-left, or switch back to your app. Your Gusan keyboard is ready to reconnect." : "You're ready to set up your Gusan keyboard.").font(.body).foregroundStyle(Theme.secondaryText)
                         PrimaryButton(title: "Done") { dismiss() }
                     }
                 } else { SignInCard() }
@@ -70,7 +70,7 @@ struct AccountView: View {
                         Button("Try again") { Task { await model.update() } }.frame(minHeight: 44)
                     } else {
                         PlanBadge(pro: model.isPro)
-                        Text(model.isPro ? "Gusan Cloud is included in your plan." : "Upgrade to Gusan Pro for AI actions in any app.").font(.body).foregroundStyle(.secondary)
+                        Text(model.isPro ? "Gusan Cloud is included in your plan." : "Upgrade to Gusan Pro for AI actions in any app.").font(.body).foregroundStyle(Theme.secondaryText)
                         Link("Manage plan", destination: Theme.website).frame(minHeight: 44)
                         if !model.isPro { Link("Explore Gusan Pro", destination: Theme.pricing).frame(minHeight: 44) }
                     }
