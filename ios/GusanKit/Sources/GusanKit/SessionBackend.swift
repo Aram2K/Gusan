@@ -21,9 +21,10 @@ final class KeychainSessionBackend: SessionBackend {
     let name = "Keychain"
     private let group: String?
     private let enabled: Bool
-    init(group: String?, enabled: Bool) { self.group = group; self.enabled = enabled }
+    private let service: String
+    init(group: String?, enabled: Bool, service: String = "Gusan.") { self.group = group; self.enabled = enabled; self.service = service }
     private func query(_ key: String) -> [String: Any] {
-        var result: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "Gusan." + key, kSecAttrAccount as String: key]
+        var result: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service + key, kSecAttrAccount as String: key]
         if let group { result[kSecAttrAccessGroup as String] = group }
         return result
     }
@@ -138,11 +139,28 @@ public enum SharedKeychain {
         let prefix = String(group[..<dot])
         return prefix.count == 10 && prefix.allSatisfy({ $0.isLetter || $0.isNumber }) ? prefix : nil
     }
-    /// A keychain backend shared with the extensions, or nil when the team prefix is unknown.
+    /// The keyboard extension's own keychain group ("TEAMID.<app bundle>.keyboard"). The keyboard can always read
+    /// it (no entitlement beyond its default), and the app/screen extension can write to it when their signature
+    /// carries the team wildcard, which free-account sideloading tools grant.
+    static func keyboardBundleID(from bundleID: String?) -> String? {
+        guard let bundleID, !bundleID.isEmpty else { return nil }
+        if bundleID.hasSuffix(".keyboard") { return bundleID }
+        for suffix in [".screen", ".keyboardpreview", ".activity"] where bundleID.hasSuffix(suffix) {
+            return String(bundleID.dropLast(suffix.count)) + ".keyboard"
+        }
+        return bundleID + ".keyboard"
+    }
+    /// Keychain backends shared with the extensions, best first; empty when the team prefix is unknown.
+    /// Values for `name` live under their own service so they never collide with the keyboard's private items.
     public static func backend(named name: String, maxBytes: Int? = nil) -> SessionBackend? {
         guard let team = teamPrefix() else { return nil }
-        let keychain = KeychainSessionBackend(group: "\(team).com.aram2k.gusan.\(name)", enabled: true)
-        return maxBytes.map { SizeLimitedSessionBackend(wrapping: keychain, maxBytes: $0) } ?? keychain
+        var groups = ["\(team).com.aram2k.gusan.\(name)"]
+        if let keyboard = keyboardBundleID(from: Bundle.main.bundleIdentifier) { groups.insert("\(team).\(keyboard)", at: 0) }
+        let layers: [SessionBackend] = groups.map { group in
+            let keychain = KeychainSessionBackend(group: group, enabled: true, service: "Gusan.shared.\(name).")
+            return maxBytes.map { SizeLimitedSessionBackend(wrapping: keychain, maxBytes: $0) } ?? keychain
+        }
+        return layers.count == 1 ? layers[0] : LayeredSessionBackend(layers)
     }
 }
 
