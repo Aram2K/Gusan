@@ -1,0 +1,139 @@
+{
+  "id": "c10_en_ka_offsite",
+  "title": "Booking a team offsite at a Tbilisi hotel",
+  "scenario": "James books rooms and a meeting room for a 12-person team offsite with Nino, the events manager of a hotel in Tbilisi. She speaks polite Georgian (formal 'თქვენ'). Dates, prices in lari (said in Georgian words), a card payment question and an email address read out in English.",
+  "tags": ["1-to-1", "formal", "numbers", "money", "dates", "email", "fillers", "short-replies", "mixed"],
+  "me": "james",
+  "my_lang": "en",
+  "their_lang": "ka",
+  "speakers": {
+    "james": {"name": "James Reed", "gender": "male", "voice": "JBFqnCBsd6RMkjVDRZzb", "accent_note": "Team lead from London, British English. George: warm British voice."},
+    "nino": {"name": "Nino", "gender": "female", "voice": "pFZP5JQG7iQjIQuC4Bku", "accent_note": "Events manager in Tbilisi, polite Georgian. Lily: soft British voice."}
+  },
+  "glossary": ["James", "Nino", "Vere", "james.reed@harbourline.co.uk"],
+  "turns": [
+    {
+      "speaker": "nino", "lang": "ka", "langs": ["ka"],
+      "text": "გამარჯობა, ბატონო ჯეიმს! ნინო ვარ, სასტუმრო ვერედან. თქვენი ჯავშნის თაობაზე გირეკავთ.",
+      "ref": {
+        "en": "Hello, James! This is Nino from Hotel Vere. I'm calling about your booking."
+      },
+      "gap_before": 0.5,
+      "notes": "#formal #names 'ბატონო ჯეიმს' is the polite Georgian address (literally 'Mr. James')"
+    },
+    {
+      "speaker": "james", "lang": "en", "langs": ["en"],
+      "text": "Hi Nino, thanks for calling. Yes, we're twelve people, from the 4th to the 7th of December.",
+      "ref": {
+        "ka": "გამარჯობა, ნინო, მადლობა დარეკვისთვის. დიახ, თორმეტი ადამიანი ვიქნებით, 4-დან 7 დეკემბრამდე.",
+        "en": "Hi Nino, thanks for calling. Yes, we're twelve people, from the 4th to the 7th of December."
+      },
+      "gap_before": 0.5,
+      "notes": "#numbers #date"
+    },
+    {
+      "speaker": "nino", "lang": "ka", "langs": ["ka"],
+      "text": "შესანიშნავია. საკონფერენციო დარბაზიც დაგჭირდებათ?",
+      "ref": {
+        "en": "Excellent. Will you also need a conference room?"
+      },
+      "gap_before": 0.5,
+      "notes": "#question #formal"
+    },
+    {
+      "speaker": "james", "lang": "en", "langs": ["en"],
+      "text": "Yes, for two days, with a projector and good Wi-Fi.",
+      "ref": {
+        "ka": "დიახ, ორი დღით, პროექტორით და კარგი Wi-Fi-ით.",
+        "en": "Yes, for two days, with a projector and good Wi-Fi."
+      },
+      "gap_before": 0.4,
+      "notes": "#numbers"
+    },
+    {
+      "speaker": "nino", "lang": "ka", "langs": ["ka"],
+      "text": "რა თქმა უნდა. დარბაზი დღეში სამასი ლარი ღირს, ყავის შესვენებით.",
+      "ref": {
+        "en": "Of course. The room costs three hundred lari a day, with a coffee break."
+      },
+      "gap_before": 0.5,
+      "notes": "#money #numbers the price is in Georgian words (სამასი = 300)"
+    },
+    {
+      "speaker": "james", "lang": "en", "langs": ["en"],
+      "text": "Mm-hm.",
+      "ref": {
+        "ka": "აჰა.",
+        "en": "Mm-hm."
+      },
+      "gap_before": 0.3,
+      "notes": "#short #filler backchannel"
+    },
+    {
+      "speaker": "nino", "lang": "ka", "langs": ["ka"],
+      "text": "ოთახები კი ღამეში ას ოთხმოცი ლარი ღირს, საუზმით.",
+      "ref": {
+        "en": "And the rooms are one hundred eighty lari a night, with breakfast."
+      },
+      "gap_before": 0.4,
+      "notes": "#money #numbers ას ოთხმოცი = 180"
+    },
+    {
+      "speaker": "james", "lang": "en", "langs": ["en"],
+      "text": "Sounds good. Can we pay by card when we arrive?",
+      "ref": {
+        "ka": "კარგია. შეგვიძლია ბარათით გადავიხადოთ ჩამოსვლისას?",
+        "en": "Sounds good. Can we pay by card when we arrive?"
+      },
+      "gap_before": 0.5,
+      "notes": "#question"
+    },
+    {
+      "speaker": "nino", "lang": "ka", "langs": ["ka"],
+      "text": "დიახ, შეგიძლიათ. დადასტურებას წინასწარ გამოგიგზავნით ელფოსტით. რომელ მისამართზე?",
+      "ref": {
+        "en": "Yes, you can. I'll send you a confirmation by email in advance. To which address?"
+      },
+      "gap_before": 0.5,
+      "notes": "#question #formal"
+    },
+    {
+      "speaker": "james", "lang": "en", "langs": ["en"],
+      "text": "It's james dot reed at harbourline dot co dot uk.",
+      "ref": {
+        "ka": "მისამართია james.reed@harbourline.co.uk.",
+        "en": "It's james dot reed at harbourline dot co dot uk."
+      },
+      "gap_before": 0.4,
+      "notes": "#email spoken in English: expect james.reed@harbourline.co.uk"
+    },
+    {
+      "speaker": "nino", "lang": "ka", "langs": ["ka", "en"],
+      "text": "OK, ჩავიწერე. კიდევ რამით ხომ ვერ დაგეხმარებით?",
+      "ref": {
+        "en": "OK, I've written it down. Is there anything else I can help you with?"
+      },
+      "gap_before": 0.5,
+      "notes": "#mixed #question #formal 'OK' in Latin letters inside Georgian"
+    },
+    {
+      "speaker": "james", "lang": "en", "langs": ["en"],
+      "text": "No, that's all. Thank you, Nino!",
+      "ref": {
+        "ka": "არა, ეს ყველაფერია. გმადლობთ, ნინო!",
+        "en": "No, that's all. Thank you, Nino!"
+      },
+      "gap_before": 0.4,
+      "notes": ""
+    },
+    {
+      "speaker": "nino", "lang": "ka", "langs": ["ka"],
+      "text": "არაფრის. ნახვამდის!",
+      "ref": {
+        "en": "You're welcome. Goodbye!"
+      },
+      "gap_before": 0.3,
+      "notes": "#short #formal"
+    }
+  ]
+}

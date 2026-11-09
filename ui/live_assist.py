@@ -129,6 +129,16 @@ What it is (product contract):
   paints a darker rounded plate instead - never the OS acrylic, which blurs
   the whole square window and shows as a rectangle around the card.
 
+* The Interpreter (ui/live_interp.py, docs/redesign/interpreter-spec.md): a chip in the header next
+  to the Hidden chip (outlined "Interpreter" while off, the filled pair "EN ⇄ JA" while on; a click
+  turns it on or off at any time through app.interpreter - Free: the Pro window). While it runs, a
+  thin row under the header holds the pair ("You [English ▾] ⇄ [Japanese ▾] Anna": searchable
+  pickers, ui/components/lang_picker.py, written through app.set_settings), the two directions (a
+  mic and a headphones toggle; the last one off turns the interpreter off) and the delay, and the
+  LIVE TRANSCRIPT box becomes CAPTIONS: each phrase with the original small and the translation
+  large (yours in indigo). It works without a Live Assistant session too (captions only); the
+  Answer area stays.
+
 Threading: suggestion requests run on a worker thread and report back via
 signals; every widget touch happens on the GUI thread.
 """
@@ -166,6 +176,14 @@ from web_sources import sources_html
 import people_from_screen
 from rich_text import streaming_markdown  # noqa: F401  (it moved to rich_text: the meeting chat renders streams too)
 from ui import glass, live_docs_ui
+
+
+def _li():
+    """ui/live_interp.py (the Interpreter's chip, row and captions), imported when the card first
+    needs it: it pulls in ui.components (QtSvg), which the PySide6 stand-ins of tests/test_core.py
+    (CI has no PySide6) can't import - and this module must stay importable there."""
+    from ui import live_interp
+    return live_interp
 
 logger = logging.getLogger("transcribe")
 
@@ -1308,7 +1326,15 @@ class LiveAssistOverlay(QWidget):
         self._people = people_from_screen.ScreenReader(
             ask=self._people_ask, probe=self._people_probe, deliver=self._people_deliver)
         self._first_token_at = 0.0
+        # The Interpreter's captions (ui/live_interp.py), rendered at most every 80 ms.
+        self._captions = _li().CaptionLog()
+        self._captions_shown = False
+        self._interp_notice = ""
         self._build()
+        self._cap_timer = QTimer(self)
+        self._cap_timer.setSingleShot(True)
+        self._cap_timer.setInterval(80)
+        self._cap_timer.timeout.connect(self._render_captions)
         self._doc_queue = live_docs_ui.AddQueue(self)
         self._doc_queue.started.connect(self._on_doc_started)
         self._doc_queue.added.connect(self._on_doc_added)
@@ -1374,6 +1400,8 @@ class LiveAssistOverlay(QWidget):
             except Exception:
                 logger.debug("Live Assistant: no plan sync", exc_info=True)
         self._refresh_plan()
+        self._attach_interpreter()
+        self._refresh_interp()
 
     # ── build ──
     def _build(self):
@@ -1422,6 +1450,10 @@ class LiveAssistOverlay(QWidget):
         self.btn_private.setCursor(Qt.PointingHandCursor)
         self.btn_private.clicked.connect(lambda: self.set_private(not self._private))
         bl.addWidget(self.btn_private)
+        # The Interpreter, next to the Hidden chip: one tap turns it on or off.
+        self.btn_interp = _li().InterpChip(self.bar)
+        self.btn_interp.clicked.connect(self._toggle_interp)
+        bl.addWidget(self.btn_interp)
         # Screen context, ON by default: every answer sees the screen you're
         # working on (the tooltip text is set by _on_screen_toggled).
         self.btn_screen = _IconButton("screen", self.bar, "")
@@ -1448,6 +1480,13 @@ class LiveAssistOverlay(QWidget):
         body = QVBoxLayout(self.body)
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(8)
+
+        # While the Interpreter runs: the two languages (searchable pickers), the two directions and the delay.
+        self.interp_row = _li().DirectionRow(self.body)
+        self.interp_row.toggled.connect(self._interp_direction)
+        self.interp_row.languages_picked.connect(self._interp_languages)
+        self.interp_row.hide()
+        body.addWidget(self.interp_row)
 
         # The calendar invite - only while the session came from one: who is on it
         # and whether it has an agenda. A click swaps it (and the transcript card)
@@ -1729,6 +1768,14 @@ class LiveAssistOverlay(QWidget):
         self.lbl_status.setTextFormat(Qt.PlainText)       # file names appear here: never rich text
         self.lbl_status.setMaximumHeight(32)
         foot_row.addWidget(self.lbl_status, 1)
+        # "Speak needs a virtual microphone": Set up opens the Interpreter page's microphone row.
+        self.btn_interp_setup = QPushButton("Set up", self.body)
+        self.btn_interp_setup.setFixedHeight(22)
+        self.btn_interp_setup.setCursor(Qt.PointingHandCursor)
+        self.btn_interp_setup.setAccessibleName("Set up the virtual microphone")
+        self.btn_interp_setup.clicked.connect(self._interp_setup)
+        self.btn_interp_setup.hide()
+        foot_row.addWidget(self.btn_interp_setup)
         # Appears once a session's recording is on disk.
         self.btn_audio = QPushButton("Download audio", self.body)
         self.btn_audio.setFixedHeight(22)
@@ -1811,6 +1858,8 @@ class LiveAssistOverlay(QWidget):
         ok_bg, ok_fg, ok_line = chip_colors("ok", self._theme_name)
         # The PRO pill (ProTag's purple glass): a lighter rim on dark glass.
         pro_line = "rgba(255,255,255,0.45)" if self._theme_name == "dark" else "rgba(255,255,255,0.7)"
+        interp_ink = "#a5b4fc" if self._theme_name == "dark" else "#4f46e5"
+        interp_line = "rgba(165,180,252,0.5)" if self._theme_name == "dark" else "rgba(99,102,241,0.45)"
         self.setStyleSheet(f"""
             QLabel {{ color: {t['text']}; background: transparent; font-size: 12px; }}
             QToolTip {{
@@ -1899,6 +1948,24 @@ class LiveAssistOverlay(QWidget):
             QLabel#laRuleOfferText {{ color: {t['text']}; font-size: 11.5px; }}
             QPushButton#laClip {{ background: transparent; border: none; padding: 0; }}
             QPushButton#laClip:hover {{ background: rgba(37,99,235,0.14); border-radius: 8px; }}
+            QPushButton#laInterp {{
+                background: {t['card']}; color: {interp_ink}; border: 1px solid {interp_line};
+                border-radius: 13px; padding: 0px; font-size: 12px; font-weight: 700;
+            }}
+            QPushButton#laInterp:hover {{ border-color: {interp_ink}; }}
+            QPushButton#laInterp[on="true"] {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3b82f6, stop:1 #8b5cf6);
+                color: #ffffff; border: 1px solid rgba(255,255,255,0.35); border-radius: 13px;
+                padding: 0px;
+            }}
+            QPushButton#laInterp[on="true"]:hover {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2563eb, stop:1 #7c3aed);
+            }}
+            QFrame#laInterpRow {{
+                background: {t['card']}; border: 1px solid {t['card_border']}; border-radius: 10px;
+            }}
+            QLabel#laInterpWho {{ color: {t['faint']}; font-size: 11px; font-weight: 600; }}
+            QLabel#laInterpDelay {{ color: {t['text']}; font-size: 11.5px; font-weight: 700; }}
         """)
         self.drop_veil.set_theme(t)
         self.btn_rules.set_theme(t)
@@ -1919,6 +1986,8 @@ class LiveAssistOverlay(QWidget):
                   self.btn_stop, self.btn_snip, self.inv_chip.drop):
             b.set_theme(t)
         self._shadow_key = None          # shadow tint depends on theme
+        self.interp_row.set_theme(t, dark=self._theme_name == "dark")
+        self._refresh_interp()
         self._refresh_private_chip()
         self._refresh_live_controls()
         self._refresh_docs_chip()        # its little icon wears the theme's ink
@@ -2018,6 +2087,9 @@ class LiveAssistOverlay(QWidget):
         Follow it; never writes back (the value is already there)."""
         if self.app and key in HEAR_KEYS:
             self._refresh_hear()           # who transcribes (and the language hint) follows
+        if self.app and (str(key).startswith("interpreter_") or key == "language"):
+            self._refresh_interp()         # the chip's pair, the row's names, captions on / off
+            return
         if not self.app or not str(key).startswith("live_assist_"):
             return
         cfg = self.app.cfg
@@ -2105,6 +2177,12 @@ class LiveAssistOverlay(QWidget):
         if getattr(self, "_crop_shots", None):
             self._refresh_crop_controls()      # privacy changed mid-crop
 
+    @property
+    def hidden_from_share(self):
+        """Kept out of screen shares right now. A question asked over the card (ui.components.mini_prompt,
+        e.g. the interpreter's "Privacy mode is on") and a picker's list read it: they are kept out too."""
+        return bool(self._private and (self._exclusion_ok or self._mac_partial))
+
     def _guard_popup(self, w):
         """A tooltip/menu about to show: hidden like the card when it belongs
         to the card and the card is hidden; restored if it was ours before."""
@@ -2167,11 +2245,15 @@ class LiveAssistOverlay(QWidget):
             self.btn_private.setIconSize(QSize(16, 16))
         except Exception:
             logger.debug("chip icon failed", exc_info=True)
-        self.btn_private.setText(st.text)
+        # While the interpreter runs its "EN ⇄ JA" chip needs the room: the Hidden chip shows its
+        # icon only (the word stays in the tooltip and the accessible name), so the title is not cut.
+        compact = self._interp_active()
+        self.btn_private.setText("" if compact else st.text)
         self.btn_private.setAccessibleName(st.headline)
+        pad = "2px 4px 2px 4px" if compact else "2px 10px 2px 7px"
         self.btn_private.setStyleSheet(
             f"QPushButton#laPrivate {{ background: {bg}; color: {fg}; border: 1px solid "
-            f"{border}; border-radius: 11px; padding: 2px 10px 2px 7px; font-size: 12px; "
+            f"{border}; border-radius: 11px; padding: {pad}; font-size: 12px; "
             "font-weight: 600; }")
         tip = st.tip + (" " + _CHIP_CLICK[st.key] if st.key in _CHIP_CLICK else "")
         # Rich text so Qt wraps it (a plain tooltip is one ~1000 px line).
@@ -2571,7 +2653,15 @@ class LiveAssistOverlay(QWidget):
         QTimer.singleShot(0, self._apply_glass)
 
     # ── session context ──
+    def _sync_ctx_chip(self):
+        """The "+ Add context" line: hidden while an editor (context or invite) is open, and when it
+        is empty while the interpreter is on (the directions take its place; a written context stays)."""
+        empty_under_interp = not self._context and self._interp_active()
+        self.ctx_chip.setVisible(self.ctx_panel.isHidden() and self.inv_panel.isHidden()
+                                 and not empty_under_interp)
+
     def _refresh_context_chip(self):
+        self._sync_ctx_chip()
         chip, ctx = self.ctx_chip, self._context
         locked = bool(ctx) and self._meeting_active
         everything = self.rules_active()
@@ -2660,7 +2750,7 @@ class LiveAssistOverlay(QWidget):
         if self.ctx_panel.isHidden():
             return
         self.ctx_panel.hide()
-        self.ctx_chip.show()
+        self._sync_ctx_chip()                  # (again once the context is set: _on_rules_changed)
         self.lbl_sum_head.show()
         self.txt_summary.show()
         self.lbl_hear.setVisible(bool(self.lbl_hear.text()))
@@ -2886,7 +2976,7 @@ class LiveAssistOverlay(QWidget):
         if self.inv_panel.isHidden():
             return
         self.inv_panel.hide()
-        self.ctx_chip.show()
+        self._sync_ctx_chip()
         self.lbl_sum_head.show()
         self.txt_summary.show()
         if commit:
@@ -3132,8 +3222,9 @@ class LiveAssistOverlay(QWidget):
             self._title, self._attendees = title or "", attendees or ""
             self._attendees_dropped = False
             self._people.begin(people_from_screen.my_name(self.app))
-            self.txt_summary.clear()
-            self.txt_summary.setPlaceholderText("Listening…")
+            if not self._captions_shown:
+                self.txt_summary.clear()
+                self.txt_summary.setPlaceholderText("Listening…")
             self.lbl_status.setText("Context locked in for this session." if self._context
                                     else "")
         else:
@@ -3175,16 +3266,18 @@ class LiveAssistOverlay(QWidget):
             # transcript once, as "[...]" - and never heard as speech by an answer or a rule.
             if not self._live_text.endswith(GAP_MARK):
                 self._live_text = (self._live_text + " " + GAP_MARK).strip()
-                self.txt_summary.setPlainText(self._live_text[-700:])
+                if not self._captions_shown:
+                    self.txt_summary.setPlainText(self._live_text[-700:])
             return
         self._live_text = (self._live_text + " " + piece).strip()
         self._text_since_suggest += len(piece)
         tail = self._live_text[-700:]
         if len(self._live_text) > 700 and " " in tail:
             tail = tail.split(" ", 1)[1]
-        self.txt_summary.setPlainText(tail)
-        sb = self.txt_summary.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        if not self._captions_shown:
+            self.txt_summary.setPlainText(tail)
+            sb = self.txt_summary.verticalScrollBar()
+            sb.setValue(sb.maximum())
         # "Apply to everything I hear": every new piece goes to the rule (merged with the ones heard
         # a moment ago), not only a question. Same guard as below: only while the card is on screen.
         if answer and self._meeting_active and self.isVisible() and self.rules_active():
@@ -3204,6 +3297,246 @@ class LiveAssistOverlay(QWidget):
         # The meeting window's rolling recap isn't shown here: the overlay is
         # for answers, and the live transcript beats a recap mid-call.
         self._summary = text or ""
+
+    # ── the Interpreter (ui/live_interp.py; the engine is app.interpreter) ──
+    def _interp_host(self):
+        return getattr(self.app, "interpreter", None) if self.app else None
+
+    def _attach_interpreter(self):
+        """Follow the app's InterpreterHost: its state (the chip, the row, the captions), its
+        events (captions) and its one-sentence notices (the footer)."""
+        host = self._interp_host()
+        if host is None:
+            return
+        for name, slot in (("state_changed", self._refresh_interp), ("event", self._on_interp_event),
+                           ("notice", self._on_interp_notice),
+                           ("directions_changed", self._refresh_interp_directions)):
+            sig = getattr(host, name, None)
+            if sig is not None:
+                try:
+                    sig.connect(slot)
+                except Exception:
+                    logger.debug("Live Assistant: interpreter %s not connected", name, exc_info=True)
+        code, text = getattr(host, "last_notice", ("", ""))
+        if text:
+            self._on_interp_notice(code, text)
+
+    def _interp_active(self):
+        """Starting or running - or stopping only to start again with a new language pair (the row,
+        the chip and the captions stay put instead of blinking off for the second it takes)."""
+        host = self._interp_host()
+        try:
+            return bool(host is not None and (host.active or getattr(host, "restarting", False)))
+        except Exception:
+            return False
+
+    def _their_name(self):
+        """The other person's first name on this call (the invite's or the meeting's people), else "Them"."""
+        others = list(self._invite_others or [])
+        if not others and self._attendees:
+            try:
+                others = others_of(self._attendees, self._me_name())
+            except Exception:
+                others = []
+        first = str(others[0]).strip().split()[0] if others and str(others[0]).strip() else ""
+        return first or "Them"
+
+    def _refresh_interp(self, _state=None):
+        """The chip, the direction row and the captions box, as the interpreter is now."""
+        from ui import interpreter_host as ih
+        host = self._interp_host()
+        cfg = self.app.cfg if self.app else {}
+        on = self._interp_active()
+        dark = self._theme_name == "dark"
+        self.btn_interp.set_state(on, ih.pair_codes(cfg), "#a5b4fc" if dark else "#4f46e5")
+        if on != bool(getattr(self, "_private_compact", False)):
+            self._private_compact = on
+            try:
+                self._refresh_private_chip()        # icon-only while on, the word back when off
+            except Exception:
+                logger.debug("private chip refresh failed", exc_info=True)
+        hotkey = cfg.get("interpreter_hotkey") or ""
+        try:
+            from ui.components.controls import keycap_labels
+            keys = " + ".join(keycap_labels(hotkey))
+        except Exception:
+            keys = ""
+        tip = ("Turn the interpreter off" if on else "Turn the interpreter on") + (" (%s)" % keys if keys else "")
+        self.btn_interp.setToolTip(_wrap_tip(tip))
+        self.interp_row.setVisible(on)
+        if on:
+            voice_on = bool(cfg.get("interpreter_voice_on", True)) and getattr(host, "own_voice", None) is not False
+            try:
+                from interpreter import voices as vp
+                choice = vp.VoiceChoice.from_config(cfg)
+                hear_voice = "Voice: " + " or ".join(vp.label(v) for v in choice.all_ids())
+            except Exception:
+                hear_voice = ""
+            self.interp_row.set_languages(ih.my_language(cfg), ih.their_language(cfg))
+            self.interp_row.set_people(self._their_name())
+            self.interp_row.set_voice(voice_on, hear_voice)
+            self._refresh_interp_directions()
+        else:
+            self.interp_row.set_latency(None)
+            if not self._interp_notice:
+                self.btn_interp_setup.hide()
+        if _state == "starting":
+            self._captions.clear()
+        self._set_captions_shown(on and bool(cfg.get("interpreter_captions", True)))
+        self._sync_ctx_chip()
+
+    def _refresh_interp_directions(self, *_args):
+        """The mic and the headphones on the row - also while the card is hidden or folded: what
+        runs, or what the person picked while a switch (or the start) is under way."""
+        if not self._interp_active():
+            return
+        host = self._interp_host()
+        cfg = self.app.cfg if self.app else {}
+        if getattr(host, "running", False) and callable(getattr(host, "direction_on", None)):
+            self.interp_row.set_directions(host.direction_on("speak"), host.direction_on("hear"))
+        else:
+            self.interp_row.set_directions(cfg.get("interpreter_speak", True), cfg.get("interpreter_hear", True))
+
+    def _set_captions_shown(self, shown):
+        if shown == self._captions_shown:
+            if shown:
+                self._schedule_captions()
+            return
+        self._captions_shown = shown
+        if shown:
+            self.lbl_sum_head.setText("CAPTIONS")
+            self.txt_summary.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)   # the newest line is kept in view
+            self.txt_summary.setMaximumHeight(200)
+            self.txt_summary.setPlaceholderText(_li().CAPTIONS_PLACEHOLDER)
+            self.txt_summary.setAccessibleName("Captions")
+            self._render_captions()
+        else:
+            self.lbl_sum_head.setText("LIVE TRANSCRIPT")
+            self.txt_summary.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            self.txt_summary.setMaximumHeight(110)
+            self.txt_summary.setAccessibleName("Live transcript")
+            self.txt_summary.setPlaceholderText("Listening…" if self._meeting_active else TRANSCRIPT_PLACEHOLDER)
+            tail = self._live_text[-700:]
+            self.txt_summary.setPlainText(tail)
+
+    def _on_interp_event(self, e):
+        if not isinstance(e, dict):
+            return
+        # (the directions follow host.directions_changed: _refresh_interp_directions)
+        if e.get("type") == "spoken" and e.get("latency") is not None:
+            host = self._interp_host()
+            self.interp_row.set_latency(host.latency() if host is not None else e.get("latency"))
+        if self._captions.event(e) and self._captions_shown:
+            self._schedule_captions()
+
+    def _schedule_captions(self):
+        if not self._cap_timer.isActive():
+            self._cap_timer.start()
+
+    def _render_captions(self):
+        if not self._captions_shown:
+            return
+        t = _THEMES[self._theme_name]
+        colors = {"text": t["text"], "muted": t["muted"], "faint": t["faint"], "accent": t["accent"],
+                  "mine": "#a5b4fc" if self._theme_name == "dark" else "#4338ca",
+                  "line": "rgba(255,255,255,0.12)" if self._theme_name == "dark" else "rgba(15,23,42,0.08)"}
+        html_text = self._captions.html(colors, them=self._their_name())
+        if not html_text:
+            self.txt_summary.clear()
+            return
+        self.txt_summary.setHtml(html_text)
+        # The small speaker by your lines: an image the document holds itself (never a file).
+        try:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QTextDocument
+            from ui.components import icons as comp_icons
+            self.txt_summary.document().addResource(
+                QTextDocument.ImageResource, QUrl(_li().SPEAKER_URL),
+                comp_icons.pixmap("volume", 11, colors["mine"], 2).toImage())
+        except Exception:
+            logger.debug("captions: speaker icon unavailable", exc_info=True)
+        sb = self.txt_summary.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def _on_interp_notice(self, code, text):
+        self._interp_notice = text or ""
+        if text:
+            self._set_status(text)
+        elif self.lbl_status.text() and self.lbl_status.text() == getattr(self, "_last_interp_text", ""):
+            self._set_status("")
+        self._last_interp_text = text or ""
+        self.btn_interp_setup.setVisible(code == "no_virtual_mic")
+
+    def _toggle_interp(self):
+        host = self._interp_host()
+        if host is None:
+            self._set_status("The interpreter isn't available.")
+            return
+        try:
+            host.toggle(source="card", parent=self)
+        except Exception:
+            logger.warning("Live Assistant: interpreter toggle failed", exc_info=True)
+        self._refresh_interp()
+
+    def _interp_direction(self, name, on):
+        host = self._interp_host()
+        if host is None:
+            return
+        other = self.interp_row.hear_switch if name == "speak" else self.interp_row.speak_switch
+        try:
+            if not on and not other.isChecked() and self._interp_active():
+                # The last one off turns the interpreter off and keeps its setting: the chip turns it
+                # back on the same way (the row - the only switches here - is hidden while it's off).
+                host.stop("user")
+                self._refresh_interp()
+                return
+            host.set_direction(name, on)
+        except Exception:
+            logger.warning("Live Assistant: interpreter direction failed", exc_info=True)
+
+    def _interp_languages(self, my, their):
+        """The row's pickers or its swap: write what changed, the way the Interpreter page does (a
+        swap writes both keys at once, so a running interpreter starts again only once - the host
+        does that for interpreter_my_language / interpreter_their_language). Refused: the row goes
+        back to what cfg says."""
+        from ui import interpreter_host as ih
+        if not self.app:
+            return
+        cfg = self.app.cfg
+        updates = {}
+        if my and my != ih.my_language(cfg):
+            updates["interpreter_my_language"] = my
+        if their and their != ih.their_language(cfg):
+            updates["interpreter_their_language"] = their
+        if updates and not self._write_settings(updates):
+            self._refresh_interp()
+
+    def _write_settings(self, updates):
+        """app.set_settings (one save, each side effect once), else app.set_setting per key, else the
+        card's own _store. True when every key was taken."""
+        app = self.app
+        many = getattr(app, "set_settings", None)
+        try:
+            if callable(many):
+                res = many(dict(updates)) or {}
+                return all(res.get(k, False) for k in updates)
+            one = getattr(app, "set_setting", None)
+            if callable(one):
+                return all([bool(one(k, v)) for k, v in updates.items()])
+            for k, v in updates.items():
+                self._store(k, v)
+            return True
+        except Exception:
+            logger.warning("Live Assistant: the interpreter's languages couldn't be saved", exc_info=True)
+            return False
+
+    def _interp_setup(self):
+        fn = getattr(self.app, "show_main", None) if self.app else None
+        if callable(fn):
+            try:
+                fn("interpreter", focus="microphone")
+            except Exception:
+                logger.warning("Opening the Interpreter page failed", exc_info=True)
 
     # ── documents the user added (live_docs.py; the Live Assistant page manages them) ──
     def _refresh_docs_chip(self):
@@ -4403,6 +4736,9 @@ class LiveAssistOverlay(QWidget):
 
     def _on_tick(self):
         self._pump_rules()
+        if self._captions_shown or self.interp_row.isVisible():
+            host = self._interp_host()
+            self.interp_row.set_latency(host.latency() if host is not None else None)
         if (self._view == "answer" and self.rules_active() and not self._suggesting
                 and time.time() >= getattr(self, "_hold_until", 0.0)):
             self._set_view("feed")             # the typed answer has been read: back to the running results

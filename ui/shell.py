@@ -39,8 +39,8 @@ from ui.components import Button, Card, IconTile, PageHeader, Sidebar, icons, la
 
 logger = logging.getLogger("transcribe")
 
-ROUTES = ("home", "dictation", "smart_actions", "meetings", "live_assistant", "audio_to_text",
-          "settings", "account")
+ROUTES = ("home", "dictation", "smart_actions", "meetings", "live_assistant", "interpreter",
+          "audio_to_text", "settings", "account")
 
 # Pages that moved: the old route opens its new place. The Dictionary is a
 # section of Settings (ui/pages/settings.py), not a page of its own.
@@ -52,6 +52,7 @@ TITLES = {
     "smart_actions": "Smart Actions",
     "meetings": "Meetings",
     "live_assistant": "Live Assistant",
+    "interpreter": "Interpreter",
     "audio_to_text": "Convert audio to text",
     "settings": "Settings",
     "account": "Account & plan",
@@ -88,6 +89,8 @@ def _import_page_module(route):
             import ui.pages.meetings as mod
         elif route == "live_assistant":
             import ui.pages.live_assistant as mod
+        elif route == "interpreter":
+            import ui.pages.interpreter as mod
         elif route == "audio_to_text":
             import ui.pages.audio_to_text as mod
         elif route == "settings":

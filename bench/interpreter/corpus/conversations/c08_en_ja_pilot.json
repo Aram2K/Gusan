@@ -1,0 +1,130 @@
+{
+  "id": "c08_en_ja_pilot",
+  "title": "Pilot planning with a Japanese partner",
+  "scenario": "Emma from Gusan talks to Mr. Tanaka, IT manager at a trading company in Osaka, about a pilot. Polite business Japanese (keigo). Tanaka's long answer is a chain of verb-final clauses, which tests cutting Japanese phrases on 、 and 。 and keeping up; Emma backchannels with a short 'Mm-hm'.",
+  "tags": ["1-to-1", "formal", "long-turn", "numbers", "dates", "time", "fillers", "glossary", "short-replies", "mixed"],
+  "me": "emma",
+  "my_lang": "en",
+  "their_lang": "ja",
+  "speakers": {
+    "emma": {"name": "Emma", "gender": "female", "voice": "Xb7hH8MSUJpSbSDYk0k2", "accent_note": "Gusan partner manager, British English. Alice: clear British voice."},
+    "tanaka": {"name": "Tanaka", "gender": "male", "voice": "JBFqnCBsd6RMkjVDRZzb", "accent_note": "IT manager in Osaka, polite business Japanese (keigo). George: warm British voice."}
+  },
+  "glossary": ["Gusan", "Zoom", "Tanaka", "Emma"],
+  "turns": [
+    {
+      "speaker": "tanaka", "lang": "ja", "langs": ["ja"],
+      "text": "本日はお時間をいただき、ありがとうございます。田中と申します。",
+      "ref": {
+        "en": "Thank you for your time today. My name is Tanaka."
+      },
+      "gap_before": 0.5,
+      "notes": "#formal #names keigo"
+    },
+    {
+      "speaker": "emma", "lang": "en", "langs": ["en"],
+      "text": "Thank you, Mr. Tanaka. I'm Emma from Gusan. Did your team get a chance to try the app?",
+      "ref": {
+        "ja": "ありがとうございます、田中さん。Gusanのエマです。チームの皆さんにアプリをお試しいただけましたか？",
+        "en": "Thank you, Mr. Tanaka. I'm Emma from Gusan. Did your team get a chance to try the app?"
+      },
+      "gap_before": 0.5,
+      "notes": "#question #glossary #names"
+    },
+    {
+      "speaker": "tanaka", "lang": "ja", "langs": ["ja"],
+      "text": "はい。えーと、先週、営業部の5人で試してみました。",
+      "ref": {
+        "en": "Yes. Um, last week five people from the sales department tried it."
+      },
+      "gap_before": 0.6,
+      "notes": "#filler #numbers #date 'はい' then 'えーと' (um)"
+    },
+    {
+      "speaker": "emma", "lang": "en", "langs": ["en"],
+      "text": "And how did it go?",
+      "ref": {
+        "ja": "いかがでしたか？",
+        "en": "And how did it go?"
+      },
+      "gap_before": 0.4,
+      "notes": "#short #question"
+    },
+    {
+      "speaker": "tanaka", "lang": "ja", "langs": ["ja", "en"],
+      "text": "全体的にはとても良かったです。翻訳が速くて、海外のお客様とのZoom会議でも問題なく使えました。ただ、社内の会議では専門用語や製品名が多いので、用語集を事前に登録できると助かります。それから、情報セキュリティ部から、音声データがどこに保存されるのか確認したいと言われています。",
+      "ref": {
+        "en": "Overall it was very good. The translation was fast, and it worked without problems even in Zoom meetings with overseas clients. However, our internal meetings have a lot of technical terms and product names, so it would help if we could register a glossary in advance. Also, our information security department wants to confirm where the audio data is stored."
+      },
+      "gap_before": 0.7,
+      "notes": "#long #mixed #glossary ~22 s of verb-final (SOV) clauses: cutting on 、 and 。, keep-up; 'Zoom' in Latin letters"
+    },
+    {
+      "speaker": "emma", "lang": "en", "langs": ["en"],
+      "text": "Mm-hm.",
+      "ref": {
+        "ja": "はい。",
+        "en": "Mm-hm."
+      },
+      "gap_before": 0.3,
+      "notes": "#short #filler backchannel (speak direction: say it or drop it, never stall)"
+    },
+    {
+      "speaker": "emma", "lang": "en", "langs": ["en"],
+      "text": "Audio isn't stored on our servers. And yes, you can add a glossary in the settings.",
+      "ref": {
+        "ja": "音声は弊社のサーバーには保存されません。また、用語集は設定から追加できます。",
+        "en": "Audio isn't stored on our servers. And yes, you can add a glossary in the settings."
+      },
+      "gap_before": 0.5,
+      "notes": ""
+    },
+    {
+      "speaker": "tanaka", "lang": "ja", "langs": ["ja"],
+      "text": "なるほど、承知しました。",
+      "ref": {
+        "en": "I see, understood."
+      },
+      "gap_before": 0.4,
+      "notes": "#short #formal"
+    },
+    {
+      "speaker": "emma", "lang": "en", "langs": ["en"],
+      "text": "Could we start a pilot with 50 licenses on December 3rd?",
+      "ref": {
+        "ja": "12月3日から、50ライセンスで試験導入を始めることは可能でしょうか？",
+        "en": "Could we start a pilot with 50 licenses on December 3rd?"
+      },
+      "gap_before": 0.5,
+      "notes": "#question #numbers #date"
+    },
+    {
+      "speaker": "tanaka", "lang": "ja", "langs": ["ja"],
+      "text": "社内で確認いたしますが、おそらく大丈夫だと思います。来週の水曜日、午後3時にもう一度お話しできますでしょうか？",
+      "ref": {
+        "en": "I'll check internally, but I think it should be fine. Could we talk again next Wednesday at 3 p.m.?"
+      },
+      "gap_before": 0.6,
+      "notes": "#question #time #date #formal"
+    },
+    {
+      "speaker": "emma", "lang": "en", "langs": ["en"],
+      "text": "Yes, that works. Thank you!",
+      "ref": {
+        "ja": "はい、大丈夫です。ありがとうございます。",
+        "en": "Yes, that works. Thank you!"
+      },
+      "gap_before": 0.4,
+      "notes": ""
+    },
+    {
+      "speaker": "tanaka", "lang": "ja", "langs": ["ja"],
+      "text": "こちらこそ、よろしくお願いいたします。",
+      "ref": {
+        "en": "Thank you as well. We look forward to working with you."
+      },
+      "gap_before": 0.3,
+      "notes": "#formal a set courtesy phrase with no literal English equivalent"
+    }
+  ]
+}

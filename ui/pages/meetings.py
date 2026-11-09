@@ -161,6 +161,8 @@ _SETTING_KEYS = {
     ASK_KEY, LINK_ONLY_KEY, CONSENT_KEY, "notion_api_key", "notion_parent_page", "notion_auth_mode",
     "notion_workspace_name", "notion_parent_title", "notion_auto_send", "notion_reconnect",
     "live_assist_hotkey", "live_assist_private", "google_oauth_client_id", "google_oauth_client_secret",
+    # the start card's Interpreter row: the switch and the language pair
+    "interpreter_with_meetings", "interpreter_my_language", "interpreter_their_language",
 }
 
 
@@ -1371,6 +1373,23 @@ class StartCard(QFrame):
         self.lang_combo = LangCombo(with_icons=True, accessible="Meeting language", parent=self)
         self.lang_combo.activated.connect(self._on_lang)
         fields.addLayout(self._field("Language", self.lang_combo))
+        # The Interpreter starts with the recording (cfg interpreter_with_meetings; the hook is
+        # ui/interpreter_host.InterpreterHost._on_meeting_phase). Its two languages are picked right
+        # here (searchable pickers, a swap); the voice and the rest are on its page.
+        from ui.pages.interpreter import LangPairRow
+        interp = QWidget(self)
+        il = QHBoxLayout(interp)
+        il.setContentsMargins(0, 0, 0, 0)
+        il.setSpacing(8)
+        self.interp_toggle = Toggle("Interpreter", False, interp)
+        self.interp_toggle.setToolTip("When it's on, the interpreter starts with the recording.")
+        self.interp_toggle.toggled.connect(self._on_interpreter)
+        il.addWidget(self.interp_toggle, 0, Qt.AlignVCenter)
+        self.interp_langs = LangPairRow(interp)
+        self.interp_langs.languages_picked.connect(self._on_interp_languages)
+        il.addWidget(self.interp_langs, 1, Qt.AlignVCenter)
+        self.interp_row = interp
+        fields.addLayout(self._field("Interpreter", interp))
         form.addLayout(fields)
         top.addLayout(form, 1)
         lay.addLayout(top)
@@ -1434,6 +1453,18 @@ class StartCard(QFrame):
         on = bool(cfg.get(CONSENT_KEY, True))
         self.consent_divider.setVisible(on)
         self.consent_row.setVisible(on)
+        want = bool(cfg.get("interpreter_with_meetings", False))
+        if self.interp_toggle.isChecked() != want:
+            self.interp_toggle.blockSignals(True)
+            self.interp_toggle.setChecked(want)
+            self.interp_toggle.blockSignals(False)
+            self.interp_toggle.update()
+        self._sync_interp_languages(cfg)
+
+    def _sync_interp_languages(self, cfg=None):
+        from ui import interpreter_host
+        cfg = self.page.cfg() if cfg is None else cfg
+        self.interp_langs.set_languages(interpreter_host.my_language(cfg), interpreter_host.their_language(cfg))
 
     def sync_default(self, force=False):
         """Keep the default name current ('Meeting · Tue 14:30') until the user types one."""
@@ -1569,6 +1600,29 @@ class StartCard(QFrame):
         code = self.lang_combo.currentData()
         if code:
             self.page.set_setting("meeting_language", code)
+
+    def _on_interpreter(self, on):
+        """The Interpreter with every recording. A Pro feature: a Free person or a guest who turns
+        it on gets the Pro window (the switch stays off)."""
+        if on and not self.page.is_pro():
+            self.page.call("_pro_upsell", "Interpreter")
+            on = False
+        elif self.page.set_setting("interpreter_with_meetings", bool(on)):
+            return
+        else:
+            on = bool(self.page.cfg().get("interpreter_with_meetings", False))
+        self.interp_toggle.blockSignals(True)
+        self.interp_toggle.setChecked(on)
+        self.interp_toggle.blockSignals(False)
+        self.interp_toggle.update()
+
+    def _on_interp_languages(self, my, their):
+        """A pick or the swap on the Interpreter row: write what changed (both keys at once for a
+        swap). Refused: the pickers go back to what the settings say."""
+        from ui.pages.interpreter import pair_updates
+        updates = pair_updates(self.page.cfg(), my, their)
+        if updates and not self.page.set_settings(updates):
+            self._sync_interp_languages()
 
     def _copy_notice(self):
         QGuiApplication.clipboard().setText(NOTICE_TEXT)

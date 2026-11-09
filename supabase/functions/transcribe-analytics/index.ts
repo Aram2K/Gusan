@@ -79,6 +79,12 @@ const allowedEvents = new Set([
   'calendar_disconnected',
   'calendar_reminder_action',
   'calendar_meeting_started',
+  // Gusan Interpreter (directions, languages, durations, reasons - never text or audio).
+  'interpreter_started',
+  'interpreter_stopped',
+  'interpreter_failed',
+  'voice_created',
+  'voice_deleted',
 ])
 
 const sensitiveKeys = new Set([

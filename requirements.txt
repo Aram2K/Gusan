@@ -8,6 +8,12 @@ pyaudio; sys_platform != "win32"
 # It includes PyAudio as a dependency so the regular `import pyaudio` keeps
 # working everywhere — main.py prefers `pyaudiowpatch` when available.
 pyaudiowpatch; sys_platform == "win32"
+# websockets (BSD-3-Clause) is the Interpreter's live connection to ElevenLabs (speech-to-text and
+# the translated voice, interpreter/eleven.py, sync client). Pinned: a network library.
+websockets==17.4
+# pycaw (MIT, with comtypes) turns the call app down while a translation plays (Windows
+# per-app volume, interpreter/audio_io.Ducker). Without it the interpreter just skips that.
+pycaw==20260927; sys_platform == "win32"
 numpy
 # sherpa-onnx powers local, offline speaker diarization (Apache-2.0) and, from Gusan 2.0.1, the
 # local Armenian speech model (speech_hy.py). Models are downloaded on first use; the app degrades

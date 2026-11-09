@@ -1,0 +1,2 @@
+# The deploy copy holds the bench token (prepare_deploy.py writes it; --stub overwrites it).
+.deploy/

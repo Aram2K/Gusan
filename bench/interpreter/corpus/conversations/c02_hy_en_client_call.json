@@ -1,0 +1,151 @@
+{
+  "id": "c02_hy_en_client_call",
+  "title": "Client call: Armenian studio, two US clients",
+  "scenario": "Lusine runs a small design studio in Yerevan and speaks Armenian in the call (the interpreter's speak side is Armenian to English). Her US clients, Emily (product lead) and Rachel (finance), speak English. They review the logo, check the November invoice, spell an email and book the next Zoom across time zones. Both people on the far side are women, so the hear voice must stay female all the way through.",
+  "tags": ["client-call", "3-person", "two-women", "formal", "mixed", "numbers", "money", "dates", "time", "email", "spelled", "pause", "glossary", "overlap", "short-replies", "fillers"],
+  "me": "lusine",
+  "my_lang": "hy",
+  "their_lang": "en",
+  "speakers": {
+    "lusine": {"name": "Lusine", "gender": "female", "voice": "Xb7hH8MSUJpSbSDYk0k2", "accent_note": "Studio owner in Yerevan: polite Eastern Armenian with a few English work words. Alice: clear British voice."},
+    "emily": {"name": "Emily Carter", "gender": "female", "voice": "cgSgspJ2msm6clMCkdW9", "accent_note": "Product lead in New York, American English. Jessica: warm American voice."},
+    "rachel": {"name": "Rachel Moss", "gender": "female", "voice": "pFZP5JQG7iQjIQuC4Bku", "accent_note": "Finance at the client, spells her email. Lily: soft British voice."}
+  },
+  "glossary": ["Zoom", "Northpeak", "r.moss@northpeak.io", "Rachel", "Lusine"],
+  "turns": [
+    {
+      "speaker": "emily", "lang": "en", "langs": ["en"],
+      "text": "Hi Lusine, thanks for joining. Rachel from our finance team is with me today.",
+      "ref": {
+        "hy": "Բարև Ձեզ, Լուսինե, շնորհակալ եմ, որ միացաք։ Այսօր ինձ հետ է Ռեյչելը՝ մեր ֆինանսական բաժնից։",
+        "en": "Hi Lusine, thanks for joining. Rachel from our finance team is with me today."
+      },
+      "gap_before": 0.5,
+      "notes": "#names"
+    },
+    {
+      "speaker": "rachel", "lang": "en", "langs": ["en"],
+      "text": "Hi there!",
+      "ref": {
+        "hy": "Բարև Ձեզ։",
+        "en": "Hi there!"
+      },
+      "gap_before": 0.3,
+      "notes": "#short a second woman on the far side"
+    },
+    {
+      "speaker": "lusine", "lang": "hy", "langs": ["hy", "en"],
+      "text": "Բարև ձեզ, հաճելի է ծանոթանալ։ Design-ի առաջին տարբերակը երեկ ուղարկեցի, հասցրե՞լ եք նայել։",
+      "ref": {
+        "en": "Hello, nice to meet you. I sent the first version of the design yesterday. Have you had a chance to look at it?"
+      },
+      "gap_before": 0.5,
+      "notes": "#formal #question #mixed 'Design' inside Armenian; plural polite 'ձեզ' (she greets both)"
+    },
+    {
+      "speaker": "emily", "lang": "en", "langs": ["en"],
+      "text": "We did, and we love it. Just one thing: could the logo be a bit bigger on mobile?",
+      "ref": {
+        "hy": "Այո, նայեցինք, և շատ հավանեցինք։ Միայն մի բան՝ հնարավո՞ր է, որ բջջայինում լոգոն մի քիչ ավելի մեծ լինի։",
+        "en": "We did, and we love it. Just one thing: could the logo be a bit bigger on mobile?"
+      },
+      "gap_before": 0.6,
+      "notes": "#question"
+    },
+    {
+      "speaker": "lusine", "lang": "hy", "langs": ["hy"],
+      "text": "Իհարկե, խնդիր չկա։ Վաղը կուղղեմ։",
+      "ref": {
+        "en": "Of course, no problem. I'll fix it tomorrow."
+      },
+      "gap_before": 0.4,
+      "notes": ""
+    },
+    {
+      "speaker": "rachel", "lang": "en", "langs": ["en"],
+      "text": "Great. And the invoice for November, is it still $4,500?",
+      "ref": {
+        "hy": "Հիանալի է։ Իսկ նոյեմբերի հաշիվը դեռ 4500 դոլա՞ր է։",
+        "en": "Great. And the invoice for November, is it still $4,500?"
+      },
+      "gap_before": 0.7,
+      "notes": "#money #question '$4,500' is read as four thousand five hundred dollars"
+    },
+    {
+      "speaker": "lusine", "lang": "hy", "langs": ["hy"],
+      "text": "Մի րոպե, ստուգեմ։",
+      "ref": {
+        "en": "One moment, let me check."
+      },
+      "gap_before": 0.4,
+      "notes": "#short"
+    },
+    {
+      "speaker": "lusine", "lang": "hy", "langs": ["hy", "en"],
+      "text": "Այո, չորս հազար հինգ հարյուր դոլար, լոգոն էլ մեջն է։ Invoice-ը կուղարկեմ մինչև ուրբաթ։",
+      "ref": {
+        "en": "Yes, four thousand five hundred dollars, and the logo is included. I'll send the invoice by Friday."
+      },
+      "gap_before": 2.5,
+      "notes": "#pause #money #numbers #mixed #date 2.5 s of silence first while she checks (same speaker): the phrase before must be flushed, then a number in Armenian words"
+    },
+    {
+      "speaker": "rachel", "lang": "en", "langs": ["en"],
+      "text": "Perfect. Please send it to r dot moss at northpeak dot io. That's M-O-S-S.",
+      "ref": {
+        "hy": "Հիանալի է։ Խնդրում եմ, ուղարկեք r.moss@northpeak.io հասցեին։ Այսինքն՝ M-O-S-S։",
+        "en": "Perfect. Please send it to r dot moss at northpeak dot io. That's M-O-S-S."
+      },
+      "gap_before": 0.4,
+      "notes": "#email #spelled expect r.moss@northpeak.io, then the letters M-O-S-S"
+    },
+    {
+      "speaker": "lusine", "lang": "hy", "langs": ["hy"],
+      "text": "Ըհը, գրեցի։",
+      "ref": {
+        "en": "Uh-huh, got it."
+      },
+      "gap_before": 0.5,
+      "notes": "#short #filler 'Ըհը' = uh-huh"
+    },
+    {
+      "speaker": "emily", "lang": "en", "langs": ["en"],
+      "text": "And could we do a quick Zoom on Thursday at 9 a.m. our time? That's 6 p.m. for you, I think.",
+      "ref": {
+        "hy": "Իսկ կարո՞ղ ենք հինգշաբթի կարճ Zoom անել, մեր ժամանակով առավոտյան 9-ին։ Ձեզ մոտ դա, կարծեմ, երեկոյան 6-ն է։",
+        "en": "And could we do a quick Zoom on Thursday at 9 a.m. our time? That's 6 p.m. for you, I think."
+      },
+      "gap_before": 0.4,
+      "notes": "#question #time #date #glossary New York 9 a.m. = Yerevan 6 p.m.: both times must survive translation unchanged"
+    },
+    {
+      "speaker": "lusine", "lang": "hy", "langs": ["hy"],
+      "text": "Այո, երեկոյան վեցն ինձ հարմար է։ Շնորհակալություն, մինչ հանդիպում։",
+      "ref": {
+        "en": "Yes, six in the evening works for me. Thank you, see you then."
+      },
+      "gap_before": 0.5,
+      "notes": "#time #formal"
+    },
+    {
+      "speaker": "emily", "lang": "en", "langs": ["en"],
+      "text": "Bye, Lusine!",
+      "ref": {
+        "hy": "Ցտեսություն, Լուսինե։",
+        "en": "Bye, Lusine!"
+      },
+      "gap_before": 0.3,
+      "notes": "#short"
+    },
+    {
+      "speaker": "rachel", "lang": "en", "langs": ["en"],
+      "text": "Bye!",
+      "ref": {
+        "hy": "Ցտեսություն։",
+        "en": "Bye!"
+      },
+      "gap_before": -0.3,
+      "notes": "#short #overlap the two women talk over each other on the same (system) track"
+    }
+  ]
+}

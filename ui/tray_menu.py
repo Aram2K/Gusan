@@ -18,6 +18,7 @@ meeting is coming up; the account rows depend on the plan):
     Dictate                             Alt+R
     Record a meeting…  PRO
     Live Assistant  PRO            Ctrl+Alt+A
+    ✓ Interpreter  PRO             Ctrl+Alt+I   (checked while it runs)
     Convert audio to text…
     Recent                                  ›   (Home's newest 4 + "Show all in Gusan")
     ──
@@ -69,6 +70,7 @@ toggle_dictation exists. The Live Assistant row opens the card for every plan
                             (please add a public ``toggle_dictation``)
     Record a meeting…       Pro: show_main("meetings")   Free: _pro_upsell("Meeting recording")
     Live Assistant          toggle_live_assist() for every plan (the card's Start asks for Pro)
+    Interpreter             toggle_interpreter("tray"): on / off (Free: the Pro window)
     Convert audio to text…  show_main("audio_to_text")
     Recent › <item>         show_main(route, **opts) - Home's row targets
                             (dictation entry=, meetings meeting=, audio_to_text transcript=, smart_actions)
@@ -485,6 +487,13 @@ class TrayMenu(QObject):
         self._build()
         self.menu.aboutToShow.connect(self._on_about_to_show)
         self.recent.aboutToShow.connect(self._on_recent_show)
+        host = getattr(app, "interpreter", None)
+        sig = getattr(host, "state_changed", None)
+        if sig is not None:
+            try:
+                sig.connect(self._on_interpreter_state)
+            except Exception:
+                logger.debug("tray: interpreter state unavailable", exc_info=True)
         self.refresh()
         self._fill_recent()
 
@@ -536,6 +545,9 @@ class TrayMenu(QObject):
         self._add("dictate", "Dictate", self.dictate)
         self._add("meeting", "Record a meeting…", self.record_meeting, **{P_PRO: True})
         self._add("assist", "Live Assistant", self.live_assistant, **{P_PRO: True})
+        it = self._add("interpreter", "Interpreter", None, **{P_PRO: True})
+        it.setCheckable(True)
+        it.triggered.connect(self.interpreter)
         self._add("convert", "Convert audio to text…", self.convert_audio)
         ra = self.menu.addMenu(self.recent)
         ra.setProperty(P_KIND, "item")
@@ -552,7 +564,7 @@ class TrayMenu(QObject):
         self._sep("sep_account")
         self._add("settings", "Settings…", self.open_settings)
         self._add("quit", "Quit %s" % APP_NAME, self.quit_app)
-        for key in ("meeting", "assist"):
+        for key in ("meeting", "assist", "interpreter"):
             a = self.actions[key]
             a.setToolTip("Pro feature")
             a.setStatusTip("Pro feature")
@@ -624,6 +636,7 @@ class TrayMenu(QObject):
         self.refresh_account()
         self.refresh_hotkeys()
         self.refresh_privacy()
+        self.refresh_interpreter()
         self.refresh_next()
 
     def refresh_account(self):
@@ -647,6 +660,25 @@ class TrayMenu(QObject):
         else:
             hk = cfg.get("live_assist_hotkey", "")
         self._set_hint("assist", hotkey_hint(hk))
+        if hasattr(self.app, "_registered_interp_hotkey"):
+            ihk = getattr(self.app, "_registered_interp_hotkey", None) or ""
+            if not ihk and getattr(self.app, "_interp_listener", None) is not None:
+                ihk = cfg.get("interpreter_hotkey", "")
+        else:
+            ihk = cfg.get("interpreter_hotkey", "")
+        self._set_hint("interpreter", hotkey_hint(ihk))
+
+    def _on_interpreter_state(self, _state=""):
+        self.refresh_interpreter()
+
+    def refresh_interpreter(self):
+        """The Interpreter row is checked while it runs (or starts)."""
+        host = getattr(self.app, "interpreter", None)
+        try:
+            on = bool(getattr(host, "active", False))
+        except Exception:
+            on = False
+        self.actions["interpreter"].setChecked(on)
 
     def refresh_privacy(self):
         a = self.actions["privacy"]
@@ -713,7 +745,7 @@ class TrayMenu(QObject):
         self.refresh_next()
 
     def on_setting_changed(self, key):
-        if key in ("hotkey", "live_assist_hotkey"):
+        if key in ("hotkey", "live_assist_hotkey", "interpreter_hotkey"):
             self.refresh_hotkeys()
         elif key == "privacy_mode":
             self.refresh_privacy()
@@ -824,6 +856,14 @@ class TrayMenu(QObject):
         # The card opens for everyone (Free and guests too); it asks for Pro
         # when Start is pressed, not here.
         _call(self.app, "toggle_live_assist")
+
+    def interpreter(self, _checked=False):
+        # On or off; a Free person or a guest gets the Pro window (the host decides).
+        if callable(getattr(self.app, "toggle_interpreter", None)):
+            _call(self.app, "toggle_interpreter", "tray")
+        else:
+            _call(self.app, "show_main", "interpreter")
+        self.refresh_interpreter()
 
     def convert_audio(self):
         _call(self.app, "show_main", "audio_to_text")

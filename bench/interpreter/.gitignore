@@ -1,0 +1,26 @@
+# The bench password (server/prepare_deploy.py writes it; it goes in the x-bench-token header). Never commit.
+.bench_token
+
+# Paid ElevenLabs clips (sha1 of model|voice|lang|text). Keep a copy somewhere safe: deleting it means
+# paying for the same characters again.
+corpus/cache/
+
+# Generated tracks (~20 MB per conversation): rebuilt from the cache for free with python generate.py.
+corpus/audio/
+
+# Dry runs (fake voices).
+corpus/audio_dry/
+corpus/cache_dry/
+
+# Raw run outputs, the character ledger and saved run audio stay on this PC; the markdown reports are kept.
+results/*.json
+results/*.tmp
+results/*.reserved
+results/audio/
+
+__pycache__/
+
+# Run logs and analysis caches (local; the markdown reports are what is kept).
+*.log
+results/*.pkl
+results/*_console*.txt

@@ -84,7 +84,7 @@ def test_unknown_route_warns_and_falls_back_to_home(shell, caplog):
 
 # -- the Dictionary lives in Settings, not on the main pages --
 
-SIX_PAGES = ["home", "dictation", "smart_actions", "meetings", "live_assistant", "audio_to_text"]
+PAGES = ["home", "dictation", "smart_actions", "meetings", "live_assistant", "interpreter", "audio_to_text"]
 
 
 def test_dictionary_is_not_a_route_or_a_title():
@@ -98,28 +98,28 @@ def test_dictionary_is_not_a_route_or_a_title():
     assert all(alias not in shell_mod.ROUTES for alias in shell_mod.ROUTE_ALIASES)
 
 
-def test_sidebar_has_the_six_pages_and_settings_but_no_dictionary(shell):
+def test_sidebar_has_the_seven_pages_and_settings_but_no_dictionary(shell):
     from ui.components import sidebar as sidebar_mod
-    assert [r for r, *_ in sidebar_mod.NAV] == SIX_PAGES
+    assert [r for r, *_ in sidebar_mod.NAV] == PAGES
     win, _ = shell("free")
-    assert set(win.sidebar.items) == set(SIX_PAGES) | {"settings"}
+    assert set(win.sidebar.items) == set(PAGES) | {"settings"}
     assert "dictionary" not in win.sidebar.items
-    assert [r for r in win.sidebar.items if r != "settings"] == SIX_PAGES
+    assert [r for r in win.sidebar.items if r != "settings"] == PAGES
     assert win.sidebar.settings_item is win.sidebar.items["settings"]
     labels = [it.accessibleName() for it in win.sidebar.items.values()]
     assert not any("dictionary" in (t or "").lower() for t in labels)
 
 
 def test_sidebar_items_do_not_overlap_and_fit(shell):
-    # Six pages + Settings: stacked in order, one 3 px gap apart, nothing under Settings.
+    # Seven pages + Settings: stacked in order, one 3 px gap apart, nothing under Settings.
     win, _ = shell("free")
     win.resize(1280, 820)
     win.show()
     win.open("home")
     QApplication.processEvents()
     sb = win.sidebar
-    tops = [sb.items[r].geometry().top() for r in SIX_PAGES]
-    assert tops == [73 + 41 * i for i in range(6)]
+    tops = [sb.items[r].geometry().top() for r in PAGES]
+    assert tops == [73 + 41 * i for i in range(len(PAGES))]
     assert sb.items["audio_to_text"].geometry().bottom() < sb.settings_item.geometry().top()
 
 
@@ -257,7 +257,7 @@ def test_placeholders_link_to_the_classic_windows(qapp, monkeypatch, route, meth
 
 
 @pytest.mark.parametrize("route", ["home", "dictation", "smart_actions", "meetings", "live_assistant",
-                                   "audio_to_text", "settings", "account"])
+                                   "interpreter", "audio_to_text", "settings", "account"])
 def test_real_page_renders_for_every_route(shell, route):
     # Wave 3: ui/pages/<route>.py exists, so the route builds its own page
     # (its create()), not the placeholder and not the error card.

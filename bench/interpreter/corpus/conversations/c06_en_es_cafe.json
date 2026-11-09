@@ -1,0 +1,130 @@
+{
+  "id": "c06_en_es_cafe",
+  "title": "Spanglish catch-up from a noisy café",
+  "scenario": "Diego, a Mexican-American co-founder, calls Sophie from a busy café in Mexico City about Tuesday's investor demo. He switches between Spanish and English in the middle of sentences. Casual and fast, with overlaps. The noisy variant adds café noise to his side (the system track).",
+  "tags": ["1-to-1", "casual", "fast", "overlap", "mixed", "numbers", "dates", "time", "email", "fillers", "short-replies", "glossary", "noisy"],
+  "me": "sophie",
+  "my_lang": "en",
+  "their_lang": "es",
+  "speakers": {
+    "sophie": {"name": "Sophie", "gender": "female", "voice": "pFZP5JQG7iQjIQuC4Bku", "accent_note": "Co-founder in San Francisco, English only. Lily: soft British voice."},
+    "diego": {"name": "Diego", "gender": "male", "voice": "iP95p4xoKVk53GoZ742B", "accent_note": "Mexican-American: Mexican Spanish with English mixed in (Spanglish). Chris: casual American voice."}
+  },
+  "glossary": ["Gusan", "Sophie", "Laura", "laura.vega@gmail.com", "Q&A"],
+  "turns": [
+    {
+      "speaker": "diego", "lang": "es", "langs": ["es"],
+      "text": "¡Hey, Sophie! Perdón por el ruido, estoy en un café. ¿Me escuchas bien?",
+      "ref": {
+        "en": "Hey, Sophie! Sorry about the noise, I'm at a café. Can you hear me OK?"
+      },
+      "gap_before": 0.5,
+      "notes": "#question #casual"
+    },
+    {
+      "speaker": "sophie", "lang": "en", "langs": ["en"],
+      "text": "Yeah, loud and clear. What's up?",
+      "ref": {
+        "es": "Sí, te escucho perfecto. ¿Qué onda?",
+        "en": "Yeah, loud and clear. What's up?"
+      },
+      "gap_before": 0.4,
+      "notes": "#question #casual"
+    },
+    {
+      "speaker": "diego", "lang": "es", "langs": ["es", "en"],
+      "text": "O sea, good news: el meeting con los investors es el martes a las diez. Pero quieren ver el demo de Gusan live, no un video.",
+      "ref": {
+        "en": "So, good news: the meeting with the investors is on Tuesday at ten. But they want to see the Gusan demo live, not a video."
+      },
+      "gap_before": 0.3,
+      "notes": "#mixed #time #date #glossary Spanglish: good news, meeting, investors, live"
+    },
+    {
+      "speaker": "sophie", "lang": "en", "langs": ["en"],
+      "text": "Live? Seriously?",
+      "ref": {
+        "es": "¿En vivo? ¿En serio?",
+        "en": "Live? Seriously?"
+      },
+      "gap_before": -0.3,
+      "notes": "#overlap #question #short starts 0.3 s before Diego ends"
+    },
+    {
+      "speaker": "diego", "lang": "es", "langs": ["es"],
+      "text": "Sí, sí, en serio. Este... ¿tú crees que el Wi-Fi del hotel va a aguantar?",
+      "ref": {
+        "en": "Yes, yes, seriously. Um... do you think the hotel Wi-Fi will hold up?"
+      },
+      "gap_before": 0.2,
+      "notes": "#filler #question 'Este...' = um"
+    },
+    {
+      "speaker": "sophie", "lang": "en", "langs": ["en"],
+      "text": "Let's bring a hotspot, just in case. How long do we get?",
+      "ref": {
+        "es": "Llevemos un hotspot, por si acaso. ¿Cuánto tiempo nos dan?",
+        "en": "Let's bring a hotspot, just in case. How long do we get?"
+      },
+      "gap_before": 0.4,
+      "notes": "#question"
+    },
+    {
+      "speaker": "diego", "lang": "es", "langs": ["es", "en"],
+      "text": "Quince minutos, y luego five minutes de Q&A.",
+      "ref": {
+        "en": "Fifteen minutes, and then five minutes of Q&A."
+      },
+      "gap_before": -0.2,
+      "notes": "#overlap #numbers #mixed switches to English in the middle of the sentence"
+    },
+    {
+      "speaker": "sophie", "lang": "en", "langs": ["en"],
+      "text": "OK.",
+      "ref": {
+        "es": "Ok.",
+        "en": "OK."
+      },
+      "gap_before": 0.4,
+      "notes": "#short one-word reply"
+    },
+    {
+      "speaker": "sophie", "lang": "en", "langs": ["en"],
+      "text": "That's tight, but I'm ready. I'll cut the slides down to ten.",
+      "ref": {
+        "es": "Es poco tiempo, pero estoy lista. Voy a dejar las diapositivas en diez.",
+        "en": "That's tight, but I'm ready. I'll cut the slides down to ten."
+      },
+      "gap_before": 0.6,
+      "notes": "#numbers #gender Spanish needs the feminine 'lista' (Sophie is a woman)"
+    },
+    {
+      "speaker": "diego", "lang": "es", "langs": ["es", "en"],
+      "text": "Perfecto. Y oye, ¿le mandas el deck a Laura antes del lunes? Es laura punto vega arroba gmail punto com.",
+      "ref": {
+        "en": "Perfect. And hey, can you send the deck to Laura before Monday? It's laura.vega@gmail.com."
+      },
+      "gap_before": 0.3,
+      "notes": "#mixed #email #question #date 'punto' = dot, 'arroba' = @; expect laura.vega@gmail.com"
+    },
+    {
+      "speaker": "sophie", "lang": "en", "langs": ["en"],
+      "text": "Sure, will do.",
+      "ref": {
+        "es": "Claro, yo se lo mando.",
+        "en": "Sure, will do."
+      },
+      "gap_before": 0.4,
+      "notes": "#short"
+    },
+    {
+      "speaker": "diego", "lang": "es", "langs": ["es", "en"],
+      "text": "¡Eres la mejor! Bueno, te dejo, que se me enfría el café. Bye!",
+      "ref": {
+        "en": "You're the best! OK, I'll let you go, my coffee's getting cold. Bye!"
+      },
+      "gap_before": 0.3,
+      "notes": "#casual #mixed"
+    }
+  ]
+}

@@ -1,7 +1,7 @@
 """Gusan 2.0 pages, one module per sidebar route.
 
 To add a page, create ``ui/pages/<route>.py`` (route = home, dictation,
-smart_actions, meetings, live_assistant, audio_to_text, settings or account;
+smart_actions, meetings, live_assistant, interpreter, audio_to_text, settings or account;
 the Dictionary is a section of settings, ui/pages/dictionary.py is embedded
 there) with:
 

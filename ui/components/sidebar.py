@@ -1,6 +1,6 @@
 """The main window's left navigation (232 px), as in the mockups.
 
-Logo + "Gusan", the six pages (no PRO tags: Pro features open the Pro
+Logo + "Gusan", the seven pages (no PRO tags: Pro features open the Pro
 window when a Free user uses them), then the account at the bottom, and
 Settings last. The account area by plan:
 
@@ -35,6 +35,7 @@ NAV = (
     ("smart_actions", "wand", "Smart Actions", True),
     ("meetings", "people", "Meetings", True),
     ("live_assistant", "incognito", "Live Assistant", True),
+    ("interpreter", "translate", "Interpreter", True),
     ("audio_to_text", "wave", "Audio to text", False),
 )
 

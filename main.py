@@ -298,6 +298,28 @@ DEFAULT = {
     # "cloud" (the AI service the user added a key for); "" = either. A yes for one is asked
     # again for the other (the question names the route).
     "live_docs_cloud_route": "",
+    # ── The Interpreter (ui/pages/interpreter.py, ui/interpreter_host.py; Pro) ──
+    # The pair: my language ("" = the Dictation language, English when that is Detect /
+    # Mixed) and theirs. The two directions: Speak (they hear me in their language) and Hear
+    # (I hear them in mine); flipping one while it runs switches it at once.
+    "interpreter_my_language": "",
+    "interpreter_their_language": "hy",
+    "interpreter_hear": True,
+    "interpreter_speak": True,
+    "interpreter_output": "auto",             # "auto" | "headphones" | "speakers"
+    "interpreter_duck": True,                 # turn the call down while a translation plays
+    "interpreter_keep_underneath": True,      # ...but keep their voice underneath (not silent)
+    "interpreter_captions": True,             # the live card shows captions while it runs
+    "interpreter_voice_on": True,             # True: my cloned voice when I speak; False: a standard one
+    # The voice I hear the others in (interpreter/voices.py): "match" = a woman's voice for a
+    # woman, a man's for a man (these two), or "fixed" = one voice for everyone.
+    "interpreter_voice_mode": "match",
+    "interpreter_voice_female": "EXAVITQu4vr4xnSDxMaL",     # Sarah
+    "interpreter_voice_male": "cjVigY5qzO86Huf0OWal",       # Eric
+    "interpreter_voice_fixed": "SAz9YHcvj6GT2YYXdXww",      # River
+    "interpreter_notice": True,               # say once that an AI interpreter is on
+    "interpreter_hotkey": "ctrl+alt+i",       # toggles it (never another shortcut's keys)
+    "interpreter_with_meetings": False,       # the Meetings start card: start with every recording
     # Dictation HUD glass (ui/overlay.py): "auto" adapts to what is behind it
     # (light over bright content, dark over dark), or pin "dark" / "light".
     "overlay_theme": "auto",
@@ -558,6 +580,14 @@ def load_config():
     # Every load (not a schema step: a current file must be healed too) - the 2.1.2 test builds' Gladia picks.
     import engine_choice
     engine_choice.heal_speech_settings(loaded)
+    # The Interpreter's shortcut (new in 2.2): a config whose other shortcuts already use its
+    # default (Ctrl+Alt+I) starts with none - the page shows "Not set" - rather than keys that
+    # could never register.
+    if "interpreter_hotkey" not in data:
+        taken = {settings_apply.norm_hotkey(loaded.get(k))
+                 for k in ("hotkey", "live_assist_hotkey", "smart_actions_hotkey")}
+        if settings_apply.norm_hotkey(DEFAULT["interpreter_hotkey"]) in taken:
+            loaded["interpreter_hotkey"] = ""
     # Keep initial_prompt in step with the structured vocabulary list, so a
     # hand-edited or older config self-heals on load.
     vocabulary.sync_config(loaded)
@@ -1153,6 +1183,9 @@ def remove_whisper_model(name):
 SILENCE_TRIGGER_SEC = 0.8
 MIN_SPEECH_SEC      = 1.5
 MAX_SPEECH_SEC      = 25
+# A meeting's mic while the Interpreter's voice plays from speakers: kept only when the person is
+# clearly talking over it - the interpreter's own rule (interpreter.audio_io.ListenGate, 2500 of 32768).
+OWN_VOICE_BARGE_IN = 2500.0 / 32768.0
 
 # Dynamically import PyAudio or PyAudioWPatch
 try:
@@ -1309,6 +1342,10 @@ class AudioRecorder:
         self._tick_at = 0.0
         self._dead_logged = False
         self._chunk_failures = 0
+        # The Interpreter's Hear voice plays on the output a meeting records (and, from
+        # speakers, into the mic): own_voice_playing() -> "speakers" / "headphones" while it
+        # plays, "" otherwise (AppController sets it). A meeting never keeps it (_keep_out_own_voice).
+        self.own_voice_playing = None
 
     def set_paused(self, paused):
         """Pause or resume a meeting recording. Only a flag: the record thread
@@ -1330,6 +1367,32 @@ class AudioRecorder:
         if samples is None or len(samples) == 0:
             return 0.0
         return float(np.sqrt(np.mean(np.square(samples))))
+
+    def _own_voice_now(self):
+        """Where Gusan's own interpreter voice is playing right now ("speakers" / "headphones"),
+        or "" (quiet, or nothing to ask)."""
+        fn = getattr(self, "own_voice_playing", None)
+        if not callable(fn):
+            return ""
+        try:
+            own = fn()
+        except Exception:
+            return ""
+        return own if own in ("speakers", "headphones") else ""
+
+    def _keep_out_own_voice(self, mic, call):
+        """A meeting never records Gusan's own interpreter voice: while it plays, the call's sound
+        (``call``) is silenced - the call turned down under it too - and, from speakers, the mic
+        (``mic``) as well unless the person talks over it. Returns (mic, call); either may be None."""
+        own = AudioRecorder._own_voice_now(self)
+        if not own:
+            return mic, call
+        if call is not None and len(call):
+            call = np.zeros_like(call)
+        if (own == "speakers" and mic is not None and len(mic)
+                and AudioRecorder._samples_rms(mic) < OWN_VOICE_BARGE_IN):
+            mic = np.zeros_like(mic)
+        return mic, call
 
     @staticmethod
     def _whisper_device():
@@ -2394,6 +2457,10 @@ class AudioRecorder:
                     mic_data = self._read_input_draining(mic_stream, sr)
                     arr_mic = np.frombuffer(mic_data, dtype=np.float32)
                     loop_chunk = self._read_available_loopback(stream)
+                    if meeting_cadence:
+                        kept, loop_chunk = AudioRecorder._keep_out_own_voice(self, arr_mic, loop_chunk)
+                        if kept is not arr_mic:
+                            arr_mic, mic_data = kept, kept.tobytes()
                     mic_part, call_part = arr_mic, loop_chunk
                     if len(loop_chunk) > 0:
                         loop_fifo = np.concatenate([loop_fifo, loop_chunk])
@@ -2417,6 +2484,8 @@ class AudioRecorder:
                     # frame so the VAD still flushes the last spoken chunk to
                     # the live transcript.
                     loop_chunk = self._read_available_loopback(stream)
+                    if meeting_cadence:
+                        _mic, loop_chunk = AudioRecorder._keep_out_own_voice(self, None, loop_chunk)
                     if len(loop_chunk) == 0:
                         time.sleep(0.05)
                         loop_idle_sec += 0.05
@@ -2440,6 +2509,11 @@ class AudioRecorder:
                         data = loop_chunk.tobytes()
                 else:
                     data = self._read_input_draining(stream, sr)
+                    if meeting_cadence:
+                        arr_in = np.frombuffer(data, dtype=np.float32)
+                        kept, _call = AudioRecorder._keep_out_own_voice(self, arr_in, None)
+                        if kept is not arr_in:
+                            data = kept.tobytes()
 
                 read_errors = 0
 
@@ -4177,6 +4251,7 @@ class AppController(QObject):
     sig_hotkey = Signal()
     sig_assist_hotkey = Signal()
     sig_smart_hotkey = Signal()         # the Smart Actions shortcut (one dictation as a Smart Action)
+    sig_interpreter_hotkey = Signal()   # the Interpreter's shortcut (on / off)
     sig_enter = Signal()
     sig_escape = Signal()
     sig_update_available = Signal(str)  # tag of newer version
@@ -4298,6 +4373,10 @@ class AppController(QObject):
         self._smart_listener = None
         self._smart_next = False
         self._oneshot_action = None
+        # The Interpreter's shortcut (interpreter_hotkey): its hook (_setup_interpreter_hotkey).
+        self._registered_interp_hotkey = None
+        self._interp_listener = None
+        self.interpreter = None          # ui/interpreter_host.InterpreterHost, made after the meeting session
         # A Smart take transcribed with its own speech model: load Dictation's
         # again once it is done (_restore_dictation_speech).
         self._smart_speech_restore = False
@@ -4362,6 +4441,16 @@ class AppController(QObject):
             self.mic_monitor = None
         self.calendar = None                 # calendar_service.CalendarService when configured
         self._reminder = None                # the calendar reminder toast, once shown
+        # The Interpreter's one owner (the page, the live card's chip, the tray, the shortcut and
+        # the Meetings start card all go through it). Cheap: nothing opens until it starts.
+        try:
+            from ui.interpreter_host import InterpreterHost
+            self.interpreter = InterpreterHost(self)
+        except Exception:
+            logger.warning("Interpreter unavailable", exc_info=True)
+            self.interpreter = None
+        # A meeting never records the Interpreter's own voice (AudioRecorder._keep_out_own_voice).
+        self.recorder.own_voice_playing = self._interpreter_voice_playing
 
         # The dictation bar is the only window built at startup: it is the
         # HUD and the workers' call_soon trampoline to the GUI thread. The
@@ -4389,6 +4478,8 @@ class AppController(QObject):
         self._setup_assist_hotkey(self.cfg.get("live_assist_hotkey", ""))
         self.sig_smart_hotkey.connect(self._on_smart_hotkey, Qt.QueuedConnection)
         self._setup_smart_hotkey(self.cfg.get("smart_actions_hotkey", ""))
+        self.sig_interpreter_hotkey.connect(self.toggle_interpreter, Qt.QueuedConnection)
+        self._setup_interpreter_hotkey(self.cfg.get("interpreter_hotkey", ""))
         self.sig_enter.connect(self._on_enter, Qt.QueuedConnection)
         self.sig_escape.connect(self._on_escape, Qt.QueuedConnection)
         self.sig_update_available.connect(self._prompt_update, Qt.QueuedConnection)
@@ -4974,7 +5065,17 @@ class AppController(QObject):
         """The Pro window. ``feature`` names what was tapped ("Meeting
         recording", "Live Assistance", "Smart Actions", "Fast cloud
         transcription"); paywall_viewed keeps the 1.9 names (PRO_FEATURE_EVENT),
-        the window shows today's (PRO_FEATURE_SHOWN)."""
+        the window shows today's (PRO_FEATURE_SHOWN). One at a time: asked again while it is
+        open (a click on the tray meanwhile), that one comes to the front - never a second."""
+        dlg = getattr(self, "_pro_window", None)
+        if dlg is not None:
+            try:
+                if dlg.isVisible():
+                    dlg.raise_()
+                    dlg.activateWindow()
+                    return
+            except RuntimeError:
+                pass                        # deleted meanwhile: open a new one
         tracked = PRO_FEATURE_EVENT.get(feature, feature)
         shown = PRO_FEATURE_SHOWN.get(feature, feature)
         try:
@@ -4985,7 +5086,11 @@ class AppController(QObject):
         try:
             from ui.pro_dialog import ProDialog
             dlg = ProDialog(main_app=self, feature=shown, parent=parent)
-            dlg.exec()
+            self._pro_window = dlg
+            try:
+                dlg.exec()
+            finally:
+                self._pro_window = None
             return
         except Exception as e:
             logger.warning("Pro dialog failed, using fallback: %s", e)
@@ -6794,6 +6899,98 @@ class AppController(QObject):
         finally:
             self._smart_next = False
 
+    def _release_interpreter_hotkey(self):
+        hk = getattr(self, "_registered_interp_hotkey", None)
+        if hk is not None:
+            try:
+                import keyboard as kbd_lib
+                kbd_lib.remove_hotkey(hk)
+            except Exception:
+                pass
+            self._registered_interp_hotkey = None
+        listener = getattr(self, "_interp_listener", None)
+        if listener is not None:
+            try:
+                listener.stop()
+            except Exception:
+                pass
+            self._interp_listener = None
+
+    def _setup_interpreter_hotkey(self, hotkey):
+        """Fourth global hotkey, the Interpreter's (default Ctrl+Alt+I): turns it on or off.
+        Keyboard only, never on the keys of dictation, the Live Assistant or Smart Actions.
+        True when it registered."""
+        self._release_interpreter_hotkey()
+        hotkey = settings_apply.norm_hotkey(hotkey)
+        taken = {settings_apply.norm_hotkey(self.cfg.get(k))
+                 for k in ("hotkey", "live_assist_hotkey", "smart_actions_hotkey")}
+        if (not hotkey or hotkey in taken or hotkey.startswith("mouse:")
+                or hotkeys.is_bare_typing_key(hotkey)):
+            return False
+        try:
+            if sys.platform == "win32":
+                import keyboard as kbd_lib
+                kbd_lib.add_hotkey(hotkey, lambda: self.sig_interpreter_hotkey.emit(),
+                                   suppress=False, trigger_on_release=False)
+                self._registered_interp_hotkey = hotkey
+            else:
+                from pynput import keyboard as pynput_keyboard
+                hotkeys.prepare_pynput_listeners()
+                listener = pynput_keyboard.GlobalHotKeys({
+                    self._to_pynput_hotkey(hotkey): lambda: self.sig_interpreter_hotkey.emit(),
+                })
+                listener.daemon = True
+                listener.start()
+                self._interp_listener = listener
+            logger.info("Registered Interpreter hotkey: %s", hotkey)
+            return True
+        except Exception as e:
+            logger.warning("Could not register Interpreter hotkey %s: %s", hotkey, e)
+            return False
+
+    def toggle_interpreter(self, source="hotkey"):
+        """The Interpreter on / off (its shortcut, the tray). Pro first: from the tray a Free person
+        or a guest gets the Pro window (ui/interpreter_host.py). Its shortcut (Ctrl+Alt+I is also
+        another app's: IntelliJ, Visual Studio, Word) never opens the Pro window over that app -
+        one quiet tray hint per run instead."""
+        if source == "hotkey" and getattr(self, "_hotkeys_suspended", False) is True:
+            return                  # a shortcut is being captured (a late hook event)
+        host = getattr(self, "interpreter", None)
+        if host is None:
+            return
+        if (source == "hotkey" and not (host.active or getattr(host, "restarting", False))
+                and not self.is_pro()):
+            if not getattr(self, "_interp_hotkey_hinted", False):
+                self._interp_hotkey_hinted = True
+                from ui import interpreter_host as ih
+                self.show_tray_hint(ih.TRAY_TITLE, ih.message("pro_required"),
+                                    on_click=lambda: self.show_main("interpreter"))
+            return
+        try:
+            host.toggle(source=source, parent=self._dialog_parent())
+        except Exception:
+            logger.warning("Interpreter toggle failed", exc_info=True)
+
+    def _interpreter_voice_playing(self):
+        """Record thread: where the Interpreter's Hear voice is playing right now - "speakers" or
+        "headphones" - or "" (quiet, or not running). The meeting recorder keeps it out."""
+        host = getattr(self, "interpreter", None)
+        ctl = getattr(host, "controller", None) if host is not None else None
+        if ctl is None:
+            return ""
+        try:
+            playing = getattr(ctl, "_hear_playing", None)        # the engine's own test (its gates use it)
+            if callable(playing):
+                on = playing()
+            else:
+                hear = (getattr(ctl, "_dirs", None) or {}).get("hear")
+                on = hear is not None and hear.sink.is_playing()
+        except Exception:
+            return ""
+        if not on:
+            return ""
+        return "speakers" if getattr(ctl, "speakers_mode", False) else "headphones"
+
     def _ensure_live_assist(self):
         """The Live Assistant card (ui/live_assist.py), built on first use and
         fed from the meeting session's live pipeline."""
@@ -6848,6 +7045,9 @@ class AppController(QObject):
             self._unregister_mouse_listener()
             self._setup_assist_hotkey("")          # releases it, registers nothing
             self._release_smart_hotkey()
+            release = getattr(self, "_release_interpreter_hotkey", None)
+            if callable(release):
+                release()
         else:
             self.apply_tray_bindings()
         return True
@@ -6890,6 +7090,9 @@ class AppController(QObject):
         # of letting both fire on one keypress.
         self._setup_assist_hotkey(self.cfg.get("live_assist_hotkey", ""))
         self._setup_smart_hotkey(self.cfg.get("smart_actions_hotkey", ""))
+        setup = getattr(self, "_setup_interpreter_hotkey", None)
+        if callable(setup):
+            setup(self.cfg.get("interpreter_hotkey", ""))
 
     # ── Event Callbacks ──
     def _on_levels(self, levels):
@@ -8084,6 +8287,8 @@ class AppController(QObject):
                                      "shutdown_speaker_followup", lambda: None)(),
                      lambda: self.file_jobs.shutdown(),
                      lambda: self.calendar is not None and self.calendar.stop(),
+                     # the Interpreter: its sound closes and the server hears how long it ran
+                     lambda: getattr(self, "interpreter", None) is not None and self.interpreter.shutdown(),
                      self._stop_mic_monitor_for_quit):
             try:
                 stop()
@@ -8105,6 +8310,9 @@ class AppController(QObject):
         self._unregister_kbd_hotkey()
         self._unregister_mouse_listener()
         self._release_smart_hotkey()
+        release = getattr(self, "_release_interpreter_hotkey", None)
+        if callable(release):
+            release()
         self._recorder_down = True
         self.recorder.shutdown()
         self.qapp.quit()
@@ -8135,17 +8343,31 @@ class AppController(QObject):
             getattr(getattr(self, "meeting_session", None), "cancel_speaker_followup", lambda: None)()
         except Exception:
             logger.debug("Ending the speaker pass at log-off failed", exc_info=True)
+        AppController._stop_interpreter_for_quit(self)
         try:
             self._stop_recording_for_quit()
         except Exception:
             logger.warning("Saving work at log-off failed", exc_info=True)
         self._flush_pending_save()
 
+    def _stop_interpreter_for_quit(self):
+        """A log-off or shutdown with the Interpreter on: the call apps' volume comes back first
+        (Windows keeps a turned-down app that way) and the server hears how long it ran. A
+        cancelled log-off leaves it off."""
+        host = getattr(self, "interpreter", None)
+        if host is None:
+            return
+        try:
+            host.shutdown()
+        except Exception:
+            logger.debug("Stopping the interpreter at log-off failed", exc_info=True)
+
     def _on_about_to_quit(self):
         """aboutToQuit - after quit_app, or on its own at a Windows log-off /
-        shutdown: a meeting still recording is saved (once), then a pending
-        settings save is written."""
+        shutdown: the Interpreter stops and a meeting still recording is saved
+        (once), then a pending settings save is written."""
         if not getattr(self, "_quitting", False):
+            AppController._stop_interpreter_for_quit(self)
             try:
                 self._stop_recording_for_quit()
             except Exception:

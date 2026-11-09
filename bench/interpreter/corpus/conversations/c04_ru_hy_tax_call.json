@@ -1,0 +1,126 @@
+{
+  "id": "c04_ru_hy_tax_call",
+  "title": "Tax question for an Armenian accountant",
+  "scenario": "Olga, a software tester from Saint Petersburg who moved to Yerevan, speaks Russian and calls her accountant Karen about the fourth-quarter tax of her sole proprietorship. Karen answers in formal Armenian with Russian words mixed in, as many people in Yerevan do, and looks something up in the middle of the call (a long pause).",
+  "tags": ["1-to-1", "formal", "mixed", "numbers", "money", "dates", "pause", "fillers", "short-replies"],
+  "me": "olga",
+  "my_lang": "ru",
+  "their_lang": "hy",
+  "speakers": {
+    "olga": {"name": "Olga", "gender": "female", "voice": "cgSgspJ2msm6clMCkdW9", "accent_note": "From Saint Petersburg, native Russian, polite 'вы'. Jessica: warm American voice."},
+    "karen": {"name": "Karen", "gender": "male", "voice": "nPczCjzI2devNBz1zQrb", "accent_note": "Accountant in Yerevan: formal Eastern Armenian with Russian fillers and words ('ну, короче', 'справка'). Brian: deep American voice."}
+  },
+  "glossary": ["Karen", "Olga", "Telegram"],
+  "turns": [
+    {
+      "speaker": "olga", "lang": "ru", "langs": ["ru"],
+      "text": "Здравствуйте, Карен! Хотела уточнить про налог за четвёртый квартал. До какого числа нужно заплатить?",
+      "ref": {
+        "hy": "Բարև Ձեզ, Կարեն։ Ուզում էի ճշտել չորրորդ եռամսյակի հարկի մասին։ Մինչև ո՞ր ամսաթիվը պետք է վճարել։",
+        "en": "Hello, Karen! I wanted to ask about the fourth-quarter tax. By what date do I need to pay it?"
+      },
+      "gap_before": 0.5,
+      "notes": "#formal #question"
+    },
+    {
+      "speaker": "karen", "lang": "hy", "langs": ["hy"],
+      "text": "Բարև Ձեզ, Օլգա։ Մինչև հունվարի քսանը։ Բայց ավելի լավ է դեկտեմբերի վերջին վճարեք, որ չմոռանաք։",
+      "ref": {
+        "ru": "Здравствуйте, Ольга. До двадцатого января. Но лучше заплатите в конце декабря, чтобы не забыть.",
+        "en": "Hello, Olga. By January 20th. But it's better to pay at the end of December, so you don't forget."
+      },
+      "gap_before": 0.6,
+      "notes": "#formal #date the date is said in Armenian words (January 20th)"
+    },
+    {
+      "speaker": "olga", "lang": "ru", "langs": ["ru"],
+      "text": "Поняла. А сколько примерно получится?",
+      "ref": {
+        "hy": "Հասկացա։ Իսկ մոտավորապես որքա՞ն կլինի։",
+        "en": "Got it. And roughly how much will it be?"
+      },
+      "gap_before": 0.4,
+      "notes": "#question"
+    },
+    {
+      "speaker": "karen", "lang": "hy", "langs": ["hy"],
+      "text": "Մի րոպե, հիմա կնայեմ։",
+      "ref": {
+        "ru": "Минутку, сейчас посмотрю.",
+        "en": "One moment, I'll look now."
+      },
+      "gap_before": 0.5,
+      "notes": "#short"
+    },
+    {
+      "speaker": "karen", "lang": "hy", "langs": ["hy", "ru"],
+      "text": "Ну, короче, Ձեր շրջանառությունը երեք միլիոն դրամ է, հարկը՝ հինգ տոկոս, ուրեմն՝ հարյուր հիսուն հազար դրամ։",
+      "ref": {
+        "ru": "Ну, короче, ваш оборот — три миллиона драмов, налог — пять процентов, значит, сто пятьдесят тысяч драмов.",
+        "en": "Well, basically, your turnover is three million dram, the tax is five percent, so that's one hundred fifty thousand dram."
+      },
+      "gap_before": 2.5,
+      "notes": "#pause #mixed #filler #numbers #money Russian 'Ну, короче' opens an Armenian sentence; 2.5 s of silence first while he looks it up (same speaker)"
+    },
+    {
+      "speaker": "olga", "lang": "ru", "langs": ["ru"],
+      "text": "Ого. А можно заплатить картой, через приложение банка?",
+      "ref": {
+        "hy": "Վա՜յ։ Իսկ կարելի՞ է քարտով վճարել, բանկի հավելվածով։",
+        "en": "Wow. And can I pay by card, through the bank's app?"
+      },
+      "gap_before": 0.4,
+      "notes": "#question"
+    },
+    {
+      "speaker": "karen", "lang": "hy", "langs": ["hy", "ru", "en"],
+      "text": "Այո, իհարկե։ Միայն անդորրագիրը պահեք ու ինձ ուղարկեք Telegram-ով։ Справка էլ է պետք, դա ես կպատրաստեմ։",
+      "ref": {
+        "ru": "Да, конечно. Только сохраните квитанцию и пришлите мне в Telegram. Ещё нужна справка, её я подготовлю.",
+        "en": "Yes, of course. Just keep the receipt and send it to me on Telegram. We also need a certificate, I'll prepare that."
+      },
+      "gap_before": 0.5,
+      "notes": "#mixed #names Russian 'Справка' and 'Telegram' in Latin letters inside Armenian"
+    },
+    {
+      "speaker": "olga", "lang": "ru", "langs": ["ru"],
+      "text": "А если я опоздаю на пару дней?",
+      "ref": {
+        "hy": "Իսկ եթե մի երկու օրով ուշանա՞մ։",
+        "en": "And what if I'm a couple of days late?"
+      },
+      "gap_before": 0.4,
+      "notes": "#question"
+    },
+    {
+      "speaker": "karen", "lang": "hy", "langs": ["hy"],
+      "text": "Տույժ կլինի։ Մեծ գումար չէ, բայց ավելի լավ է չուշանալ։",
+      "ref": {
+        "ru": "Будет пеня. Сумма небольшая, но лучше не опаздывать.",
+        "en": "There will be a penalty. It's not a big amount, but it's better not to be late."
+      },
+      "gap_before": 0.5,
+      "notes": "#formal"
+    },
+    {
+      "speaker": "olga", "lang": "ru", "langs": ["ru"],
+      "text": "Поняла. Спасибо большое, Карен!",
+      "ref": {
+        "hy": "Հասկացա։ Շատ շնորհակալ եմ, Կարեն։",
+        "en": "Got it. Thank you very much, Karen!"
+      },
+      "gap_before": 0.4,
+      "notes": ""
+    },
+    {
+      "speaker": "karen", "lang": "hy", "langs": ["hy"],
+      "text": "Խնդրեմ։ Ցտեսություն։",
+      "ref": {
+        "ru": "Пожалуйста. До свидания.",
+        "en": "You're welcome. Goodbye."
+      },
+      "gap_before": 0.3,
+      "notes": "#short #formal"
+    }
+  ]
+}

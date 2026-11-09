@@ -1,20 +1,29 @@
 // GDPR account deletion - the user's right to erasure, self-served.
 //
-// Flow: verify JWT -> cancel any active Stripe subscriptions (if a customer id
-// and STRIPE_SECRET_KEY exist) -> scrub PII from feedback rows -> delete the
-// auth user with the service role. profiles + cloud_usage cascade via FK;
-// feedback.user_id is set null and we blank its email column ourselves.
+// Flow: verify JWT -> read the Stripe customer id and the Interpreter voice id
+// (they cascade away with the user, so a read that fails is a 500 before
+// anything is changed; the app says try again) -> cancel any active Stripe
+// subscriptions (if a customer id and STRIPE_SECRET_KEY exist) -> scrub PII
+// from feedback rows -> delete the Interpreter voice clone at ElevenLabs ->
+// delete the auth user with the service role. profiles + cloud_usage +
+// interpreter_* cascade via FK; feedback.user_id is set null and we blank its
+// email column ourselves.
 //
 // Secrets: SUPABASE_SERVICE_ROLE_KEY (auto), STRIPE_SECRET_KEY (optional - if
 // missing, the account is still deleted; any live subscription must then be
-// cancelled manually from the Stripe dashboard).
+// cancelled manually from the Stripe dashboard), ELEVENLABS_KEY (optional, see
+// _shared/elevenlabs.ts - if the voice can't be deleted there, the account is
+// still deleted and the log names the voice id: {"voice_orphan": "..."}).
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { deleteVoice } from "../_shared/elevenlabs.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 const STRIPE_KEY = Deno.env.get("STRIPE_SECRET_KEY") ?? "";
+// A database without the Interpreter tables (PostgREST / Postgres "no such table") has no voice.
+const NO_TABLE = ["PGRST205", "42P01"];
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -78,13 +87,23 @@ Deno.serve(async (req) => {
   if (!SERVICE_KEY) return json({ error: "server_misconfigured" }, 500);
   const svc = createClient(SUPABASE_URL, SERVICE_KEY);
 
+  // 0. What must be cleaned up outside our database: read before anything changes. These rows
+  // cascade away with the user, so a read that fails must not look like "nothing there".
+  const [prof, voice] = await Promise.all([
+    svc.from("profiles").select("stripe_customer_id").eq("id", user.id).maybeSingle(),
+    svc.from("interpreter_voices").select("voice_id").eq("user_id", user.id).maybeSingle(),
+  ]);
+  if (prof.error) return json({ error: "server_error" }, 500);
+  if (voice.error && !NO_TABLE.includes(String(voice.error.code ?? ""))) {
+    return json({ error: "server_error" }, 500);
+  }
+  const voiceId = voice.error ? "" : String(voice.data?.voice_id ?? "");
+
   // 1. Cancel any live Stripe subscription so deletion never keeps billing.
   let stripeCancelled = false;
   try {
-    const { data: prof } = await svc.from("profiles")
-      .select("stripe_customer_id").eq("id", user.id).maybeSingle();
-    if (prof?.stripe_customer_id) {
-      stripeCancelled = await cancelStripeSubscriptions(prof.stripe_customer_id);
+    if (prof.data?.stripe_customer_id) {
+      stripeCancelled = await cancelStripeSubscriptions(prof.data.stripe_customer_id);
     } else {
       stripeCancelled = true; // nothing to cancel
     }
@@ -95,7 +114,15 @@ Deno.serve(async (req) => {
     await svc.from("feedback").update({ email: null }).eq("user_id", user.id);
   } catch (_e) { /* non-fatal */ }
 
-  // 3. Delete the auth user. profiles/cloud_usage cascade; feedback.user_id -> null.
+  // 3. The Interpreter's clone of the person's voice lives at ElevenLabs, outside
+  // our database: delete it there first. Best effort - the row cascades with the
+  // user either way, so a failure is logged with the voice id for manual removal.
+  if (voiceId) {
+    const gone = await deleteVoice(voiceId, 8_000);
+    if (!gone.ok) console.error(JSON.stringify({ voice_orphan: voiceId }));
+  }
+
+  // 4. Delete the auth user. profiles/cloud_usage cascade; feedback.user_id -> null.
   const { error: delErr } = await svc.auth.admin.deleteUser(user.id);
   if (delErr) return json({ error: "delete_failed", detail: (delErr.message ?? "").slice(0, 120) }, 500);
 

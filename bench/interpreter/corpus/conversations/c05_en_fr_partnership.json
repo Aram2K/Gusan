@@ -1,0 +1,111 @@
+{
+  "id": "c05_en_fr_partnership",
+  "title": "Partnership meeting with a French company",
+  "scenario": "Mark presents Gusan to Claire Dubois, head of partnerships at a company in Lyon. Polite, formal French ('vous'). Mark's pitch is one long speak-direction turn that has to keep up in his own voice; Claire pauses for a long moment before answering about the price, then gives her email the French way ('arobase', 'point').",
+  "tags": ["1-to-1", "formal", "long-turn", "numbers", "money", "dates", "email", "pause", "fillers", "glossary", "short-replies"],
+  "me": "mark",
+  "my_lang": "en",
+  "their_lang": "fr",
+  "speakers": {
+    "mark": {"name": "Mark Hayes", "gender": "male", "voice": "JBFqnCBsd6RMkjVDRZzb", "accent_note": "Gusan sales lead, British English. George: warm British voice."},
+    "claire": {"name": "Claire Dubois", "gender": "female", "voice": "Xb7hH8MSUJpSbSDYk0k2", "accent_note": "Head of partnerships in Lyon, native French, formal. Alice: clear British voice."}
+  },
+  "glossary": ["Gusan", "Zoom", "Teams", "Meet", "Hayes", "Dubois", "claire.dubois@telva.fr"],
+  "turns": [
+    {
+      "speaker": "claire", "lang": "fr", "langs": ["fr"],
+      "text": "Bonjour, Monsieur Hayes, et merci pour votre temps.",
+      "ref": {
+        "en": "Hello, Mr. Hayes, and thank you for your time."
+      },
+      "gap_before": 0.5,
+      "notes": "#formal #names"
+    },
+    {
+      "speaker": "mark", "lang": "en", "langs": ["en"],
+      "text": "Thank you for having me, Ms. Dubois. Shall I start with a short overview of Gusan?",
+      "ref": {
+        "fr": "Merci de me recevoir, Madame Dubois. Voulez-vous que je commence par une courte présentation de Gusan ?",
+        "en": "Thank you for having me, Ms. Dubois. Shall I start with a short overview of Gusan?"
+      },
+      "gap_before": 0.5,
+      "notes": "#formal #question #glossary"
+    },
+    {
+      "speaker": "claire", "lang": "fr", "langs": ["fr"],
+      "text": "Oui, je vous en prie.",
+      "ref": {
+        "en": "Yes, please go ahead."
+      },
+      "gap_before": 0.4,
+      "notes": "#short #formal"
+    },
+    {
+      "speaker": "mark", "lang": "en", "langs": ["en"],
+      "text": "Gusan translates your calls in real time, in your own voice. It works with Zoom, Teams and Meet, and the other side doesn't have to install anything. For a team of your size, I'd suggest a pilot with twenty users in December, and a full rollout in January.",
+      "ref": {
+        "fr": "Gusan traduit vos appels en temps réel, avec votre propre voix. Il fonctionne avec Zoom, Teams et Meet, et vos interlocuteurs n'ont rien à installer. Pour une équipe de votre taille, je proposerais un pilote avec vingt utilisateurs en décembre, puis un déploiement complet en janvier.",
+        "en": "Gusan translates your calls in real time, in your own voice. It works with Zoom, Teams and Meet, and the other side doesn't have to install anything. For a team of your size, I'd suggest a pilot with twenty users in December, and a full rollout in January."
+      },
+      "gap_before": 0.5,
+      "notes": "#long #numbers #date #glossary ~18 s speak-direction pitch: keep-up in his own voice"
+    },
+    {
+      "speaker": "claire", "lang": "fr", "langs": ["fr"],
+      "text": "C'est très intéressant. Et quel serait le prix par utilisateur ?",
+      "ref": {
+        "en": "That's very interesting. And what would the price per user be?"
+      },
+      "gap_before": 0.6,
+      "notes": "#question"
+    },
+    {
+      "speaker": "mark", "lang": "en", "langs": ["en"],
+      "text": "29 euros per user per month, and the pilot is free.",
+      "ref": {
+        "fr": "29 euros par utilisateur et par mois, et le pilote est gratuit.",
+        "en": "29 euros per user per month, and the pilot is free."
+      },
+      "gap_before": 0.5,
+      "notes": "#money"
+    },
+    {
+      "speaker": "claire", "lang": "fr", "langs": ["fr"],
+      "text": "Euh... d'accord. Je dois en parler à notre directeur financier, mais le 1er décembre, ça me paraît faisable.",
+      "ref": {
+        "en": "Um... all right. I need to discuss it with our CFO, but December 1st seems doable to me."
+      },
+      "gap_before": 2.5,
+      "notes": "#pause #filler #date 2.5 s of silence first while she thinks; '1er décembre' is read 'premier décembre'"
+    },
+    {
+      "speaker": "mark", "lang": "en", "langs": ["en"],
+      "text": "Of course. Shall I send you the contract by email?",
+      "ref": {
+        "fr": "Bien sûr. Voulez-vous que je vous envoie le contrat par e-mail ?",
+        "en": "Of course. Shall I send you the contract by email?"
+      },
+      "gap_before": 0.4,
+      "notes": "#question #formal"
+    },
+    {
+      "speaker": "claire", "lang": "fr", "langs": ["fr"],
+      "text": "Oui, à claire point dubois arobase telva point fr. Merci, et à bientôt !",
+      "ref": {
+        "en": "Yes, to claire.dubois@telva.fr. Thank you, and see you soon!"
+      },
+      "gap_before": 0.4,
+      "notes": "#email said the French way: 'point' = dot, 'arobase' = @; expect claire.dubois@telva.fr"
+    },
+    {
+      "speaker": "mark", "lang": "en", "langs": ["en"],
+      "text": "Thank you. Goodbye!",
+      "ref": {
+        "fr": "Merci. Au revoir !",
+        "en": "Thank you. Goodbye!"
+      },
+      "gap_before": 0.3,
+      "notes": "#short"
+    }
+  ]
+}

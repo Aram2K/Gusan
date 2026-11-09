@@ -89,6 +89,11 @@ ALLOWED_EVENTS = {
     "meeting_notes_failed",
     "meeting_exported",
     "meeting_deleted",            # {"count": n, "from": "row" | "selection" | "key" | "live" | "notes"} - a count, never a name
+    "interpreter_started",        # {"hear": bool, "speak": bool, "pair": "en-ja", "output": "speakers"|"headphones"} - no words
+    "interpreter_stopped",        # {"reason": "user"|"allowance_used"|"failed", "minutes": n, "latency": s}
+    "interpreter_failed",         # {"code": "pro_required"|"no_virtual_mic"|"voice"|...}
+    "voice_created",              # {"source": "meetings"|"recorded"}
+    "voice_deleted",
     "meeting_chat_asked",         # {"engine": "cloud" | "own_key" | "local"} - one question was asked, never its text
     # Monetization / accounts funnel.
     "paywall_viewed",

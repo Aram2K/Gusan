@@ -611,7 +611,8 @@ _RETIRED_UI = ("settings", "history", "meeting_detail", "meetings", "onboarding"
                "mode_combo", "file_transcribe")
 NOT_BUNDLED = {"ui." + name for name in _RETIRED_UI} | {"meeting_share"}
 _NOT_APP_DIRS = {"tests", "tests_qt", "installer", "docs", "venv", "build", "dist", "assets",
-                 "supabase", "node_modules", "__pycache__"}
+                 "supabase", "node_modules", "__pycache__",
+                 "bench"}                       # the Interpreter's speed bench: a developer tool, never shipped
 
 
 def _app_modules():

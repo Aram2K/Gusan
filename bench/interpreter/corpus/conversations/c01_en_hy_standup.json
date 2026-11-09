@@ -1,0 +1,122 @@
+{
+  "id": "c01_en_hy_standup",
+  "title": "Morning standup with the Yerevan team",
+  "scenario": "Daily standup on Zoom. Aram, an Armenian-American co-founder in Los Angeles who speaks only English, runs it with two developers in Yerevan, Anna (frontend) and Davit (backend), who speak Eastern Armenian full of English tech words. Davit gives one long, run-on release update. Aram is on laptop speakers: the speakers variant leaks the call and Gusan's English translations into his mic, which is the echo-loop worst case (the leak is in his own language).",
+  "tags": ["standup", "3-person", "man-and-woman", "casual", "mixed", "monologue", "numbers", "dates", "time", "url", "glossary", "overlap", "short-replies", "speakers"],
+  "me": "aram",
+  "my_lang": "en",
+  "their_lang": "hy",
+  "speakers": {
+    "aram": {"name": "Aram", "gender": "male", "voice": "iP95p4xoKVk53GoZ742B", "accent_note": "Armenian-American founder from Los Angeles, speaks only English in this call. Chris: casual American voice."},
+    "anna": {"name": "Anna", "gender": "female", "voice": "cgSgspJ2msm6clMCkdW9", "accent_note": "Frontend developer in Yerevan: Eastern Armenian with English tech words. Jessica is an American voice, so her Armenian may sound slightly foreign."},
+    "davit": {"name": "Davit", "gender": "male", "voice": "nPczCjzI2devNBz1zQrb", "accent_note": "Backend developer in Yerevan: fast, run-on Eastern Armenian with English tech words. Brian: deep American voice."}
+  },
+  "glossary": ["Supabase", "ElevenLabs", "Zoom", "Meet", "aibuben.xyz", "Anna", "Davit"],
+  "turns": [
+    {
+      "speaker": "aram", "lang": "en", "langs": ["en"],
+      "text": "Morning, everyone. Let's keep it quick, I have an investor call at eleven. Anna, you start?",
+      "ref": {
+        "hy": "Բարի լույս բոլորին։ Արագ անցնենք, ժամը տասնմեկին ներդրողների հետ զանգ ունեմ։ Աննա, կսկսե՞ս։",
+        "en": "Morning, everyone. Let's keep it quick, I have an investor call at eleven. Anna, you start?"
+      },
+      "gap_before": 0.5,
+      "notes": "#question #time 'at eleven'"
+    },
+    {
+      "speaker": "anna", "lang": "hy", "langs": ["hy", "en"],
+      "text": "Բարի լույս։ Երեկ login-ի bug-ը fix արեցի, PR-ը բացել եմ, review է պետք։",
+      "ref": {
+        "en": "Good morning. Yesterday I fixed the login bug. I've opened the PR, it needs a review."
+      },
+      "gap_before": 0.6,
+      "notes": "#mixed English tech words inside Armenian: login, bug, fix, PR, review"
+    },
+    {
+      "speaker": "aram", "lang": "en", "langs": ["en"],
+      "text": "Nice. Davit, can you review it today?",
+      "ref": {
+        "hy": "Լավ է։ Դավիթ, կարո՞ղ ես այսօր նայել։",
+        "en": "Nice. Davit, can you review it today?"
+      },
+      "gap_before": 0.4,
+      "notes": "#question"
+    },
+    {
+      "speaker": "davit", "lang": "hy", "langs": ["hy"],
+      "text": "Հա, ճաշից հետո կնայեմ։",
+      "ref": {
+        "en": "Yeah, I'll look at it after lunch."
+      },
+      "gap_before": 0.5,
+      "notes": "#short #casual 'Հա' = yeah; the hear voice switches from the woman's to the man's"
+    },
+    {
+      "speaker": "aram", "lang": "en", "langs": ["en"],
+      "text": "Great. And the ElevenLabs part, are we still on track for Friday?",
+      "ref": {
+        "hy": "Հիանալի է։ Իսկ ElevenLabs-ի մասով ուրբաթին հասցնո՞ւմ ենք։",
+        "en": "Great. And the ElevenLabs part, are we still on track for Friday?"
+      },
+      "gap_before": 0.5,
+      "notes": "#question #glossary #date"
+    },
+    {
+      "speaker": "davit", "lang": "hy", "langs": ["hy", "en"],
+      "text": "Մասամբ։ Ձայնն արդեն աշխատում է, բայց Supabase-ի ֆունկցիան դեռ deploy չենք արել, որովհետև token-ների ժամկետը տասնհինգ րոպեում լրանում է ու երկար զանգերի ժամանակ կապը կտրվում է, դրա համար ուզում եմ reconnect ավելացնել ու երկու օր թեստավորել իրական զանգերով՝ Zoom-ով ու Meet-ով։ Release-ը կանենք ոչ թե ուրբաթ, այլ հաջորդ երեքշաբթի՝ նոյեմբերի տասնյոթին։ Ու մի բան էլ։ ElevenLabs-ի պլանը պետք է մեծացնենք, այս ամսվա նիշերի կեսն արդեն ծախսել ենք։",
+      "ref": {
+        "en": "Partly. The voice already works, but we haven't deployed the Supabase function yet, because the tokens expire in fifteen minutes and on long calls the connection drops, so I want to add a reconnect and test for two days on real calls, on Zoom and Meet. We'll release not on Friday but next Tuesday, November 17. And one more thing. We need to upgrade the ElevenLabs plan, we've already used half of this month's characters."
+      },
+      "gap_before": 0.7,
+      "notes": "#monologue #mixed #numbers #date #glossary one ~29 s answer; its middle sentence runs on for ~18 s without a full stop (early clause cutting, keep-up); numbers are Armenian words (15 minutes, 17 November)"
+    },
+    {
+      "speaker": "anna", "lang": "hy", "langs": ["hy", "en"],
+      "text": "Իսկ ես test case-երը կգրեմ մինչև երկուշաբթի, լա՞վ։",
+      "ref": {
+        "en": "And I'll write the test cases by Monday, OK?"
+      },
+      "gap_before": -0.2,
+      "notes": "#overlap #mixed #question #date starts 0.2 s before Davit ends: a woman over a man on the same (system) track"
+    },
+    {
+      "speaker": "aram", "lang": "en", "langs": ["en"],
+      "text": "Perfect. So we release on Tuesday, I'll tell the investors.",
+      "ref": {
+        "hy": "Հիանալի է։ Ուրեմն թողարկումը երեքշաբթի է, ես ներդրողներին կասեմ։",
+        "en": "Perfect. So we release on Tuesday, I'll tell the investors."
+      },
+      "gap_before": 0.4,
+      "notes": "#date"
+    },
+    {
+      "speaker": "davit", "lang": "hy", "langs": ["hy"],
+      "text": "Լավ։",
+      "ref": {
+        "en": "OK."
+      },
+      "gap_before": 0.3,
+      "notes": "#short one-word reply"
+    },
+    {
+      "speaker": "aram", "lang": "en", "langs": ["en"],
+      "text": "Oh, and the new landing page is live: aibuben dot xyz. Check it on your phones.",
+      "ref": {
+        "hy": "Ու նոր կայքէջն արդեն հասանելի է՝ aibuben.xyz։ Ստուգեք ձեր հեռախոսներով։",
+        "en": "Oh, and the new landing page is live: aibuben dot xyz. Check it on your phones."
+      },
+      "gap_before": 0.6,
+      "notes": "#url spoken 'aibuben dot xyz': expect aibuben.xyz in text and translation"
+    },
+    {
+      "speaker": "aram", "lang": "en", "langs": ["en"],
+      "text": "Thanks, see you tomorrow!",
+      "ref": {
+        "hy": "Շնորհակալություն, մինչև վաղը։",
+        "en": "Thanks, see you tomorrow!"
+      },
+      "gap_before": 0.4,
+      "notes": "#short"
+    }
+  ]
+}

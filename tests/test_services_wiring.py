@@ -878,6 +878,22 @@ class TestSafeQuit(unittest.TestCase):
         app._on_about_to_quit()                             # WM_ENDSESSION: nothing left but settings
         self.assertEqual(app.order, ["settings"])
 
+    def test_a_log_off_stops_the_interpreter_first(self):
+        # F24: Windows keeps a call app turned down; the Interpreter puts the volume back (and
+        # tells the server how long it ran) before the meeting is saved
+        app = self._app("recording", recording=True)
+        app.interpreter = SimpleNamespace(shutdown=lambda: app.order.append("interpreter"))
+        app._on_session_ending(object())
+        self.assertEqual(app.order, ["interpreter", "save meeting", "settings"])
+        app = self._app()                                   # aboutToQuit alone (no commitDataRequest)
+        app.interpreter = SimpleNamespace(shutdown=lambda: app.order.append("interpreter"))
+        app._on_about_to_quit()
+        self.assertEqual(app.order, ["interpreter", "settings"])
+        app.order.clear()
+        app._quitting = True                                # after quit_app: it already stopped there
+        app._on_about_to_quit()
+        self.assertEqual(app.order, ["settings"])
+
     def test_a_log_off_that_is_cancelled_leaves_the_speaker_names_working(self):
         # Windows asks every app before a log-off / shutdown (commitDataRequest), and
         # the user can still cancel it. The background speaker pass stops - but the next

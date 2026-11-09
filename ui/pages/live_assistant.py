@@ -1767,6 +1767,9 @@ class LiveAssistantPage(QWidget):
         self.call_lang = self._combo("Call language", CALL_LANGS)
         self.call_lang.activated.connect(lambda _i: self._apply_combo("live_assist_language", self.call_lang))
         rail.add_row(SettingRow("Call language", self.call_lang))
+        # The Interpreter (ui/pages/interpreter.py): its switch starts / stops it now; the pair
+        # and More open its page.
+        self.interp_row = rail.add_row(self._build_interpreter_row())
         self.answer_lang = self._combo("Answer in", ANSWER_LANGS)
         self.answer_lang.activated.connect(lambda _i: self._apply_combo("live_assist_output_language", self.answer_lang))
         rail.add_row(SettingRow("Answer in", self.answer_lang))
@@ -1842,6 +1845,110 @@ class LiveAssistantPage(QWidget):
         rail.set_foot(self.more_button)
         self._set_more(False)
         return rail
+
+    def _build_interpreter_row(self):
+        """"Interpreter" [switch] / "English ▾ ⇄ Armenian ▾" (picked right here) / "They hear me in
+        my voice · I hear them" + More › (its page). The switch is the interpreter itself (on =
+        running), not a setting."""
+        from ui.pages.interpreter import LangPairRow, host_for
+        self.interp_host = host_for(self.app)
+        row = SettingRow("Interpreter", None, stacked=True)
+        row.layout().setSpacing(8)
+        self.interp_toggle = Toggle("Interpreter", False)
+        self.interp_toggle.toggled.connect(self._on_interp_toggled)
+        try:
+            row.layout().itemAt(0).layout().itemAt(0).layout().addWidget(self.interp_toggle, 0, Qt.AlignVCenter)
+        except Exception:
+            logger.debug("interpreter switch not placed", exc_info=True)
+        self.interp_langs = LangPairRow(row)
+        self.interp_langs.languages_picked.connect(self._on_interp_languages)
+        row.layout().addWidget(self.interp_langs)
+        foot = QHBoxLayout()
+        foot.setSpacing(8)
+        self.interp_hint = label("", "hint", row)
+        foot.addWidget(self.interp_hint, 1)
+        chev = QLabel()
+        chev.setPixmap(icons.pixmap("chev_r", 12, "blue-tx", sw=2))
+        chev.setFixedSize(12, 12)
+        self.interp_more = Button("More", "link", "s", trail=chev)
+        self.interp_more.setFont(theme.font(12.5, 600))
+        self.interp_more.setFixedHeight(22)
+        self.interp_more.layout().setContentsMargins(0, 0, 0, 0)
+        self.interp_more.setStyleSheet("QPushButton { padding: 0px; }")
+        self.interp_more.setFixedWidth(self.interp_more.fontMetrics().horizontalAdvance("More") + 4 + 4 + 12)
+        self.interp_more.setAccessibleName("More interpreter settings")
+        self.interp_more.clicked.connect(self._open_interpreter)
+        foot.addWidget(self.interp_more, 0, Qt.AlignVCenter)
+        row.layout().addLayout(foot)
+        self.interp_host.state_changed.connect(self._refresh_interpreter)
+        return row
+
+    def _refresh_interpreter(self, *_args):
+        from ui import interpreter_host as ih
+        cfg = self._cfg_dict()
+        host = getattr(self, "interp_host", None)
+        self._set_checked(self.interp_toggle, bool(host is not None and host.active))
+        self.interp_langs.set_languages(ih.my_language(cfg), ih.their_language(cfg))
+        parts = []
+        if cfg.get("interpreter_speak", True):
+            # "in my voice" only for a voice known to exist (the Interpreter page's "Standard voice"
+            # otherwise): never a claim while there is none, or none is known yet.
+            mine = (cfg.get("interpreter_voice_on", True) and _is_pro(self.app)
+                    and self._interp_own_voice() is True)
+            parts.append("They hear me in my voice" if mine else "They hear me")
+        if cfg.get("interpreter_hear", True):
+            parts.append("I hear them")
+        self.interp_hint.setText(" · ".join(parts))
+
+    def _interp_own_voice(self):
+        """True: my cloned voice exists; False: it doesn't; None: not known yet. What the Interpreter
+        page read from the server when it has, else what the last run's start said."""
+        win = getattr(self.app, "main_win", None)
+        try:
+            page = win.page("interpreter") if win is not None and hasattr(win, "page") else None
+        except Exception:
+            page = None
+        tab = getattr(page, "voice_tab", None)
+        if tab is not None and getattr(tab, "voice_known", False):
+            return bool(getattr(tab, "voice", None))
+        own = getattr(getattr(self, "interp_host", None), "own_voice", None)
+        return None if own is None else bool(own)
+
+    def _on_interp_toggled(self, on):
+        host = self.interp_host
+        if on:
+            host.start(source="live_assistant", parent=self)
+        else:
+            host.stop("user")
+        self._refresh_interpreter()
+
+    def _on_interp_languages(self, my, their):
+        """A pick or the swap on the Interpreter row: write what changed in one go (a swap writes both
+        keys, so a running interpreter starts again once). Refused: the row shows the settings again."""
+        from ui.pages.interpreter import pair_updates
+        updates = pair_updates(self._cfg_dict(), my, their)
+        if not updates:
+            return
+        many = getattr(self.app, "set_settings", None)
+        ok = False
+        try:
+            if callable(many):
+                res = many(dict(updates)) or {}
+                ok = all(res.get(k, False) for k in updates)
+            else:
+                ok = all([self._set(k, v) for k, v in updates.items()])
+        except Exception:
+            logger.warning("Live Assistant: the interpreter's languages couldn't be saved", exc_info=True)
+        if not ok:
+            self._refresh_interpreter()
+
+    def _open_interpreter(self):
+        if callable(getattr(self.app, "show_main", None)):
+            self._call("show_main", "interpreter")
+        else:
+            win = self.window()
+            if hasattr(win, "open") and win is not self:
+                win.open("interpreter")
 
     def _combo(self, name, options):
         cb = QComboBox()
@@ -1982,6 +2089,7 @@ class LiveAssistantPage(QWidget):
             self._sync_key(key, refresh_writer=False)
         self._refresh_writer()
         self.speech.refresh()
+        self._refresh_interpreter()
 
     _MISSING = object()
 
@@ -1995,6 +2103,10 @@ class LiveAssistantPage(QWidget):
 
         if refresh_writer and self.speech.watches(key):
             self.speech.refresh()               # what transcribes the call (and its language hint)
+        if str(key).startswith("interpreter_") or key == "language":
+            self._refresh_interpreter()         # the Interpreter row: its pair and its line
+            if key != "language":
+                return
         if key == "live_assist_private":
             on = bool(val(True))
             self._wanted_private = on

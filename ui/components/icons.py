@@ -83,8 +83,14 @@ IC = {
     "lock": '<rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/>',
     "globe": ('<circle cx="12" cy="12" r="9"/>'
               '<path d="M3 12h18M12 3c2.4 2.5 3.6 5.5 3.6 9s-1.2 6.5-3.6 9c-2.4-2.5-3.6-5.5-3.6-9S9.6 5.5 12 3z"/>'),
+    # A character and a letter ("文A"): the Interpreter (sidebar, its page, the live card's chip).
     "translate": ('<path d="M4 5h8M8 3v2M5.5 5c.8 3 3 5.5 6 6.5M10.5 5c-.8 3.5-3 6.5-6.5 8"/>'
                   '<path d="m12 21 4.5-10L21 21M13.5 17.5h6"/>'),
+    # Two arrows, one each way: swap the interpreter's two languages.
+    "swap": '<path d="M5 8.5h13.5M15 5l3.5 3.5L15 12M19 15.5H5.5M9 12l-3.5 3.5L9 19"/>',
+    # "I hear them": the interpreter's voice in your ears.
+    "headphones": ('<path d="M4 15.5V12a8 8 0 0 1 16 0v3.5"/><rect x="3.5" y="14" width="4" height="6.5" rx="1.6"/>'
+                   '<rect x="16.5" y="14" width="4" height="6.5" rx="1.6"/>'),
     "mail": '<rect x="3" y="5.5" width="18" height="13" rx="2"/><path d="m3.5 7 8.5 6.5L20.5 7"/>',
     "list": ('<path d="M9 6.5h11M9 12h11M9 17.5h11"/>'
              '<path d="m3.5 6.5 1.2 1.2 2-2.2M3.5 12l1.2 1.2 2-2.2M3.5 17.5l1.2 1.2 2-2.2"/>'),

@@ -1,0 +1,139 @@
+{
+  "id": "c03_en_ru_release",
+  "title": "Release check-in with a Russian-speaking contractor",
+  "scenario": "Kate, a product manager in London, checks Monday's release with Dmitry, who runs a small development agency and speaks Russian full of English work words. Quick, fast back-and-forth with small overlaps; Dmitry gives the billing email the Russian way ('собака' for @).",
+  "tags": ["1-to-1", "fast", "overlap", "mixed", "numbers", "money", "email", "dates", "short-replies", "fillers"],
+  "me": "kate",
+  "my_lang": "en",
+  "their_lang": "ru",
+  "speakers": {
+    "kate": {"name": "Kate", "gender": "female", "voice": "pFZP5JQG7iQjIQuC4Bku", "accent_note": "Product manager in London, British English. Lily: soft British voice."},
+    "dmitry": {"name": "Dmitry", "gender": "male", "voice": "JBFqnCBsd6RMkjVDRZzb", "accent_note": "Agency lead, native Russian with English IT and business words. George: warm British voice."}
+  },
+  "glossary": ["Stripe", "staging", "Nordsoft", "billing@nordsoft.dev", "Dmitry"],
+  "turns": [
+    {
+      "speaker": "kate", "lang": "en", "langs": ["en"],
+      "text": "Hi Dmitry! Quick one: are we still on for the release on Monday?",
+      "ref": {
+        "ru": "Привет, Дмитрий! Коротко: релиз у нас всё ещё в понедельник?",
+        "en": "Hi Dmitry! Quick one: are we still on for the release on Monday?"
+      },
+      "gap_before": 0.5,
+      "notes": "#question #date"
+    },
+    {
+      "speaker": "dmitry", "lang": "ru", "langs": ["ru", "en"],
+      "text": "Ну... в целом да. Осталось закрыть два бага на staging, и нужен ваш approve по дизайну.",
+      "ref": {
+        "en": "Well... basically, yes. We still have to close two bugs on staging, and we need your approval on the design."
+      },
+      "gap_before": 0.4,
+      "notes": "#filler #mixed English inside Russian: staging, approve"
+    },
+    {
+      "speaker": "kate", "lang": "en", "langs": ["en"],
+      "text": "I approved it this morning.",
+      "ref": {
+        "ru": "Я одобрила его сегодня утром.",
+        "en": "I approved it this morning."
+      },
+      "gap_before": -0.3,
+      "notes": "#overlap #gender starts 0.3 s before Dmitry ends; Russian needs the feminine 'одобрила' (Kate is a woman)"
+    },
+    {
+      "speaker": "dmitry", "lang": "ru", "langs": ["ru"],
+      "text": "А, супер, тогда вопрос снят.",
+      "ref": {
+        "en": "Oh, great, then that's settled."
+      },
+      "gap_before": 0.3,
+      "notes": "#short"
+    },
+    {
+      "speaker": "kate", "lang": "en", "langs": ["en"],
+      "text": "And the bugs?",
+      "ref": {
+        "ru": "А баги?",
+        "en": "And the bugs?"
+      },
+      "gap_before": 0.3,
+      "notes": "#short #question"
+    },
+    {
+      "speaker": "dmitry", "lang": "ru", "langs": ["ru", "en"],
+      "text": "Максимум до пятницы. Один в логине, второй в оплате через Stripe.",
+      "ref": {
+        "en": "By Friday at the latest. One is in the login, the other is in payments through Stripe."
+      },
+      "gap_before": -0.3,
+      "notes": "#overlap #mixed #date Stripe in Latin letters inside Russian"
+    },
+    {
+      "speaker": "kate", "lang": "en", "langs": ["en"],
+      "text": "OK, um, and who do I send the payment confirmation to?",
+      "ref": {
+        "ru": "Хорошо. А кому отправить подтверждение оплаты?",
+        "en": "OK, um, and who do I send the payment confirmation to?"
+      },
+      "gap_before": 0.4,
+      "notes": "#question #filler 'um' in the speak direction (should be dropped, not translated)"
+    },
+    {
+      "speaker": "dmitry", "lang": "ru", "langs": ["ru", "en"],
+      "text": "На billing собака nordsoft точка dev. И поставьте меня в копию, пожалуйста.",
+      "ref": {
+        "en": "To billing@nordsoft.dev. And please copy me in."
+      },
+      "gap_before": 0.4,
+      "notes": "#email #mixed said the Russian way: 'собака' = @, 'точка' = dot; expect billing@nordsoft.dev"
+    },
+    {
+      "speaker": "kate", "lang": "en", "langs": ["en"],
+      "text": "Sure. And the budget is still 12,000 euros for this sprint, right?",
+      "ref": {
+        "ru": "Конечно. И бюджет на этот спринт всё ещё 12 000 евро, верно?",
+        "en": "Sure. And the budget is still 12,000 euros for this sprint, right?"
+      },
+      "gap_before": 0.4,
+      "notes": "#money #question"
+    },
+    {
+      "speaker": "dmitry", "lang": "ru", "langs": ["ru"],
+      "text": "Да.",
+      "ref": {
+        "en": "Yes."
+      },
+      "gap_before": 0.3,
+      "notes": "#short one-word reply"
+    },
+    {
+      "speaker": "dmitry", "lang": "ru", "langs": ["ru", "en"],
+      "text": "Но если добавим push-уведомления, это ещё плюс три тысячи.",
+      "ref": {
+        "en": "But if we add push notifications, that's another three thousand."
+      },
+      "gap_before": 0.6,
+      "notes": "#money #numbers #mixed 'push' inside Russian; same speaker after a short pause"
+    },
+    {
+      "speaker": "kate", "lang": "en", "langs": ["en"],
+      "text": "Let's discuss that next week. Thanks, Dmitry!",
+      "ref": {
+        "ru": "Давайте обсудим это на следующей неделе. Спасибо, Дмитрий!",
+        "en": "Let's discuss that next week. Thanks, Dmitry!"
+      },
+      "gap_before": -0.3,
+      "notes": "#overlap"
+    },
+    {
+      "speaker": "dmitry", "lang": "ru", "langs": ["ru"],
+      "text": "Договорились. Хорошего дня!",
+      "ref": {
+        "en": "Deal. Have a good day!"
+      },
+      "gap_before": 0.3,
+      "notes": "#short"
+    }
+  ]
+}

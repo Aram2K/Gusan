@@ -1,0 +1,139 @@
+{
+  "id": "c09_en_zh_supplier",
+  "title": "Headset order with a Shenzhen supplier",
+  "scenario": "Tom orders branded USB headsets from Wang Li, an export sales manager at a factory in Shenzhen. She speaks Mandarin with the English trade words common in export sales (logo, order, confirm, PI) and reads an email address the Chinese way ('艾特' for @, '点' for dot).",
+  "tags": ["1-to-1", "mixed", "numbers", "money", "dates", "email", "overlap", "fillers", "short-replies"],
+  "me": "tom",
+  "my_lang": "en",
+  "their_lang": "zh",
+  "speakers": {
+    "tom": {"name": "Tom", "gender": "male", "voice": "nPczCjzI2devNBz1zQrb", "accent_note": "Operations at a US startup, American English. Brian: deep American voice."},
+    "wang": {"name": "Wang Li", "gender": "female", "voice": "cgSgspJ2msm6clMCkdW9", "accent_note": "Export sales manager in Shenzhen: Mandarin with English trade words. Jessica: warm American voice."}
+  },
+  "glossary": ["Wang Li", "Tom", "PI", "tom@brightloop.io"],
+  "turns": [
+    {
+      "speaker": "wang", "lang": "zh", "langs": ["zh", "en"],
+      "text": "Tom，你好！我是王丽。上周寄的样品，你们收到了吗？",
+      "ref": {
+        "en": "Hi Tom! This is Wang Li. Did you get the samples we sent last week?"
+      },
+      "gap_before": 0.5,
+      "notes": "#mixed #question #names #date only the name 'Tom' is in Latin letters"
+    },
+    {
+      "speaker": "tom", "lang": "en", "langs": ["en"],
+      "text": "Hi Wang Li. Yes, they arrived on Monday. The sound is great, but the cable is too short.",
+      "ref": {
+        "zh": "王丽，你好。收到了，周一到的。音质很好，但是线太短了。",
+        "en": "Hi Wang Li. Yes, they arrived on Monday. The sound is great, but the cable is too short."
+      },
+      "gap_before": 0.5,
+      "notes": "#date #names"
+    },
+    {
+      "speaker": "wang", "lang": "zh", "langs": ["zh"],
+      "text": "明白。线可以改成一米五，没问题。",
+      "ref": {
+        "en": "Understood. We can make the cable one and a half meters, no problem."
+      },
+      "gap_before": 0.4,
+      "notes": "#numbers '一米五' = 1.5 m"
+    },
+    {
+      "speaker": "tom", "lang": "en", "langs": ["en"],
+      "text": "Great. Can you also print our logo on them?",
+      "ref": {
+        "zh": "太好了。能不能也把我们的logo印上去？",
+        "en": "Great. Can you also print our logo on them?"
+      },
+      "gap_before": 0.4,
+      "notes": "#question"
+    },
+    {
+      "speaker": "wang", "lang": "zh", "langs": ["zh", "en"],
+      "text": "可以，logo每个加0.3美元，最少一千个。",
+      "ref": {
+        "en": "Yes, the logo is 30 cents extra per unit, with a minimum of one thousand units."
+      },
+      "gap_before": 0.4,
+      "notes": "#mixed #money #numbers English 'logo' inside Mandarin; 0.3 dollars = 30 cents"
+    },
+    {
+      "speaker": "tom", "lang": "en", "langs": ["en"],
+      "text": "OK. And the price for 2,000 units?",
+      "ref": {
+        "zh": "好的。那两千个是什么价格？",
+        "en": "OK. And the price for 2,000 units?"
+      },
+      "gap_before": 0.4,
+      "notes": "#question #numbers"
+    },
+    {
+      "speaker": "wang", "lang": "zh", "langs": ["zh", "en"],
+      "text": "嗯，那个……2000个的话，每个12美元，含运费。这个order你们什么时候能confirm？",
+      "ref": {
+        "en": "Um, well... for 2,000 units, it's 12 dollars each, shipping included. When can you confirm this order?"
+      },
+      "gap_before": 0.6,
+      "notes": "#filler #money #numbers #mixed #question '嗯，那个' = um, well; English 'order' and 'confirm' inside Mandarin"
+    },
+    {
+      "speaker": "tom", "lang": "en", "langs": ["en"],
+      "text": "This week, if you can ship before December 15th.",
+      "ref": {
+        "zh": "如果你们能在12月15日前发货，我们这周就确认。",
+        "en": "This week, if you can ship before December 15th."
+      },
+      "gap_before": -0.3,
+      "notes": "#overlap #date starts 0.3 s before Wang Li ends"
+    },
+    {
+      "speaker": "wang", "lang": "zh", "langs": ["zh"],
+      "text": "好的。",
+      "ref": {
+        "en": "OK."
+      },
+      "gap_before": 0.3,
+      "notes": "#short one-word reply"
+    },
+    {
+      "speaker": "wang", "lang": "zh", "langs": ["zh", "en"],
+      "text": "我今天把PI发到你邮箱，tom艾特brightloop点io，对吧？",
+      "ref": {
+        "en": "I'll send the PI to your email today: tom@brightloop.io, right?"
+      },
+      "gap_before": 0.8,
+      "notes": "#email #mixed #question said the Chinese way: '艾特' = @, '点' = dot; PI = proforma invoice; same speaker after a pause"
+    },
+    {
+      "speaker": "tom", "lang": "en", "langs": ["en"],
+      "text": "Yes.",
+      "ref": {
+        "zh": "对。",
+        "en": "Yes."
+      },
+      "gap_before": 0.4,
+      "notes": "#short one-word reply"
+    },
+    {
+      "speaker": "wang", "lang": "zh", "langs": ["zh"],
+      "text": "好，那就这样。拜拜！",
+      "ref": {
+        "en": "Good, that's settled then. Bye-bye!"
+      },
+      "gap_before": 0.3,
+      "notes": "#short"
+    },
+    {
+      "speaker": "tom", "lang": "en", "langs": ["en"],
+      "text": "Thanks, bye!",
+      "ref": {
+        "zh": "谢谢，拜拜！",
+        "en": "Thanks, bye!"
+      },
+      "gap_before": -0.2,
+      "notes": "#short #overlap"
+    }
+  ]
+}

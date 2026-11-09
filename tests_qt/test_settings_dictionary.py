@@ -738,7 +738,7 @@ def test_the_sidebar_has_no_dictionary_entry(env):
     win, _app = env.build("free")
     assert "dictionary" not in win.sidebar.items
     assert set(win.sidebar.items) == {"home", "dictation", "smart_actions", "meetings", "live_assistant",
-                                      "audio_to_text", "settings"}
+                                      "interpreter", "audio_to_text", "settings"}
 
 
 # ── a Dictionary that cannot be built ────────────────────────────────────────

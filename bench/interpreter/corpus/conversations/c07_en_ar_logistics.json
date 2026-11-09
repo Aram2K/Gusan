@@ -1,0 +1,139 @@
+{
+  "id": "c07_en_ar_logistics",
+  "title": "Dubai logistics company: drivers' languages and pricing",
+  "scenario": "Daniel talks to Omar, operations manager at a logistics company in Dubai, and his IT colleague Layla. They speak Modern Standard Arabic with Gulf expressions and English product names. A man and a woman on the far side, in Arabic, sometimes overlapping.",
+  "tags": ["3-person", "man-and-woman", "formal", "mixed", "numbers", "money", "dates", "overlap", "fillers", "glossary", "short-replies"],
+  "me": "daniel",
+  "my_lang": "en",
+  "their_lang": "ar",
+  "speakers": {
+    "daniel": {"name": "Daniel", "gender": "male", "voice": "iP95p4xoKVk53GoZ742B", "accent_note": "Gusan account manager, American English. Chris: casual American voice."},
+    "omar": {"name": "Omar", "gender": "male", "voice": "nPczCjzI2devNBz1zQrb", "accent_note": "Operations manager in Dubai: Modern Standard Arabic with Gulf expressions and English product names. Brian: deep American voice."},
+    "layla": {"name": "Layla", "gender": "female", "voice": "pFZP5JQG7iQjIQuC4Bku", "accent_note": "IT lead in Dubai, Arabic. Lily: soft British voice."}
+  },
+  "glossary": ["Gusan", "Zoom", "Microsoft Teams", "Layla", "Daniel"],
+  "turns": [
+    {
+      "speaker": "omar", "lang": "ar", "langs": ["ar"],
+      "text": "مرحباً دانيال، أهلاً وسهلاً. معي اليوم زميلتي ليلى من قسم تقنية المعلومات.",
+      "ref": {
+        "en": "Hello Daniel, welcome. With me today is my colleague Layla from the IT department."
+      },
+      "gap_before": 0.5,
+      "notes": "#formal #names"
+    },
+    {
+      "speaker": "layla", "lang": "ar", "langs": ["ar"],
+      "text": "أهلاً دانيال، تشرفنا.",
+      "ref": {
+        "en": "Hi Daniel, nice to meet you."
+      },
+      "gap_before": 0.3,
+      "notes": "#short a woman right after a man on the same track: the hear voice must switch"
+    },
+    {
+      "speaker": "daniel", "lang": "en", "langs": ["en"],
+      "text": "I'm glad to meet you both. What do your teams use for calls today?",
+      "ref": {
+        "ar": "أنا سعيد بالتعرف عليكما. ماذا تستخدم فرقكم للمكالمات حالياً؟",
+        "en": "I'm glad to meet you both. What do your teams use for calls today?"
+      },
+      "gap_before": 0.5,
+      "notes": "#question #gender Arabic needs the masculine 'سعيد' (Daniel is a man) and the dual 'عليكما'"
+    },
+    {
+      "speaker": "omar", "lang": "ar", "langs": ["ar", "en"],
+      "text": "في الغالب Microsoft Teams، وأحياناً Zoom مع العملاء. يعني، المشكلة أن نصف السائقين لا يتكلمون العربية.",
+      "ref": {
+        "en": "Mostly Microsoft Teams, and sometimes Zoom with clients. I mean, the problem is that half of the drivers don't speak Arabic."
+      },
+      "gap_before": 0.6,
+      "notes": "#mixed #filler #glossary English product names inside Arabic; 'يعني' = I mean"
+    },
+    {
+      "speaker": "daniel", "lang": "en", "langs": ["en"],
+      "text": "That's exactly where Gusan helps. Which languages do they speak?",
+      "ref": {
+        "ar": "وهنا بالضبط يأتي دور Gusan. ما اللغات التي يتحدثونها؟",
+        "en": "That's exactly where Gusan helps. Which languages do they speak?"
+      },
+      "gap_before": 0.4,
+      "notes": "#question #glossary"
+    },
+    {
+      "speaker": "layla", "lang": "ar", "langs": ["ar"],
+      "text": "الأردية والهندية في الغالب، وبعضهم يتكلم الإنجليزية.",
+      "ref": {
+        "en": "Mostly Urdu and Hindi, and some of them speak English."
+      },
+      "gap_before": 0.4,
+      "notes": "#names language names"
+    },
+    {
+      "speaker": "omar", "lang": "ar", "langs": ["ar"],
+      "text": "وكم تكلفة الاشتراك إذا كان لدينا 150 مستخدماً؟",
+      "ref": {
+        "en": "And how much is the subscription if we have 150 users?"
+      },
+      "gap_before": -0.2,
+      "notes": "#overlap #question #numbers a man starts over a woman on the same (system) track"
+    },
+    {
+      "speaker": "daniel", "lang": "en", "langs": ["en"],
+      "text": "For 150 users, it's $3,600 a month, and the first month is free.",
+      "ref": {
+        "ar": "مع 150 مستخدماً، التكلفة 3600 دولار شهرياً، والشهر الأول مجاني.",
+        "en": "For 150 users, it's $3,600 a month, and the first month is free."
+      },
+      "gap_before": 0.5,
+      "notes": "#money #numbers"
+    },
+    {
+      "speaker": "layla", "lang": "ar", "langs": ["ar", "en"],
+      "text": "وهل هناك dashboard لمتابعة الاستخدام؟",
+      "ref": {
+        "en": "And is there a dashboard to track usage?"
+      },
+      "gap_before": 0.4,
+      "notes": "#mixed #question English 'dashboard' inside Arabic"
+    },
+    {
+      "speaker": "daniel", "lang": "en", "langs": ["en"],
+      "text": "Yes, admins get a dashboard with the minutes per user.",
+      "ref": {
+        "ar": "نعم، لدى المسؤولين لوحة تحكم تعرض الدقائق لكل مستخدم.",
+        "en": "Yes, admins get a dashboard with the minutes per user."
+      },
+      "gap_before": 0.4,
+      "notes": ""
+    },
+    {
+      "speaker": "omar", "lang": "ar", "langs": ["ar"],
+      "text": "تمام. أرسل لنا العرض على الإيميل، وإن شاء الله نرد عليك يوم الاثنين.",
+      "ref": {
+        "en": "OK. Send us the offer by email, and hopefully we'll get back to you on Monday."
+      },
+      "gap_before": 0.5,
+      "notes": "#date 'تمام' = OK, 'إن شاء الله' = hopefully"
+    },
+    {
+      "speaker": "daniel", "lang": "en", "langs": ["en"],
+      "text": "Perfect, thank you both!",
+      "ref": {
+        "ar": "ممتاز، شكراً لكما!",
+        "en": "Perfect, thank you both!"
+      },
+      "gap_before": 0.3,
+      "notes": "#short"
+    },
+    {
+      "speaker": "layla", "lang": "ar", "langs": ["ar"],
+      "text": "مع السلامة!",
+      "ref": {
+        "en": "Goodbye!"
+      },
+      "gap_before": 0.2,
+      "notes": "#short"
+    }
+  ]
+}

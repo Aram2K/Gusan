@@ -23,6 +23,11 @@ Side effects
                          rolled back when it can't register); refused when it
                          equals the dictation or Live Assistant hotkey (and
                          those two are refused when they equal it)
+    interpreter_hotkey   the Interpreter's shortcut (default Ctrl+Alt+I; on / off):
+                         re-register it (app._setup_interpreter_hotkey; rolled back
+                         when it can't register); refused when it equals the
+                         dictation, Live Assistant or Smart Actions hotkey (and
+                         those are refused when they equal it)
     smart_actions_speech_model   what transcribes a Smart Action: "" (same as
                          Dictation), "cloud" (Gusan Cloud; refused in Privacy
                          mode - Pro is checked when a take starts) or a
@@ -63,6 +68,7 @@ logger = logging.getLogger("transcribe")
 HOTKEY = "hotkey"
 ASSIST_HOTKEY = "live_assist_hotkey"
 SMART_HOTKEY = "smart_actions_hotkey"   # ui/pages/smart_actions.py HOTKEY_KEY
+INTERP_HOTKEY = "interpreter_hotkey"    # ui/pages/interpreter.py HOTKEY_KEY
 SMART_SPEECH = "smart_actions_speech_model"   # engine_choice.SMART_SPEECH_KEY
 SMART_SPEECH_CLOUD = "cloud"                   # engine_choice.SMART_SPEECH_CLOUD
 LIVE_SPEECH = "live_assist_speech_model"       # engine_choice.LIVE_SPEECH_KEY
@@ -155,13 +161,15 @@ def apply(app, updates, autostart_mod=None):
     results = {}
     changed = []
     wrote = False
-    want = {"hotkey": False, "assist": False, "smart": False, "preload": False, "overlay": False,
-            "la_private": False}
+    want = {"hotkey": False, "assist": False, "smart": False, "interp": False, "preload": False,
+            "overlay": False, "la_private": False}
     old_hotkey = cfg.get(HOTKEY)
     old_assist = cfg.get(ASSIST_HOTKEY, "")
     old_smart = cfg.get(SMART_HOTKEY, "")
     updates = dict(updates)
     smart_after = norm_hotkey(updates.get(SMART_HOTKEY, cfg.get(SMART_HOTKEY)))
+    old_interp = cfg.get(INTERP_HOTKEY, "")
+    interp_after = norm_hotkey(updates.get(INTERP_HOTKEY, cfg.get(INTERP_HOTKEY)))
     # Privacy first: it decides whether a cloud backend in the same call is allowed.
     items = sorted(updates.items(), key=lambda kv: kv[0] != PRIVACY)
 
@@ -216,7 +224,7 @@ def apply(app, updates, autostart_mod=None):
         if key == ASSIST_HOTKEY:
             value = norm_hotkey(value)
             dictation = norm_hotkey(updates.get(HOTKEY, cfg.get(HOTKEY)))
-            if value and (value == dictation or value == smart_after
+            if value and (value == dictation or value == smart_after or value == interp_after
                           or hotkeys.is_bare_typing_key(value)):
                 results[key] = False            # would fire with dictation / Smart Actions / while typing
                 continue
@@ -224,7 +232,16 @@ def apply(app, updates, autostart_mod=None):
         if key == SMART_HOTKEY:
             value = norm_hotkey(value)
             taken = (norm_hotkey(updates.get(HOTKEY, cfg.get(HOTKEY))),
-                     norm_hotkey(updates.get(ASSIST_HOTKEY, cfg.get(ASSIST_HOTKEY))))
+                     norm_hotkey(updates.get(ASSIST_HOTKEY, cfg.get(ASSIST_HOTKEY))), interp_after)
+            if value and (value in taken or value.startswith("mouse:")
+                          or hotkeys.is_bare_typing_key(value)):
+                results[key] = False            # another shortcut's keys / not a key combo
+                continue
+
+        if key == INTERP_HOTKEY:
+            value = norm_hotkey(value)
+            taken = (norm_hotkey(updates.get(HOTKEY, cfg.get(HOTKEY))),
+                     norm_hotkey(updates.get(ASSIST_HOTKEY, cfg.get(ASSIST_HOTKEY))), smart_after)
             if value and (value in taken or value.startswith("mouse:")
                           or hotkeys.is_bare_typing_key(value)):
                 results[key] = False            # another shortcut's keys / not a key combo
@@ -260,7 +277,8 @@ def apply(app, updates, autostart_mod=None):
                 results[key] = False            # a lone typing key would fire while you type
                 continue
             assist = norm_hotkey(updates.get(ASSIST_HOTKEY, cfg.get(ASSIST_HOTKEY)))
-            if (assist and value == assist) or (smart_after and value == smart_after):
+            if ((assist and value == assist) or (smart_after and value == smart_after)
+                    or (interp_after and value == interp_after)):
                 # Taking the Live Assistant's (or Smart Actions') key would
                 # silently unbind it (their setup refuses a clash): change
                 # that one first.
@@ -280,6 +298,8 @@ def apply(app, updates, autostart_mod=None):
             want["assist"] = True
         elif key == SMART_HOTKEY:
             want["smart"] = True
+        elif key == INTERP_HOTKEY:
+            want["interp"] = True
         if key in PRELOAD_KEYS:
             want["preload"] = True
         if key in OVERLAY_KEYS:
@@ -333,6 +353,18 @@ def apply(app, updates, autostart_mod=None):
                 _try("smart_actions_hotkey rollback", smart_fn, old_smart)
                 if SMART_HOTKEY in changed:
                     changed.remove(SMART_HOTKEY)
+    interp_fn = getattr(app, "_setup_interpreter_hotkey", None)
+    if callable(interp_fn) and (want["hotkey"] or want["assist"] or want["smart"] or want["interp"]):
+        # The Interpreter's shortcut never shares keys with the other three either.
+        ok, reg = _try("interpreter_hotkey", interp_fn, cfg.get(INTERP_HOTKEY, ""))
+        interp_ok = bool(ok and (reg or not cfg.get(INTERP_HOTKEY)))
+        if want["interp"]:
+            results[INTERP_HOTKEY] = interp_ok
+            if not interp_ok:
+                cfg[INTERP_HOTKEY] = old_interp
+                _try("interpreter_hotkey rollback", interp_fn, old_interp)
+                if INTERP_HOTKEY in changed:
+                    changed.remove(INTERP_HOTKEY)
     if want["preload"]:
         _try("preload", app._preload_speech_model)
     if want["overlay"]:
