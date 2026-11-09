@@ -19,7 +19,7 @@ struct TaskRow: View {
                     } else {
                         Text(Duration.seconds(task.elapsed()).formatted(.time(pattern: .minuteSecond))).monospacedDigit()
                     }
-                }.font(.caption).foregroundStyle(.secondary)
+                }.font(.caption).foregroundStyle(Theme.secondaryText)
             }
             Spacer(minLength: 0)
             if attention ?? task.needsAttention {

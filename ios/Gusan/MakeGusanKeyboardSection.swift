@@ -27,7 +27,7 @@ struct MakeGusanKeyboardSection: View {
         } header: {
             Text("Make Gusan your keyboard")
         } footer: {
-            Text("Password and PIN fields always use Apple's keyboard.")
+            Text("Password and PIN fields always use Apple's keyboard.").foregroundStyle(Theme.secondaryText)
         }
         .onAppear { model.refreshDiagnostics() }
         .onChange(of: scenePhase) { if $0 == .active { model.refreshDiagnostics() } }
@@ -37,7 +37,7 @@ struct MakeGusanKeyboardSection: View {
         Label {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title).font(.subheadline)
-                if !compact { Text(detail).font(.footnote).foregroundStyle(.secondary) }
+                if !compact { Text(detail).font(.footnote).foregroundStyle(Theme.secondaryText) }
             }
         } icon: {
             Image(systemName: confirmed ? "checkmark.circle.fill" : "exclamationmark.triangle")

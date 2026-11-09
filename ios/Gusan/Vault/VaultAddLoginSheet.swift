@@ -30,7 +30,7 @@ struct VaultAddLoginSheet: View {
                         .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
                 }.bold().disabled(vault.busy || saving || hostname.isEmpty || password.isEmpty)
             }.padding(20)
-            Form {
+            GlassList {
                 Section("Site and login") {
                     VaultAutoFillField(title: "Site or URL", text: $hostname, contentType: .URL, keyboardType: .URL)
                     VaultAutoFillField(title: "Username or email", text: $username, contentType: .username)
@@ -39,17 +39,18 @@ struct VaultAddLoginSheet: View {
                 Section {
                     VaultAutoFillField(title: "Authenticator secret (optional)", text: $authenticator, secure: true)
                 } header: { Text("Two-factor authentication") } footer: {
-                    Text("Paste a base32 secret or an otpauth:// URL. This is the setup secret, not a six-digit code.")
+                    Text("Paste a base32 secret or an otpauth:// URL. This is the setup secret, not a six-digit code.").foregroundStyle(Theme.secondaryText)
                 }
                 Section {
                     Text("Gusan imports a copy of this login into this iPhone's keychain, protected by Face ID. Changes in iPhone Passwords won't sync. The agent never sees it: when it needs this login you approve with Face ID, and it's typed into the site for the agent. Re-enrolling Face ID removes saved logins.")
-                        .font(.footnote).foregroundStyle(.secondary)
+                        .font(.footnote).foregroundStyle(Theme.secondaryText)
                 }
                 if vault.busy { ProgressView("Saving securely…") }
                 if let error = vault.error { Section { Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(Theme.danger) } }
             }
             .disabled(vault.busy || saving)
         }
+        .background(GrainBackground())
         .interactiveDismissDisabled(vault.busy || saving)
         .onDisappear { clear() }
     }

@@ -15,12 +15,12 @@ struct VaultView: View {
     init() {}
 
     var body: some View {
-        List {
+        GlassList {
             Section {
                 Label("Logins the agent never sees", systemImage: "lock.shield")
                     .font(.headline)
                 Text("Always ask before using a login is always on. Each use needs your approval with Face ID on this iPhone.")
-                    .font(.footnote).foregroundStyle(.secondary)
+                    .font(.footnote).foregroundStyle(Theme.secondaryText)
             }
             if !available {
                 Section {
@@ -42,14 +42,14 @@ struct VaultView: View {
                 }
                 Section("Sign-in requests") {
                     if vault.pending.isEmpty {
-                        Text("No sign-in requests. An agent will ask here when it needs a saved login.").foregroundStyle(.secondary)
+                        Text("No sign-in requests. An agent will ask here when it needs a saved login.").foregroundStyle(Theme.secondaryText)
                     }
                     ForEach(vault.pending) { request in
                         requestRow(request)
                     }
                 }
                 Section("Logins") {
-                    if vault.logins.isEmpty { Text("Add a login with +. Passwords stay in this iPhone's private keychain.").foregroundStyle(.secondary) }
+                    if vault.logins.isEmpty { Text("Add a login with +. Passwords stay in this iPhone's private keychain.").foregroundStyle(Theme.secondaryText) }
                     ForEach(vault.logins) { login in
                         loginRow(login)
                             .swipeActions(allowsFullSwipe: false) {
@@ -59,18 +59,17 @@ struct VaultView: View {
                     }
                 }
                 Section("Recent use") {
-                    if vault.events.isEmpty { Text("Your login activity will appear here.").foregroundStyle(.secondary) }
+                    if vault.events.isEmpty { Text("Your login activity will appear here.").foregroundStyle(Theme.secondaryText) }
                     ForEach(vault.events) { event in
                         VStack(alignment: .leading, spacing: 4) {
                             Text(event.label)
-                            Text(event.at, style: .time).font(.caption).foregroundStyle(.secondary)
+                            Text(event.at, style: .time).font(.caption).foregroundStyle(Theme.secondaryText)
                         }.accessibilityElement(children: .combine)
                     }
                 }
                 if vault.loading { ProgressView("Refreshing Vault…") }
             }
         }
-        .listStyle(.insetGrouped)
         .navigationTitle("Vault")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -110,7 +109,7 @@ struct VaultView: View {
             Label("\(request.hostname) asks you to sign in", systemImage: "person.badge.key.fill").font(.headline)
             Text(request.title).font(.subheadline)
             Text("Agent is on \(request.pageURL?.absoluteString ?? "an unknown page")")
-                .font(.footnote).foregroundStyle(.secondary)
+                .font(.footnote).foregroundStyle(Theme.secondaryText)
             if !request.pageMatches {
                 Label("The page doesn't match this login's site. Don't share this login.", systemImage: "exclamationmark.shield.fill")
                     .font(.footnote).foregroundStyle(Theme.danger)
@@ -134,7 +133,7 @@ struct VaultView: View {
                     }.frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
                 }.buttonStyle(.borderless)
                 Spacer()
-                Text("Expires \(request.expiresAt, style: .time)").font(.caption).foregroundStyle(.secondary)
+                Text("Expires \(request.expiresAt, style: .time)").font(.caption).foregroundStyle(Theme.secondaryText)
             }
         }.padding(.vertical, 8).disabled(vault.busy || approving != nil || denying != nil)
     }
@@ -143,12 +142,12 @@ struct VaultView: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(login.hostname).font(.headline)
-                if login.hasTOTP { Label("TOTP", systemImage: "number.shield").font(.caption).foregroundStyle(.secondary) }
+                if login.hasTOTP { Label("TOTP", systemImage: "number.shield").font(.caption).foregroundStyle(Theme.secondaryText) }
             }
-            if let hint = login.usernameHint { Text(hint).font(.subheadline).foregroundStyle(.secondary) }
+            if let hint = login.usernameHint { Text(hint).font(.subheadline).foregroundStyle(Theme.secondaryText) }
             if let lastUsed = login.lastUsedAt {
-                Text("Last used \(lastUsed.formatted(date: .abbreviated, time: .shortened))").font(.caption).foregroundStyle(.secondary)
-            } else { Text("Not used yet").font(.caption).foregroundStyle(.secondary) }
+                Text("Last used \(lastUsed.formatted(date: .abbreviated, time: .shortened))").font(.caption).foregroundStyle(Theme.secondaryText)
+            } else { Text("Not used yet").font(.caption).foregroundStyle(Theme.secondaryText) }
         }.accessibilityElement(children: .combine)
     }
 }

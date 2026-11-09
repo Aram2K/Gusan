@@ -36,9 +36,9 @@ struct VoiceListeningView: View {
                 else { VoiceLevelBars(level: voice.status.level, active: voice.status.phase == .recording).frame(height: 44).accessibilityHidden(true) }
                 Text(title).font(.title2).bold()
                 if voice.error.isEmpty {
-                    Text("Swipe back to your app.").foregroundStyle(.secondary)
+                    Text("Swipe back to your app.").foregroundStyle(Theme.secondaryText)
                 } else {
-                    Text(voice.inAppError).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    Text(voice.inAppError).foregroundStyle(Theme.secondaryText).multilineTextAlignment(.center)
                     if voice.error == VoiceError.notSignedIn.localizedDescription || voice.error == VoiceError.unauthorized.localizedDescription {
                         Button("Sign in", action: onSignIn).buttonStyle(.borderedProminent)
                     } else if voice.permission == .denied {
@@ -50,7 +50,7 @@ struct VoiceListeningView: View {
                     Button("Stop listening", role: .destructive) { voice.stop() }
                         .buttonStyle(.bordered).controlSize(.large)
                 }
-            }.padding(24)
+            }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity).background(GrainBackground())
                 .navigationTitle("Gusan").navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { voice.closePresentation() } } }
         }
@@ -74,10 +74,10 @@ struct VoiceSettingsSection: View {
                 }.frame(minHeight: 44).contentShape(Rectangle())
             }.disabled(voice.starting)
             if voice.permission == .denied { Button("Open microphone settings") { Theme.openSettings() } }
-            if !voice.error.isEmpty { Label(voice.inAppError, systemImage: "exclamationmark.circle").foregroundStyle(.secondary) }
+            if !voice.error.isEmpty { Label(voice.inAppError, systemImage: "exclamationmark.circle").foregroundStyle(Theme.secondaryText) }
             Picker("Language I speak", selection: $language) { ForEach(VoiceSettings.languages, id: \.code) { Text($0.name).tag($0.code) } }.onChange(of: language) { voice.settings.language = $0 }
             Picker("Ready window", selection: $minutes) { ForEach(VoiceSettings.idleOptions, id: \.self) { Text($0 == 0 ? "Until I stop" : $0 == 60 ? "1 hour" : "\($0) min").tag($0) } }.onChange(of: minutes) { voice.settings.idleMinutes = $0 }
-            Text("An open session reserves the mic and uses some battery. iOS may end a background session early.").font(.footnote).foregroundStyle(.secondary)
+            Text("An open session reserves the mic and uses some battery. iOS may end a background session early.").font(.footnote).foregroundStyle(Theme.secondaryText)
         }.onAppear { language = voice.settings.language; minutes = voice.settings.idleMinutes; voice.refreshPermission() }
             .onChange(of: scenePhase) { if $0 == .active { voice.refreshPermission() } }
     }

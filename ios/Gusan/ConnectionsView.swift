@@ -4,7 +4,7 @@ struct ConnectionsView: View {
     @EnvironmentObject private var connections: CalendarConnections
 
     var body: some View {
-        List {
+        GlassList {
             Section {
                 Toggle(isOn: Binding(get: { connections.state == .connected || connections.connecting }, set: { connections.setIPhoneEnabled($0) })) {
                     HStack {
@@ -12,7 +12,7 @@ struct ConnectionsView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("iPhone Calendar")
                                 Text(connections.connecting ? "Connecting…" : connections.state.label)
-                                    .font(.subheadline).foregroundStyle(.secondary)
+                                    .font(.subheadline).foregroundStyle(Theme.secondaryText)
                             }
                         } icon: { Image(systemName: "calendar") }
                         if connections.connecting { ProgressView() }
@@ -32,7 +32,7 @@ struct ConnectionsView: View {
                             Label {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text("Google Calendar").foregroundStyle(.primary)
-                                    Text(connections.googleState.rawValue).font(.subheadline).foregroundStyle(.secondary)
+                                    Text(connections.googleState.rawValue).font(.subheadline).foregroundStyle(Theme.secondaryText)
                                 }
                             } icon: { Image(systemName: "calendar") }
                             Spacer()
@@ -42,23 +42,23 @@ struct ConnectionsView: View {
                     }.disabled(connections.googleBusy)
                 }
             } footer: {
-                Text("Gusan reads busy times to help Smart answer availability questions and Agent plan around your schedule. It never creates or changes events.")
+                Text("Gusan reads busy times to help Smart answer availability questions and Agent plan around your schedule. It never creates or changes events.").foregroundStyle(Theme.secondaryText)
             }
             Section {
                 Toggle("Include event titles", isOn: Binding(get: { connections.includeTitles }, set: { connections.setIncludeTitles($0) }))
                     .frame(minHeight: 44).contentShape(Rectangle()).disabled(connections.connecting || connections.googleBusy)
-            } footer: { Text("Busy times only by default. Turn on event titles to share them with Smart and Agent when you ask about scheduling.") }
+            } footer: { Text("Busy times only by default. Turn on event titles to share them with Smart and Agent when you ask about scheduling.").foregroundStyle(Theme.secondaryText) }
             if let updated = connections.lastUpdated {
                 Section {
                     HStack {
                         Text("Last updated")
                         Spacer()
-                        Text(updated, style: .relative).foregroundStyle(.secondary)
+                        Text(updated, style: .relative).foregroundStyle(Theme.secondaryText)
                         if connections.refreshing { ProgressView() }
                     }
                 }
             }
-            if let error = connections.error { Section { Text(error).foregroundStyle(.secondary) } }
+            if let error = connections.error { Section { Text(error).foregroundStyle(Theme.secondaryText) } }
         }
         .navigationTitle("Connections").navigationBarTitleDisplayMode(.inline)
         .task { await connections.refresh() }
