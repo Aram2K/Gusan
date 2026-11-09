@@ -4320,7 +4320,7 @@ class AppController(QObject):
         self._update_fetch_user = False      # ...for the update window (Cancel stops it) or quietly ahead
         self._update_installing = False      # an in-app update attempt runs: download .. hand-over
         self._update_closing = False         # the installer is started: Gusan closes in a moment
-        self._update_window = None           # ui/update_window.py, built on the first update
+        self._update_window = None           # the update panel (ui/update_panel.py, in Settings > Updates & about)
         self._update_cancel = False          # the attempt was cancelled
         self._update_gen = 0                 # each attempt's own number (a timer of an old one does nothing)
         self._update_queued = None           # (tag, manual, on_done) started once a cancelled download ends
@@ -5518,10 +5518,10 @@ class AppController(QObject):
                 logger.debug("update result callback failed", exc_info=True)
 
     def install_update(self, tag, manual=True, on_done=None):
-        """Install release ``tag`` in this copy, with a window from the first click to the restart
-        (ui/update_window.py): download progress with Cancel, the checksum check, "Installing" - Gusan
-        then closes and opens again by itself - or what went wrong with Try again / the download page.
-        GUI thread.
+        """Install release ``tag`` in this copy, shown from the first click to the restart in Settings >
+        Updates & about (ui/update_panel.py - never a window of its own; the Gusan window opens there):
+        download progress with Cancel, the checksum check, "Installing" - Gusan then closes and opens again
+        by itself - or what went wrong with Try again / the download page. GUI thread.
 
         True: an attempt started. False: nothing started - not a release this copy can install; the
         download page opened instead (a Mac, the portable zip, python main.py); an attempt is already
@@ -5557,7 +5557,7 @@ class AppController(QObject):
             elif callable(on_done):
                 self._update_on_done = on_done  # the newest page's row hears the result
             if win is not None:
-                self._bring_to_front(win)
+                self._front_update()
             return False
         blocked = self._update_blocker()
         if blocked:
@@ -5578,7 +5578,7 @@ class AppController(QObject):
             self.track("update_install_started", {"manual": False, "to": tag})
         win = self._update_window_for(tag)
         win.show_downloading()
-        self._bring_to_front(win)
+        self._front_update()                    # the Gusan window, on Settings > Updates & about
         ready = self._update_ready
         if ready and ready[0] == tag and os.path.isfile(ready[1]):
             self._update_handover(gen)          # fetched ahead already: nothing to download
@@ -5607,19 +5607,59 @@ class AppController(QObject):
                     or getattr(self, "_quitting", False))
 
     def _update_window_for(self, tag):
-        """The update window (built the first time, lazily), set to release ``tag``."""
-        win = self._update_window
+        """The update panel of Settings > Updates & about (ui/update_panel.py), set to release ``tag``
+        (_front_update brings it into view). Without that page (it could not be built) an unseen panel still
+        runs the attempt and the tray says how it ended. (The name is the old window's: callers keep it.)"""
+        win = self._update_panel_host()
         if win is None:
-            from ui.update_window import UpdateWindow
-            win = UpdateWindow(tag, main_app=self)
+            win = self._update_window
+            if win is not None:
+                try:
+                    win.isVisible()
+                except RuntimeError:
+                    win = None                  # the Settings page was built again: its old panel is gone
+            if win is None:
+                from ui.update_panel import UpdatePanel
+                win = UpdatePanel(tag)
+        if win is not self._update_window:
             win.cancel_requested.connect(self._cancel_update)
             win.install_requested.connect(self._update_install_now)
             win.retry_requested.connect(self._update_retry)
             win.website_requested.connect(self._update_open_page)
             self._update_window = win
-        elif getattr(win, "tag", tag) != tag:
+        if getattr(win, "tag", tag) != tag:
             win.set_tag(tag)
         return win
+
+    def _update_panel_host(self):
+        """Settings > Updates & about's update panel; the page and that section are built when they aren't
+        yet. Nothing is brought forward here (_front_update does that). None: no page."""
+        try:
+            win = self._ensure_main_window()
+            panel = getattr(win.page("settings"), "update_panel", None)
+            if panel is None:
+                panel = getattr(win.open("settings", section="updates"), "update_panel", None)
+            return panel
+        except Exception:
+            logger.warning("Settings couldn't show the update", exc_info=True)
+            return None
+
+    def _front_update(self, activate=True):
+        """Bring the update into view. ``activate`` (they just asked): the Gusan window on Settings > Updates
+        & about. Otherwise nothing pops up over what they are doing - the panel changes in place."""
+        if activate:
+            self.show_settings("updates")
+
+    @staticmethod
+    def _update_seen(win):
+        """Is the update panel on screen in front (the Gusan window active, on Settings > Updates & about)?"""
+        try:
+            if not win.isVisible():
+                return False
+            top = win.window()
+            return bool(top.isActiveWindow()) and not top.isMinimized()
+        except Exception:
+            return False
 
     def _update_done(self, ok, info):
         """The attempt ended without installing: its on_done, once."""
@@ -5634,15 +5674,18 @@ class AppController(QObject):
         win = self._update_window
         if win is not None:
             win.show_failed(message, detail)
-            # Nobody asked for THIS: it may have failed while they dictate or type somewhere else. It comes
-            # up on top, but never takes the keyboard (and its Enter is not theirs).
-            self._bring_to_front(win, activate=False)
+            # Nobody asked for THIS: it may have failed while they dictate or type somewhere else. Nothing
+            # pops up; when the panel isn't in front a notice says it, and its click opens the panel.
+            self._front_update(activate=False)
+            if not self._update_seen(win):
+                self.show_tray_hint("Update not installed", message,
+                                    on_click=lambda: self.show_settings("updates"))
         else:
             self.show_tray_hint("Update not installed", message)
         self._update_done(False, message)
 
     def _cancel_update(self):
-        """Cancel, Esc or the X of the window while it downloads or waits."""
+        """The update panel's Cancel while it downloads or waits."""
         if self._update_closing or not self._update_installing:
             return
         if self._update_cancel:
@@ -5709,7 +5752,7 @@ class AppController(QObject):
         return False
 
     def _ask_install_with_unsaved_key(self, win):
-        """The one question of an update: "install" or anything else (Not yet, Esc). Over the update window."""
+        """The one question of an update: "install" or anything else (Not yet, Esc). Over the Gusan window."""
         from ui.components import mini_prompt
         return mini_prompt.choose(
             win, "Install the update now?",
@@ -5760,9 +5803,9 @@ class AppController(QObject):
         self._update_closing = True
         win = self._update_window
         win.show_installing(admin=all_users)
-        # Not activated: the handover may come minutes after the click (it waited for a recording), and
-        # whatever they are typing in meanwhile must not land in this window.
-        self._bring_to_front(win, activate=False)
+        # Nothing pops up: the handover may come minutes after the click (it waited for a recording), and
+        # whatever they are typing in meanwhile stays where it is.
+        self._front_update(activate=False)
         log = updater.new_log_path()
 
         def _run():
@@ -5997,20 +6040,11 @@ class AppController(QObject):
             self._clear_update_attempt()
         if not tag or self._update_installing or self._update_closing:
             return
-        log = str(attempt.get("log") or "")
-        if attempt.get("quit") or self._update_blocker():
-            # The install at Quit: no window was open then; one notice, whose click tries again. The same
-            # when they are dictating or recording right now - a window popping up then would be in their way.
-            self.show_tray_hint(f"{APP_NAME} didn't update",
-                                f"The update to {tag} stopped before it finished. Click to try again.",
-                                on_click=lambda t=tag: self.install_update(t, manual=True))
-            return
-        self._update_tag, self._update_manual, self._update_on_done = tag, True, None
-        win = self._update_window_for(tag)
-        win.show_failed("The installer stopped before it finished.",
-                        f"Details: {log}" if log and os.path.exists(log) else "")
-        # It opens by itself, seconds after Gusan started: never over what they are typing.
-        self._bring_to_front(win, activate=False)
+        # One notice, whose click tries again (it opens Settings > Updates & about with the progress). Nothing
+        # opens by itself seconds after Gusan started: it would be in the way of what they are doing.
+        self.show_tray_hint(f"{APP_NAME} didn't update",
+                            f"The update to {tag} stopped before it finished. Click to try again.",
+                            on_click=lambda t=tag: self.install_update(t, manual=True))
 
     def _tidy_update_files(self):
         """Gusan runs the new version: the installer and the logs it left in %TEMP% are not needed - except

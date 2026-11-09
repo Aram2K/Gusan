@@ -1095,8 +1095,7 @@ def update_env(ctl, monkeypatch, tmp_path):
     _wait(lambda: ctl._update_fetching is None, 3000)
     win = ctl._update_window
     if win is not None:
-        win.hide()
-        win.deleteLater()
+        win.hide()                            # back to idle (it is part of the Settings page: never deleted here)
     ctl._update_window = None
     for name, value in (("_update_installing", False), ("_update_closing", False), ("_update_cancel", False),
                         ("_update_ready", None), ("_update_queued", None), ("_update_on_done", None),
@@ -1105,7 +1104,7 @@ def update_env(ctl, monkeypatch, tmp_path):
     _spin(50)
 
 
-def test_install_update_shows_the_window_from_the_click_to_the_restart(ctl, update_env):
+def test_install_update_shows_in_settings_from_the_click_to_the_restart(ctl, update_env):
     import sys
     import threading
     env = update_env
@@ -1113,14 +1112,17 @@ def test_install_update_shows_the_window_from_the_click_to_the_restart(ctl, upda
     results = []
     assert ctl.install_update("v99.0.0", on_done=lambda ok, info: results.append((ok, info))) is True
     win = ctl._update_window
-    assert win is not None and win.isVisible() and win.stage == "downloading"
-    assert win.lbl_version.accessibleName() == "Version 99.0.0"
-    assert _wait(lambda: win.lbl_detail.accessibleName() == "50 of 100 MB")       # it moves, with its size
+    # In the Gusan window, Settings > Updates & about - never a window of its own.
+    assert win is not None and not win.isWindow() and win.window() is ctl.main_win
+    assert ctl.main_win.current_route() == "settings" and ctl.main_win.isVisible()
+    assert win.isVisible() and win.stage == "downloading"
+    assert win.lbl_status.accessibleName() == "Downloading 99.0.0"
+    assert _wait(lambda: win.lbl_amount.accessibleName() == "50 / 100 MB")        # it moves, with its size
     assert win.btn_cancel.isVisible() and not win.btn_retry.isVisible()
     assert env.quits == [] and ctl._update_closing is False
     env.hold.set()
     assert _wait(lambda: win.stage == "installing")
-    assert "opens again by itself" in win.lbl_status.accessibleName()
+    assert "opens again by itself" in win.lbl_detail.accessibleName()
     assert not win.btn_cancel.isVisible()                                          # nothing to press now
     assert _wait(lambda: ctl.cfg["update_attempt"])                                # handed over (the worker answered)
     # Quiet, for exactly this copy, with its own log; a per-user Setup reopens Gusan itself, and so does the watcher.
@@ -1139,28 +1141,27 @@ def test_install_update_shows_the_window_from_the_click_to_the_restart(ctl, upda
     assert env.fetches == 1
 
 
-def test_a_failure_nobody_asked_for_comes_on_top_without_taking_the_keyboard(ctl, update_env):
-    """Install update, then dictate somewhere else: when the download fails the window must not take the
-    focus (the dictation's paste would land in it), and only a click gets it the keyboard."""
-    from PySide6.QtCore import Qt
+def test_a_failure_nobody_asked_for_pops_nothing_up(ctl, update_env):
+    """Install update, then work somewhere else: when the download fails nothing comes up over what they are
+    doing - the row says it, and when the Gusan window isn't in front a notice does too."""
     import updater
     env = update_env
     env.fetch_result = (False, updater.MSG_NETWORK)
-    assert ctl.install_update("v99.0.0") is True
+    assert ctl.install_update("v99.0.0") is True                          # the click opens the Gusan window on it
     win = ctl._update_window
-    assert win.testAttribute(Qt.WA_ShowWithoutActivating) is False        # the click: it takes the keyboard
+    assert ctl.main_win.isVisible()
+    ctl.main_win.hide()                                                    # they go back to their work
+    ctl.hints.clear()
     assert _wait(lambda: win.stage == "failed")
-    assert win.isVisible()
-    assert win.testAttribute(Qt.WA_ShowWithoutActivating) is True          # the failure: on top, keyboard untouched
-    env.fetch_result = None
-    ctl.install_update("v99.0.0")                                          # their click (Try again, Settings, the notice)
-    assert win.testAttribute(Qt.WA_ShowWithoutActivating) is False
+    assert not ctl.main_win.isVisible()                                    # nothing popped up
+    assert _wait(lambda: any(h[0] == "Update not installed" for h in ctl.hints))
 
 
 def test_a_window_they_put_away_is_not_pulled_back_by_what_comes_by_itself(qapp):
     import main
-    from ui.update_window import UpdateWindow
-    w = UpdateWindow("v99.0.0")
+    from PySide6.QtWidgets import QWidget
+    w = QWidget()
+    w.resize(300, 200)
     try:
         w.show()
         w.showMinimized()
@@ -1168,7 +1169,7 @@ def test_a_window_they_put_away_is_not_pulled_back_by_what_comes_by_itself(qapp)
         if not w.isMinimized():
             pytest.skip("this platform cannot minimise a window")
         main.AppController._bring_to_front(w, activate=False)
-        assert w.isMinimized()                                             # a failure does not restore it
+        assert w.isMinimized()                                             # what comes by itself does not restore it
         main.AppController._bring_to_front(w)                             # a click does
         QApplication.processEvents()
         assert not w.isMinimized()
@@ -1184,9 +1185,10 @@ def test_cancel_in_the_window_stops_the_download_at_once_and_installs_nothing(ct
     results = []
     assert ctl.install_update("v99.0.0", on_done=lambda ok, info: results.append((ok, info))) is True
     win = ctl._update_window
-    assert _wait(lambda: win.lbl_detail.accessibleName() == "50 of 100 MB")
+    assert _wait(lambda: win.lbl_amount.accessibleName() == "50 / 100 MB")
     win.btn_cancel.click()
     assert not win.isVisible()                                      # gone at once, the download is still winding down
+    assert ctl.main_win.page("settings").update_button.isVisible()  # the row has its own button back
     assert results == [(False, "")]                                 # a plain Cancel: the Settings row says nothing
     assert _wait(lambda: ctl._update_fetching is None)
     assert ctl._update_installing is False and ctl._update_closing is False
@@ -1207,9 +1209,10 @@ def test_a_failed_download_says_why_and_try_again_goes_on(ctl, update_env):
     assert ctl.install_update("v99.0.0", on_done=lambda ok, info: results.append((ok, info))) is True
     win = ctl._update_window
     assert _wait(lambda: win.stage == "failed")
-    assert win.lbl_status.accessibleName() == "The update didn't install. " + updater.MSG_NETWORK
-    assert results == [(False, updater.MSG_NETWORK)]                # the Settings row says why, too
-    assert win.btn_retry.isVisible() and win.btn_website.isVisible() and win.btn_close.isVisible()
+    assert win.lbl_status.accessibleName() == "The update didn't install"
+    assert win.lbl_detail.accessibleName() == updater.MSG_NETWORK
+    assert results == [(False, updater.MSG_NETWORK)]
+    assert win.btn_retry.isVisible() and win.btn_website.isVisible()
     assert ctl._update_installing is False and env.launched == []   # Gusan carries on, nothing was started
     env.fetch_result = None
     win.btn_retry.click()
@@ -1227,7 +1230,7 @@ def test_saying_no_to_windows_permission_keeps_gusan_open_and_fully_working(ctl,
     win = ctl._update_window
     assert _wait(lambda: win.stage == "failed")
     assert env.launched[0]["all_users"] is True and env.launched[0]["relaunch"] is False
-    assert updater.MSG_NO_PERMISSION in win.lbl_status.accessibleName()
+    assert updater.MSG_NO_PERMISSION in win.lbl_detail.accessibleName()
     assert results == [(False, updater.MSG_NO_PERMISSION)]
     assert env.watchers == [] and env.quits == []                   # no watcher, no quit
     assert ctl._update_closing is False and ctl._update_installing is False
@@ -1240,30 +1243,16 @@ def test_a_job_that_starts_during_the_download_is_waited_for_then_the_install_go
     env.hold = threading.Event()
     assert ctl.install_update("v99.0.0") is True
     win = ctl._update_window
-    assert _wait(lambda: win.lbl_detail.accessibleName() == "50 of 100 MB")
+    assert _wait(lambda: win.lbl_amount.accessibleName() == "50 / 100 MB")
     ctl._file_job_running = True                                    # a file starts converting meanwhile
     env.hold.set()
     assert _wait(lambda: win.stage == "waiting")
-    assert "when your recording or file is done" in win.lbl_status.accessibleName()
+    assert "when your recording or file is done" in win.lbl_detail.accessibleName()
     _spin(300)
     assert env.launched == [] and ctl._update_closing is False
     ctl._file_job_running = False
     assert _wait(lambda: len(env.launched) == 1, 6000)              # picked up by the 2 s poll
     assert win.stage == "installing"
-
-
-def test_the_update_window_never_keeps_gusan_from_quitting(ctl, update_env):
-    assert ctl.install_update("v99.0.0") is True
-    win = ctl._update_window
-    assert _wait(lambda: win.stage == "installing")
-    win.close()
-    assert win.isVisible()                                          # Esc / X while installing do nothing...
-    ctl._quitting = True
-    try:
-        win.close()
-        assert not win.isVisible()                                  # ...but never veto the quit
-    finally:
-        ctl._quitting = False
 
 
 def test_quitting_to_update_puts_every_window_and_the_tray_icon_away_before_setup_starts(ctl, update_env, monkeypatch):

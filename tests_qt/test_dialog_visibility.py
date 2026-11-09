@@ -1112,9 +1112,9 @@ def test_the_palette_is_complete_and_the_style_is_fusion(qapp, scheme):
     assert contrast(pal.color(QPalette.Active, QPalette.WindowText), pal.color(QPalette.Window)) >= 12
 
 
-# ═══════════════════════════ the update window (ui/update_window.py) ═══════════════════════════
-def _update_window_stages(w):
-    """(name, go) for every stage the controller puts the update window in."""
+# ═══════════════════ the update, in Settings > Updates & about (ui/update_panel.py) ═══════════════════
+def _update_stages(w):
+    """(name, go) for every stage the controller puts the update panel in."""
     mb = 2 ** 20
     long_log = "Details: C:/Users/Someone/AppData/Local/Temp/gusan-update/logs/gusan-update-0a1b2c3d.log"
     return (("downloading", lambda: w.show_downloading()),
@@ -1129,46 +1129,59 @@ def _update_window_stages(w):
             ("failed with the log", lambda: w.show_failed("The installer stopped before it finished.", long_log)))
 
 
-def test_the_update_window_is_readable_in_every_stage(qapp, scheme, made):
-    from ui.update_window import UpdateWindow
-    w = UpdateWindow("v2.0.2")
-    made.append(w)
-    for name, go in _update_window_stages(w):
+def _updates_page(made):
+    from ui.shell import MainWindow
+    win = MainWindow(make_stub_app("free"))
+    win.resize(1280, 820)
+    made.append(win)
+    page = win.open("settings", section="updates")
+    page.ensure_built()
+    page.update_panel.set_tag("v2.0.2")
+    return win, page
+
+
+def test_the_update_row_is_readable_in_every_stage(qapp, scheme, made):
+    win, page = _updates_page(made)
+    _show(win)
+    for name, go in _update_stages(page.update_panel):
         go()
-        rows = readable(w, "the update window (%s)" % name, minimum=4)
-        names = " ".join(n for n, *_ in rows)
-        assert "Updating Gusan" in names, name
+        rows = readable(page.version_row, "the update row (%s)" % name, minimum=3)
+        assert rows, name
 
 
-def test_the_update_window_looks_the_same_on_a_dark_windows(qapp):
+def test_the_update_row_looks_the_same_on_a_dark_windows(qapp):
     from ui import theme
-    from ui.update_window import UpdateWindow
+    made = []
 
     def pictures():
-        w = UpdateWindow("v2.0.2")
+        win, page = _updates_page(made)
+        _show(win)
+        panel = page.update_panel
         out = {}
-        for name, go in _update_window_stages(w):
+        for name, go in _update_stages(panel):
             go()
-            _show(w)
-            if w.bar.maximum() == 0:
+            _show(win)
+            if panel.bar.maximum() == 0:
                 # A busy bar is animated: two grabs (the light one and the dark one) are taken at different
-                # moments and differ by where its chunk is - on a loaded computer that failed this test at
-                # random. The test is about colours, so the bar holds still.
-                w.bar.setRange(0, 100)
-                w.bar.setValue(50)
-            out[name] = w.grab().toImage()
-        w.close()
-        w.deleteLater()
+                # moments and differ by where its chunk is. The test is about colours, so the bar holds still.
+                panel.bar.setRange(0, 100)
+                panel.bar.setValue(50)
+            out[name] = page.version_row.grab().toImage()
+        win.close()
         return out
 
-    qapp.setPalette(os_light_palette())
-    theme.install_light_scheme(qapp)
-    light = pictures()
-    qapp.setPalette(os_dark_palette())
-    theme.install_light_scheme(qapp)
-    dark = pictures()
-    qapp.setPalette(os_light_palette())
-    theme.install_light_scheme(qapp)
+    try:
+        qapp.setPalette(os_light_palette())
+        theme.install_light_scheme(qapp)
+        light = pictures()
+        qapp.setPalette(os_dark_palette())
+        theme.install_light_scheme(qapp)
+        dark = pictures()
+    finally:
+        qapp.setPalette(os_light_palette())
+        theme.install_light_scheme(qapp)
+        for w in made:
+            w.deleteLater()
     assert set(light) == set(dark)
     for key in light:
         assert light[key].size() == dark[key].size(), key

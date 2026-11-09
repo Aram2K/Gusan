@@ -61,8 +61,8 @@ Integration notes for Wave 4
    focus="gpu"). "Remove" (ready, Gusan's own download only: app.gpu_removable())
    calls app.remove_gpu_download(); the card follows the re-probe.
 3. Updates: "Install update" calls app.install_update(tag, on_done=...) when the
-   controller has it: it opens the update window (download progress, Cancel,
-   "Installing", Try again; ui/update_window.py), installs quietly and quits;
+   controller has it: the update shows in this row (``update_panel``,
+   ui/update_panel.py: progress, Cancel, "Installing", Try again), installs quietly and quits;
    it calls on_done(ok, info) only when it did NOT install ("" = a Cancel or the
    browser took over), so the row can say why. Without it the page runs
    updater.install itself and emits app.sig_quit. unsaved_edits() lets the
@@ -2921,6 +2921,13 @@ class SettingsPage(QWidget):
         self.update_button = Button("Check now", "secondary", "s", icon="refresh", parent=ver)
         self.update_button.clicked.connect(lambda _=False: self._update_clicked())
         vl.addWidget(self.update_button, 0, Qt.AlignVCenter)
+        # The in-app update shows right here (ui/update_panel.py): its stage on the status line, a progress
+        # bar under it and its own buttons in the button's place - never a window of its own.
+        from ui.update_panel import UpdatePanel
+        self.update_panel = UpdatePanel(status_label=self.update_status, dot=self.update_dot,
+                                        row_button=self.update_button, on_idle=self._update_panel_idle, parent=ver)
+        vcol.addWidget(self.update_panel)
+        vl.addWidget(self.update_panel.actions, 0, Qt.AlignVCenter)
         self.version_row = ver
         rows.append(ver)
         self.t_install = self._toggle("install_updates_on_quit", "Install updates when I quit", True)
@@ -2988,8 +2995,22 @@ class SettingsPage(QWidget):
             return updater.AVAILABLE, pending
         return updater.LATEST, ""
 
+    def _update_panel_idle(self):
+        """The update panel gave the row back (a Cancel): its own status again - an update that was being
+        installed is available again."""
+        status, tag = self._update or (updater.LATEST, "")
+        if status == "installing":
+            status = updater.AVAILABLE
+        self._show_update(status, tag)
+
+    def _panel_active(self):
+        panel = getattr(self, "update_panel", None)
+        return panel is not None and panel.active()
+
     def _show_update(self, status, tag=""):
         self._update = (status, tag)
+        if self._panel_active():
+            return              # the update panel speaks on the row; this comes back when it is done
         _title, text = updater.status_line(status, tag)
         self.update_status.setText(text or "")
         color = {updater.LATEST: ("ok", "ok-tx"), updater.AVAILABLE: ("blue", "blue-tx"),
@@ -3056,8 +3077,11 @@ class SettingsPage(QWidget):
 
     def _install_failed(self, tag, info):
         """app.install_update didn't install (it tracked it; on macOS it
-        opened the release page)."""
+        opened the release page). While the update panel shows the failure
+        itself, the row keeps it."""
         self._show_update(updater.AVAILABLE, tag)
+        if self._panel_active():
+            return
         if info and info != updater.UNSUPPORTED:
             self.update_status.setText(info)
             tint(self.update_status, "red-tx")

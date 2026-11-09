@@ -183,12 +183,17 @@ def test_the_meetings_live_and_notes_views(quiet, meetings_root):
     assert_no_old_name("Meetings notes view", visible_strings(page))
 
 
-def test_the_update_window_in_every_stage(quiet):
-    """The in-app update window (ui/update_window.py): its title, every stage's words and buttons."""
-    from ui.update_window import UpdateWindow
-    w = UpdateWindow("v2.0.2")
-    quiet.append(w)
-    w.show()
+def test_the_update_row_in_every_stage(quiet):
+    """The in-app update in Settings > Updates & about (ui/update_panel.py): every stage's words and buttons."""
+    from tests_qt.conftest import make_stub_app
+    from ui.shell import MainWindow
+    win = MainWindow(make_stub_app("free"))
+    quiet.append(win)
+    win.show()
+    page = win.open("settings", section="updates")
+    page.ensure_built()
+    w = page.update_panel
+    w.set_tag("v2.0.2")
     mb = 2 ** 20
     seen = set()
     for name, go in (("downloading", lambda: w.show_downloading()),
@@ -202,11 +207,11 @@ def test_the_update_window_in_every_stage(quiet):
                      ("failed", lambda: w.show_failed("Couldn't download the update.", "Details: C:\\x.log"))):
         go()
         QApplication.processEvents()
-        strings = visible_strings(w)
-        assert len(strings) > 3, name
-        assert_no_old_name("the update window (%s)" % name, strings)
+        strings = visible_strings(page.version_row)
+        assert len(strings) > 2, name
+        assert_no_old_name("the update row (%s)" % name, strings)
         seen.update(strings)
-    assert "Updating Gusan" in seen and "Try again" in seen
+    assert "Downloading 2.0.2" in seen and "Try again" in seen
 
 
 # ── the welcome, the sign-in sheet, the Pro window ───────────────────────────

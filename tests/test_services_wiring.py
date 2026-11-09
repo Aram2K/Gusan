@@ -408,6 +408,9 @@ class TestInstallUpdate(unittest.TestCase):
         app.flush_config_save = lambda: setattr(app, "flushed", app.flushed + 1)
         app.quit_app = lambda: None
         app._bring_to_front = lambda w, activate=True: None
+        app._update_panel_host = lambda: None              # no Settings page here: an unseen panel
+        app._front_update = lambda activate=True: None
+        app._update_seen = lambda w: True
         app._is_newer = main.AppController._is_newer
         bind(app, *_UPDATE_METHODS)
         return app
@@ -416,8 +419,8 @@ class TestInstallUpdate(unittest.TestCase):
         """install_update with the download answering ``fetched`` ((ok, path or message))."""
         import types
         timers, window = [], mock.MagicMock()
-        module = types.ModuleType("ui.update_window")
-        module.UpdateWindow = mock.MagicMock(return_value=window)
+        module = types.ModuleType("ui.update_panel")
+        module.UpdatePanel = mock.MagicMock(return_value=window)
         with mock.patch.object(main, "APP_VERSION", "2.0.0"), \
                 mock.patch.object(main.sys, "platform", "win32"), \
                 mock.patch.object(main.threading, "Thread", _Inline), \
@@ -429,7 +432,7 @@ class TestInstallUpdate(unittest.TestCase):
                 mock.patch.object(main.updater, "new_log_path", return_value="C:/t/u.log"), \
                 mock.patch.object(main, "QTimer", SimpleNamespace(
                     singleShot=lambda ms, fn: timers.append(fn))), \
-                mock.patch.dict(sys.modules, {"ui.update_window": module}), \
+                mock.patch.dict(sys.modules, {"ui.update_panel": module}), \
                 mock.patch.object(main.webbrowser, "open") as browser:
             app.install_update("v2.0.1", **kw)
         return timers, browser, window, launch

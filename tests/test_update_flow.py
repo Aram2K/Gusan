@@ -1,8 +1,8 @@
 """The in-app update, end to end, without Qt or a network: main.AppController.install_update drives the
-"Updating Gusan" window (ui/update_window.py) from the first click to the restart.
+update shown in Settings > Updates & about (ui/update_panel.py) from the first click to the restart.
 
 What is checked here (the pieces are in tests/test_updater.py, the window itself in
-tests_qt/test_update_window.py):
+tests_qt/test_update_panel.py):
  * progress -> checking -> installing -> the installer is started (quietly, for exactly this copy) ->
    Gusan quits through quit_app after 1.5 s; per-user Setup reopens Gusan itself, a watcher reopens it
    in every other case; an all-users install asks Windows for permission first and a No keeps Gusan open;
@@ -79,7 +79,8 @@ class _Signal:
 
 
 class _Window:
-    """ui.update_window.UpdateWindow as the controller sees it: it records every call."""
+    """ui.update_panel.UpdatePanel (Settings > Updates & about) as the controller sees it: it records every
+    call. "front" = the Gusan window opened on it (they asked); "front_quiet" = nothing popped up."""
 
     def __init__(self, tag="", main_app=None, parent=None):
         self.tag, self.app, self.calls, self.stage, self.visible = tag, main_app, [], "downloading", False
@@ -152,8 +153,8 @@ class Harness(unittest.TestCase):
         package = types.ModuleType("ui.components")
         package.__path__ = []
         package.mini_prompt = prompt
-        window_module = types.ModuleType("ui.update_window")
-        window_module.UpdateWindow = _Window
+        window_module = types.ModuleType("ui.update_panel")
+        window_module.UpdatePanel = _Window
         self.save_config = MagicMock()
 
         def worker(target=None, args=(), kwargs=None, daemon=None, name=None):
@@ -186,7 +187,7 @@ class Harness(unittest.TestCase):
             mock.patch.object(updater, "setup_running", lambda: self.setup_alive),
             mock.patch.object(updater, "prune_cache", self.prune),
             mock.patch.object(updater, "prune_logs", self.prune),
-            mock.patch.dict(sys.modules, {"ui.update_window": window_module, "ui.components": package,
+            mock.patch.dict(sys.modules, {"ui.update_panel": window_module, "ui.components": package,
                                           "ui.components.mini_prompt": prompt}),
         )
         for p in patches:
@@ -226,6 +227,10 @@ class Harness(unittest.TestCase):
         app.schedule_config_save = lambda: setattr(app, "saves", app.saves + 1)
         app.quit_app = MagicMock()
         app._bring_to_front = lambda w, activate=True: w.front(activate)
+        app._update_panel_host = lambda: None               # the unseen panel (the fake above) stands in
+        app._front_update = lambda activate=True: app._update_window.front(activate)
+        app._update_seen = lambda w: w.visible
+        app.show_settings = lambda section=None, **k: app.hints.append(("settings", section, None))
         app._is_newer = main.AppController._is_newer
         app._is_meeting_busy = lambda: bool(app.meeting_session.is_busy)
         bind(app, *METHODS)
@@ -483,10 +488,11 @@ class TestTheWindowNeverTakesTheKeyboard(Harness):
         self.assertEqual(self.window.stage, "installing")
         self.assertEqual(self.window.calls[-1], ("front_quiet", (), {}))
 
-    def test_a_stopped_install_found_after_a_restart_only_comes_on_top(self):
+    def test_a_stopped_install_found_after_a_restart_opens_nothing_by_itself(self):
         app = TestAfterRestart._start(self, TestAfterRestart._attempt(self), log_text="Log closed.\n")
         TestAfterRestart.run_all_timers(self)
-        self.assertEqual(app._update_window.calls[-1], ("front_quiet", (), {}))
+        self.assertIsNone(app._update_window)                                  # a notice, nothing pops up
+        self.assertEqual(app.hints[0][0], "Gusan didn't update")
 
     def test_a_stopped_install_found_while_they_dictate_is_a_notice_not_a_window(self):
         app = TestAfterRestart._start(self, TestAfterRestart._attempt(self), log_text="Log closed.\n", is_rec=True)
@@ -1220,21 +1226,19 @@ class TestAfterRestart(Harness):
         self.assertEqual([ms for ms, _fn in self.timers], [3000])
         self.assertEqual(app.cfg["update_attempt"] == {}, False)       # kept until it is said
         self.run_all_timers()
-        win = app._update_window
-        message, detail = win.last("show_failed")[1][0], win.last("show_failed")[2]["detail"]
-        self.assertEqual(message, "The installer stopped before it finished.")
-        self.assertEqual(detail, "Details: " + self._attempt()["log"])
-        self.assertEqual(win.tag, "v2.0.1")                           # Try again = that version
-        self.assertEqual(app._update_tag, "v2.0.1")
-        self.assertEqual(win.calls[-1], ("front_quiet", (), {}))       # it comes by itself: never takes the keyboard
+        # One notice, whose click tries that version again; nothing opens by itself after a restart.
+        self.assertIsNone(app._update_window)
+        title, text, on_click = app.hints[0]
+        self.assertEqual((title, text), ("Gusan didn't update",
+                                         "The update to v2.0.1 stopped before it finished. Click to try again."))
+        self.assertTrue(callable(on_click))
         self.assertEqual(app.cfg["update_attempt"], {})               # said once
         self.assertFalse(app._update_failed_notice)
 
     def test_no_log_at_all_means_it_never_started_which_is_a_stopped_install(self):
         app = self._start(self._attempt())                            # no log file
         self.run_all_timers()
-        win = app._update_window
-        self.assertEqual(win.last("show_failed")[2]["detail"], "")    # nothing to point at
+        self.assertEqual(app.hints[0][0], "Gusan didn't update")
 
     def test_a_setup_that_still_runs_says_nothing_and_keeps_the_record(self):
         self.setup_alive = True
@@ -1251,7 +1255,7 @@ class TestAfterRestart(Harness):
         app = self._start(self._attempt(), log_text="Setup started\nExtracting files\n")
         self.assertTrue(app._update_failed_notice)
         self.run_all_timers()
-        self.assertEqual(app._update_window.last("show_failed")[1][0], "The installer stopped before it finished.")
+        self.assertEqual(app.hints[0][0], "Gusan didn't update")
         self.assertEqual(app.cfg["update_attempt"], {})
 
     def test_when_nobody_can_tell_if_setup_runs_the_log_decides_by_its_age(self):
@@ -1325,11 +1329,11 @@ class TestAfterRestart(Harness):
         app = self._start("not a dict")
         self.assertEqual(self.timers, [])
 
-    def test_the_failed_window_offers_try_again_which_installs_again(self):
+    def test_the_notice_click_tries_again_which_installs_again(self):
         app = self._start(self._attempt(), log_text="Log closed.\n")
         self.run_all_timers()
         with mock.patch.object(main, "APP_VERSION", OLD):
-            app._update_window.retry_requested.emit()
+            app.hints[0][2]()                                          # the notice's click
         self.assertEqual(len(self.fetches), 1)
         self.launch.assert_called_once()
         self.assertEqual(app.cfg["update_attempt"], {"to": "v2.0.1", "log": LOG, "from": OLD})

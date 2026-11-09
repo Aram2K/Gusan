@@ -68,9 +68,10 @@ has one yet).
   current/dismissed instead of reading main's module cfg); test_updater
   checks they agree, so main can import them later.
 
-The update window (main.AppController.install_update + ui/update_window.py)
----------------------------------------------------------------------------
-Install update shows a window from start to finish instead of a silent ~100 MB download that
+The update in Settings (main.AppController.install_update + ui/update_panel.py)
+-------------------------------------------------------------------------------
+Install update shows in Settings > Updates & about, in the version row, from start to finish (never
+a window of its own) instead of a silent ~100 MB download that
 ends with the app vanishing and a wizard: progress with Cancel (download(on_progress,
 should_cancel) -> CANCELLED), the checksum check, "Installing" with Gusan reopening by itself,
 or what went wrong with Try again / the download page.
