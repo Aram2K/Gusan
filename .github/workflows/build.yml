@@ -319,7 +319,17 @@ jobs:
           if (-not (Test-Path $iscc)) {
             $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           }
-          & $iscc /DMyAppVersion="${{ steps.version.outputs.version }}" installer\installer.iss
+          # The compiler's own words go into a public annotation when it fails (job logs are not public: the
+          # 2.1.3 build failed with no reason anyone could read).
+          $out = & $iscc /DMyAppVersion="${{ steps.version.outputs.version }}" installer\installer.iss 2>&1
+          $code = $LASTEXITCODE
+          $out | Write-Output
+          if ($code -ne 0) {
+            $out | Select-String -Pattern 'Error|Unknown|Line \d+' | Select-Object -First 8 | ForEach-Object {
+              Write-Output ("::error title=Inno Setup::" + ($_.Line -replace '[\r\n]', ' '))
+            }
+            exit $code
+          }
           Move-Item installer\TranscribeApp-Setup.exe TranscribeApp-Windows-Setup.exe
           # Same bytes under the Gusan download name. The Inno output stays
           # TranscribeApp-Setup so AppId and the installed exe are unchanged.

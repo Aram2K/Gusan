@@ -592,6 +592,7 @@ class TestUpdateTaskbarIcon(unittest.TestCase):
         self.assertIn("Icon := ExtractIconW(0, ExpandConstant('{srcexe}'), 0);", iss)
         self.assertIn("SendMessageW(Wnd, $0080, 1, Icon);", iss)
         init = iss.split("procedure InitializeWizard;", 1)[1].split("end;", 1)[0]
-        for line in ("SetGusanIcon(WizardForm.Handle);", "SetGusanIcon(GetWindowLongW(WizardForm.Handle, -8));",
-                     "SetGusanIcon(MainForm.Handle);"):
+        for line in ("SetGusanIcon(WizardForm.Handle);", "SetGusanIcon(GetWindowLongW(WizardForm.Handle, -8));"):
             self.assertIn(line, init)
+        # Inno Setup 6 has no MainForm in its scripts (an Inno 5 object): naming it stops the compile (2.1.3)
+        self.assertNotIn("MainForm.", iss)

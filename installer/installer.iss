@@ -562,7 +562,6 @@ begin
   // in a silent update too (InitializeWizard runs then as well).
   SetGusanIcon(WizardForm.Handle);
   SetGusanIcon(GetWindowLongW(WizardForm.Handle, -8));
-  SetGusanIcon(MainForm.Handle);
   AnalyticsPage := CreateInputOptionPage(
     wpSelectTasks,
     'Privacy',
