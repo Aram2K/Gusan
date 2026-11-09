@@ -1148,11 +1148,12 @@ Deno.serve(async (req) => {
   // No web results attached: never "I can't browse the web" (the founder's Live Assistant said it, 2026-11-09).
   // Search on: none were needed or found. Search off (Live Assistant, Smart Actions): say it can be turned on.
   const searchOn = body.web_search === true;
+  const searchOff = body.web_search === false;          // said by 2.1.3+; an older app sends nothing (no note)
   const note = sources.length ? ""
     : searchOn && (body.mode === "smart_auto" || body.mode === "live_assist" || body.mode === "meeting_chat")
     ? "Web search is available for these requests. No web results are attached to this one (none were " +
       "needed or none were found): answer from what you know, and never say you cannot search the web or browse."
-    : !searchOn && (body.mode === "smart_auto" || body.mode === "live_assist")
+    : searchOff && (body.mode === "smart_auto" || body.mode === "live_assist")
     ? "Web search is turned off in Gusan for these answers. Answer from what you know and what was said. Never " +
       "say you cannot browse the web; when the answer needs current outside facts, say in a few words that web " +
       "search is off and can be turned on in Gusan (Search the web)."

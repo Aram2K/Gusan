@@ -754,9 +754,12 @@ def run_managed_action(text, mode, token, source_lang="auto", target_lang="en",
     def _post(msgs):
         body = {"messages": msgs, "max_tokens": _max_tokens_for(mode, text), "mode": server_mode(mode)}
         body.update(_managed_extra(session_id, note_ref, prefer))
-        if web_search and not (config or {}).get("privacy_mode") and mode in WEB_SEARCH_MODES:
-            body["web_search"] = True
-            if isinstance(web_query, str) and web_query.strip():
+        if mode in WEB_SEARCH_MODES:
+            # Off is said too (False): the server then never answers "I can't browse the web" - it says web
+            # search can be turned on in Gusan. (An older app sends nothing: its requests stay as they were.)
+            on = bool(web_search) and not (config or {}).get("privacy_mode")
+            body["web_search"] = on
+            if on and isinstance(web_query, str) and web_query.strip():
                 body["web_query"] = web_query.strip()[:400]
         return requests.post(
             SMART_ACTION_URL,
@@ -840,9 +843,12 @@ def run_managed_action_stream(text, mode, token, on_token, source_lang="auto",
         body = {"messages": msgs, "max_tokens": _max_tokens_for(mode, text),
                 "mode": server_mode(mode), "stream": True}
         body.update(_managed_extra(session_id, note_ref, prefer))
-        if web_search and not (config or {}).get("privacy_mode") and mode in WEB_SEARCH_MODES:
-            body["web_search"] = True
-            if isinstance(web_query, str) and web_query.strip():
+        if mode in WEB_SEARCH_MODES:
+            # Off is said too (False): the server then never answers "I can't browse the web" - it says web
+            # search can be turned on in Gusan. (An older app sends nothing: its requests stay as they were.)
+            on = bool(web_search) and not (config or {}).get("privacy_mode")
+            body["web_search"] = on
+            if on and isinstance(web_query, str) and web_query.strip():
                 body["web_query"] = web_query.strip()[:400]
         return requests.post(
             SMART_ACTION_URL,

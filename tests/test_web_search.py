@@ -39,7 +39,9 @@ def test_managed_opt_in(stream, enabled, privacy, mode, expected):
         body = post.call_args.kwargs["json"]
         assert (body.get("web_search") is True) == expected
         if not expected:
-            assert "web_search" not in body
+            # Off is said (False) where search could run, so the answer never claims it cannot browse
+            assert body.get("web_search") in (False, None)
+            assert body.get("web_search") is False or mode not in action_api.WEB_SEARCH_MODES
             assert "web_query" not in body
         else:
             assert body["web_query"] == "latest news?"
@@ -479,7 +481,7 @@ def test_a_smart_action_without_the_setting_never_asks_to_search():
     with patch.object(action_api.requests, "post", return_value=resp) as post:
         actions.process("look up the euro dollar rate", actions.ACTION_SMART_AUTO, model=actions.API_MANAGED_ID,
                         config={"_managed_token": "tok"})
-    assert "web_search" not in post.call_args.kwargs["json"]
+    assert post.call_args.kwargs["json"]["web_search"] is False          # off, said: never "I can't browse"
 
 
 def test_the_pill_says_searching_the_web_and_counts_the_sources():
@@ -619,6 +621,7 @@ def test_without_web_results_the_answer_never_says_it_cannot_browse():
     turned on in Gusan."""
     source = SERVER.read_text(encoding="utf-8")
     assert 'searchOn && (body.mode === "smart_auto" || body.mode === "live_assist" || body.mode === "meeting_chat")' in source
-    assert '!searchOn && (body.mode === "smart_auto" || body.mode === "live_assist")' in source
+    assert 'searchOff && (body.mode === "smart_auto" || body.mode === "live_assist")' in source
+    assert "const searchOff = body.web_search === false;" in source      # an older app (no field): unchanged
     assert "Web search is turned off in Gusan for these answers." in source
     assert "can be turned on in Gusan (Search the web)" in source
