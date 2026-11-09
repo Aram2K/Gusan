@@ -14,7 +14,7 @@ from tests.test_interpreter_controller import FakeAudio, make as make_interprete
 
 
 class FakeProc:
-    def __init__(self, out=b"", code=None, err=b""):
+    def __init__(self, out=b"", code=None, err=b"gusan-tap: started: 48000.0 Hz, 2 ch\n"):
         self.stdout = io.BytesIO(out)
         self.stderr = io.BytesIO(err)
         self.stdin = mock.Mock()
@@ -58,33 +58,60 @@ def test_tap_hands_out_20ms_chunks_and_leaves_gusan_out():
     assert proc.terminated
 
 
-@pytest.mark.parametrize("code,err", [(3, "no_call_sound"), (2, "mac_too_old"), (9, "no_call_sound")])
-def test_a_refused_tap_raises_a_calm_code(code, err):
-    tap, _got = tap_with(FakeProc(code=code, err=b"the tap was refused"))
-    with pytest.raises(InterpreterError) as e:
-        tap.start()
-    assert e.value.code == err
-
-
-class SilentProc(FakeProc):
-    """A helper that runs but never writes (its output device isn't playing)."""
+class IdleProc(FakeProc):
+    """Started, but nothing plays: macOS runs no tap callback, so no bytes come."""
 
     def __init__(self):
         super().__init__()
-        self.stdout = mock.Mock()
         self._gate = threading.Event()
+        self.stdout = mock.Mock()
         self.stdout.read = lambda _n: self._gate.wait(5) and b""
-
-    def poll(self):
-        return -15 if self.terminated else None
 
     def terminate(self):
         self.terminated = True
         self._gate.set()
 
 
-def test_a_silent_helper_never_freezes_the_start():
-    proc = SilentProc()
+def test_silence_keeps_the_timeline_going_while_nothing_plays():
+    proc = IdleProc()
+    tap, got = tap_with(proc)
+    tap.start()
+    time.sleep(0.5)
+    tap.stop()
+    total = sum(len(c) for c in got)
+    assert not any(any(c) for c in got)
+    assert 0.3 * 32000 <= total <= 0.6 * 32000          # ~0.5 s of 16 kHz int16
+    assert all(len(c) % 640 == 0 for c in got)
+
+
+@pytest.mark.parametrize("code,err", [(3, "no_call_sound"), (2, "mac_too_old"), (9, "no_call_sound")])
+def test_a_refused_tap_raises_a_calm_code(code, err):
+    tap, _got = tap_with(FakeProc(code=code, err=b"gusan-tap: the tap was refused\n"))
+    with pytest.raises(InterpreterError) as e:
+        tap.start()
+    assert e.value.code == err
+    assert str(e.value) == mac_audio.MESSAGES[err]
+
+
+class MuteProc(FakeProc):
+    """A helper that runs but says nothing at all (a stuck device)."""
+
+    def __init__(self):
+        super().__init__()
+        self._gate = threading.Event()
+        self.stderr = mock.Mock()
+        self.stderr.readline = lambda: self._gate.wait(5) and b""
+
+    def poll(self):
+        return 0 if self.terminated else None
+
+    def terminate(self):
+        self.terminated = True
+        self._gate.set()
+
+
+def test_a_mute_helper_never_freezes_the_start():
+    proc = MuteProc()
     tap, _got = tap_with(proc)
     tap.START_S = 0.2
     t0 = time.monotonic()

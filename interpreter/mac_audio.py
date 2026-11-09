@@ -28,7 +28,16 @@ SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mac", "gusan_
 MIN_MACOS = (14, 2)
 CHUNK = 640                       # bytes: 20 ms of 16 kHz mono int16
 # the helper's exit codes (gusan_tap.swift)
-EXIT_CODES = {2: "mac_too_old", 3: "no_call_sound", 4: "device_lost", 5: "start"}
+EXIT_CODES = {2: "mac_too_old", 3: "no_call_sound", 4: "device_lost", 5: "no_call_sound"}
+MESSAGES = {
+    "no_call_sound": "Gusan can't hear the call. Allow System Audio Recording in Settings.",
+    "mac_too_old": "Hearing the call needs macOS 14.2 or later.",
+    "device_lost": "A sound device stopped working. Check your headphones, speakers or microphone.",
+}
+
+
+def error(code):
+    return InterpreterError(code, MESSAGES.get(code, MESSAGES["no_call_sound"]))
 
 
 def macos_version(release=None):
@@ -92,6 +101,7 @@ class TapCapture:
     the helper ends by itself (the output device went away)."""
 
     START_S = 2.0                 # the helper says no within this, or it runs
+    FILL_S = 0.02
 
     def __init__(self, on_pcm, helper, exclude_pids=(), popen=subprocess.Popen):
         self.on_pcm = on_pcm
@@ -104,6 +114,8 @@ class TapCapture:
         self.device_name = "the Mac's sound"
         self.lost = False
         self.first_at = None
+        self._last = 0.0
+        self._hand_lock = threading.Lock()
 
     def start(self):
         args = [self.helper]
@@ -113,29 +125,27 @@ class TapCapture:
         self.lost = False
         self._proc = proc = self._popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE, bufsize=0)
-        first = self._first_chunk(proc)          # the first sound, or nothing when it refused
-        if not first:
-            if proc.poll() is None:              # running but silent: the output device isn't playing
+        said = self._first_line(proc)              # "gusan-tap: started ..." or why not
+        if "started" not in said:
+            if proc.poll() is None:                # no word within START_S: must not freeze the start
                 self._end(proc)
             code = proc.poll()
-            err = (proc.stderr.read() or b"").decode("utf-8", "ignore").strip()
-            logger.warning("interpreter: the call's sound can't be captured (%s) %s", code, err)
+            logger.warning("interpreter: the call's sound can't be captured (%s) %s", code, said.strip())
             self._proc = None
-            raise InterpreterError(EXIT_CODES.get(code, "no_call_sound"))
-        self.first_at = time.monotonic()
-        self._thread = threading.Thread(target=self._pump, args=(proc, first), name="interp-tap",
-                                        daemon=True)
+            raise error(EXIT_CODES.get(code, "no_call_sound"))
+        self._last = self.first_at = time.monotonic()
+        self._thread = threading.Thread(target=self._pump, args=(proc,), name="interp-tap", daemon=True)
         self._thread.start()
+        self._filler = threading.Thread(target=self._fill, name="interp-tap-fill", daemon=True)
+        self._filler.start()
         logger.info("interpreter capture: the Mac's sound (process tap, Gusan left out)")
 
-    def _first_chunk(self, proc):
-        """The helper's first 20 ms, or b"" when it refuses or says nothing within START_S (a device
-        that never runs must not freeze the start)."""
+    def _first_line(self, proc):
         box = []
-        t = threading.Thread(target=lambda: box.append(proc.stdout.read(CHUNK)), daemon=True)
+        t = threading.Thread(target=lambda: box.append(proc.stderr.readline()), daemon=True)
         t.start()
         t.join(self.START_S)
-        return box[0] if box else b""
+        return (box[0] or b"").decode("utf-8", "ignore") if box else ""
 
     @staticmethod
     def _end(proc):
@@ -149,20 +159,34 @@ class TapCapture:
         except Exception:  # noqa: BLE001
             proc.kill()
 
-    def _pump(self, proc, first):
-        chunk = first
-        while chunk:
+    def _hand(self, chunk):
+        with self._hand_lock:
+            self._last = time.monotonic()
             try:
                 self.on_pcm(chunk)
             except Exception:  # noqa: BLE001 - a bad chunk must not stop the capture
                 logger.debug("interpreter capture handler failed", exc_info=True)
+
+    def _pump(self, proc):
+        while True:
             try:
                 chunk = proc.stdout.read(CHUNK)
             except Exception:  # noqa: BLE001
                 chunk = b""
+            if not chunk:
+                break
+            self._hand(chunk)
         if not self._stopping:
             self.lost = True
             logger.warning("interpreter capture lost: the process tap ended (%s)", proc.poll())
+
+    def _fill(self):
+        """macOS runs a tap only while something plays: silence keeps the timeline going meanwhile."""
+        while not self._stopping and not self.lost:
+            time.sleep(self.FILL_S)
+            gap = time.monotonic() - self._last
+            if gap >= 5 * self.FILL_S:
+                self._hand(bytes(int(gap / 0.02) * CHUNK))
 
     def stop(self):
         self._stopping = True
@@ -255,7 +279,7 @@ class MacAudio:
             if loopback:
                 helper = self._helper_path()
                 if not helper:
-                    raise InterpreterError("no_call_sound")
+                    raise error("no_call_sound")
                 return TapCapture(on_pcm, helper, exclude_pids=(os.getpid(),))
             pa = self._ensure()
             idx = device if device is not None else self.mic_index()
