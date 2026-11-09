@@ -244,7 +244,7 @@ class TestSmartActionsSpeechModel(unittest.TestCase):
     KEY = "smart_actions_speech_model"
 
     def test_known_values_are_written_and_never_preload(self):
-        for value in ("small", "cloud", "large-v3-turbo", ""):
+        for value in ("small", "cloud", "cloud:best", "large-v3-turbo", ""):
             app = FakeApp(smart_actions_speech_model="base")
             self.assertTrue(settings_apply.apply(app, {self.KEY: value})[self.KEY], value)
             self.assertEqual(app.cfg[self.KEY], value)
@@ -259,8 +259,20 @@ class TestSmartActionsSpeechModel(unittest.TestCase):
             self.assertEqual(app.cfg[self.KEY], "")
             self.assertEqual(app.saves, 0)
 
+    def test_every_choice_the_list_offers_can_be_saved(self):
+        """2.1.3 and 2.1.4 listed Best accuracy ("cloud:best") but refused it here: it snapped back to Fast."""
+        import engine_choice
+        for value in [r["value"] for r in engine_choice.smart_speech_rows({}, True)]:
+            app = FakeApp(smart_actions_speech_model="base")
+            self.assertTrue(settings_apply.apply(app, {self.KEY: value})[self.KEY], value)
+        for value in [r["value"] for r in engine_choice.live_speech_rows({"google_api_key": "g"}, True, True)]:
+            app = FakeApp(live_assist_speech_model="base", google_api_key="g")
+            self.assertTrue(settings_apply.apply(app, {"live_assist_speech_model": value})["live_assist_speech_model"],
+                            value)
+
     def test_the_cloud_is_refused_in_privacy_mode(self):
         app = FakeApp(privacy_mode=True, smart_actions_speech_model="")
+        self.assertFalse(settings_apply.apply(app, {self.KEY: "cloud:best"})[self.KEY])
         self.assertFalse(settings_apply.apply(app, {self.KEY: "cloud"})[self.KEY])
         self.assertEqual(app.cfg[self.KEY], "")
         self.assertTrue(settings_apply.apply(app, {self.KEY: "small"})[self.KEY])   # on-device is fine

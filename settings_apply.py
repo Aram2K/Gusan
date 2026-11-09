@@ -65,6 +65,7 @@ ASSIST_HOTKEY = "live_assist_hotkey"
 SMART_HOTKEY = "smart_actions_hotkey"   # ui/pages/smart_actions.py HOTKEY_KEY
 SMART_SPEECH = "smart_actions_speech_model"   # engine_choice.SMART_SPEECH_KEY
 SMART_SPEECH_CLOUD = "cloud"                   # engine_choice.SMART_SPEECH_CLOUD
+SMART_SPEECH_CLOUDS = ("cloud", "cloud:best")  # engine_choice.SMART_SPEECH_CLOUD_PROFILES: Fast, Best accuracy
 LIVE_SPEECH = "live_assist_speech_model"       # engine_choice.LIVE_SPEECH_KEY
 FILE_MODEL = "file_model"                      # engine_choice.FILE_KEY
 FILE_AUTO = "auto"                             # engine_choice.FILE_AUTO
@@ -92,12 +93,12 @@ def norm_hotkey(hk):
 
 
 def _smart_speech_ok(value, private):
-    """A smart_actions_speech_model value a page may write: "" (same as
-    Dictation), "cloud" outside Privacy mode, or a known local speech model id (a Whisper model
-    or the Armenian one)."""
+    """A smart_actions_speech_model value a page may write: "" (like Dictation), Gusan Cloud's "cloud" (Fast) or
+    "cloud:best" (Best accuracy) outside Privacy mode, or a known local speech model id (a Whisper model or the
+    Armenian one). (2.1.3 and 2.1.4 refused "cloud:best" here: Best accuracy snapped back to Fast.)"""
     if value == "":
         return True
-    if value == SMART_SPEECH_CLOUD:
+    if value in SMART_SPEECH_CLOUDS:
         return not private
     import hardware
     return hardware.is_speech_id(value)
