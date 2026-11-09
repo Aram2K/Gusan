@@ -47,7 +47,7 @@ Integration notes for Wave 4
   ``app.sig_history_changed`` when it exists (see ui/pages/home.py). Meeting
   entries (backend "meeting" / audio_dir) are left out - they live on Meetings.
 * Routes this page opens: settings with section="speech" ("Change" on the
-  Runs on line and the rail's "More options"); the Settings page's on_open
+  Runs on line and the rail's "Speech & AI settings" link); the Settings page's on_open
   already reads it (the speech model lives there). The Mixed-languages picks
   are this rail's own "Languages you mix" row.
 * Narrow windows (under ~1116 px): the settings rail moves into the page,
@@ -802,10 +802,12 @@ class DictationPage(QWidget):
         chev = QLabel()
         chev.setPixmap(icons.pixmap("chev_r", 14, "blue-tx", sw=2))
         chev.setContentsMargins(4, 0, 0, 0)
-        more = Button("More options", "link", "s", trail=chev)
+        # It goes to Settings, so it says where (the founder, 2026-11-09: "More options" is for a link that opens
+        # more here, like the Live Assistant's) - the same words as Smart Actions' link.
+        more = Button("Speech & AI settings", "link", "s", trail=chev)
         more.setFont(theme.font(13, 600))
         more.setFixedHeight(22)
-        more.setAccessibleName("More dictation options")
+        more.setAccessibleName("Open Speech & AI settings")
         more.clicked.connect(lambda: H.go(self, self.app, "settings", section="speech"))
         self.more_options = rail.set_foot(more)
         return rail

@@ -18,7 +18,7 @@ Signals: navigate(route), upgrade() (Free), sign_in() (guest), account().
 """
 
 from PySide6.QtCore import QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QLinearGradient, QPainter
+from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
                                QVBoxLayout, QWidget)
 
@@ -40,8 +40,9 @@ NAV = (
 
 
 class Avatar(QWidget):
-    """Round avatar: the name's first letter on the blue gradient. A guest
-    (``guest=True``) gets a neutral person icon instead - never a letter."""
+    """Round avatar: the person's choice (ui/components/avatars.py: the name's first letter on a colour, a preset
+    picture or their own photo; Gusan blue with the letter by default). A guest (``guest=True``) gets a neutral
+    person icon instead - never a letter."""
 
     def __init__(self, name="", size=30, parent=None, guest=False):
         super().__init__(parent)
@@ -50,6 +51,8 @@ class Avatar(QWidget):
         self._letter = (name or "?").strip()[:1].upper() or "?"
         self.setFixedSize(self._size, self._size)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        from ui.components import avatars
+        avatars.register(self)                  # a new choice repaints it
 
     def set_name(self, name, guest=None):
         if guest is not None:
@@ -68,30 +71,10 @@ class Avatar(QWidget):
         return QSize(self._size, self._size)
 
     def paintEvent(self, _e):
+        from ui.components import avatars
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
-        r = QRectF(0, 0, self._size, self._size)
-        if self._guest:
-            g = QLinearGradient(r.topLeft(), r.bottomRight())
-            g.setColorAt(0, QColor("#e8eef6"))
-            g.setColorAt(1, QColor("#cbd5e1"))
-            p.setPen(Qt.NoPen)
-            p.setBrush(g)
-            p.drawEllipse(r)
-            isz = int(round(self._size * 0.58))
-            off = int(round((self._size - isz) / 2.0))
-            p.drawPixmap(off, off, icons.pixmap("user", isz, "#475569", sw=1.9))
-            p.end()
-            return
-        g = QLinearGradient(r.topLeft(), r.bottomRight())     # 135deg
-        g.setColorAt(0, QColor("#60a5fa"))
-        g.setColorAt(1, QColor("#2563eb"))
-        p.setPen(Qt.NoPen)
-        p.setBrush(g)
-        p.drawEllipse(r)
-        p.setPen(QColor("#ffffff"))
-        p.setFont(theme.font(int(self._size * 0.43), 700))
-        p.drawText(r, Qt.AlignCenter, self._letter)
+        # (avatars.paint draws half a pixel inside: the circle's edge was cut at the top and left at 125 percent)
+        avatars.paint(p, QRectF(0, 0, self._size, self._size), self._letter, guest=self._guest)
         p.end()
 
 

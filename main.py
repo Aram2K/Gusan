@@ -186,6 +186,7 @@ DEFAULT = {
     "max_speech_sec": 25.0,
     "privacy_mode": False,
     "save_history": True,
+    "avatar": "",                       # ui/components/avatars.py: "" (Gusan blue + the letter), a preset, "photo"
     "analytics_enabled": True,
     "analytics_consent_applied": False,
     "analytics_endpoint": "https://hftcelxzfoubheqeoool.supabase.co/functions/v1/transcribe-analytics",

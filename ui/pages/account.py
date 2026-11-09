@@ -283,7 +283,14 @@ class AccountPage(QWidget):
         card.setAccessibleName("Account: %s" % name)
         top = QHBoxLayout()
         top.setSpacing(12)
-        self.avatar = Avatar(name, 44, card, guest=not signed)      # a guest: the person icon, never a letter
+        self.avatar_picker = None
+        if signed:
+            # Signed in: a pencil over the avatar on hover; a click opens the choices under it (avatar_picker.py).
+            from ui.components.avatar_picker import AvatarButton
+            self.avatar = AvatarButton(name, 44, card)
+            self.avatar.clicked.connect(self._toggle_avatar_picker)
+        else:
+            self.avatar = Avatar(name, 44, card, guest=True)        # a guest: the person icon, never a letter
         top.addWidget(self.avatar, 0, Qt.AlignVCenter)
         col = QVBoxLayout()
         col.setSpacing(0)
@@ -301,6 +308,14 @@ class AccountPage(QWidget):
         col.addWidget(self.email_label)
         top.addLayout(col, 1)
         card.add(top)
+        if signed:
+            from ui.components.avatar_picker import AvatarPicker
+            self.avatar_picker = AvatarPicker(name, card)
+            self.avatar_picker.chosen.connect(self._choose_avatar)
+            self.avatar_picker.upload_requested.connect(self._upload_avatar)
+            self.avatar_picker.done.connect(lambda: self._toggle_avatar_picker(False))
+            self.avatar_picker.setVisible(bool(getattr(self, "_avatar_open", False)))
+            card.add(self.avatar_picker)
         card.add(Divider(card))
         row = QHBoxLayout()
         row.setSpacing(12)
@@ -324,6 +339,49 @@ class AccountPage(QWidget):
             self.notice_label.setAccessibleName(text)
             card.add(self.notice_label)
         return card
+
+    # ── the avatar (ui/components/avatars.py) ──
+    def _toggle_avatar_picker(self, show=None):
+        picker = getattr(self, "avatar_picker", None)
+        if picker is None:
+            return
+        show = not picker.isVisible() if show is None else bool(show)
+        self._avatar_open = show
+        if show:
+            picker.say("")
+            picker.refresh()
+        picker.setVisible(show)
+        if show and picker.choices:
+            target = next((c for c in picker.choices if c.is_selected() and c.isVisible()), picker.choices[0])
+            target.setFocus(Qt.OtherFocusReason)
+
+    def _choose_avatar(self, value):
+        """Shown at once on every avatar, and kept (cfg ``avatar``)."""
+        from ui.components import avatars
+        avatars.set_choice(value)
+        if S.call(self.app, "set_setting", avatars.CFG_KEY, value) is None:
+            cfg = getattr(self.app, "cfg", None)
+            if isinstance(cfg, dict):
+                cfg[avatars.CFG_KEY] = value
+
+    def _upload_avatar(self):
+        from PySide6.QtCore import QStandardPaths
+        from PySide6.QtWidgets import QFileDialog
+        from ui.components import avatars
+        start = QStandardPaths.writableLocation(QStandardPaths.PicturesLocation) or ""
+        path, _ = QFileDialog.getOpenFileName(self, "Choose a photo", start,
+                                              "Pictures (*.png *.jpg *.jpeg *.bmp *.webp *.gif)")
+        if not path:
+            return
+        picker = getattr(self, "avatar_picker", None)
+        if not avatars.save_photo(path):
+            if picker is not None:
+                picker.say("That picture couldn't be opened.")
+            return
+        self._choose_avatar(avatars.PHOTO)
+        if picker is not None:
+            picker.say("")
+            picker.refresh(avatars.PHOTO)
 
     def _usage_card(self, v):
         card = Card(pad=(20, 18), gap=12)

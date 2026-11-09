@@ -205,6 +205,8 @@ class MainWindow(QMainWindow):
         self._share_hidden = False
         self.setWindowTitle(APP_NAME)
         theme.apply(self)
+        from ui.components import avatars
+        avatars.set_choice((getattr(main_app, "cfg", None) or {}).get("avatar"))     # every avatar shows their pick
         self.setMinimumSize(*MIN_SIZE)
         self.resize(*DEFAULT_SIZE)
 
@@ -379,6 +381,9 @@ class MainWindow(QMainWindow):
 
     def on_setting_changed(self, key):
         """AppController.sig_setting_changed lands here; every built page hears it."""
+        if key == "avatar":
+            from ui.components import avatars
+            avatars.set_choice((getattr(self.app, "cfg", None) or {}).get("avatar"))
         if key == "live_assist_private" and self._share_hidden:
             cfg = getattr(self.app, "cfg", None) or {}
             if not cfg.get("live_assist_private", True):
