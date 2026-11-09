@@ -28,6 +28,15 @@ KINDS = {
 }
 
 NOTES = (
+    ("2.1.5", (
+        ("fixed", "Best accuracy sticks in Smart Actions",
+         "Choosing Best accuracy under Transcribes with no longer goes back to Fast."),
+        ("fixed", "Lists open smoothly", "Every dropdown opens in place at once, without shaking."),
+        ("better", "Speed and accuracy for Gusan Cloud",
+         "Fast and Best accuracy show their dots, like the models on this computer."),
+        ("better", "A shorter dictation history",
+         "Today and yesterday stay in view; everything older waits under Earlier."),
+    )),
     ("2.1.4", (
         ("new", "Choose your avatar",
          "Hover your avatar in Account & plan: pick a colour, a picture or your own photo."),

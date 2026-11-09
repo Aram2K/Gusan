@@ -67,7 +67,7 @@ class TestDue(unittest.TestCase):
         self.assertEqual((prev, [v for v, _ in found]), ("", ["2.1.4"]))
 
     def test_no_notes_for_this_version_shows_nothing(self):
-        self.assertIsNone(wn.due({"onboarding_done": True, "whats_new_seen": "2.1.4"}, "2.1.9"))
+        self.assertIsNone(wn.due({"onboarding_done": True, "whats_new_seen": "9.9.0"}, "9.9.9"))
 
 
 if __name__ == "__main__":
