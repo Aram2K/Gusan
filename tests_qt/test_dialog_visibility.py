@@ -1161,6 +1161,14 @@ def test_the_update_row_looks_the_same_on_a_dark_windows(qapp):
         for name, go in _update_stages(panel):
             go()
             _show(win)
+            # the wrapped detail line settles its height a pass later: wait until the row stops changing
+            last = None
+            for _ in range(20):
+                page.version_row.layout().activate()
+                QApplication.processEvents()
+                if page.version_row.size() == last:
+                    break
+                last = page.version_row.size()
             if panel.bar.maximum() == 0:
                 # A busy bar is animated: two grabs (the light one and the dark one) are taken at different
                 # moments and differ by where its chunk is. The test is about colours, so the bar holds still.
