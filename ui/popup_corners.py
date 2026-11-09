@@ -12,11 +12,16 @@ system draws the border then, so the window's own square one is dropped. Windows
 card. Nothing about the window's flags changes.
 
 ``install(app)`` once: an application event filter that does this when a list window is first shown.
+
+Opening without a jolt (the founder, 2026-11-09: the list "vibrating at the beginning and getting out of the scope
+while opening"): Windows' roll-down animation for lists is turned off for Gusan (UI_AnimateCombo) - the list grew
+from its top while being placed - and the list's own border is dropped when the list window is first polished,
+before it is shown, so it no longer changes size by its border in the middle of opening.
 """
 import logging
 import sys
 
-from PySide6.QtCore import QEvent, QObject
+from PySide6.QtCore import QEvent, QObject, Qt
 
 logger = logging.getLogger(__name__)
 
@@ -54,12 +59,18 @@ def round_window(widget):
 class _PopupCorners(QObject):
     def eventFilter(self, obj, event):
         try:
-            if event.type() == QEvent.Show and obj.metaObject().className() == CONTAINER \
-                    and not obj.property("gusanCard"):
+            kind = event.type()
+            if kind not in (QEvent.Polish, QEvent.Show) or obj.metaObject().className() != CONTAINER:
+                return False
+            if kind == QEvent.Polish and windows_rounds_corners() and not obj.property("gusanNoBorder"):
+                # Before it is first shown: the system will draw the card's border and round it, so no square
+                # border of our own - set now, never in the middle of opening (it changed the list's size).
+                obj.setProperty("gusanNoBorder", True)
+                obj.setStyleSheet("QComboBoxPrivateContainer { border: none; }")
+            elif kind == QEvent.Show and not obj.property("gusanCard"):
                 obj.setProperty("gusanCard", True)
-                if round_window(obj):
-                    # The system draws the card's border and rounds it: no square border of our own.
-                    obj.setStyleSheet("QComboBoxPrivateContainer { border: none; }")
+                if not round_window(obj) and obj.property("gusanNoBorder"):
+                    obj.setStyleSheet("")               # the system did not round it: our own border back
         except Exception:
             logger.debug("List window styling failed", exc_info=True)
         return False
@@ -74,4 +85,8 @@ def install(app):
     if _filter is None and app is not None:
         _filter = _PopupCorners(app)
         app.installEventFilter(_filter)
+        try:
+            app.setEffectEnabled(Qt.UI_AnimateCombo, False)     # no roll-down: the list opens in place, at once
+        except Exception:
+            logger.debug("Could not turn the list animation off", exc_info=True)
     return _filter
