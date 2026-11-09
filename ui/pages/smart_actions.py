@@ -133,19 +133,22 @@ WATCHED = frozenset({
 })
 
 # ("line", text, px, role, weight) | ("check", text) | ("rich", bold, rest) | ("signoff",)
+# Six compact cards, three columns: everything a Smart Action does - writing, lists, translating, polishing, the
+# text you selected and the web (2.1.2) - each with what you say and a short line of what it writes.
 EXAMPLES = (
-    ("mail", "Email", "Email Anna: the demo moves to Thursday. Ask if the deck is ready.",
-     (("line", "Subject: Demo moves to Thursday", 11.5, "muted", 400),
-      ("line", "Hi Anna,"),
-      ("line", "The demo moves to Thursday. Is the deck ready?"),
+    ("mail", "Email", "Email Anna: the demo moves to Thursday, ask if the deck is ready",
+     (("line", "Hi Anna, the demo moves to Thursday. Is the deck ready?"),
       ("signoff",))),
     ("list", "To-do list", "To-do: call David, book the room, send the slides",
      (("check", "Call David"), ("check", "Book the room"), ("check", "Send the slides"))),
     ("translate", "Translate", "Translate to Spanish: see you tomorrow at ten",
-     (("line", "Spanish", 11.5, "muted", 400),
-      ("line", "Nos vemos mañana a las diez.", 15, "h3", 500))),
+     (("line", "Nos vemos mañana a las diez.", 13.5, "h3", 500),)),
     ("pen", "Polish", "Clean this up: so um we need the, like, numbers by Monday",
-     (("line", "We need the numbers by Monday.", 13.5, "h3", 400),)),
+     (("line", "We need the numbers by Monday.", 13.5, "h3", 500),)),
+    ("text", "Your selection", "Select text anywhere, then: make it shorter",
+     (("line", "Rewrites it in place, or answers about it.", 12.5, "muted", 400),)),
+    ("globe", "Search the web", "What AI events are in Paris next week?",
+     (("line", "Looks it up and answers, with its sources.", 12.5, "muted", 400),)),
 )
 
 
@@ -591,15 +594,15 @@ class ExampleCard(Card):
     """What you say -> what it writes, with Try it (a practice box)."""
 
     def __init__(self, page, icon, name, said, lines, parent=None):
-        super().__init__(parent, pad=(16, 14), gap=10)
+        super().__init__(parent, pad=(14, 12), gap=8)
         self.page = page
         self.name = name
         self.signoff_label = None
         self.setAccessibleName(name)
         head = QHBoxLayout()
         head.setSpacing(8)
-        head.addWidget(_icon_label(icon, 18, "blue-tx", self))
-        head.addWidget(_text(name, "h3", 14, 700, self))
+        head.addWidget(_icon_label(icon, 16, "blue-tx", self))
+        head.addWidget(_text(name, "h3", 13.5, 700, self))
         head.addStretch(1)
         self.try_button = Button("Try it", "secondary", "s", parent=self)
         self.try_button.setAccessibleName("Try %s" % name)
@@ -612,7 +615,7 @@ class ExampleCard(Card):
         mic = _icon_label("mic", 14, "faint", self)
         said_row.addWidget(mic, 0, Qt.AlignTop)
         said_row.setAlignment(mic, Qt.AlignTop)
-        self.said_label = _text("“%s”" % said, "muted", 12.5, 400, self, wrap=True, italic=True)
+        self.said_label = _text("“%s”" % said, "muted", 12, 400, self, wrap=True, italic=True)
         said_row.addWidget(self.said_label, 1)
         self.add(said_row)
 
@@ -620,8 +623,8 @@ class ExampleCard(Card):
                             "background: #ffffff; border: 1px solid %s; border-radius: 10px;"
                             % theme.qss_color("line"))
         pl = QVBoxLayout(self.paper)
-        pl.setContentsMargins(12, 10, 12, 10)
-        pl.setSpacing(3)
+        pl.setContentsMargins(10, 7, 10, 7)
+        pl.setSpacing(2)
         for spec in lines:
             pl.addWidget(self._line(spec))
         pl.addStretch(1)
@@ -679,7 +682,7 @@ class ExampleCard(Card):
         self.practice.setPlaceholderText(placeholder)
         # Same size as the result it replaces, so the grid doesn't jump.
         h = self.paper.height() if self.paper.height() > 0 else self.paper.sizeHint().height()
-        self.practice.setFixedHeight(max(64, h))
+        self.practice.setFixedHeight(max(56, h))
         self.paper.hide()
         self.practice.show()
         self.practice.setFocus(Qt.OtherFocusReason)
@@ -1008,12 +1011,13 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(12)
         self.examples = []
+        cols = 3
         for i, (icon, name, said, lines) in enumerate(EXAMPLES):
             card = ExampleCard(self, icon, name, said, lines, w)
-            grid.addWidget(card, i // 2, i % 2)
+            grid.addWidget(card, i // cols, i % cols)
             self.examples.append(card)
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
+        for c in range(cols):
+            grid.setColumnStretch(c, 1)
         col.addLayout(grid)
         # (The hero's muted line already says Alt+R pastes the exact words.)
         return w

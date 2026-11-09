@@ -184,28 +184,31 @@ QComboBox::down-arrow:on {
 QComboBox {
     combobox-popup: 0;          /* the list drops down under the box, never over it */
 }
+/* The list window IS the card (ui/popup_corners.py): white, one thin border; on Windows 11 the system rounds its
+   corners and draws the border. The list inside has no border or rounding of its own - a rounded card inside the
+   square window showed square corners and a square shadow around it. */
 QComboBoxPrivateContainer {
-    background: transparent;    /* only the rounded card below shows, not a square frame around it */
-    border: none;
+    background: #ffffff;
+    border: 1px solid #d5dce6;
 }
 QComboBox QAbstractItemView {
     background-color: #ffffff;
-    border: 1px solid #cbd5e1;
-    border-radius: 12px;
-    selection-background-color: #3b82f6;
-    selection-color: #ffffff;
+    border: none;
+    border-radius: 0px;
+    selection-background-color: #eef4ff;
+    selection-color: #1d4ed8;
     outline: 0;
     padding: 4px;
     color: #1e293b;
 }
 QComboBox QAbstractItemView::item {
-    min-height: 34px;
-    padding: 6px 10px;
-    border-radius: 4px;
+    min-height: 26px;           /* 34 px with the padding: the same rows as the model pickers */
+    padding: 4px 10px;
+    border-radius: 6px;
 }
 QComboBox QAbstractItemView::item:selected {
-    background-color: #3b82f6;
-    color: #ffffff;
+    background-color: #eef4ff;
+    color: #1d4ed8;
 }
 QComboBox QAbstractItemView::item:hover {
     background-color: #f1f5f9;

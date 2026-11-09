@@ -712,16 +712,18 @@ QComboBox::drop-down {{
 QComboBox::down-arrow, QComboBox::down-arrow:on {{
     image: url("{chev}"); width: 12px; height: 8px; margin-right: 10px;
 }}
-/* The list drops down UNDER the box (Fusion's default draws it over the box, hiding it), as one rounded card:
-   the popup window's own frame is taken off, so there is no second, square outline around it. (The window's
-   flags are left alone: changing them makes the list stop selecting.) */
+/* The list drops down UNDER the box (Fusion's default draws it over the box, hiding it). The list WINDOW is the
+   card (ui/popup_corners.py): white with one thin border; on Windows 11 the system rounds its corners and draws
+   the border. The list inside has no border or rounding of its own: a rounded card inside the square window
+   showed square corners and a square shadow around it. (The window's flags are left alone: changing them makes
+   the list stop selecting.) */
 QComboBox {{ combobox-popup: 0; }}
-QComboBoxPrivateContainer {{ background: transparent; border: none; }}
+QComboBoxPrivateContainer {{ background: #ffffff; border: 1px solid {t['line2']}; }}
 QComboBox QAbstractItemView {{
-    background: #ffffff; border: 1px solid {t['line2']}; border-radius: 12px; outline: 0px; padding: 6px;
+    background: #ffffff; border: none; border-radius: 0px; outline: 0px; padding: 4px;
     color: {t['text']}; selection-background-color: {t['blue-sub']}; selection-color: {t['blue-tx']};
 }}
-QComboBox QAbstractItemView::item {{ min-height: 30px; padding: 4px 10px; border-radius: 8px; }}
+QComboBox QAbstractItemView::item {{ min-height: 26px; padding: 4px 10px; border-radius: 6px; }}   /* 34 px: the model pickers' rows */
 QComboBox QAbstractItemView::item:hover {{ background: {t['bg2']}; color: {t['ink']}; }}
 QComboBox QAbstractItemView::item:selected {{ background: {t['blue-sub']}; color: {t['blue-tx']}; }}
 QCheckBox, QRadioButton {{ spacing: 10px; color: {t['text']}; background: transparent; }}

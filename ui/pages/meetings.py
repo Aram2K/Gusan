@@ -114,7 +114,7 @@ from datetime import datetime, timezone
 
 from PySide6.QtCore import QEvent, QPropertyAnimation, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QColor, QDesktopServices, QGuiApplication, QIcon, QKeySequence, QPainter, QPen,  # noqa: F401
-                           QPixmap, QRadialGradient, QShortcut)    # (QDesktopServices: tests patch openUrl through it)
+                           QLinearGradient, QPixmap, QRadialGradient, QShortcut)    # (QDesktopServices: tests patch openUrl through it)
 from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QComboBox, QFrame, QGraphicsOpacityEffect,
                                QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QRadioButton,
                                QScrollArea, QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
@@ -969,44 +969,78 @@ class RecordButton(QAbstractButton):
         super().keyPressEvent(e)
 
     def paintEvent(self, _e):
+        """A real button (the founder, 2026-11-09): a recessed well, a domed white cap on a soft shadow, a glossy
+        red dome on it. Pressed, the cap sinks into the well - its shadow tightens, its light flips, the red
+        darkens - and comes back up when let go."""
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
+        down = self.isDown()
+        hover = self.underMouse() and not down
+        sink = 2.0 if down else 0.0
         cx = self.W / 2.0
-        cy = self.RING + self.CIRCLE / 2.0
+        cy0 = self.RING + self.CIRCLE / 2.0
         r = self.CIRCLE / 2.0
-        # soft shadow under the disc (0 24px 48px rgba(15,23,42,.12)), then the 10 px red ring
-        g = QRadialGradient(cx, cy + 14, r + 14)
-        g.setColorAt(0.70, QColor(15, 23, 42, 34))
-        g.setColorAt(1.0, QColor(15, 23, 42, 0))
+        R = r + self.RING
         p.setPen(Qt.NoPen)
-        p.setBrush(g)
-        p.drawEllipse(QRectF(cx - r - 14, cy + 14 - r - 14, 2 * (r + 14), 2 * (r + 14)))
-        ring = QColor(220, 38, 38, 26 if self.underMouse() else 15)
-        p.setBrush(ring)
-        p.drawEllipse(QRectF(cx - r - self.RING, cy - r - self.RING, 2 * (r + self.RING), 2 * (r + self.RING)))
-        p.setBrush(QColor("#ffffff"))
+        # the well the button sits in: darker at the top, lighter at the bottom (a dip), a faint red tint on hover
+        well = QLinearGradient(0, cy0 - R, 0, cy0 + R)
+        well.setColorAt(0.0, QColor(203, 213, 225, 150))
+        well.setColorAt(0.55, QColor(226, 232, 240, 110))
+        well.setColorAt(1.0, QColor(255, 255, 255, 200))
+        p.setBrush(well)
+        p.drawEllipse(QRectF(cx - R, cy0 - R, 2 * R, 2 * R))
+        if hover:
+            p.setBrush(QColor(220, 38, 38, 18))
+            p.drawEllipse(QRectF(cx - R, cy0 - R, 2 * R, 2 * R))
+        # the cap's shadow in the well: deep when raised, tight when pressed
+        cy = cy0 + sink
+        sh_off, sh_alpha = (2.0, 70) if down else (7.0, 55 if not hover else 64)
+        shadow = QRadialGradient(cx, cy + sh_off, r + 6)
+        shadow.setColorAt(0.80, QColor(15, 23, 42, sh_alpha))
+        shadow.setColorAt(1.0, QColor(15, 23, 42, 0))
+        p.setBrush(shadow)
+        p.drawEllipse(QRectF(cx - r - 6, cy + sh_off - r - 6, 2 * (r + 6), 2 * (r + 6)))
+        # the cap: a white dome (light from above), its light flipped when pressed in
+        cap = QLinearGradient(0, cy - r, 0, cy + r)
+        cap.setColorAt(0.0, QColor("#eef1f5") if down else QColor("#ffffff"))
+        cap.setColorAt(1.0, QColor("#fbfcfd") if down else QColor("#e9edf2"))
+        p.setBrush(cap)
         p.setPen(QPen(theme.qcolor("line2"), 1))
         p.drawEllipse(QRectF(cx - r + 0.5, cy - r + 0.5, 2 * r - 1, 2 * r - 1))
-        # the red dot with its glow (0 6px 14px rgba(220,38,38,.35))
+        if not down:
+            # a thin highlight along the top of the cap's rim
+            p.setPen(QPen(QColor(255, 255, 255, 230), 1.5))
+            p.setBrush(Qt.NoBrush)
+            p.drawArc(QRectF(cx - r + 2, cy - r + 2, 2 * r - 4, 2 * r - 4), 30 * 16, 120 * 16)
+        # the red dome: a glow under it, a gradient lit from the top left, a small highlight
         dr = 22.0
-        glow = QRadialGradient(cx, cy + 6, dr + 10)
-        glow.setColorAt(0.6, QColor(220, 38, 38, 70))
-        glow.setColorAt(1.0, QColor(220, 38, 38, 0))
         p.setPen(Qt.NoPen)
+        glow = QRadialGradient(cx, cy + (3 if down else 6), dr + 10)
+        glow.setColorAt(0.6, QColor(220, 38, 38, 45 if down else 70))
+        glow.setColorAt(1.0, QColor(220, 38, 38, 0))
         p.setBrush(glow)
-        p.drawEllipse(QRectF(cx - dr - 10, cy + 6 - dr - 10, 2 * (dr + 10), 2 * (dr + 10)))
+        p.drawEllipse(QRectF(cx - dr - 10, cy + (3 if down else 6) - dr - 10, 2 * (dr + 10), 2 * (dr + 10)))
         red = theme.qcolor("red")
-        if self.isDown():
-            red = red.darker(115)
-        elif self.underMouse():
-            red = red.darker(106)
-        p.setBrush(red)
+        if down:
+            red = red.darker(118)
+        elif hover:
+            red = red.lighter(104)
+        dome = QRadialGradient(cx - dr * 0.35, cy - dr * 0.45, dr * 1.55)
+        dome.setColorAt(0.0, red.lighter(150 if not down else 118))
+        dome.setColorAt(0.55, red)
+        dome.setColorAt(1.0, red.darker(130))
+        p.setBrush(dome)
         p.drawEllipse(QRectF(cx - dr, cy - dr, 2 * dr, 2 * dr))
+        spec = QRadialGradient(cx - dr * 0.25, cy - dr * 0.5, dr * 0.55)
+        spec.setColorAt(0.0, QColor(255, 255, 255, 60 if down else 120))
+        spec.setColorAt(1.0, QColor(255, 255, 255, 0))
+        p.setBrush(spec)
+        p.drawEllipse(QRectF(cx - dr * 0.8, cy - dr * 1.05, dr * 1.1, dr * 0.9))
         if self.hasFocus() and self.property("focusVisible"):
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(theme.qcolor("blue-l"), 2))
             rr = r + self.RING - 1
-            p.drawEllipse(QRectF(cx - rr, cy - rr, 2 * rr, 2 * rr))
+            p.drawEllipse(QRectF(cx - rr, cy0 - rr, 2 * rr, 2 * rr))
         p.end()
 
 

@@ -299,10 +299,11 @@ def test_no_shortcut_set_shows_set_shortcut(pages, tries):
 
 
 # ── Smart Actions: examples and Try it ───────────────────────────────────────
-def test_four_examples_with_try_it(pages, tries):
+def test_six_examples_with_try_it(pages, tries):
+    """Everything a Smart Action does, compact (the founder, 2026-11-09): the selection and the web too."""
     page = pages("smart_actions", live_app("free"))
     names = [c.name for c in page.examples]
-    assert names == ["Email", "To-do list", "Translate", "Polish"]
+    assert names == ["Email", "To-do list", "Translate", "Polish", "Your selection", "Search the web"]
     for card in page.examples:
         assert card.try_button.accessibleName() == "Try %s" % card.name
     assert page.example("Email").signoff_label.text() == "Best, Aram"

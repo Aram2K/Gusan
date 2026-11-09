@@ -8766,6 +8766,12 @@ def main():
         install_light_scheme(qapp)
     except Exception as e:
         logging.warning("Could not set the light palette: %s", e)
+    # Every dropdown's list as one clean card: Windows 11 rounds the list window itself (ui/popup_corners.py).
+    try:
+        from ui import popup_corners
+        popup_corners.install(qapp)
+    except Exception as e:
+        logging.warning("Could not set up the dropdown lists: %s", e)
     # Gusan 2.0 fonts: bundled assets/fonts if present, else the system faces.
     try:
         from ui.theme import load_fonts
