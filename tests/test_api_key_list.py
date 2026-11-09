@@ -248,7 +248,8 @@ class TestCloudWriterChoice(unittest.TestCase):
     def test_the_server_moves_the_pick_first(self):
         src = open(os.path.join(ROOT, "supabase", "functions", "smart-action", "index.ts"), encoding="utf-8").read()
         self.assertIn("function preferRoutes(", src)
-        self.assertIn("const routes = notes ? chain : preferRoutes(chain, body?.model);", src)   # notes keep their order
+        # meeting notes and the Interpreter's phrases (mode "interpret") keep their own order
+        self.assertIn("const routes = notes || interpret ? chain : preferRoutes(chain, body?.model);", src)
         for fam in action_api.CLOUD_WRITER_FAMILIES:
             self.assertIn('"%s"' % fam, src)
 
