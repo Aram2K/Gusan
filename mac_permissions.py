@@ -35,12 +35,15 @@ MICROPHONE = "microphone"
 ACCESSIBILITY = "accessibility"
 INPUT_MONITORING = "input_monitoring"
 ALL = (MICROPHONE, ACCESSIBILITY, INPUT_MONITORING)
+# The Interpreter's Hear only (the call's sound, a Core Audio process tap): not in the start guide.
+SYSTEM_AUDIO = "system_audio"
 
 _PANE = "x-apple.systempreferences:com.apple.preference.security?"
 SETTINGS_URLS = {
     MICROPHONE: _PANE + "Privacy_Microphone",
     ACCESSIBILITY: _PANE + "Privacy_Accessibility",
     INPUT_MONITORING: _PANE + "Privacy_ListenEvent",
+    SYSTEM_AUDIO: _PANE + "Privacy_AudioCapture",
 }
 
 # IOHIDCheckAccess / IOHIDRequestAccess (IOKit/hid/IOHIDLib.h)
@@ -142,6 +145,31 @@ def microphone_granted():
     if st in (_AV_DENIED, _AV_RESTRICTED):
         return False
     return None
+
+
+def system_audio_granted():
+    """"System Audio Recording" (the Interpreter hears the call): True / False, or None when
+    macOS hasn't asked yet or can't say. Read with TCC's own preflight (no prompt)."""
+    if not IS_MAC:
+        return None
+    try:
+        tcc = _lib("tcc", "/System/Library/PrivateFrameworks/TCC.framework/Versions/A/TCC")
+        cf = _cf()
+        cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+        cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+        cf.CFRelease.argtypes = [ctypes.c_void_p]
+        service = cf.CFStringCreateWithCString(None, b"kTCCServiceAudioCapture", 0x08000100)
+        fn = tcc.TCCAccessPreflight
+        fn.restype = ctypes.c_int
+        fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        try:
+            res = fn(service, None)
+        finally:
+            cf.CFRelease(service)
+    except Exception as e:
+        logger.debug("TCCAccessPreflight failed: %s", e)
+        return None
+    return True if res == 0 else False if res == 1 else None
 
 
 def status():

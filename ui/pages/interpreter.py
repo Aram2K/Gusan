@@ -34,6 +34,7 @@ setting goes through app.set_setting (instant apply); nothing slow runs on the G
 
 import datetime
 import logging
+import sys
 import math
 import os
 import threading
@@ -74,8 +75,12 @@ VOICE_MODES = (("Match the speaker", voice_presets.MATCH), ("One voice for every
 VOICE_MATCH_HINT = "A woman's or a man's voice, picked once when they start talking."
 OUTPUTS = (("auto", "Automatic"), ("headphones", "Headphones"), ("speakers", "Speakers"))
 OUTPUT_HINT = "Speakers work too: Gusan keeps its voice out of your mic."
-CABLE_URL = "https://vb-audio.com/Cable/"
-CABLE_HINT = "Then pick CABLE Output as the microphone in Zoom, Teams or Meet."
+if sys.platform == "darwin":
+    CABLE_URL = "https://existential.audio/blackhole/"
+    CABLE_HINT = "Install BlackHole 2ch, then pick it as the microphone in Zoom, Teams or Meet."
+else:
+    CABLE_URL = "https://vb-audio.com/Cable/"
+    CABLE_HINT = "Then pick CABLE Output as the microphone in Zoom, Teams or Meet."
 THEM = "Anna"                                # the other person in the picture
 TRY_PHASES = {"listening": "Listening…", "translating": "Translating…", "speaking": "Playing…"}
 TRY_FAILED = "Couldn't try it just now. Check your connection and try again."
@@ -284,6 +289,8 @@ def find_virtual_mic():
         if idx is None:
             return ""
         name = audio_io._name(pa.get_device_info_by_index(idx)).lower()
+        if "blackhole" in name:
+            return "BlackHole 2ch"
         return "Gusan Microphone" if "gusan" in name else "CABLE Output"
     finally:
         try:

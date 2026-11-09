@@ -407,12 +407,16 @@ jobs:
       - name: Generate app icon
         run: /opt/homebrew/bin/python3.11 installer/make_icns.py
 
+      - name: Build the Interpreter's call-sound helper
+        run: swiftc -O -o gusan-tap interpreter/mac/gusan_tap.swift
+
       - name: Build .app
         run: |
           /opt/homebrew/bin/python3.11 -m PyInstaller \
             --onedir --windowed \
             --name TranscribeApp \
             --icon assets/icon.icns \
+            --add-binary "gusan-tap:." \
             --add-data "config.example.json:." \
             --add-data "history.py:." \
             --add-data "assets:assets" \
@@ -463,6 +467,7 @@ jobs:
           plist_set CFBundleShortVersionString "$VERSION"
           plist_set CFBundleVersion "$VERSION"
           plist_set NSMicrophoneUsageDescription "Gusan records your microphone to turn speech into text. Audio stays on your Mac unless you pick a cloud speech engine."
+          plist_set NSAudioCaptureUsageDescription "Gusan's Interpreter listens to your call's sound to translate it for you."
           plist_set NSAppleEventsUsageDescription "Gusan pastes transcribed text into the focused window via simulated keystrokes."
           # Surface the global-hotkey requirement so macOS shows a clear
           # prompt under Privacy & Security → Accessibility.

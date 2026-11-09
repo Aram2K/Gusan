@@ -37,8 +37,9 @@ CALL_APPS = {
     "discord.exe", "skype.exe", "whatsapp.exe", "whatsapp.root.exe", "telegram.exe",
     "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe", "arc.exe",
 }
-VIRTUAL_MIC_OUTPUTS = ("gusan speaker", "cable input")        # what we write into
-VIRTUAL_MIC_INPUTS = ("gusan microphone", "cable output")     # what the call app picks
+# BlackHole 2ch (macOS) is one device for both: Speak writes into it, the call app records it.
+VIRTUAL_MIC_OUTPUTS = ("gusan speaker", "cable input", "blackhole 2ch")       # what we write into
+VIRTUAL_MIC_INPUTS = ("gusan microphone", "cable output", "blackhole 2ch")    # what the call app picks
 # How Windows names headphones, in its display languages (the form factor below comes first).
 _HEADPHONE_WORDS = (
     "headphone", "headset", "earphone", "earbud", "airpods", "buds", "hands-free",

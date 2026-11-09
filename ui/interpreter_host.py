@@ -29,6 +29,7 @@ minutes, latency}, interpreter_failed {code} - never words, never names.
 """
 
 import logging
+import sys
 import threading
 import time
 
@@ -48,7 +49,8 @@ TRAY_TITLE = "Interpreter"
 
 IDLE, STARTING, RUNNING, STOPPING = "idle", "starting", "running", "stopping"
 
-NO_VIRTUAL_MIC = "Speak needs a virtual microphone. Hear works now."
+NO_VIRTUAL_MIC = ("Install BlackHole so they can hear you." if sys.platform == "darwin"
+                  else "Speak needs a virtual microphone. Hear works now.")
 # Codes the engine (or this host) adds to interpreter.session.MESSAGES: one calm sentence each.
 EXTRA_MESSAGES = {
     "no_virtual_mic": NO_VIRTUAL_MIC,
@@ -66,6 +68,8 @@ EXTRA_MESSAGES = {
     "privacy_stop": "Privacy mode is on, so the interpreter stopped.",
     "account": "The account changed, so the interpreter stopped.",
     "mic_back": "Switch your call's microphone back to your own mic.",
+    "no_call_sound": "Gusan can't hear the call. Allow System Audio Recording in Settings.",
+    "mac_too_old": "Hearing the call needs macOS 14.2 or later.",
 }
 # Stops the person asked for: a run that had Speak on leaves the virtual microphone silent (a call
 # that listens to it hears nothing), so they are told once (mic_back). Other stops say their reason.

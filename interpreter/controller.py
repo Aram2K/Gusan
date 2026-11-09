@@ -14,6 +14,7 @@ goes away moves the directions to the device Windows uses now. Time the computer
 never billed, and a long sleep stops it.
 """
 import logging
+import sys
 import threading
 import time
 
@@ -166,6 +167,14 @@ class WindowsAudio:
                 pass
 
 
+def default_audio(platform=None):
+    """The real devices of this computer: MacAudio on a Mac, else WindowsAudio."""
+    if (platform or sys.platform) == "darwin":
+        from interpreter.mac_audio import MacAudio
+        return MacAudio()
+    return WindowsAudio()
+
+
 class _Early:
     """Sound captured before the speech service is connected: kept (the last EARLY_S) and sent on
     once it is, so words said while the interpreter starts are not lost."""
@@ -231,7 +240,7 @@ class Interpreter:
         self._token_getter = token_getter
         self._on_event = on_event or (lambda e: None)
         self.settings = settings
-        self.audio = audio or WindowsAudio()
+        self.audio = audio or default_audio()
         self.session = session or InterpreterSession(token_getter)
         self._translate = translate or translate_phrase
         # Gusan Cloud's translator is warmed up as each direction starts; another translator (a
@@ -283,6 +292,10 @@ class Interpreter:
                 self._emit({"type": "error", "code": "no_virtual_mic", "direction": "speak"})
             if not s.hear and not speak_ok:
                 raise InterpreterError("bad_request", "Turn on at least one direction.")
+            problem = getattr(self.audio, "call_sound_problem", None)
+            code = problem() if s.hear and callable(problem) else None
+            if code:                           # Hear can't hear the call: nothing starts, one line says why
+                raise InterpreterError(code)
             try:
                 out = self._output_info()
             except Exception:  # noqa: BLE001 - speakers: the safe guess (the mic is gated)
@@ -407,6 +420,9 @@ class Interpreter:
             self._voices["speak"], self._own_voice = vid, True
         return vid
 
+    def _own_voice_excluded(self):
+        return bool(getattr(self.audio, "excludes_own_voice", False))
+
     def _played_by(self, canceller):
         def played(pcm):
             canceller.reference(pcm)
@@ -484,8 +500,9 @@ class Interpreter:
             # Our own voice is subtracted; while Gusan talks, what is left passes when it is more
             # than our leftovers (they talk over the translation) - muted otherwise, and until our
             # voice has been found in the capture.
+            # A capture that leaves Gusan out (the Mac's process tap) never holds our voice.
             d.gate = audio_io.ListenGate(d.sink.is_playing, barge_in=lambda _pcm: canceller.their_voice(),
-                                         hold_s=HOLD_S)
+                                         hold_s=HOLD_S, enabled=not self._own_voice_excluded())
         else:
             vmic = self.audio.virtual_mic_output()
             if vmic is None:                      # never the translated voice into my own ears
@@ -511,8 +528,10 @@ class Interpreter:
         d.early = early = _Early(pipe.feed)
         gate = d.gate
         if name == "hear":
+            excluded = self._own_voice_excluded()
+
             def on_pcm(pcm):
-                clean = gate.process(canceller.process(pcm))
+                clean = gate.process(pcm if excluded else canceller.process(pcm))
                 if wants_pitch():                        # only until the voice is decided
                     tracker.feed(clean, self._clock())
                 early(clean)
