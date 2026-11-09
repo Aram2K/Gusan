@@ -55,7 +55,7 @@ Integration notes for Wave 4
   or nothing, never the server), so a Pro user's "This computer" sticks; the
   "Gusan Cloud answers while you have Pro." line remains only as a guard. Free +
   Gusan Cloud -> _pro_upsell("Live Assistance"). "Change" -> Settings › Speech & AI.
-* Call language / Answer in: "" means "Same as Dictation" / "Same as the
+* Call language / Answer in: "" means Dictation's language (shown as that language) / "Same as the
   call". The card still falls back to English for "" (ui/live_assist.py
   _start_listening ``or "en"``, the answer's ``output_lang ... or "en"``):
   make them follow cfg["language"] and the call's language, and consider ""
@@ -130,7 +130,8 @@ STATUS_WORDS = {"on": "Hidden", "partial": "May be hidden"}
 STATUS_WORD_DEFAULT = "Visible"
 
 # value -> shown name. "" follows Dictation / the call (see the notes above).
-CALL_LANGS = [("", "Same as Dictation"), ("auto", "Detect automatically"),
+# The call language "" (Dictation's language) has no row of its own: the picker shows that language (_sync_key).
+CALL_LANGS = [("auto", "Detect automatically"),
               ("multi", "Mixed languages"), ("en", "English"), ("ar", "Arabic"),
               ("hy", "Armenian"), ("fr", "French"), ("de", "German"), ("ru", "Russian"),
               ("es", "Spanish")]
@@ -2014,8 +2015,11 @@ class LiveAssistantPage(QWidget):
             self._set_checked(self.web_toggle, not privacy and bool(val(False)))
         elif key == "live_assist_screen_auto":
             self._set_checked(self.screen_toggle, bool(val(True)))
-        elif key == "live_assist_language":
-            self._set_combo(self.call_lang, val("en"))
+        elif key in ("live_assist_language", "language"):
+            # "" follows Dictation's language: the picker shows that language (no "Same as Dictation" row).
+            own = val("") if key == "live_assist_language" else cfg.get("live_assist_language", "")
+            dictation = val("") if key == "language" else cfg.get("language")
+            self._set_combo(self.call_lang, own or dictation or "auto")
         elif key == "live_assist_output_language":
             self._set_combo(self.answer_lang, val("en"))
         elif key == "live_assist_theme":

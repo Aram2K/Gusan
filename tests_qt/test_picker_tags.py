@@ -3,7 +3,7 @@ Smart Actions "Transcribes with", Audio to text "Accuracy", Settings > Speech & 
 
 Every row is a REAL model name with a small chip for where it runs - LOCAL (this computer), CLOUD
 (Gusan Cloud or your own key) and PRO where a Pro plan is needed - under headings for its group
-("On this computer", "Gusan Cloud", "Your own key"); Gusan Cloud is a service, never a model.
+("Gusan Cloud", "On this computer", "Your own key"); Gusan Cloud is a service, never a model.
 The closed box shows the selected name and its chips. The rows come from engine_choice
 (speech_row dicts), drawn by ui/components/model_combo.py (fill_rows).
 
@@ -119,7 +119,7 @@ def test_rows_come_with_headings_and_headings_are_not_rows(qapp, host):
     win = host()
     rows = ec.live_speech_rows(_cfg(), True, True)
     box = _box(win, rows, current="")
-    assert box.headings() == ["On this computer", "Gusan Cloud", "Your own key"]
+    assert box.headings() == ["Gusan Cloud", "On this computer", "Your own key"]
     assert len(box.row_indexes()) == len(rows) and box.count() == len(rows) + 3
     values = [box.itemData(i) for i in box.row_indexes()]
     assert values == [r["value"] for r in rows]
@@ -132,7 +132,7 @@ def test_rows_come_with_headings_and_headings_are_not_rows(qapp, host):
     seen = []
     box.currentIndexChanged.connect(lambda i: seen.append(i))
     box.fill_rows(ec.live_speech_rows({}, False, False))
-    assert box.headings() == ["On this computer", "Gusan Cloud"] and seen == []
+    assert box.headings() == ["Gusan Cloud", "On this computer"] and seen == []
 
 
 def test_a_row_without_a_group_has_no_heading_and_a_group_keeps_one_heading(qapp, host):

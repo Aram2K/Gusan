@@ -457,8 +457,9 @@ def test_clicking_a_downloaded_row_selects_it_with_no_question(sa_page, asked):
     _click_row(page.speech_combo, "small")
     assert not asked.calls and app.downloads.started == []
     assert page.speech_combo.currentData() == "small" and app.cfg["smart_actions_speech_model"] == "small"
-    _click_row(page.speech_combo, "")                       # Same as Dictation
-    assert not asked.calls and app.cfg["smart_actions_speech_model"] == ""
+    _click_row(page.speech_combo, "base")                   # Dictation's model: on disk too, no question
+    assert not asked.calls and app.downloads.started == []
+    assert page.speech_combo.currentData() == "base" and app.cfg["smart_actions_speech_model"] == "base"
 
 
 def test_clicking_gusan_cloud_as_free_opens_the_pro_window(sa_page, asked):
@@ -466,7 +467,8 @@ def test_clicking_gusan_cloud_as_free_opens_the_pro_window(sa_page, asked):
     page = sa_page(app)
     _click_row(page.speech_combo, "cloud")
     assert [c for c in app.calls if c[0] == "_pro_upsell"] == [("_pro_upsell", "Fast cloud transcription")]
-    assert not asked.calls and page.speech_combo.currentData() == ""
+    assert not asked.calls and app.cfg["smart_actions_speech_model"] == ""           # nothing was picked
+    assert page.speech_combo.currentData() == "base"                                 # it shows Dictation's model
     assert page.speech_combo.choice_enabled(page.speech_combo.findData("cloud"))      # never greyed
 
 

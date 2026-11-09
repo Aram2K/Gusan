@@ -183,15 +183,16 @@ REALTIME_POOR_FAST_NOTE = "OpenAI GPT Live Transcribe · ElevenLabs Scribe v2 ·
 
 
 def realtime_note(profile, cfg=None):
-    """The second line of a dictation / Smart Actions Gusan Cloud row: Gladia live, then the profile's first two
-    engines (its backup). Without real-time (cfg live_stt off, Privacy mode) the profile's own line."""
+    """The second line of a dictation / Smart Actions Gusan Cloud row. Fast: Gladia live, then the profile's first two
+    engines (its backup). Best accuracy never streams (main.AudioRecorder._live_engine): its own line, ElevenLabs
+    Scribe v2 first. Without real-time (cfg live_stt off, Privacy mode) the profile's own line."""
     cfg = cfg or {}
     note = CLOUD_PROFILE_NOTES[profile]
-    if cfg.get("privacy_mode") or not cfg.get("live_stt", True):
+    if profile != CLOUD_FAST or cfg.get("privacy_mode") or not cfg.get("live_stt", True):
         return note
     import speech_langs
     if speech_langs.normalize(cfg.get("language"), default="auto") in speech_langs.LIVE_POOR:
-        return REALTIME_POOR_FAST_NOTE if profile == CLOUD_FAST else note
+        return REALTIME_POOR_FAST_NOTE
     return " · ".join([REALTIME_ENGINE] + note.split(" · ")[:2])
 
 
@@ -765,22 +766,39 @@ def smart_speech_engine(cfg, pro, downloaded=None):
     return speech_engine(cfg, pro, feature)
 
 
+def smart_speech_same_value(cfg):
+    """The "Transcribes with" row that runs what Dictation runs - the setting "" has no row of its own (the founder,
+    2026-11-09: no "Same as Dictation" wording; the picker shows the real model): "cloud" / "cloud:best" for Gusan
+    Cloud, the model id on this computer. "" when Dictation uses your own key: that row stays, named after its model."""
+    value = dictation_speech_value(cfg or {})
+    if value in SMART_SPEECH_CLOUD_PROFILES or hardware.is_speech_id(value):
+        return value
+    return SMART_SPEECH_SAME
+
+
 def smart_speech_rows(cfg=None, pro=None):
-    """The rows of Smart Actions' "Transcribes with" picker (speech_row dicts): "Same as
-    Dictation" (naming the model Dictation uses now, with its tag), then under "On this
-    computer" every Whisper model, then under "Gusan Cloud" the model Gusan Cloud transcribes
-    with (CLOUD, PRO). Values: "", a Whisper id, "cloud"."""
+    """The rows of Smart Actions' "Transcribes with" picker (speech_row dicts): under "Gusan Cloud" Fast and Best
+    accuracy (CLOUD, PRO), then under "On this computer" every Whisper model; under "Your own key", only while
+    Dictation runs on one, that model (value ""). Values: "cloud", "cloud:best", a Whisper id, ""."""
     cfg = cfg or {}
     _c, pro, _signed = _context(cfg, pro)
-    dictation = speech_engine(cfg, pro)
-    rows = [_row_for_engine(SMART_SPEECH_SAME, SMART_SPEECH_SAME_LABEL, dictation,
-                            show_pro=pro_chip(pro))]
-    rows += _local_rows()
+    rows = []
     for value, profile in SMART_SPEECH_CLOUD_PROFILES.items():
         name = CLOUD_PROFILE_NAMES[profile]
         rows.append(speech_row(value, name, "cloud", GROUP_GUSAN_CLOUD,
                                note=realtime_note(profile, cfg), pro=True, model=name,
                                show_pro=pro_chip(pro)))
+    rows += _local_rows()
+    same = smart_speech_same_value(cfg)
+    if not same or same not in {r["value"] for r in rows}:
+        # Dictation's pick has no row here (its own key; a model this list doesn't show): "" stands for it, named
+        # after the model that runs, in that model's group.
+        dictation = speech_engine(cfg, pro)
+        name = dictation.get("model_name") or OWN_KEY
+        kind = dictation.get("kind") if dictation.get("kind") in ("local", "cloud", "own_key") else "local"
+        group = {"local": GROUP_THIS_COMPUTER, "cloud": GROUP_GUSAN_CLOUD, "own_key": GROUP_OWN_KEY}[kind]
+        rows.append(speech_row(SMART_SPEECH_SAME, name, kind, group, model=name, note=dictation.get("plain") or "",
+                               show_pro=False))
     return rows
 
 
@@ -871,14 +889,14 @@ def dictation_speech_rows(cfg=None, pro=None, source=None):
     _c, pro, _signed = _context(cfg, pro)
     show_pro = pro_chip(pro)
     rows = []
-    if source in (None, "local"):
-        rows += _local_rows()
     if source in (None, "cloud"):
         for value, profile in DICTATION_CLOUD_PROFILES.items():
             name = CLOUD_PROFILE_NAMES[profile]
             rows.append(speech_row(value, name, "cloud", GROUP_GUSAN_CLOUD,
                                    note=realtime_note(profile, cfg), pro=True, model=name,
                                    show_pro=show_pro))
+    if source in (None, "local"):
+        rows += _local_rows()
     if source in (None, "own_key"):
         # One row per saved key that can transcribe (Mistral, Google Gemini): its speech model,
         # and the name the person gave the key.
@@ -1486,14 +1504,12 @@ def live_speech_rows(cfg=None, pro=None, signed_in=None, language=None):
     note = ""
     if auto.get("reason") == "language" and auto.get("language_name"):
         note = f"for {auto['language_name']}"
-    else:
-        note = "same as Dictation"
     rows = [_row_for_engine(LIVE_SPEECH_AUTO, LIVE_SPEECH_AUTO_LABEL, auto, note=note, show_pro=show_pro)]
-    rows += _local_rows()
     for value, profile in ((LIVE_SPEECH_CLOUD, CLOUD_FAST), (LIVE_SPEECH_BEST, CLOUD_BEST)):
         name = CLOUD_PROFILE_NAMES[profile]
         rows.append(speech_row(value, name, "cloud", GROUP_GUSAN_CLOUD, note=CLOUD_PROFILE_NOTES[profile],
                                pro=True, model=name, show_pro=show_pro))
+    rows += _local_rows()
     if _has_google_key(cfg):
         for mid in GEMINI_SPEECH_MODELS:
             name = model_display_name(mid)
@@ -1719,12 +1735,12 @@ def file_rows(cfg=None, pro=None, language=None, signed_in=None):
             rows[0] = _row_for_engine(FILE_AUTO, FILE_AUTO_LABEL, auto, note=f"for {name}" if name else "",
                                       show_pro=pro_chip(pro))
     rows[0]["kind"] = "auto"
-    rows += _local_rows()
     for value, profile in FILE_MANAGED_PROFILES.items():
         name = CLOUD_PROFILE_NAMES[profile]
         rows.append(speech_row(value, name, "cloud", GROUP_GUSAN_CLOUD,
                                note=CLOUD_PROFILE_NOTES[profile], pro=True, model=name,
                                show_pro=pro_chip(pro)))
+    rows += _local_rows()
     for value, (_backend, field) in _FILE_OWN.items():
         if _has_key(cfg, field):
             res = _file_cloud_engine(cfg, value, False)

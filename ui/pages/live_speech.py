@@ -320,7 +320,7 @@ class LiveSpeechRow(QWidget):
             return (ro.get("tagged") or name) + " · Armenian only"
         if not value and ro.get("auto") and ro.get("reason") == "language" and ro.get("language_name"):
             return (ro.get("tagged") or name) + " · for %s" % ro["language_name"]      # Automatic moved it (the Armenian model)
-        return (ro.get("tagged") or name) + ("" if value else " · same as Dictation")
+        return ro.get("tagged") or name
 
     def _running_report(self):
         """The recorder's speech_report() of the session being recorded now (what it REALLY

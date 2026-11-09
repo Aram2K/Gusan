@@ -128,7 +128,8 @@ def test_the_row_sits_next_to_the_writer_choice_and_lists_everything(build):
     values = list(rows)
     assert values[0] == "" and rows[""] == "Automatic · Whisper Base · Local"      # names what it would pick now
     import hardware
-    assert values[1:1 + len(hardware.MODEL_INFO)] == list(hardware.MODEL_INFO)
+    assert values[1:3] == ["cloud", "cloud:best"]                                  # Gusan Cloud first
+    assert values[3:3 + len(hardware.MODEL_INFO)] == list(hardware.MODEL_INFO)
     # REAL model names and where they run - Gusan Cloud is a heading, never the name of a model
     assert rows["small"] == "Whisper Small · Local"
     assert rows["cloud"] == "Fast · Cloud · Pro"                    # Gusan Cloud's two PROFILES: it chooses the model
@@ -137,7 +138,7 @@ def test_the_row_sits_next_to_the_writer_choice_and_lists_everything(build):
         "own:google:gemini-2.5-flash", "own:google:gemini-2.5-pro", "own:google:gemini-3-flash-preview"]
     assert rows["own:google:gemini-3-flash-preview"] == "Gemini 3 Flash (preview) · your Google key · Cloud"
     assert not any("Gusan Cloud" in text.split(" · ")[0] for text in rows.values())
-    assert sp.combo.headings() == ["On this computer", "Gusan Cloud", "Your own key"]
+    assert sp.combo.headings() == ["Gusan Cloud", "On this computer", "Your own key"]
 
 
 def test_headings_are_not_rows_and_a_row_has_its_chips_and_its_second_line(build):
@@ -207,7 +208,7 @@ def test_a_model_not_on_this_computer_wears_the_download_icon(build):
 def test_the_line_says_what_really_transcribes(build):
     page, app = build("pro", backend="local", whisper_model="base", live_assist_language="en")
     sp = page.speech
-    assert sp.line.text() == "Whisper Base · Local · same as Dictation"
+    assert sp.line.text() == "Whisper Base · Local"
     app.cfg["live_assist_speech_model"] = "small"
     page.on_setting_changed("live_assist_speech_model")
     assert sp.line.text() == "Whisper Small · Local" and sp.combo.currentData() == "small"
@@ -222,7 +223,7 @@ def test_the_line_says_what_really_transcribes(build):
 def test_a_cloud_pick_that_cannot_run_reads_automatic(build):
     page, app = build("free", live_assist_speech_model="cloud:best", live_assist_language="en", **KEY)
     assert page.speech.combo.currentData() == ""                 # no Pro: Automatic really runs
-    assert page.speech.line.text() == "Whisper Base · Local · same as Dictation"
+    assert page.speech.line.text() == "Whisper Base · Local"
     page, app = build("pro", live_assist_speech_model="cloud", privacy_mode=True, live_assist_language="en")
     assert page.speech.combo.currentData() == ""                 # Privacy mode paused it
 
@@ -252,7 +253,7 @@ def test_free_armenian_says_plainly_that_local_whisper_is_not_reliable(build):
     assert sp.note.isVisibleTo(page)
     assert sp.note.text() == ("Whisper on this computer isn't reliable for Armenian. "
                               "Gusan Cloud (Pro) or your own Google key does much better.")
-    assert sp.line.text() == "Whisper Base · Local · same as Dictation"
+    assert sp.line.text() == "Whisper Base · Local"
     assert "isn't reliable for Armenian" in sp.combo.accessibleDescription()   # said to a screen reader too
 
 
@@ -265,7 +266,7 @@ def test_pro_armenian_runs_on_gusan_cloud_by_itself_with_nothing_to_warn_about(b
 
 def test_privacy_mode_keeps_it_local_and_says_why(build):
     page, _app = build("pro", privacy_mode=True, **HY)
-    assert page.speech.line.text() == "Whisper Base · Local · same as Dictation"
+    assert page.speech.line.text() == "Whisper Base · Local"
     assert page.speech.note.text().startswith("Privacy mode keeps transcription on this computer")
     assert "Armenian" in page.speech.note.text()
 

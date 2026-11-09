@@ -369,12 +369,12 @@ class TestPicker(unittest.TestCase):
         # (the Armenian model's row is hidden here: it is not on this computer and not listed)
         rows = ec.live_speech_choices({})
         self.assertEqual(rows[0], ("", "Automatic · Whisper Base", "Automatic · Whisper Base · Local", False))
-        self.assertEqual([r[0] for r in rows[1:1 + len(ec.SPEECH_MODELS)]], list(ec.SPEECH_MODELS))
-        self.assertTrue(all(not r[3] for r in rows[:1 + len(ec.SPEECH_MODELS)]))
-        tail = rows[1 + len(ec.SPEECH_MODELS):]
-        # Gusan Cloud is a service (a heading) that CHOOSES the model: its two rows are its profiles
-        self.assertEqual(tail, [("cloud", "Fast", "Fast · Cloud · Pro", True),
-                                ("cloud:best", "Best accuracy", "Best accuracy · Cloud · Pro", True)])
+        # Gusan Cloud right under Automatic (the founder, 2026-11-09): a service (a heading) that CHOOSES the
+        # model - its two rows are its profiles
+        self.assertEqual(rows[1:3], [("cloud", "Fast", "Fast · Cloud · Pro", True),
+                                     ("cloud:best", "Best accuracy", "Best accuracy · Cloud · Pro", True)])
+        self.assertEqual([r[0] for r in rows[3:]], list(ec.SPEECH_MODELS))
+        self.assertTrue(all(not r[3] for r in rows[3:]))
 
     def test_the_armenian_row_is_hidden_until_it_is_available_and_then_says_what_it_is(self):
         with hy(ready=False, listed=False):
@@ -385,10 +385,10 @@ class TestPicker(unittest.TestCase):
             self.assertEqual((row["name"], row["tags"], row["group"]),
                              ("NVIDIA FastConformer Armenian", ("local",), ec.GROUP_THIS_COMPUTER))
             self.assertEqual(row["note"], "Armenian only · about 105 MB · free, works offline")
-            # it sits with the other models on this computer, before Gusan Cloud
+            # it sits with the other models on this computer, after Gusan Cloud
             values = [r["value"] for r in rows]
             self.assertLess(values.index("large-v3"), values.index("hy-fastconformer"))
-            self.assertLess(values.index("hy-fastconformer"), values.index("cloud"))
+            self.assertLess(values.index("cloud"), values.index("hy-fastconformer"))
         with hy(ready=True, listed=True):
             row = next(r for r in ec.live_speech_rows({}) if r["value"] == "hy-fastconformer")
             self.assertEqual(row["note"], "Armenian only · free, works offline")        # (no size once it is here)

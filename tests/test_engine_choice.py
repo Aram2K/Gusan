@@ -312,23 +312,24 @@ class TestAudioToTextModels(unittest.TestCase):
     def test_choices(self):
         choices = ec.file_choices()
         self.assertEqual(choices[0], ("auto", "Automatic", "Automatic · Local", False))
-        self.assertEqual([c[0] for c in choices[1:-2]], list(ec.SPEECH_MODELS))
+        # Gusan Cloud first (the founder, 2026-11-09), then this computer
+        self.assertEqual([c[0] for c in choices[3:]], list(ec.SPEECH_MODELS))
         # a REAL model name and where it runs - never a plain word, never "Gusan Cloud" as a model
         self.assertIn(("small", "Whisper Small", "Whisper Small · Local", False), choices)
-        self.assertTrue(all(not c[3] for c in choices[:-2]))
+        self.assertTrue(all(not c[3] for c in choices[3:]))
         # Gusan Cloud is a heading and a PROFILE: its server chooses the model
-        self.assertEqual(choices[-2], ("cloud", "Best accuracy", "Best accuracy · Cloud · Pro", True))
+        self.assertEqual(choices[1], ("cloud", "Best accuracy", "Best accuracy · Cloud · Pro", True))
         self.assertEqual([c[1] for c in choices],
-                         ["Automatic", "Whisper Tiny", "Whisper Base", "Whisper Small", "Whisper Medium",
-                          "Whisper Large v3 Turbo", "Whisper Large v3", "Best accuracy", "Gladia Solaria"])
-        self.assertEqual(ec.file_choices({"managed_provider": "mistral"})[-2][2],
+                         ["Automatic", "Best accuracy", "Gladia Solaria", "Whisper Tiny", "Whisper Base",
+                          "Whisper Small", "Whisper Medium", "Whisper Large v3 Turbo", "Whisper Large v3"])
+        self.assertEqual(ec.file_choices({"managed_provider": "mistral"})[1][2],
                          "Best accuracy · Cloud · Pro")
 
     def test_rows_group_the_models_and_wear_tags(self):
         rows = ec.file_rows(BOTH)
         self.assertEqual([r["group"] for r in rows],
-                         [""] + [ec.GROUP_THIS_COMPUTER] * len(ec.SPEECH_MODELS)
-                         + [ec.GROUP_GUSAN_CLOUD] * 2 + [ec.GROUP_OWN_KEY, ec.GROUP_OWN_KEY])
+                         [""] + [ec.GROUP_GUSAN_CLOUD] * 2 + [ec.GROUP_THIS_COMPUTER] * len(ec.SPEECH_MODELS)
+                         + [ec.GROUP_OWN_KEY, ec.GROUP_OWN_KEY])
         by = {r["value"]: r for r in rows}
         self.assertEqual(by["small"]["tags"], ("local",))
         self.assertEqual(by["small"]["note"], "Balanced")
@@ -386,7 +387,7 @@ class TestAudioToTextModels(unittest.TestCase):
         self.assertEqual(own(GKEY), [google])
         self.assertEqual(own(MKEY), [mistral])
         self.assertEqual(own(BOTH), [google, mistral])
-        self.assertEqual(ec.file_choices(BOTH)[-4][0], "cloud")             # Gusan Cloud, then own keys
+        self.assertEqual(ec.file_choices(BOTH)[1][0], "cloud")              # Gusan Cloud first, own keys last
         # The row names the model that will really run (same names as Dictation's).
         cfg = dict(BOTH, google_stt_model="gemini-2.5-pro", mistral_stt_model="voxtral-mini-2602")
         self.assertEqual([c[2] for c in own(cfg)],
@@ -396,7 +397,7 @@ class TestAudioToTextModels(unittest.TestCase):
                          "Gemini 2.5 Flash · your Google key · Cloud")
         # Privacy mode keeps them listed (the page greys them out), with the real names.
         self.assertEqual(own(dict(BOTH, privacy_mode=True)), [google, mistral])
-        self.assertEqual(ec.file_choices(dict(BOTH, privacy_mode=True))[-4][2],
+        self.assertEqual(ec.file_choices(dict(BOTH, privacy_mode=True))[1][2],
                          "Best accuracy · Cloud · Pro")
 
     def test_engine_gusan_cloud(self):
@@ -666,23 +667,22 @@ class TestSmartActionsSpeech(unittest.TestCase):
 
     def test_choices(self):
         choices = ec.smart_speech_choices()
-        # "Same as Dictation" names what Dictation runs now (here: no cfg = Whisper Base on this computer)
-        self.assertEqual(choices[0], ("", "Same as Dictation · Whisper Base",
-                                      "Same as Dictation · Whisper Base · Local", False))
-        self.assertEqual(choices[-2:], [("cloud", "Fast", "Fast · Cloud · Pro", True),
-                                        ("cloud:best", "Best accuracy", "Best accuracy · Cloud · Pro", True)])
-        middle = choices[1:-2]
-        self.assertEqual([c[0] for c in middle], list(ec.SPEECH_MODELS))
-        self.assertIn(("small", "Whisper Small", "Whisper Small · Local", False), middle)
-        self.assertTrue(all(not c[3] for c in middle))
-        self.assertEqual(ec.smart_speech_choices({"managed_provider": "mistral"})[-2][2],
+        # Gusan Cloud first; no "Same as Dictation" row (the founder, 2026-11-09)
+        self.assertEqual(choices[:2], [("cloud", "Fast", "Fast · Cloud · Pro", True),
+                                       ("cloud:best", "Best accuracy", "Best accuracy · Cloud · Pro", True)])
+        rest = choices[2:]
+        self.assertEqual([c[0] for c in rest], list(ec.SPEECH_MODELS))
+        self.assertIn(("small", "Whisper Small", "Whisper Small · Local", False), rest)
+        self.assertTrue(all(not c[3] for c in rest))
+        self.assertFalse([c for c in choices if "Same as" in c[1]])
+        self.assertEqual(ec.smart_speech_choices({"managed_provider": "mistral"})[0][2],
                          "Fast · Cloud · Pro")
 
     def test_gusan_cloud_offers_fast_and_best_accuracy_each_its_own_profile(self):
         """The founder (2026-11-09): Best accuracy in the Smart Actions list too - and each row is what runs."""
         rows = {r["value"]: r for r in ec.smart_speech_rows({"backend": "managed"}, True)}
         self.assertEqual((rows["cloud"]["title"], rows["cloud:best"]["title"]), ("Fast", "Best accuracy"))
-        self.assertTrue(rows["cloud:best"]["note"].endswith(ec.CLOUD_PROFILE_NOTES[ec.CLOUD_BEST].split(" \u00b7 ")[1]))
+        self.assertEqual(rows["cloud:best"]["note"], ec.CLOUD_PROFILE_NOTES[ec.CLOUD_BEST])     # its own engines
         best = ec.smart_speech_engine({"smart_actions_speech_model": "cloud:best", "managed_speech_profile": "fast"},
                                       True)
         fast = ec.smart_speech_engine({"smart_actions_speech_model": "cloud", "managed_speech_profile": "best"}, True)
@@ -691,13 +691,22 @@ class TestSmartActionsSpeech(unittest.TestCase):
                          {"smart_actions_speech_model": "cloud:best"})
         self.assertEqual(ec.set_smart_speech({}, "cloud:best", pro=False)["problem"], "pro")
 
-    def test_same_as_dictation_wears_the_tags_of_what_dictation_runs(self):
-        rows = ec.smart_speech_rows({"backend": "managed", "managed_provider": "gemini"}, True)
-        self.assertEqual(rows[0]["title"], "Same as Dictation · Fast")
-        self.assertEqual(rows[0]["tags"], ("cloud", "pro"))
-        self.assertFalse(rows[0]["pro"])                       # picking it never needs a plan
-        rows = ec.smart_speech_rows({"backend": "managed", "privacy_mode": True}, True)
-        self.assertEqual(rows[0]["tags"], ("local",))          # Privacy mode: Dictation is local
+    def test_like_dictation_is_the_row_of_what_dictation_runs_never_a_row_of_its_own(self):
+        """The setting "" (like Dictation) shows the row Dictation's pick has: Fast, Best accuracy or the model on
+        this computer. Only Dictation's own key has no such row: then a row named after that model stands for it."""
+        same = ec.smart_speech_same_value
+        self.assertEqual(same({"backend": "managed"}), "cloud")
+        self.assertEqual(same({"backend": "managed", "managed_speech_profile": "best"}), "cloud:best")
+        self.assertEqual(same({"whisper_model": "small"}), "small")
+        self.assertEqual(same({"backend": "managed", "privacy_mode": True, "whisper_model": "base"}), "base")
+        for cfg in ({"backend": "managed"}, {"whisper_model": "small"}, {}):
+            self.assertNotIn("", [r["value"] for r in ec.smart_speech_rows(cfg, True)], cfg)
+        self.assertEqual(same(dict(MKEY, backend="mistral")), "")
+        rows = ec.smart_speech_rows(dict(MKEY, backend="mistral"), True)
+        own = [r for r in rows if r["value"] == ""]
+        self.assertEqual(len(own), 1)
+        self.assertEqual(own[0]["group"], ec.GROUP_OWN_KEY)
+        self.assertNotIn("Same as", own[0]["title"])
 
     def test_set_smart_speech(self):
         key = ec.SMART_SPEECH_KEY
@@ -816,13 +825,15 @@ class TestDictationSpeechPicker(unittest.TestCase):
     def test_every_choice_is_listed_in_its_group(self):
         rows = ec.dictation_speech_rows(self.KEYS, pro=False)
         values = [r["value"] for r in rows]
-        self.assertEqual(values[:6], ["tiny", "base", "small", "medium", "large-v3-turbo", "large-v3"])
-        self.assertEqual(values[-3:], ["cloud", "cloud:best", "key:k1"])
+        self.assertEqual(values[:2], ["cloud", "cloud:best"])                  # Gusan Cloud first
+        self.assertEqual(values[2:8], ["tiny", "base", "small", "medium", "large-v3-turbo", "large-v3"])
+        self.assertEqual(values[-1], "key:k1")
         cloud = rows[values.index("cloud:best")]
         self.assertEqual((cloud["group"], cloud["tags"], cloud["title"]),
                          (ec.GROUP_GUSAN_CLOUD, ("cloud", "pro"), "Best accuracy"))
         self.assertIn("Work Mistral", rows[values.index("key:k1")]["title"])
-        self.assertEqual((rows[0]["speed"], rows[0]["accuracy"]), (5, 2))       # the dots of Whisper Tiny
+        tiny = rows[values.index("tiny")]
+        self.assertEqual((tiny["speed"], tiny["accuracy"]), (5, 2))             # the dots of Whisper Tiny
 
     def test_a_source_keeps_its_group_only(self):
         self.assertEqual([r["value"] for r in ec.dictation_speech_rows({}, source="cloud")],
@@ -964,13 +975,17 @@ class TestRealtimeInTheRows(unittest.TestCase):
     """A dictation / Smart Action on Gusan Cloud streams to Gladia live first (live_stt.py): its rows name Gladia
     first, then the profile's backup engines. Live Assistant and files don't stream: their lines stay."""
 
-    def test_dictation_rows_name_gladia_live_first(self):
+    def test_fast_names_gladia_live_first_and_best_accuracy_its_own_engines(self):
+        """Only Fast streams (main.AudioRecorder._live_engine): Best accuracy's text is its own engines', ElevenLabs
+        Scribe v2 first - its row never claims Gladia live (the founder asked, 2026-11-09)."""
         rows = {r["value"]: r["note"] for r in ec.dictation_speech_rows({}, source="cloud")}
-        for value, profile in ec.DICTATION_CLOUD_PROFILES.items():
-            first, *backup = ec.CLOUD_PROFILE_NOTES[profile].split(" \u00b7 ")
-            self.assertEqual(rows[value], " \u00b7 ".join(["Gladia Solaria 1 live", first, backup[0]]))
-        smart = [r for r in ec.smart_speech_rows({}) if r["value"] == ec.SMART_SPEECH_CLOUD][0]
-        self.assertTrue(smart["note"].startswith("Gladia Solaria 1 live \u00b7 "))
+        first, *backup = ec.CLOUD_PROFILE_NOTES[ec.CLOUD_FAST].split(" \u00b7 ")
+        self.assertEqual(rows[ec.DICTATION_CLOUD], " \u00b7 ".join(["Gladia Solaria 1 live", first, backup[0]]))
+        self.assertEqual(rows[ec.DICTATION_CLOUD_BEST], ec.CLOUD_PROFILE_NOTES[ec.CLOUD_BEST])
+        self.assertNotIn("Gladia", rows[ec.DICTATION_CLOUD_BEST])
+        smart = {r["value"]: r["note"] for r in ec.smart_speech_rows({})}
+        self.assertTrue(smart[ec.SMART_SPEECH_CLOUD].startswith("Gladia Solaria 1 live \u00b7 "))
+        self.assertNotIn("Gladia", smart[ec.SMART_SPEECH_CLOUD_BEST])
 
     def test_without_real_time_the_profile_line_stays(self):
         for cfg in ({"live_stt": False}, {"privacy_mode": True}):

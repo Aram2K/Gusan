@@ -125,23 +125,26 @@ def _items(combo):
 
 
 # ── Transcribes with ────────────────────────────────────────────────────────
-def test_transcribes_with_lists_same_whisper_and_cloud(page_for):
+def test_transcribes_with_lists_gusan_cloud_then_whisper(page_for):
     import hardware
-    page = page_for(live_app("free"))
+    app = live_app("free")
+    page = page_for(app)
     combo = page.speech_combo
     items = _items(combo)
-    assert items[0] == ("", "Same as Dictation · Whisper Base · Local")      # it names what Dictation runs now
-    assert [v for v, _t in items[1:-2]] == list(hardware.MODEL_INFO)
+    assert items[:2] == [("cloud", "Fast · Cloud · Pro"), ("cloud:best", "Best accuracy · Cloud · Pro")]
+    assert [v for v, _t in items[2:]] == list(hardware.MODEL_INFO)
+    assert combo.findData("") < 0 and not any("Dictation" in t for _v, t in items)   # no "Same as Dictation" row
     # REAL model names; where each runs and the plan it needs are chips painted at the row's right edge
     assert ("small", "Whisper Small · Local") in items
-    assert items[-2:] == [("cloud", "Fast · Cloud · Pro"), ("cloud:best", "Best accuracy · Cloud · Pro")]
     assert combo.row_tags(combo.findData("cloud")) == ("cloud", "pro")
     assert combo.row_tags(combo.findData("small")) == ("local",)
     assert combo.choice_mark(combo.findData("cloud")) == ""                  # (a mark is a download icon only)
-    assert combo.headings() == ["On this computer", "Gusan Cloud"]            # Gusan Cloud: the service, not a model
+    assert combo.headings() == ["Gusan Cloud", "On this computer"]            # Gusan Cloud: the service, not a model
     assert combo.accessibleName() == "Transcribes with"
-    assert combo.currentData() == "" and combo.plain_text() == "Same as Dictation"
-    assert page.speech_line.text() == "Whisper Base · Local"      # the stub dictates with base (no "Same as" twice)
+    # Nothing picked (""): it shows the model Dictation runs - the stub dictates with base
+    assert app.cfg["smart_actions_speech_model"] == ""
+    assert combo.currentData() == "base" and combo.plain_text() == "Whisper Base"
+    assert page.speech_line.text() == "Whisper Base · Local"
     assert page.speech_row.hint_label.isHidden()
 
 
@@ -149,7 +152,7 @@ def test_pro_picks_gusan_cloud_and_the_row_wears_its_chips(page_for, asked):
     app = live_app("pro")
     page = page_for(app)
     combo = page.speech_combo
-    assert _items(combo)[-2] == ("cloud", "Fast · Cloud · Pro")
+    assert combo.itemText(combo.findData("cloud")) == "Fast · Cloud · Pro"
     assert combo.choice_mark(combo.findData("cloud")) == ""
     combo.setCurrentIndex(combo.findData("cloud"))
     assert settings(app, "smart_actions_speech_model") == [("set_setting", "smart_actions_speech_model", "cloud")]
@@ -173,7 +176,7 @@ def test_free_picking_gusan_cloud_opens_the_pro_window(page_for):
     combo.setCurrentIndex(combo.findData("cloud"))
     assert upsells(app) == [("_pro_upsell", "Fast cloud transcription")]
     assert not settings(app, "smart_actions_speech_model")
-    assert combo.currentData() == ""                                         # back to what is set
+    assert combo.currentData() == "base"                                     # back to what is set: Dictation's model
 
 
 def test_gusan_cloud_is_never_greyed_out_in_privacy_mode(page_for):
@@ -183,8 +186,8 @@ def test_gusan_cloud_is_never_greyed_out_in_privacy_mode(page_for):
     cloud = combo.findData("cloud")
     assert combo.choice_enabled(cloud)                                      # clickable, not faded
     assert page.speech_row.hint_label.isHidden()                            # no "Privacy mode keeps it ..." line
-    # A "cloud" pick paused by Privacy mode runs like Dictation, and reads so.
-    assert combo.currentData() == ""
+    # A "cloud" pick paused by Privacy mode runs like Dictation, and shows Dictation's model.
+    assert combo.currentData() == "base"
     assert page.speech_line.text() == "Whisper Base · Local"
     app.cfg["privacy_mode"] = False
     page.on_setting_changed("privacy_mode")
@@ -218,7 +221,7 @@ def test_pro_in_privacy_mode_can_keep_it_on(page_for, asked):
     assert len(asked.calls) == 1
     assert app.cfg["privacy_mode"] is True                                  # unchanged
     assert not settings(app, "privacy_mode") and not settings(app, "smart_actions_speech_model")
-    assert combo.currentData() == "" and page.speech_line.text() == "Whisper Base · Local"
+    assert combo.currentData() == "base" and page.speech_line.text() == "Whisper Base · Local"   # Dictation's model
     assert not upsells(app)
 
 
@@ -231,7 +234,7 @@ def test_free_in_privacy_mode_gets_the_pro_window_not_the_privacy_question(page_
         assert upsells(app) == [("_pro_upsell", "Fast cloud transcription")]
         assert not asked.calls                                              # Pro is checked first
         assert app.cfg["privacy_mode"] is True and not settings(app, "smart_actions_speech_model")
-        assert combo.currentData() == ""
+        assert combo.currentData() == "base"                                # Dictation's model, as before
 
 
 def test_a_whisper_model_not_on_disk_asks_then_downloads_and_is_saved(page_for, asked):
@@ -258,8 +261,8 @@ def test_a_whisper_model_not_on_disk_asks_then_downloads_and_is_saved(page_for, 
     combo.setCurrentIndex(combo.findData("base"))
     assert app.downloads.started == ["small"] and len(asked.calls) == 1
     assert page.speech_line.text() == "Whisper Base · Local"
-    combo.setCurrentIndex(0)
-    assert app.cfg["smart_actions_speech_model"] == ""
+    combo.setCurrentIndex(combo.findData("small"))                        # back to the one it downloaded
+    assert app.cfg["smart_actions_speech_model"] == "small"
 
 
 def test_not_now_leaves_everything_unchanged(page_for, asked):
@@ -343,17 +346,19 @@ def test_the_chips_of_a_row_do_not_change_with_the_plan(page_for):
         assert combo.choice_mark(last) == "", tier
 
 
-def test_same_as_dictation_follows_the_dictation_model(page_for):
+def test_like_dictation_shows_dictations_model(page_for):
     app = live_app("pro", backend="managed", managed_provider="gemini")
     page = page_for(app)
     combo = page.speech_combo
     assert page.speech_line.text() == "Fast · Cloud"
-    assert combo.itemText(0) == "Same as Dictation · Fast · Cloud · Pro"
-    assert combo.row_tags(0) == ("cloud", "pro")                          # it wears the tags of what Dictation runs
+    # Nothing picked (""): the picker shows the row of what Dictation runs, with that row's tags
+    assert combo.currentData() == "cloud" and combo.plain_text() == "Fast"
+    assert combo.current_tags() == ("cloud", "pro")
     app.cfg.update(backend="local", whisper_model="small")
     page.on_setting_changed("backend")
     assert page.speech_line.text() == "Whisper Small · Local"
-    assert combo.itemText(0) == "Same as Dictation · Whisper Small · Local" and combo.row_tags(0) == ("local",)
+    assert combo.currentData() == "small" and combo.current_tags() == ("local",)
+    assert app.cfg["smart_actions_speech_model"] == ""                   # still follows Dictation: nothing was written
 
 
 def test_the_cloud_item_is_the_fast_profile_whatever_the_old_provider_says(page_for):
@@ -366,7 +371,8 @@ def test_the_cloud_item_is_the_fast_profile_whatever_the_old_provider_says(page_
     app.cfg["managed_provider"] = "mistral"
     page.on_setting_changed("managed_provider")
     assert combo.itemText(combo.findData("cloud")) == "Fast · Cloud · Pro"   # the server chooses the model
-    assert combo.currentData() == ""                                         # the pick is kept
+    assert app.cfg["smart_actions_speech_model"] == ""                       # the pick is kept
+    assert combo.currentData() == "base"                                     # (it shows Dictation's model)
 
 
 # ── Try it: a rich paste ─────────────────────────────────────────────────────

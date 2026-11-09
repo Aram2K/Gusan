@@ -130,6 +130,7 @@ WATCHED = frozenset({
     "action_model", "action_api_provider", "action_api_model", "action_api_key",
     "google_api_key", "mistral_api_key", "privacy_mode", "admin_tier_override",
     "backend", "whisper_model", "managed_provider", "mistral_stt_model", "google_stt_model",
+    "managed_speech_profile", "speech_key_id", "api_keys",
 })
 
 # ("line", text, px, role, weight) | ("check", text) | ("rich", bold, rest) | ("signoff",)
@@ -1215,14 +1216,14 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
     # ── Transcribes with ──
     def _speech_rows(self):
         """The picker's rows (engine_choice.smart_speech_rows): real model names, a LOCAL / CLOUD
-        chip and PRO where a plan is needed; "Same as Dictation" names the model Dictation uses."""
+        chip and PRO where a plan is needed; Gusan Cloud first."""
         try:
             import engine_choice
             return engine_choice.smart_speech_rows(_cfg(self.app), _is_pro(self.app))
         except Exception:
             logger.debug("smart_speech_rows failed", exc_info=True)
-            return [{"value": "", "name": "Same as Dictation", "title": "Same as Dictation",
-                     "line": "Same as Dictation", "note": "", "tags": (), "pro": False, "group": "",
+            return [{"value": "", "name": "Like Dictation", "title": "Like Dictation",
+                     "line": "Like Dictation", "note": "", "tags": (), "pro": False, "group": "",
                      "tip": ""}]
 
     def _fill_speech_combo(self, rows=None):
@@ -1306,7 +1307,7 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
     def speech_value(self):
         """What really transcribes a Smart Action now, as a picker value: a
         "cloud" pick paused by Privacy mode (or a lapsed Pro) runs like
-        Dictation, so it reads Same as Dictation."""
+        Dictation, so it shows Dictation's model."""
         value = str(_cfg(self.app).get(SPEECH_KEY) or "").strip()
         try:
             import engine_choice
@@ -1318,7 +1319,13 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
             return value if value in SPEECH_CLOUDS else SPEECH_CLOUD
         if backend == "local":
             return model
-        return "" if value in SPEECH_CLOUDS or self.speech_combo.findData(value) < 0 else value
+        shown = "" if value in SPEECH_CLOUDS or self.speech_combo.findData(value) < 0 else value
+        if not shown:
+            # Like Dictation: the row of what Dictation runs (there is no "Same as Dictation" row).
+            same = engine_choice.smart_speech_same_value(_cfg(self.app))
+            if same and self.speech_combo.findData(same) >= 0:
+                return same
+        return shown
 
     def _speech_line(self):
         """The muted line under the picker: what it really runs on."""
@@ -1327,7 +1334,7 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
             return ""
         value = self.speech_value()
         if not value:
-            # The picker already says "Same as Dictation": just the model, with its tag.
+            # Dictation's own key (its row is that model): just the model, with its tag.
             return ro.get("tagged") or ro.get("model_name") or ""
         if ro.get("kind") == "cloud":
             return ro.get("tagged") or ro.get("label") or ""
@@ -1362,8 +1369,10 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
         box = self.speech_combo
         self._mark_speech_rows()                    # the download icons follow the disk
         i = box.findData(self.speech_value())
+        if i < 0 or box.is_heading(i):
+            i = next((k for k in range(box.count()) if not box.is_heading(k)), 0)   # never a heading
         box.blockSignals(True)
-        box.setCurrentIndex(i if i >= 0 else 0)
+        box.setCurrentIndex(i)
         box.blockSignals(False)
         line = self._speech_line()
         self.speech_line.setText(line)
@@ -1421,12 +1430,12 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
 
     def _cancel_speech_download(self):
         """Stop the Armenian model's download. A pick of it that is not on this computer would only
-        start the download again at the next Smart Action, so "Same as Dictation" is put back."""
+        start the download again at the next Smart Action, so it goes back to Dictation's model."""
         if not hy_model.cancel(self.app):
             return
         if self.speech_value() == hy_model.HY_ID:
             _set_many(self.app, {SPEECH_KEY: ""})
-        self._speech_note = "The download was stopped. Same as Dictation is back."
+        self._speech_note = "The download was stopped."
         self._refresh_speech()
 
     def _apply_speech(self, value, turn_off_privacy=False):

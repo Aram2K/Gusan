@@ -206,8 +206,8 @@ def test_the_row_in_every_picker(live_build, page_for, audio_build, hy_listed):
     assert box.row_tags(i) == ("local",) and box.row_note(i) == NOTE
     assert box.choice_mark(i) == "download"                                    # not on this computer: the icon
     values = list(rows)
-    assert values.index("large-v3") < values.index(HY) < values.index("cloud")  # with the models on this computer
-    assert box.headings()[0] == "On this computer"
+    assert values.index("cloud") < values.index("large-v3") < values.index(HY)  # with the models on this computer
+    assert box.headings()[:2] == ["Gusan Cloud", "On this computer"]            # (Gusan Cloud first)
     sa_app = live_app("pro")
     sa_app.downloads = HyDownloads()
     sa = page_for(sa_app)
@@ -363,7 +363,7 @@ def test_smart_a_pick_asks_then_downloads_and_cancel_puts_the_same_as_dictation_
     assert app.downloads.cancelled == [HY]
     assert app.cfg["smart_actions_speech_model"] == ""
     assert page.speech_cancel.isHidden()
-    assert page.speech_row.hint_label.text() == "The download was stopped. Same as Dictation is back."
+    assert page.speech_row.hint_label.text() == "The download was stopped."
 
 
 def test_smart_when_it_is_here_it_is_picked_at_once_and_says_armenian_only(page_for, asked, hy_listed):

@@ -183,7 +183,7 @@ def test_same_page_for_free_and_pro_with_no_limit_wording(build, store):
         box = page.model_combo
         assert [box.itemText(i) for i in box.row_indexes() if "pro" in box.row_tags(i)] == [
             "Best accuracy · Cloud · Pro", "Gladia Solaria · Cloud · Pro"]
-        assert box.headings() == ["On this computer", "Gusan Cloud"]
+        assert box.headings() == ["Gusan Cloud", "On this computer"]
     assert not [c for c in free_app.calls + pro_app.calls if c[0] == "_pro_upsell"], "nothing opens by itself"
 
 
@@ -347,13 +347,13 @@ def test_language_list_and_model_list(build, store):
                      "French", "German", "Russian", "Spanish"]
     box = page.model_combo
     names = [box.itemData(i, Qt.UserRole + 1) for i in box.row_indexes()]
-    assert names == ["Automatic", "Whisper Tiny", "Whisper Base", "Whisper Small", "Whisper Medium",
-                     "Whisper Large v3 Turbo", "Whisper Large v3", "Best accuracy", "Gladia Solaria"]
+    assert names == ["Automatic", "Best accuracy", "Gladia Solaria", "Whisper Tiny", "Whisper Base",
+                     "Whisper Small", "Whisper Medium", "Whisper Large v3 Turbo", "Whisper Large v3"]
     assert box.itemText(box.findData("large-v3-turbo")) == "Whisper Large v3 Turbo · Local"
     assert box.itemText(box.findData("cloud")) == "Best accuracy · Cloud · Pro"
     assert box.row_note(box.findData("medium")) == "Accurate"
     assert box.row_note(box.findData("cloud")) == "ElevenLabs Scribe v2 · OpenAI GPT Transcribe · GPT-4o Transcribe"
-    assert box.headings() == ["On this computer", "Gusan Cloud"]
+    assert box.headings() == ["Gusan Cloud", "On this computer"]
     box.showPopup()
     QApplication.processEvents()
     widest = max(box.itemDelegate().row_width(box.model().index(i, 0), box.font()) for i in range(box.count()))

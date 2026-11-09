@@ -2787,10 +2787,11 @@ class AudioRecorder:
         return AudioRecorder._backend(self) == "managed"
 
     def _live_engine(self, capture_mode):
-        """The real-time engine of this take (live_stt.ENGINE_*), or None (the pieces only). A language Gladia writes
-        poorly (speech_langs.LIVE_POOR: Armenian) on Fast streams to OpenAI gpt-live-transcribe; on Best accuracy it
-        does not stream (ElevenLabs Scribe v2, the most accurate - the founder's pick, 2026-11-07). Every other
-        language streams to Gladia."""
+        """The real-time engine of this take (live_stt.ENGINE_*), or None (the pieces only). Only Fast streams: to
+        Gladia, or for a language Gladia writes poorly (speech_langs.LIVE_POOR: Armenian) to OpenAI
+        gpt-live-transcribe. Best accuracy never does - its text is its own engines' (ElevenLabs Scribe v2 first, the
+        founder's pick for Armenian 2026-11-07; for every language since 2026-11-09: a live text in Best accuracy
+        was Gladia's, not the more accurate engines the row names)."""
         if not AudioRecorder._live_wanted(self, capture_mode):
             return None
         import live_stt
@@ -2799,12 +2800,14 @@ class AudioRecorder:
             # language Gladia writes poorly, else Gladia.
             poor = AudioRecorder._lang_setting(self) in speech_langs.LIVE_POOR
             return live_stt.ENGINE_OPENAI if poor else live_stt.ENGINE_GLADIA
+        import engine_choice
+        # A Smart Action with its own Gusan Cloud profile (cloud_model_override) uses that one.
+        profile = engine_choice.cloud_profile(getattr(self, "cloud_model_override", None)
+                                              or cfg.get(engine_choice.SPEECH_PROFILE_KEY))
+        if profile != engine_choice.CLOUD_FAST:
+            return None
         if AudioRecorder._lang_setting(self) in speech_langs.LIVE_POOR:
-            import engine_choice
-            # A Smart Action with its own Gusan Cloud profile (cloud_model_override) uses that one.
-            profile = engine_choice.cloud_profile(getattr(self, "cloud_model_override", None)
-                                                  or cfg.get(engine_choice.SPEECH_PROFILE_KEY))
-            return live_stt.ENGINE_OPENAI if profile == engine_choice.CLOUD_FAST else None
+            return live_stt.ENGINE_OPENAI
         return live_stt.ENGINE_GLADIA
 
     def _start_live(self, capture_mode):

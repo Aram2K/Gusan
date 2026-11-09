@@ -64,12 +64,15 @@ class TestWhenItRuns(unittest.TestCase):
             self.assertEqual(self._engine("smart_meeting", language="hy", managed_speech_profile=profile), "openai")
         self.assertIsNone(self._engine("smart_meeting", language="en", privacy_mode=True))
 
-    def test_armenian_streams_to_openai_on_fast_and_not_at_all_on_best_accuracy(self):
+    def test_only_fast_streams_best_accuracy_never_does(self):
         """The founder's pick (2026-11-07): Armenian Fast = OpenAI gpt-live-transcribe (Gladia writes it poorly),
-        Armenian Best accuracy = ElevenLabs Scribe v2 (the pieces); every other language = Gladia."""
+        Armenian Best accuracy = ElevenLabs Scribe v2 (the pieces). Since 2026-11-09 Best accuracy never streams in
+        any language (its text was Gladia's live text, not the more accurate engines the row names)."""
         self.assertEqual(self._engine(language="hy", managed_speech_profile="fast"), "openai")
         self.assertIsNone(self._engine(language="hy", managed_speech_profile="best"))
-        self.assertEqual(self._engine(language="fr", managed_speech_profile="best"), "gladia")
+        self.assertIsNone(self._engine(language="fr", managed_speech_profile="best"))
+        self.assertIsNone(self._engine(language="auto", managed_speech_profile="best"))
+        self.assertEqual(self._engine(language="fr", managed_speech_profile="fast"), "gladia")
         self.assertEqual(self._engine(language="auto", managed_speech_profile="fast"), "gladia")
         self.assertIsNone(self._engine(language="hy", managed_speech_profile="fast", privacy_mode=True))
 

@@ -445,10 +445,15 @@ def test_a_refused_change_shows_the_old_value(build):
 
 def test_languages(build):
     page, app = build("pro")
-    assert page.call_lang.currentText() == "Same as Dictation"
+    # "" follows Dictation's language and shows it (Dictation's default "auto"): no "Same as Dictation" row.
+    assert page.call_lang.currentText() == "Detect automatically"
     assert page.answer_lang.currentText() == "Same as the call"
     names = [page.call_lang.itemText(i) for i in range(page.call_lang.count())]
-    assert names[:4] == ["Same as Dictation", "Detect automatically", "Mixed languages", "English"]
+    assert names[:3] == ["Detect automatically", "Mixed languages", "English"]
+    assert "Same as Dictation" not in names
+    app.cfg["language"] = "de"                      # Dictation's language changes: the call language follows
+    page.on_setting_changed("language")
+    assert page.call_lang.currentText() == "German"
     assert "Armenian" in names                      # in the list, not first (no Armenian focus)
     i = page.call_lang.findData("fr")
     page.call_lang.setCurrentIndex(i)
