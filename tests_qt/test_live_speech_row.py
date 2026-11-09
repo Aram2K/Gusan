@@ -438,7 +438,8 @@ def test_the_row_has_names_and_a_keyboard_path(build):
     free, _a = build("free")
     box = free.speech.combo
     spoken = box.itemData(box.findData("cloud:best"), Qt.AccessibleTextRole)
-    assert spoken == "Best accuracy · Cloud · Pro. ElevenLabs Scribe v2 · OpenAI GPT Transcribe · GPT-4o Transcribe"   # its tags and its second line are spoken
+    assert spoken == ("Best accuracy · Cloud · Pro. ElevenLabs Scribe v2 · OpenAI GPT Transcribe · GPT-4o Transcribe."
+                      " Speed 4 of 5, accuracy 5 of 5")                  # its tags, its second line and its dots
     assert int(box.focusPolicy().value) & int(Qt.TabFocus.value)                 # Tab reaches it
     box.setFocus()
     QTest.keyClick(box, Qt.Key_Down)                                             # opens the list, picks nothing

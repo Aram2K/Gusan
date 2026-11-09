@@ -260,7 +260,8 @@ def test_every_row_is_named_for_a_screen_reader_with_its_tags_and_second_line(qa
     win = host()
     box = _box(win, ec.live_speech_rows(_cfg(), True, True))
     spoken = box.itemData(box.findData("cloud:best"), Qt.AccessibleTextRole)
-    assert spoken == "Best accuracy · Cloud · Pro. ElevenLabs Scribe v2 · OpenAI GPT Transcribe · GPT-4o Transcribe"
+    assert spoken == ("Best accuracy · Cloud · Pro. ElevenLabs Scribe v2 · OpenAI GPT Transcribe · GPT-4o Transcribe."
+                      " Speed 4 of 5, accuracy 5 of 5")                  # its tags, its second line, its dots
     assert box.itemData(box.findData("cloud:best"), Qt.ToolTipRole) == "Runs in the cloud. Needs a Pro plan"
     assert box.itemData(box.findData("small"), Qt.ToolTipRole) == "Runs on this computer"
     box.set_choice_mark(box.findData("small"), "download", "460 MB")

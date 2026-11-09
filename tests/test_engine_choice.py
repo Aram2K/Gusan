@@ -1007,3 +1007,15 @@ class TestRealtimeInTheRows(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCloudDots(unittest.TestCase):
+    def test_gusan_cloud_rows_wear_speed_and_accuracy_dots(self):
+        """The founder (2026-11-09): dots for the Pro choices too - Fast 5 / 4, Best accuracy 4 / 5."""
+        for rows in (ec.smart_speech_rows({}, True), ec.dictation_speech_rows({}, True),
+                     ec.live_speech_rows({}, True, True)):
+            by = {r["value"]: r for r in rows}
+            self.assertEqual((by["cloud"]["speed"], by["cloud"]["accuracy"]), (5, 4))
+            self.assertEqual((by["cloud:best"]["speed"], by["cloud:best"]["accuracy"]), (4, 5))
+        by = {r["value"]: r for r in ec.file_rows({}, True)}
+        self.assertEqual((by["cloud"]["speed"], by["cloud"]["accuracy"]), (4, 5))

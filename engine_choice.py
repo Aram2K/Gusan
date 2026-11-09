@@ -163,6 +163,16 @@ CLOUD_FAST, CLOUD_BEST = "fast", "best"
 # pick of it is this profile, _PROFILE_ALIASES.)
 CLOUD_GLADIA = "gladia"
 CLOUD_PROFILES = (CLOUD_FAST, CLOUD_BEST, CLOUD_GLADIA)
+# Speed / accuracy dots (1-5) of Gusan Cloud's profiles, like the models on this computer (the founder, 2026-11-09:
+# Fast 5 / 4, Best accuracy 4 / 5).
+CLOUD_PROFILE_DOTS = {CLOUD_FAST: (5, 4), CLOUD_BEST: (4, 5), CLOUD_GLADIA: (5, 4)}
+
+
+def _cloud_dots(profile):
+    speed, accuracy = CLOUD_PROFILE_DOTS.get(profile, (0, 0))
+    return {"speed": speed, "accuracy": accuracy}
+
+
 CLOUD_PROFILE_NAMES = {CLOUD_FAST: "Fast", CLOUD_BEST: "Best accuracy",
                        CLOUD_GLADIA: "Gladia Solaria"}
 # What each profile tries, first to last (transcribe-proxy FAST_ORDER / BEST_ORDER, the first three; the Gladia
@@ -787,7 +797,7 @@ def smart_speech_rows(cfg=None, pro=None):
         name = CLOUD_PROFILE_NAMES[profile]
         rows.append(speech_row(value, name, "cloud", GROUP_GUSAN_CLOUD,
                                note=realtime_note(profile, cfg), pro=True, model=name,
-                               show_pro=pro_chip(pro)))
+                               show_pro=pro_chip(pro), **_cloud_dots(profile)))
     rows += _local_rows()
     same = smart_speech_same_value(cfg)
     if not same or same not in {r["value"] for r in rows}:
@@ -894,7 +904,7 @@ def dictation_speech_rows(cfg=None, pro=None, source=None):
             name = CLOUD_PROFILE_NAMES[profile]
             rows.append(speech_row(value, name, "cloud", GROUP_GUSAN_CLOUD,
                                    note=realtime_note(profile, cfg), pro=True, model=name,
-                                   show_pro=show_pro))
+                                   show_pro=show_pro, **_cloud_dots(profile)))
     if source in (None, "local"):
         rows += _local_rows()
     if source in (None, "own_key"):
@@ -1508,7 +1518,7 @@ def live_speech_rows(cfg=None, pro=None, signed_in=None, language=None):
     for value, profile in ((LIVE_SPEECH_CLOUD, CLOUD_FAST), (LIVE_SPEECH_BEST, CLOUD_BEST)):
         name = CLOUD_PROFILE_NAMES[profile]
         rows.append(speech_row(value, name, "cloud", GROUP_GUSAN_CLOUD, note=CLOUD_PROFILE_NOTES[profile],
-                               pro=True, model=name, show_pro=show_pro))
+                               pro=True, model=name, show_pro=show_pro, **_cloud_dots(profile)))
     rows += _local_rows()
     if _has_google_key(cfg):
         for mid in GEMINI_SPEECH_MODELS:
@@ -1739,7 +1749,7 @@ def file_rows(cfg=None, pro=None, language=None, signed_in=None):
         name = CLOUD_PROFILE_NAMES[profile]
         rows.append(speech_row(value, name, "cloud", GROUP_GUSAN_CLOUD,
                                note=CLOUD_PROFILE_NOTES[profile], pro=True, model=name,
-                               show_pro=pro_chip(pro)))
+                               show_pro=pro_chip(pro), **_cloud_dots(profile)))
     rows += _local_rows()
     for value, (_backend, field) in _FILE_OWN.items():
         if _has_key(cfg, field):

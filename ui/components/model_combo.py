@@ -61,6 +61,8 @@ HEADING_ROLE = Qt.UserRole + 6       # True on a group heading (it is not a row)
 TIP_ROLE = Qt.UserRole + 7           # a rich row's tooltip (the tags in words)
 CLOSED_ROLE = Qt.UserRole + 8        # a rich row's short name: what the closed box says when the title does not fit
 DOTS_ROLE = Qt.UserRole + 9          # a rich row's (speed, accuracy), 1-5 each: dots after its second line
+DOTS_BELOW_ROLE = Qt.UserRole + 10   # True: the dots on a third line of their own (a cloud row: its second line
+                                     # lists engines, too long for the dots to follow it)
 MARK_PRO = "pro"
 MARK_DOWNLOAD = "download"
 # Where QStandardItem keeps an item's flags. Rows are greyed out through the
@@ -83,6 +85,7 @@ _CHIP_GAP = 4         # between two chips
 _HEADING_H = 26       # a group heading's height
 _ROW_H = 34           # a one-line row (the stylesheet's own item height)
 _ROW_H_NOTE = 46      # a row with its muted second line
+_ROW_H_DOTS = 64      # a row with its second line and the dots on a third
 # Speed / accuracy: "Speed ●●●●○  Accuracy ●●●○○" after the second line (models on this computer).
 DOTS_MAX = 5
 _DOT = 6              # a dot's diameter
@@ -251,7 +254,9 @@ class _RowDelegate(QStyledItemDelegate):
         mw = self.mark_width(index.data(MARK_ROLE) or "")
         top_w += (_MARK_GAP + chips_w if chips_w else 0) + (_CHIP_GAP + mw if mw else 0)
         note_w = QFontMetrics(self.note_font(font)).horizontalAdvance(str(index.data(NOTE_ROLE) or ""))
-        if index.data(DOTS_ROLE):
+        if index.data(DOTS_ROLE) and index.data(DOTS_BELOW_ROLE):
+            note_w = max(note_w, self.dots_width(index.data(DOTS_ROLE), font) - _DOTS_LEAD)
+        elif index.data(DOTS_ROLE):
             note_w = self.dots_column(font) + self.dots_width(index.data(DOTS_ROLE), font)
         return max(top_w, note_w) + _TEXT_PAD
 
@@ -261,7 +266,7 @@ class _RowDelegate(QStyledItemDelegate):
         fm = QFontMetrics(self.note_font(font))
         widest = 0
         for i in range(self._box.count()):
-            if self._box.itemData(i, DOTS_ROLE):
+            if self._box.itemData(i, DOTS_ROLE) and not self._box.itemData(i, DOTS_BELOW_ROLE):
                 widest = max(widest, fm.horizontalAdvance(str(self._box.itemData(i, NOTE_ROLE) or "")))
         return widest
 
@@ -320,6 +325,8 @@ class _RowDelegate(QStyledItemDelegate):
         if self.is_heading(index):
             return QSize(self.row_width(index, option.font), _HEADING_H)
         if self.is_rich(index):
+            if index.data(DOTS_ROLE) and index.data(DOTS_BELOW_ROLE):
+                return QSize(self.row_width(index, option.font), _ROW_H_DOTS)
             return QSize(self.row_width(index, option.font),
                          _ROW_H_NOTE if index.data(NOTE_ROLE) else _ROW_H)
         sh = super().sizeHint(option, index)
@@ -415,8 +422,13 @@ class _RowDelegate(QStyledItemDelegate):
             if dots:
                 nfm = QFontMetrics(nf)
                 on_c = theme.qcolor("blue-tx" if selected else "blue")
-                self.paint_dots(painter, dots, left + self.dots_column(option.font),
-                                note_r.top() + nfm.height() // 2 + 1, option.font, note_c, on_c)
+                if index.data(DOTS_BELOW_ROLE):
+                    # Their own line, under the engines, starting at the text's left edge.
+                    self.paint_dots(painter, dots, left - _DOTS_LEAD,
+                                    note_r.top() + nfm.height() + nfm.height() // 2 + 4, option.font, note_c, on_c)
+                else:
+                    self.paint_dots(painter, dots, left + self.dots_column(option.font),
+                                    note_r.top() + nfm.height() // 2 + 1, option.font, note_c, on_c)
         painter.restore()
 
 
@@ -534,6 +546,8 @@ class PlainNameCombo(QComboBox):
         self.setItemData(i, tuple(row.get("tags") or ()), TAGS_ROLE)
         if row.get("speed") or row.get("accuracy"):
             self.setItemData(i, (int(row.get("speed") or 0), int(row.get("accuracy") or 0)), DOTS_ROLE)
+            self.setItemData(i, row.get("kind") not in ("local", "auto", None) or len(str(row.get("note") or "")) > 30,
+                             DOTS_BELOW_ROLE)
         tip = str(row.get("tip") or "")
         self.setItemData(i, tip, TIP_ROLE)
         self.setItemData(i, tip, Qt.ToolTipRole)
