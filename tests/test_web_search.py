@@ -611,3 +611,14 @@ def test_a_deep_search_waits_up_to_two_minutes_and_the_pill_says_researching():
     assert action_api._web_timeout(False, "do a deep search on X", "smart_auto", 45) == 45
     _t, sub = pill_copy._writing(None, "", {"writer": "Gusan Cloud", "web": "deep"}, 0.3)
     assert sub == "Researching the web · Gusan Cloud"
+
+
+def test_without_web_results_the_answer_never_says_it_cannot_browse():
+    """The founder's Live Assistant said "I can't browse the web" (2026-11-09, its web search was off): with search
+    on and nothing attached, or search off, the model is told never to say so - and, when off, that it can be
+    turned on in Gusan."""
+    source = SERVER.read_text(encoding="utf-8")
+    assert 'searchOn && (body.mode === "smart_auto" || body.mode === "live_assist" || body.mode === "meeting_chat")' in source
+    assert '!searchOn && (body.mode === "smart_auto" || body.mode === "live_assist")' in source
+    assert "Web search is turned off in Gusan for these answers." in source
+    assert "can be turned on in Gusan (Search the web)" in source

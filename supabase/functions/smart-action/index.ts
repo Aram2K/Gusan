@@ -1145,10 +1145,19 @@ Deno.serve(async (req) => {
         : block + "\n\n" + String(last.content ?? "") };
     }
   }
-  if (!sources.length && body.web_search === true && body.mode === "smart_auto") {
-    // Web search is on but nothing was attached (not needed, or nothing found): never "I can't search the web".
-    const note = "Web search is available for these requests. No web results are attached to this one (none were " +
-      "needed or none were found): answer from what you know, and never say you cannot search the web or browse.";
+  // No web results attached: never "I can't browse the web" (the founder's Live Assistant said it, 2026-11-09).
+  // Search on: none were needed or found. Search off (Live Assistant, Smart Actions): say it can be turned on.
+  const searchOn = body.web_search === true;
+  const note = sources.length ? ""
+    : searchOn && (body.mode === "smart_auto" || body.mode === "live_assist" || body.mode === "meeting_chat")
+    ? "Web search is available for these requests. No web results are attached to this one (none were " +
+      "needed or none were found): answer from what you know, and never say you cannot search the web or browse."
+    : !searchOn && (body.mode === "smart_auto" || body.mode === "live_assist")
+    ? "Web search is turned off in Gusan for these answers. Answer from what you know and what was said. Never " +
+      "say you cannot browse the web; when the answer needs current outside facts, say in a few words that web " +
+      "search is off and can be turned on in Gusan (Search the web)."
+    : "";
+  if (note) {
     const systemIndex = messages.findLastIndex((m: any) => m?.role === "system" && typeof m.content === "string");
     if (systemIndex >= 0) {
       const system = messages[systemIndex] as { content: string };
