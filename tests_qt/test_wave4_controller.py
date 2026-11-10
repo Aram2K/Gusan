@@ -1,11 +1,15 @@
 """Gusan 2.0 Wave 4: the REAL AppController owns the services and wires them
 (offscreen, a throwaway profile, no global hotkey hooks, no network, no
 analytics). Named to run last: it imports main and builds the whole app."""
+import sys
 import threading
 from unittest import mock
 
 import pytest
 from PySide6.QtWidgets import QApplication
+
+# main.install_update installs by itself on Windows only; a Mac opens the download page instead.
+SELF_INSTALL = pytest.mark.skipif(sys.platform != "win32", reason="the app installs its own updates on Windows only")
 
 
 def _spin(ms=50):
@@ -366,7 +370,8 @@ def test_the_tray_is_the_gusan_menu(ctl):
     assert isinstance(tm, TrayMenu)
     assert ctl.tray_icon.contextMenu() is tm.menu
     rows = tm.visible_texts()
-    texts = [t for _k, t in rows]
+    # a Mac's plain menu says it in the text: "Dictate\t⌃ R", "Live Assistant  (Pro)"
+    texts = [t.split("\t")[0].removesuffix("  (Pro)") for _k, t in rows]
     for row in ("Open Gusan", "Dictate", "Record a meeting…", "Live Assistant",
                 "Convert audio to text…", "Recent", "Privacy mode", "Settings…", "Quit Gusan"):
         assert row in texts, row
@@ -1105,6 +1110,7 @@ def update_env(ctl, monkeypatch, tmp_path):
     _spin(50)
 
 
+@SELF_INSTALL
 def test_install_update_shows_in_settings_from_the_click_to_the_restart(ctl, update_env):
     import sys
     import threading
@@ -1142,6 +1148,7 @@ def test_install_update_shows_in_settings_from_the_click_to_the_restart(ctl, upd
     assert env.fetches == 1
 
 
+@SELF_INSTALL
 def test_a_failure_nobody_asked_for_pops_nothing_up(ctl, update_env):
     """Install update, then work somewhere else: when the download fails nothing comes up over what they are
     doing - the row says it, and when the Gusan window isn't in front a notice does too."""
@@ -1179,6 +1186,7 @@ def test_a_window_they_put_away_is_not_pulled_back_by_what_comes_by_itself(qapp)
         w.deleteLater()
 
 
+@SELF_INSTALL
 def test_cancel_in_the_window_stops_the_download_at_once_and_installs_nothing(ctl, update_env):
     import threading
     env = update_env
@@ -1202,6 +1210,7 @@ def test_cancel_in_the_window_stops_the_download_at_once_and_installs_nothing(ct
     assert ctl._update_window.stage == "installing" and env.fetches == 2
 
 
+@SELF_INSTALL
 def test_a_failed_download_says_why_and_try_again_goes_on(ctl, update_env):
     import updater
     env = update_env
@@ -1221,6 +1230,7 @@ def test_a_failed_download_says_why_and_try_again_goes_on(ctl, update_env):
     assert win.stage == "installing" and env.fetches == 2
 
 
+@SELF_INSTALL
 def test_saying_no_to_windows_permission_keeps_gusan_open_and_fully_working(ctl, update_env):
     import updater
     env = update_env
@@ -1238,6 +1248,7 @@ def test_saying_no_to_windows_permission_keeps_gusan_open_and_fully_working(ctl,
     assert ctl.cfg["update_attempt"] == {}
 
 
+@SELF_INSTALL
 def test_a_job_that_starts_during_the_download_is_waited_for_then_the_install_goes_on(ctl, update_env):
     import threading
     env = update_env

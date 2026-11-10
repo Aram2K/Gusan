@@ -64,6 +64,12 @@ class TestMacCapturePrivacy(unittest.TestCase):
     """glass.exclude_from_capture on macOS sets NSWindow.sharingType and
     reports only what it can read back."""
 
+    def setUp(self):
+        from ui import glass
+        cocoa = mock.patch.object(glass, "_cocoa", lambda: True)     # the real Mac platform
+        cocoa.start()
+        self.addCleanup(cocoa.stop)
+
     def _runtime(self, sticks=True, has_window=True):
         state = {"sharing": 1}                      # NSWindowSharingReadOnly
 

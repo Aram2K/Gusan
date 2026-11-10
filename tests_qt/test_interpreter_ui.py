@@ -8,6 +8,7 @@
 * the Meetings start card's and the Live Assistant rail's Interpreter rows;
 * settings_apply - the Interpreter shortcut never takes another shortcut's keys.
 """
+import sys
 import time
 from types import SimpleNamespace
 
@@ -16,6 +17,8 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication, QWidget
 
 from tests_qt.conftest import make_stub_app
+
+MAC = sys.platform == "darwin"          # shortcuts read ⌃ ⌥ there, Ctrl Alt on Windows
 
 VOICE = {"voice_id": "v1", "source": "meetings", "created_at": "2026-11-07T10:00:00Z"}
 
@@ -422,7 +425,7 @@ def test_the_rail_rows(page, ip):
     assert [b.text() for b in p.output_seg.buttons()] == ["Automatic", "Headphones", "Speakers"]
     assert "Scribe v2 Realtime" in p.models_label.text() and "ElevenLabs v4 Turbo" in p.models_label.text()
     assert "DeepSeek V4.1 Flash" in p.models_label.text()
-    assert p.shortcut.capture.keys.accessibleName() == "Ctrl + Alt + I"
+    assert p.shortcut.capture.keys.accessibleName() == ("⌃ + ⌥ + I" if MAC else "Ctrl + Alt + I")
     assert not p.usage_box.isVisibleTo(p)                           # hidden until the server says
 
 
@@ -458,7 +461,7 @@ def test_the_shortcut_row_writes_the_setting(page):
     p, app = page("pro")
     p.shortcut.capture.captured.emit("ctrl+alt+j")
     assert app.cfg["interpreter_hotkey"] == "ctrl+alt+j"
-    assert p.shortcut.capture.keys.accessibleName() == "Ctrl + Alt + J"
+    assert p.shortcut.capture.keys.accessibleName() == ("⌃ + ⌥ + J" if MAC else "Ctrl + Alt + J")
 
 
 # ── Voice for them ──
@@ -1660,7 +1663,7 @@ def test_the_tray_row_toggles_the_interpreter(qapp):
     tr = tm.build_tray_menu(app, QMenu(), custom=True)
     try:
         a = tr.actions["interpreter"]
-        assert a.isCheckable() and a.property(tm.P_PRO) and a.property(tm.P_HINT) == "Ctrl+Alt+I"
+        assert a.isCheckable() and a.property(tm.P_PRO) and a.property(tm.P_HINT) == ("⌃⌥ I" if MAC else "Ctrl+Alt+I")
         a.trigger()
         assert app.interpreter.state == "running" and a.isChecked()
         a.trigger()

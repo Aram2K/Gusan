@@ -34,6 +34,7 @@ crashing, wraps a name with no spaces, and opens in the middle of a screen when 
 minimised; the selection bar and the Undo toast are measured too (the toast floats over the page, so it
 is measured in the picture of the page).
 """
+import sys
 import os
 import time
 
@@ -777,6 +778,8 @@ def test_placeholders_in_every_field_are_readable(qapp, scheme, window, made):
 
 
 # ═══════════════════════════ the tray menu: the one surface that follows the OS ═══════════════════════════
+@pytest.mark.skipif(sys.platform == "darwin", reason="a Mac's tray menu is the plain native one: macOS paints it, "
+                    "and the offscreen platform has no NSMenu to look at")
 def test_the_tray_menu_follows_the_os_and_is_readable_either_way(qapp, scheme, made):
     from tests_qt.test_page_floating import FakeCalendar, full_app, meeting
     from ui import theme, tray_menu

@@ -154,8 +154,16 @@ def _objc_runtime():
     return _objc
 
 
+def _cocoa():
+    from PySide6.QtGui import QGuiApplication
+    return QGuiApplication.platformName() == "cocoa"
+
+
 def _ns_window(widget):
-    """The NSWindow behind a Qt top level (winId() is its NSView on macOS)."""
+    """The NSWindow behind a Qt top level (winId() is its NSView on macOS). None off the Cocoa
+    platform (offscreen tests): winId() is no NSView there, and messaging it crashes."""
+    if not _cocoa():
+        return None
     view = int(widget.winId())
     if not view:
         return None
