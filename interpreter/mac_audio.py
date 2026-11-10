@@ -80,6 +80,14 @@ def helper_path(build=True):
     return out
 
 
+def permission_state(helper, run=subprocess.run):
+    """granted / denied / unknown (never asked yet: the first start shows macOS's prompt)."""
+    try:
+        return run([helper, "--status"], capture_output=True, text=True, timeout=5).stdout.strip() or "unknown"
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
 def capture_status(helper=None, release=None, run=subprocess.run):
     """None when the call's sound can be captured, else the code that says why not:
     mac_too_old, no_call_sound (no helper, or the permission was refused)."""
@@ -101,10 +109,12 @@ class TapCapture:
     the helper ends by itself (the output device went away)."""
 
     START_S = 2.0                 # the helper says no within this, or it runs
+    PROMPT_S = 60.0               # first start: macOS's System Audio Recording prompt waits for a click
     FILL_S = 0.02
 
-    def __init__(self, on_pcm, helper, exclude_pids=(), popen=subprocess.Popen):
+    def __init__(self, on_pcm, helper, exclude_pids=(), popen=subprocess.Popen, asking=False):
         self.on_pcm = on_pcm
+        self.start_s = self.PROMPT_S if asking else self.START_S
         self.helper = helper
         self.exclude_pids = tuple(exclude_pids)
         self._popen = popen
@@ -144,7 +154,7 @@ class TapCapture:
         box = []
         t = threading.Thread(target=lambda: box.append(proc.stderr.readline()), daemon=True)
         t.start()
-        t.join(self.START_S)
+        t.join(self.start_s)
         return (box[0] or b"").decode("utf-8", "ignore") if box else ""
 
     @staticmethod
@@ -280,7 +290,8 @@ class MacAudio:
                 helper = self._helper_path()
                 if not helper:
                     raise error("no_call_sound")
-                return TapCapture(on_pcm, helper, exclude_pids=(os.getpid(),))
+                return TapCapture(on_pcm, helper, exclude_pids=(os.getpid(),),
+                                  asking=permission_state(helper) == "unknown")
             pa = self._ensure()
             idx = device if device is not None else self.mic_index()
             if idx is None:

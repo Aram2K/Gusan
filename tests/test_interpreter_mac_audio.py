@@ -113,12 +113,32 @@ class MuteProc(FakeProc):
 def test_a_mute_helper_never_freezes_the_start():
     proc = MuteProc()
     tap, _got = tap_with(proc)
-    tap.START_S = 0.2
+    tap.start_s = 0.2
     t0 = time.monotonic()
     with pytest.raises(InterpreterError) as e:
         tap.start()
     assert time.monotonic() - t0 < 2 and proc.terminated
     assert e.value.code == "no_call_sound"
+
+
+def test_the_first_start_waits_for_the_permission_prompt():
+    asked = mac_audio.TapCapture(None, "/x/t", asking=True)
+    assert asked.start_s == mac_audio.TapCapture.PROMPT_S >= 30   # a person reads and clicks Allow
+    assert mac_audio.TapCapture(None, "/x/t").start_s == mac_audio.TapCapture.START_S
+
+
+@pytest.mark.parametrize("said,asking", [("unknown\n", True), ("granted\n", False), ("denied\n", False)])
+def test_mac_capture_asks_only_when_macos_has_not_asked_yet(said, asking):
+    with mock.patch.object(mac_audio, "permission_state", return_value=said.strip()), \
+            mock.patch.object(mac_audio, "helper_path", return_value="/x/gusan-tap"):
+        tap = mac_audio.MacAudio().capture(lambda b: None, loopback=True)
+    assert isinstance(tap, mac_audio.TapCapture) and (tap.start_s == tap.PROMPT_S) is asking
+
+
+def test_permission_state_unknown_when_the_helper_cannot_say():
+    def boom(*a, **k):
+        raise OSError("gone")
+    assert mac_audio.permission_state("/x/t", run=boom) == "unknown"
 
 
 def test_capture_status():
