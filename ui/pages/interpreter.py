@@ -81,6 +81,7 @@ if sys.platform == "darwin":
 else:
     CABLE_URL = "https://vb-audio.com/Cable/"
     CABLE_HINT = "Then pick CABLE Output as the microphone in Zoom, Teams or Meet."
+CAN_DUCK = sys.platform != "darwin"          # macOS has no per-app volume to turn the call down with
 THEM = "Anna"                                # the other person in the picture
 TRY_PHASES = {"listening": "Listening…", "translating": "Translating…", "speaking": "Playing…"}
 TRY_FAILED = "Couldn't try it just now. Check your connection and try again."
@@ -2269,6 +2270,7 @@ class InterpreterPage(QWidget):
         out.setAccessibleName("I hear it on")
         self.output_row = rail.add_row(SettingRow("I hear it on", out, stacked=True))
         self.duck_toggle = self._bool_row(rail, "Turn the call down while translating", "interpreter_duck")
+        self.duck_toggle._row.setVisible(CAN_DUCK)
         self.under_toggle = self._bool_row(rail, "Keep their voice underneath", "interpreter_keep_underneath")
         self.captions_toggle = self._bool_row(rail, "Captions", "interpreter_captions")
         self.voice_row = rail.add_row(VoiceForThemRow(self))

@@ -375,6 +375,14 @@ def test_the_switches_write_config(page):
     assert p.hear_row.sub.text() == "Voice only"                    # captions off
 
 
+@pytest.mark.parametrize("can_duck", [True, False])
+def test_turn_the_call_down_only_where_it_works(page, ip, monkeypatch, can_duck):
+    monkeypatch.setattr(ip, "CAN_DUCK", can_duck)                  # False on a Mac: no per-app volume
+    p, app = page("pro")
+    shown = [r.label.text() for r in p.rail.rows() if r.isVisibleTo(p.rail)]
+    assert ("Turn the call down while translating" in shown) is can_duck
+
+
 def test_both_directions_off_refuses_to_start(page):
     p, app = page("pro", interpreter_hear=False, interpreter_speak=False)
     _toggle(p)
@@ -407,7 +415,8 @@ def test_the_rail_rows(page, ip):
     p, app = page("pro")
     labels = [r.label.text() for r in p.rail.rows() if r.isVisibleTo(p.rail)]
     notice = ["Tell people an AI interpreter is on"] if ip.notice_spoken() else []    # once the engine says it
-    assert labels == ["I hear it on", "Turn the call down while translating", "Keep their voice underneath",
+    duck = ["Turn the call down while translating"] if ip.CAN_DUCK else []
+    assert labels == ["I hear it on"] + duck + ["Keep their voice underneath",
                       "Captions", "Voice for them", "Microphone in the call"] + notice + ["Shortcut"]
     assert p.rail.title_label.text() == "Interpreter settings"
     assert [b.text() for b in p.output_seg.buttons()] == ["Automatic", "Headphones", "Speakers"]
