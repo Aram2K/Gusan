@@ -37,6 +37,7 @@ if __name__ == "__main__":
     # `from main import ...` (file jobs, model checks): they
     # must get THIS module - a second copy would load its own config.
     sys.modules.setdefault("main", sys.modules["__main__"])
+import array
 import collections
 import threading
 import time
@@ -1195,6 +1196,59 @@ except ImportError:
     import pyaudio
     HAS_LOOPBACK = False
 
+class _MacTapStream:
+    """macOS: the call's sound (a Core Audio process tap, Gusan's own voice left out) read the way
+    the recorder reads a WASAPI loopback stream: 16 kHz mono float32, without blocking."""
+    MAX_S = 10
+
+    def __init__(self, tap_for):
+        self._buf = bytearray()
+        self._lock = threading.Lock()
+        self._tap = tap_for(self._on_pcm)
+        self._tap.start()
+
+    def _on_pcm(self, pcm):
+        with self._lock:
+            self._buf += pcm
+            extra = len(self._buf) - self.MAX_S * 16000 * 2
+            if extra > 0:
+                del self._buf[:extra]
+
+    def get_read_available(self):
+        with self._lock:
+            return len(self._buf) // 2
+
+    def read(self, frames, exception_on_overflow=False):
+        with self._lock:
+            pcm = bytes(self._buf[:frames * 2])
+            del self._buf[:len(pcm)]
+        return array.array("f", [v / 32768.0 for v in array.array("h", pcm)]).tobytes()
+
+    def stop_stream(self):
+        self._tap.stop()
+
+    def close(self):
+        pass
+
+
+def _mac_call_sound():
+    """macOS: the call's sound as a loopback stream, or None (no helper, no permission, macOS older
+    than 14.2) - the meeting then records the microphone only."""
+    try:
+        from interpreter import mac_audio
+        helper = mac_audio.helper_path()
+        if mac_audio.capture_status(helper) is not None:
+            return None
+        asking = mac_audio.permission_state(helper) == "unknown"
+        stream = _MacTapStream(lambda on_pcm: mac_audio.TapCapture(
+            on_pcm, helper, exclude_pids=(os.getpid(),), asking=asking))
+        logger.info("Meeting: the call's sound from a process tap (Gusan left out)")
+        return stream
+    except Exception as e:
+        logger.warning("Meeting: the call's sound can't be captured on this Mac: %s", e)
+        return None
+
+
 class _GpuDecodeError(Exception):
     """A decode failed in the GPU stack (transcribe_segments retries on CPU)."""
 
@@ -2076,14 +2130,18 @@ class AudioRecorder:
         # into ordinary dictation via a shared config key.
         self.mic_stream = None
         is_loopback = False
+        mac_tap = None
         self._loopback_rate = cfg["sample_rate"]
         self._loopback_channels = 1
 
         actual_device_index = None
 
         if capture_mode in ("smart_meeting", "system_only"):
-            discovered = self._find_default_loopback_device()
-            if discovered is not None:
+            mac_tap = _mac_call_sound() if sys.platform == "darwin" else None
+            discovered = None if mac_tap is not None else self._find_default_loopback_device()
+            if mac_tap is not None:
+                is_loopback = True          # already 16 kHz mono: _loopback_rate/_channels stay as set
+            elif discovered is not None:
                 actual_device_index = discovered
                 is_loopback = True
                 try:
@@ -2119,7 +2177,7 @@ class AudioRecorder:
             open_args["channels"] = self._loopback_channels
             open_args["frames_per_buffer"] = int(cfg["chunk_size"] * (self._loopback_rate / cfg["sample_rate"]))
             
-        self.stream = self.audio.open(**open_args)
+        self.stream = mac_tap if mac_tap is not None else self.audio.open(**open_args)
 
         # If primary stream is a loopback, open a secondary stream for the default
         # microphone - but only in smart_meeting mode. "system_only" deliberately

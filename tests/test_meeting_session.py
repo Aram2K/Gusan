@@ -9,6 +9,7 @@ import json
 import tempfile
 import threading
 import time
+import sys
 import types
 import unittest
 from pathlib import Path
@@ -193,6 +194,15 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(msess.split_sentences("One, two. Three? Four"),
                          ["One, two.", "Three?", "Four"])
 
+    def test_has_loopback_on_a_mac_is_the_process_tap(self):
+        from interpreter import mac_audio
+        with patch.object(sys, "platform", "darwin"):
+            with patch.object(mac_audio, "capture_status", return_value=None):
+                self.assertTrue(msess.has_loopback())
+            with patch.object(mac_audio, "capture_status", return_value="mac_too_old"):
+                self.assertFalse(msess.has_loopback())
+
+    @patch.object(sys, "platform", "win32")
     def test_has_loopback_reads_the_loaded_main_without_importing_it(self):
         fake = types.ModuleType("main")
         fake.HAS_LOOPBACK = False

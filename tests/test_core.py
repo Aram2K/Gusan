@@ -1116,8 +1116,11 @@ class TestCaptureMode(unittest.TestCase):
             "defaultSampleRate": 48000, "maxInputChannels": 2}
         rec._find_default_loopback_device = MagicMock(return_value=7)
         try:
-            with patch.dict(main.cfg, {"sample_rate": 16000, "chunk_size": 1024}):
+            with patch.dict(main.cfg, {"sample_rate": 16000, "chunk_size": 1024}), \
+                    patch.object(sys, "platform", "win32"), \
+                    patch.object(main, "_mac_call_sound") as mac:
                 rec.start_recording(capture_mode="smart_meeting")
+            mac.assert_not_called()                     # Windows: WASAPI loopback, as before
             rec._find_default_loopback_device.assert_called_once()
             self.assertIsNotNone(rec.mic_stream)              # secondary mic opened
             self.assertEqual(rec.audio.open.call_count, 2)    # loopback + mic
@@ -1135,13 +1138,101 @@ class TestCaptureMode(unittest.TestCase):
             "defaultSampleRate": 48000, "maxInputChannels": 2}
         rec._find_default_loopback_device = MagicMock(return_value=7)
         try:
-            with patch.dict(main.cfg, {"sample_rate": 16000, "chunk_size": 1024}):
+            with patch.dict(main.cfg, {"sample_rate": 16000, "chunk_size": 1024}), \
+                    patch.object(sys, "platform", "win32"), \
+                    patch.object(main, "_mac_call_sound") as mac:
                 rec.start_recording(capture_mode="system_only")
+            mac.assert_not_called()                     # Windows: WASAPI loopback, as before
             rec._find_default_loopback_device.assert_called_once()
             self.assertIsNone(rec.mic_stream)                 # no secondary mic
             self.assertEqual(rec.audio.open.call_count, 1)    # loopback only
         finally:
             rec.recording = False
+
+
+    def _mac_meeting(self, mode, tap):
+        import main
+        from main import AudioRecorder
+        rec = AudioRecorder()
+        rec.audio = MagicMock()
+        rec._find_default_loopback_device = MagicMock(return_value=7)
+        with patch("threading.Thread"), \
+                patch.dict(main.cfg, {"sample_rate": 16000, "chunk_size": 1024}), \
+                patch.object(sys, "platform", "darwin"), \
+                patch.object(main, "_mac_call_sound", return_value=tap):
+            rec.start_recording(capture_mode=mode)
+        rec.recording = False
+        return rec
+
+    def test_mac_smart_meeting_takes_the_call_from_the_process_tap(self):
+        tap = MagicMock()
+        rec = self._mac_meeting("smart_meeting", tap)
+        self.assertIs(rec.stream, tap)
+        rec._find_default_loopback_device.assert_not_called()
+        self.assertEqual(rec.audio.open.call_count, 1)              # the microphone only
+        self.assertIsNotNone(rec.mic_stream)
+        self.assertEqual((rec._loopback_rate, rec._loopback_channels), (16000, 1))
+
+    def test_mac_system_only_has_no_microphone(self):
+        tap = MagicMock()
+        rec = self._mac_meeting("system_only", tap)
+        self.assertIs(rec.stream, tap)
+        self.assertIsNone(rec.mic_stream)
+        self.assertEqual(rec.audio.open.call_count, 0)
+
+    def test_mac_without_the_tap_falls_back_like_before(self):
+        rec = self._mac_meeting("smart_meeting", None)
+        rec._find_default_loopback_device.assert_called_once()
+
+    def test_mac_tap_stream_reads_like_a_loopback(self):
+        import array
+        from main import _MacTapStream
+        taps = []
+
+        class Tap:
+            def __init__(self, on_pcm):
+                self.on_pcm, self.stopped = on_pcm, False
+                taps.append(self)
+
+            def start(self):
+                pass
+
+            def stop(self):
+                self.stopped = True
+        s = _MacTapStream(Tap)
+        tap = taps[0]
+        self.assertEqual(s.get_read_available(), 0)
+        tap.on_pcm(array.array("h", [16384, -16384, 0]).tobytes())
+        self.assertEqual(s.get_read_available(), 3)
+        self.assertEqual(array.array("f", s.read(2)).tolist(), [0.5, -0.5])
+        self.assertEqual(s.get_read_available(), 1)
+        tap.on_pcm(bytes(2 * 16000 * (_MacTapStream.MAX_S + 1)))
+        self.assertEqual(s.get_read_available(), 16000 * _MacTapStream.MAX_S)   # bounded
+        s.stop_stream()
+        s.close()
+        self.assertTrue(tap.stopped)
+
+    def test_mac_call_sound_none_when_macos_says_no(self):
+        import main
+        from interpreter import mac_audio
+        with patch.object(mac_audio, "helper_path", return_value="/x/gusan-tap"), \
+                patch.object(mac_audio, "capture_status", return_value="no_call_sound"), \
+                patch.object(mac_audio, "TapCapture") as tc:
+            self.assertIsNone(main._mac_call_sound())
+        tc.assert_not_called()
+
+    def test_mac_call_sound_leaves_gusan_out(self):
+        import main
+        from interpreter import mac_audio
+        with patch.object(mac_audio, "helper_path", return_value="/x/gusan-tap"), \
+                patch.object(mac_audio, "capture_status", return_value=None), \
+                patch.object(mac_audio, "permission_state", return_value="granted"), \
+                patch.object(mac_audio, "TapCapture") as tc:
+            stream = main._mac_call_sound()
+        self.assertIsInstance(stream, main._MacTapStream)
+        _args, kw = tc.call_args
+        self.assertEqual(kw["exclude_pids"], (os.getpid(),))
+        tc.return_value.start.assert_called_once()
 
 
 class TestGoogleKeyTest(unittest.TestCase):

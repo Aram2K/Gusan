@@ -365,13 +365,24 @@ def _main_attr(name, default=None):
 
 def has_loopback():
     """True when this system can capture system sound (WASAPI loopback via
-    pyaudiowpatch, Windows)."""
+    pyaudiowpatch, Windows; a Core Audio process tap, macOS 14.2+)."""
+    if sys.platform == "darwin":
+        return has_mac_call_sound()
     flag = _main_attr("HAS_LOOPBACK")
     if flag is not None:
         return bool(flag)
     try:
         return importlib.util.find_spec("pyaudiowpatch") is not None
     except (ImportError, ValueError):
+        return False
+
+
+def has_mac_call_sound():
+    """macOS: the process-tap helper is there, macOS is new enough, and the permission isn't refused."""
+    try:
+        from interpreter import mac_audio
+        return mac_audio.capture_status() is None
+    except Exception:
         return False
 
 
