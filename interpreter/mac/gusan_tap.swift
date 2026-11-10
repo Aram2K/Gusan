@@ -1,13 +1,16 @@
 // gusan-tap: the call's sound on macOS for Gusan's Interpreter (Hear direction).
 //
 // A Core Audio process tap (macOS 14.2+) of everything the Mac plays, except the processes given
-// with --exclude-pid (Gusan itself: its own translated voice never comes back). Writes 16 kHz mono
+// with --exclude-pid (Gusan itself: its own translated voice never comes back). With --call-apps,
+// only the first group of apps (bundle-id prefixes, comma-separated) that has sound open: the call
+// app, not music or notifications; none of them running = everything except Gusan. Writes 16 kHz mono
 // 16-bit little-endian PCM to stdout, in step with the output device's clock (silence included).
 // Needs the "System Audio Recording" permission. Exit codes: 2 = macOS too old, 3 = no permission
 // or the tap was refused, 4 = no output device, 5 = the device could not start.
 //
-//   gusan-tap [--exclude-pid PID]... [--status]
+//   gusan-tap [--exclude-pid PID]... [--call-apps PREFIX,PREFIX]... [--status] [--list]
 //   --status: print the permission's state (granted / denied / unknown) and exit.
+//   --list: print the bundle id and pid of every process with sound open, and exit.
 import AudioToolbox
 import CoreAudio
 import Foundation
@@ -37,11 +40,17 @@ func permissionStatus() -> String {
 }
 
 var excluded: [pid_t] = []
+var callApps: [[String]] = []
+var listOnly = false
 var args = CommandLine.arguments.dropFirst()
 while let a = args.popFirst() {
     switch a {
     case "--exclude-pid":
         if let v = args.popFirst(), let p = pid_t(v) { excluded.append(p) }
+    case "--call-apps":
+        if let v = args.popFirst() { callApps.append(v.lowercased().split(separator: ",").map(String.init)) }
+    case "--list":
+        listOnly = true
     case "--status":
         print(permissionStatus())
         exit(0)
@@ -67,6 +76,40 @@ func processObject(_ pid: pid_t) -> AudioObjectID? {
     return st == noErr && obj != kAudioObjectUnknown ? obj : nil
 }
 
+// Every process that has sound open, with its bundle id ("" when it has none).
+func audioProcesses() -> [(obj: AudioObjectID, bundle: String, pid: pid_t)] {
+    var a = addr(kAudioHardwarePropertyProcessObjectList)
+    let sys = AudioObjectID(kAudioObjectSystemObject)
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(sys, &a, 0, nil, &size) == noErr, size > 0 else { return [] }
+    var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+    guard AudioObjectGetPropertyData(sys, &a, 0, nil, &size, &ids) == noErr else { return [] }
+    return ids.map { obj in
+        var b = addr(kAudioProcessPropertyBundleID)
+        var name: Unmanaged<CFString>?
+        var bsize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        let bundle = AudioObjectGetPropertyData(obj, &b, 0, nil, &bsize, &name) == noErr
+            ? (name?.takeRetainedValue() as String? ?? "") : ""
+        var p = addr(kAudioProcessPropertyPID)
+        var pid = pid_t(-1)
+        var psize = UInt32(MemoryLayout<pid_t>.size)
+        _ = AudioObjectGetPropertyData(obj, &p, 0, nil, &psize, &pid)
+        return (obj, bundle, pid)
+    }
+}
+
+if listOnly {
+    for p in audioProcesses() { print("\(p.bundle)\t\(p.pid)") }
+    exit(0)
+}
+
+// The first group of call apps with a process that has sound open (Gusan never counts).
+let running = audioProcesses().filter { !excluded.contains($0.pid) }
+var only: [(obj: AudioObjectID, bundle: String, pid: pid_t)] = []
+for group in callApps where only.isEmpty {
+    only = running.filter { p in group.contains { !$0.isEmpty && p.bundle.lowercased().hasPrefix($0) } }
+}
+
 func defaultOutputUID() -> String? {
     var a = addr(kAudioHardwarePropertyDefaultSystemOutputDevice)
     var dev = AudioObjectID(kAudioObjectUnknown)
@@ -80,7 +123,9 @@ func defaultOutputUID() -> String? {
     return s.takeRetainedValue() as String
 }
 
-let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: excluded.compactMap(processObject))
+let desc = only.isEmpty
+    ? CATapDescription(stereoGlobalTapButExcludeProcesses: excluded.compactMap(processObject))
+    : CATapDescription(stereoMixdownOfProcesses: only.map { $0.obj })
 desc.uuid = UUID()
 desc.name = "Gusan call sound"
 desc.isPrivate = true
@@ -192,7 +237,8 @@ st = AudioDeviceCreateIOProcIDWithBlock(&procID, aggID, ioQueue) { _, inData, _,
 guard st == noErr, let proc = procID else { cleanup(); fail(5, "no IO proc (\(st))") }
 st = AudioDeviceStart(aggID, proc)
 guard st == noErr else { cleanup(); fail(5, "could not start (\(st))") }
-say("started: \(fmt.mSampleRate) Hz, \(channels) ch, excluding \(excluded)")
+say("started: \(fmt.mSampleRate) Hz, \(channels) ch, "
+    + (only.isEmpty ? "excluding \(excluded)" : "only \(Set(only.map { $0.bundle }).sorted().joined(separator: ","))"))
 
 for sig in [SIGTERM, SIGINT, SIGPIPE] {
     signal(sig, SIG_IGN)

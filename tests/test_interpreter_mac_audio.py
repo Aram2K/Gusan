@@ -229,3 +229,44 @@ def test_the_mac_messages_are_one_short_line():
     from ui import interpreter_host as host
     for code in ("no_call_sound", "mac_too_old"):
         assert host.message(code) and "\n" not in host.message(code)
+
+
+def test_tap_asks_for_the_call_apps_in_order():
+    seen = {}
+
+    def popen(args, **kw):
+        seen["args"] = args
+        return FakeProc()
+    tap = mac_audio.TapCapture(lambda b: None, "/x/t", exclude_pids=(42,), popen=popen,
+                               call_apps=(("us.zoom.", "com.microsoft.teams"), ("com.google.chrome",)))
+    tap.start()
+    tap.stop()
+    assert seen["args"] == ["/x/t", "--exclude-pid", "42",
+                            "--call-apps", "us.zoom.,com.microsoft.teams",
+                            "--call-apps", "com.google.chrome"]
+
+
+@pytest.mark.parametrize("said,only", [
+    (b"gusan-tap: started: 48000.0 Hz, 2 ch, only us.zoom.xos\n", ["us.zoom.xos"]),
+    (b"gusan-tap: started: 48000.0 Hz, 2 ch, only com.google.Chrome,com.google.Chrome.helper\n",
+     ["com.google.Chrome", "com.google.Chrome.helper"]),
+    (b"gusan-tap: started: 48000.0 Hz, 2 ch, excluding [42]\n", []),       # no call app: everything but Gusan
+])
+def test_tap_says_which_app_it_hears(said, only):
+    tap, _got = tap_with(FakeProc(err=said))
+    tap.start()
+    tap.stop()
+    assert tap.only == only
+
+
+def test_call_apps_come_before_browsers():
+    apps, browsers = mac_audio.CALL_APPS
+    assert "us.zoom." in apps and "com.microsoft.teams" in apps
+    assert {"com.google.chrome", "com.apple.safari", "company.thebrowser."} <= set(browsers)
+    assert all(p == p.lower() for group in mac_audio.CALL_APPS for p in group)
+
+
+def test_mac_capture_taps_the_call_apps():
+    with mock.patch.object(mac_audio, "permission_state", return_value="granted"):
+        tap = mac_audio.MacAudio().capture(lambda b: None, loopback=True)
+    assert tap.call_apps == mac_audio.CALL_APPS

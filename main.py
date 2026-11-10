@@ -1241,7 +1241,7 @@ def _mac_call_sound():
             return None
         asking = mac_audio.permission_state(helper) == "unknown"
         stream = _MacTapStream(lambda on_pcm: mac_audio.TapCapture(
-            on_pcm, helper, exclude_pids=(os.getpid(),), asking=asking))
+            on_pcm, helper, exclude_pids=(os.getpid(),), asking=asking, call_apps=mac_audio.CALL_APPS))
         logger.info("Meeting: the call's sound from a process tap (Gusan left out)")
         return stream
     except Exception as e:

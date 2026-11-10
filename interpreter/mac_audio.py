@@ -80,6 +80,15 @@ def helper_path(build=True):
     return out
 
 
+# The call apps, by bundle-id prefix, in the order they win: when one of them has sound open, Hear
+# taps only it (no music or notifications); none = everything the Mac plays except Gusan. Browsers
+# come second: Meet runs in them, but so does everything else.
+CALL_APPS = (
+    ("us.zoom.", "com.microsoft.teams"),
+    ("com.google.chrome", "com.apple.safari", "com.apple.webkit.", "company.thebrowser."),
+)
+
+
 def permission_state(helper, run=subprocess.run):
     """granted / denied / unknown (never asked yet: the first start shows macOS's prompt)."""
     try:
@@ -112,8 +121,10 @@ class TapCapture:
     PROMPT_S = 60.0               # first start: macOS's System Audio Recording prompt waits for a click
     FILL_S = 0.02
 
-    def __init__(self, on_pcm, helper, exclude_pids=(), popen=subprocess.Popen, asking=False):
+    def __init__(self, on_pcm, helper, exclude_pids=(), popen=subprocess.Popen, asking=False,
+                 call_apps=()):
         self.on_pcm = on_pcm
+        self.call_apps = tuple(call_apps)
         self.start_s = self.PROMPT_S if asking else self.START_S
         self.helper = helper
         self.exclude_pids = tuple(exclude_pids)
@@ -131,6 +142,8 @@ class TapCapture:
         args = [self.helper]
         for pid in self.exclude_pids:
             args += ["--exclude-pid", str(pid)]
+        for group in self.call_apps:
+            args += ["--call-apps", ",".join(group)]
         self._stopping = False
         self.lost = False
         self._proc = proc = self._popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -148,7 +161,9 @@ class TapCapture:
         self._thread.start()
         self._filler = threading.Thread(target=self._fill, name="interp-tap-fill", daemon=True)
         self._filler.start()
-        logger.info("interpreter capture: the Mac's sound (process tap, Gusan left out)")
+        self.only = said.split(" only ", 1)[1].strip().split(",") if " only " in said else []
+        logger.info("interpreter capture: %s", f"only {', '.join(self.only)} (process tap)" if self.only
+                    else "the Mac's sound (process tap, Gusan left out)")
 
     def _first_line(self, proc):
         box = []
@@ -291,7 +306,7 @@ class MacAudio:
                 if not helper:
                     raise error("no_call_sound")
                 return TapCapture(on_pcm, helper, exclude_pids=(os.getpid(),),
-                                  asking=permission_state(helper) == "unknown")
+                                  asking=permission_state(helper) == "unknown", call_apps=CALL_APPS)
             pa = self._ensure()
             idx = device if device is not None else self.mic_index()
             if idx is None:

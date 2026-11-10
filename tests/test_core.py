@@ -1232,6 +1232,7 @@ class TestCaptureMode(unittest.TestCase):
         self.assertIsInstance(stream, main._MacTapStream)
         _args, kw = tc.call_args
         self.assertEqual(kw["exclude_pids"], (os.getpid(),))
+        self.assertEqual(kw["call_apps"], mac_audio.CALL_APPS)    # only Zoom/Teams/Meet when running
         tc.return_value.start.assert_called_once()
 
 
