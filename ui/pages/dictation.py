@@ -1258,6 +1258,8 @@ class DictationPage(QWidget):
             self._show_shortcut_problem("%s opens Live Assistant. Pick another." % shown)
         elif smart and norm(smart) == norm(combo):
             self._show_shortcut_problem("%s runs Smart Actions. Pick another." % shown)
+        elif cfg.get("screen_chat_hotkey") and norm(cfg["screen_chat_hotkey"]) == norm(combo):
+            self._show_shortcut_problem("%s opens Screen chat. Pick another." % shown)
         else:
             self._show_shortcut_problem("Couldn't use %s. Try another." % shown)
 

@@ -16,6 +16,37 @@ import mac_permissions as P  # noqa: E402
 ON = {P.MICROPHONE: True, P.ACCESSIBILITY: True, P.INPUT_MONITORING: True}
 
 
+class TestScreenRecording(unittest.TestCase):
+    def test_off_mac_is_unknown_and_does_not_request(self):
+        with mock.patch.object(P, "IS_MAC", False), mock.patch.object(P, "_screen_access") as access:
+            self.assertIsNone(P.screen_recording_granted())
+            self.assertFalse(P.request(P.SCREEN_RECORDING))
+        access.assert_not_called()
+        self.assertNotIn(P.SCREEN_RECORDING, P.ALL)
+
+    def test_preflight_granted_denied_and_unknown(self):
+        with mock.patch.object(P, "IS_MAC", True):
+            for state in (True, False):
+                with mock.patch.object(P, "_screen_access", return_value=state) as access:
+                    self.assertIs(P.screen_recording_granted(), state)
+                    access.assert_called_once_with("CGPreflightScreenCaptureAccess")
+            with mock.patch.object(P, "_screen_access", side_effect=OSError("unavailable")):
+                self.assertIsNone(P.screen_recording_granted())
+
+    def test_request_and_settings_pane(self):
+        with mock.patch.object(P, "IS_MAC", True), \
+                mock.patch.object(P, "_screen_access", return_value=False) as access, \
+                mock.patch.object(P.subprocess, "Popen") as popen:
+            self.assertFalse(P.request(P.SCREEN_RECORDING))
+            access.assert_called_once_with("CGRequestScreenCaptureAccess")
+            self.assertIn("Privacy_ScreenCapture", popen.call_args.args[0][1])
+        with mock.patch.object(P, "IS_MAC", True), \
+                mock.patch.object(P, "_screen_access", return_value=True), \
+                mock.patch.object(P, "open_settings") as settings:
+            self.assertTrue(P.request(P.SCREEN_RECORDING))
+            settings.assert_not_called()
+
+
 class TestRules(unittest.TestCase):
     def setUp(self):
         patcher = mock.patch.object(P, "IS_MAC", True)

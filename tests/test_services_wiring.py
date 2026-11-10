@@ -42,6 +42,20 @@ class _Inline:
 
 # ── config ────────────────────────────────────────────────────────────────────
 
+class TestScreenChatEngine(unittest.TestCase):
+    def test_free_meeting_does_not_override_screen_chat_own_key(self):
+        app = SimpleNamespace(cfg={"action_model": main.actions.API_OPENAI_ID, "action_api_key": "own-key"},
+                              is_pro=lambda: False, _live_session_id="meeting",
+                              auth=SimpleNamespace(get_access_token=lambda: "token"))
+        model, cfg = main.AppController._resolve_action_engine(app)
+        self.assertEqual(model, main.actions.API_MANAGED_ID)
+        self.assertEqual(cfg["_live_session_id"], "meeting")
+        model, cfg = main.AppController._resolve_action_engine(app, allow_live_session=False)
+        self.assertEqual(model, main.actions.API_OPENAI_ID)
+        self.assertNotIn("_live_session_id", cfg)
+        self.assertNotIn("_managed_token", cfg)
+
+
 class TestConfigMigration(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -107,6 +121,19 @@ class TestConfigMigration(unittest.TestCase):
                            "live_assist_writer": "", "install_updates_on_quit": True}.items():
             self.assertEqual(d[key], value, key)
         self.assertNotIn("launch_at_login", d)                # autostart decides it
+
+    def test_screen_chat_default_yields_to_existing_shortcuts(self):
+        for version in (2, 3):
+            for key in ("hotkey", "live_assist_hotkey", "smart_actions_hotkey"):
+                with self.subTest(version=version, key=key):
+                    cfg = self._load({"config_schema_version": version, key: "Ctrl + Alt + G"})
+                    self.assertEqual(cfg[key], "Ctrl + Alt + G")
+                    self.assertEqual(cfg["screen_chat_hotkey"], "")
+        for saved in ("", "ctrl+alt+h"):
+            cfg = self._load({"config_schema_version": 3, "screen_chat_hotkey": saved})
+            self.assertEqual(cfg["screen_chat_hotkey"], saved)
+        self.assertEqual(self._load({"config_schema_version": 3})["screen_chat_hotkey"],
+                         main.DEFAULT["screen_chat_hotkey"])
 
 
 # ── the speech model ──────────────────────────────────────────────────────────
@@ -537,11 +564,12 @@ class TestSessionAndBusy(unittest.TestCase):
         app._unregister_mouse_listener = lambda: app.calls.append("unmouse")
         app._setup_assist_hotkey = lambda hk: app.calls.append(("assist", hk))
         app._release_smart_hotkey = lambda: app.calls.append("unsmart")   # the Smart Actions shortcut too
+        app._release_screen_chat_hotkey = lambda: app.calls.append("unscreen")
         app.apply_tray_bindings = lambda: app.calls.append("rehook")
         cfg_before = dict(main.cfg)
         self.assertTrue(main.AppController.suspend_hotkeys(app, True))
         main.AppController.suspend_hotkeys(app, True)            # once
-        self.assertEqual(app.calls, ["unhook", "unmouse", ("assist", ""), "unsmart"])
+        self.assertEqual(app.calls, ["unhook", "unmouse", ("assist", ""), "unsmart", "unscreen"])
         main.AppController.suspend_hotkeys(app, False)
         self.assertEqual(app.calls[-1], "rehook")
         self.assertEqual(main.cfg, cfg_before)                    # no config change
@@ -764,6 +792,37 @@ class TestSmartActionsShortcut(unittest.TestCase):
         self.assertIsNone(app._registered_smart_hotkey)
 
 
+class TestScreenChatHotkey(unittest.TestCase):
+    def test_default_and_windows_registration_release(self):
+        self.assertEqual(main.DEFAULT["screen_chat_hotkey"], "ctrl+alt+g")
+        self.assertNotIn(main.DEFAULT["screen_chat_hotkey"],
+                         [main.DEFAULT[k] for k in ("hotkey", "live_assist_hotkey", "smart_actions_hotkey")])
+        app = SimpleNamespace(cfg={"hotkey": "alt+r", "live_assist_hotkey": "ctrl+alt+a",
+                                   "smart_actions_hotkey": "alt+s"},
+                              sig_screen_chat_hotkey=mock.Mock())
+        bind(app, "_setup_screen_chat_hotkey", "_release_screen_chat_hotkey")
+        keyboard = mock.Mock()
+        with mock.patch.dict(sys.modules, {"keyboard": keyboard}), mock.patch.object(main.sys, "platform", "win32"):
+            for refused in ("", "alt+r", "ctrl+alt+a", "alt+s", "g", "mouse:middle"):
+                self.assertFalse(app._setup_screen_chat_hotkey(refused))
+            keyboard.add_hotkey.assert_not_called()
+            self.assertTrue(app._setup_screen_chat_hotkey("Ctrl + Alt + G"))
+            callback = keyboard.add_hotkey.call_args.args[1]
+            callback()
+            app.sig_screen_chat_hotkey.emit.assert_called_once_with()
+            app._release_screen_chat_hotkey()
+            keyboard.remove_hotkey.assert_called_once_with("ctrl+alt+g")
+
+    def test_opener_stub_and_suspended_late_event(self):
+        app = SimpleNamespace(_open_screen_chat_window=mock.Mock())
+        main.AppController.open_screen_chat(app)
+        app._open_screen_chat_window.assert_called_once_with()
+        app._hotkeys_suspended = True
+        main.AppController.open_screen_chat(app)
+        app._open_screen_chat_window.assert_called_once_with()
+        main.AppController.open_screen_chat(SimpleNamespace())
+
+
 class TestSafeQuit(unittest.TestCase):
     def _app(self, state="idle", file_job=False, recording=False, confirm=True):
         order = []
@@ -788,7 +847,7 @@ class TestSafeQuit(unittest.TestCase):
         app._run_update_on_quit = lambda: order.append("installer")
         app._flush_pending_save = lambda: order.append("settings")
         for name in ("_unregister_transient_keys", "_unregister_kbd_hotkey", "_unregister_mouse_listener",
-                     "_release_smart_hotkey"):
+                     "_release_smart_hotkey", "_release_screen_chat_hotkey"):
             setattr(app, name, lambda: None)
         bind(app, "quit_app", "_stop_recording_for_quit", "_stop_mic_monitor_for_quit",
              "_on_quit_event", "_on_session_ending", "_on_about_to_quit", "_release_single_instance_lock")

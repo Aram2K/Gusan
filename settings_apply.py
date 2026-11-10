@@ -63,6 +63,7 @@ logger = logging.getLogger("transcribe")
 HOTKEY = "hotkey"
 ASSIST_HOTKEY = "live_assist_hotkey"
 SMART_HOTKEY = "smart_actions_hotkey"   # ui/pages/smart_actions.py HOTKEY_KEY
+SCREEN_HOTKEY = "screen_chat_hotkey"
 SMART_SPEECH = "smart_actions_speech_model"   # engine_choice.SMART_SPEECH_KEY
 SMART_SPEECH_CLOUD = "cloud"                   # engine_choice.SMART_SPEECH_CLOUD
 SMART_SPEECH_CLOUDS = ("cloud", "cloud:best")  # engine_choice.SMART_SPEECH_CLOUD_PROFILES: Fast, Best accuracy
@@ -161,12 +162,21 @@ def apply(app, updates, autostart_mod=None):
     old_hotkey = cfg.get(HOTKEY)
     old_assist = cfg.get(ASSIST_HOTKEY, "")
     old_smart = cfg.get(SMART_HOTKEY, "")
+    old_screen = cfg.get(SCREEN_HOTKEY, "")
     updates = dict(updates)
     smart_after = norm_hotkey(updates.get(SMART_HOTKEY, cfg.get(SMART_HOTKEY)))
     # Privacy first: it decides whether a cloud backend in the same call is allowed.
     items = sorted(updates.items(), key=lambda kv: kv[0] != PRIVACY)
 
     for key, value in items:
+        if key in (HOTKEY, ASSIST_HOTKEY, SMART_HOTKEY, SCREEN_HOTKEY):
+            value = norm_hotkey(value)
+            others = (HOTKEY, ASSIST_HOTKEY, SMART_HOTKEY, SCREEN_HOTKEY)
+            taken = {norm_hotkey(updates.get(k, cfg.get(k))) for k in others if k != key}
+            if value and (value in taken or hotkeys.is_bare_typing_key(value)
+                          or (key in (SMART_HOTKEY, SCREEN_HOTKEY) and value.startswith("mouse:"))):
+                results[key] = False
+                continue
         if key in PROTECTED_KEYS:
             logger.warning("Refused a page write to %s", key)
             results[key] = False
@@ -334,6 +344,20 @@ def apply(app, updates, autostart_mod=None):
                 _try("smart_actions_hotkey rollback", smart_fn, old_smart)
                 if SMART_HOTKEY in changed:
                     changed.remove(SMART_HOTKEY)
+    screen_fn = getattr(app, "_setup_screen_chat_hotkey", None)
+    if callable(screen_fn) and (want["hotkey"] or want["assist"] or want["smart"]
+                                or SCREEN_HOTKEY in changed):
+        value = cfg.get(SCREEN_HOTKEY, "")
+        taken = {norm_hotkey(cfg.get(k)) for k in (HOTKEY, ASSIST_HOTKEY, SMART_HOTKEY)}
+        if value and norm_hotkey(value) in taken:
+            ok, reg = False, False
+        else:
+            ok, reg = _try(SCREEN_HOTKEY, screen_fn, value)
+        if SCREEN_HOTKEY in changed and not (ok and (reg or not value)):
+            cfg[SCREEN_HOTKEY] = old_screen
+            _try("screen_chat_hotkey rollback", screen_fn, old_screen)
+            results[SCREEN_HOTKEY] = False
+            changed.remove(SCREEN_HOTKEY)
     if want["preload"]:
         _try("preload", app._preload_speech_model)
     if want["overlay"]:

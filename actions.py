@@ -15,6 +15,7 @@ ACTION_TRANSLATE = "translate"
 ACTION_SUMMARIZE = "summarize"
 ACTION_MEETING_NOTES = "meeting_notes"
 ACTION_LIVE_ASSIST = "live_assist"       # real-time copilot (ui/live_assist.py)
+ACTION_SCREEN_CHAT = "screen_chat"
 ACTION_LIVE_RECAP = "live_recap"         # rolling "so far" summary during a call
 ACTION_LIVE_RULE = "live_rule"           # the Live Assistant's standing instruction run on every piece of the talk
 ACTION_MEETING_CHAT = "meeting_chat"     # "Ask about this meeting" (meeting_chat.py): free-form questions on one meeting
@@ -193,6 +194,7 @@ _ACTION_MODE_WHITELIST = {
     ACTION_TRANSCRIBE_ONLY, ACTION_SMART_AUTO, ACTION_WRITE_EMAIL,
     ACTION_MAKE_TODO, ACTION_TRANSLATE, ACTION_SUMMARIZE, ACTION_MEETING_NOTES,
     ACTION_LIVE_ASSIST, ACTION_LIVE_RECAP, ACTION_LIVE_RULE, ACTION_MEETING_CHAT, ACTION_LIVE_PEOPLE,
+    ACTION_SCREEN_CHAT,
     ACTION_MEETING_TITLE, ACTION_SMART_SELECTION,
 }
 
@@ -455,6 +457,8 @@ def process_stream(text, mode, on_token, source_lang="auto", target_lang="en",
     mode = normalize_action_mode(mode)
     model = normalize_action_model(model)
     kind = ACTION_MODELS.get(model, {}).get("kind")
+    if mode == ACTION_SCREEN_CHAT and kind not in ("cloud", "managed"):
+        raise ActionError("Screen chat needs Gusan Cloud or your own API key.")
     if config and config.get("privacy_mode") and kind in ("cloud", "managed"):
         raise ActionError("Cloud AI engines are off in Privacy Mode - pick a local model "
                           "in Settings › Speech & AI.")
@@ -468,7 +472,7 @@ def process_stream(text, mode, on_token, source_lang="auto", target_lang="en",
     # emails...). Live answers and recaps are the model's own words - a list of
     # names there only tempts it to drop them in.
     vocab_block = ("" if mode in (ACTION_LIVE_ASSIST, ACTION_LIVE_RECAP, ACTION_LIVE_RULE, ACTION_MEETING_CHAT,
-                                  ACTION_LIVE_PEOPLE)
+                                  ACTION_LIVE_PEOPLE, ACTION_SCREEN_CHAT)
                    else vocabulary.spelling_authority_block(config or {}))
     if vocab_block and config is not None:
         config = {**config, "_vocab_block": vocab_block}

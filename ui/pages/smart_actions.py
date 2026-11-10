@@ -1633,6 +1633,8 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
             problem = "%s starts dictation. Pick another." % shown
         elif hk and hk == _norm(cfg.get("live_assist_hotkey")):
             problem = "%s opens Live Assistant. Pick another." % shown
+        elif hk and hk == _norm(cfg.get("screen_chat_hotkey")):
+            problem = "%s opens Screen chat. Pick another." % shown
         elif not hk or not _set(self.app, HOTKEY_KEY, hk):
             problem = "Couldn't use %s. Try another." % shown
         self._on_shortcut_problem(problem)

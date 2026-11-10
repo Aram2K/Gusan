@@ -104,6 +104,7 @@ import engine_choice
 import hardware
 import history_actions
 import hotkeys
+import settings_apply
 import speech_hy
 import updater
 from app_info import APP_NAME, APP_VERSION
@@ -112,6 +113,7 @@ from ui.components import (Avatar, Button, Card, Chip, Divider, IconTile, Keycap
                            PageHeader, Segmented, SettingRow, Toggle, icons, label, mini_prompt)
 from ui.components.model_combo import MARK_DOWNLOAD, NOTE_ROLE, PlainNameCombo
 from ui.components.controls import keycap_labels
+from ui.components.hotkey_capture import HotkeyCaptureButton
 
 logger = logging.getLogger("transcribe")
 
@@ -137,6 +139,7 @@ SHORTCUTS = (
     (("hotkey",), "mic", "Dictate", "dictation", "Dictation", hotkeys.DICTATION_DEFAULT),
     (SMART_SHORTCUT_KEYS, "wand", "Smart Actions", "smart_actions", "Smart Actions", hotkeys.SMART_ACTIONS_DEFAULT),
     (("live_assist_hotkey",), "incognito", "Live Assistant", "live_assistant", "Live Assistant", "ctrl+alt+a"),
+    (("screen_chat_hotkey",), "wand", "Screen chat", "settings", "Screen chat", "ctrl+alt+g"),
 )
 SMART_SPEECH_KEY = engine_choice.SMART_SPEECH_KEY      # Smart Actions' "Transcribes with"
 FEATURE_PAGES = (("mic", "Dictation", "dictation"), ("wand", "Smart Actions", "smart_actions"),
@@ -171,7 +174,7 @@ _WATCHED = {
     "backend", "whisper_model", "managed_provider", "mistral_stt_model", "google_stt_model", "privacy_mode",
     "action_model", "action_api_provider", "action_api_model", "action_api_base_url", "action_api_key",
     "mistral_api_key", "google_api_key", "save_history", "analytics_enabled", "overlay_private",
-    "live_assist_private", "install_updates_on_quit",
+    "live_assist_private", "install_updates_on_quit", "screen_chat_hotkey",
     "pending_update_version", "admin_tier_override",
 } | set(SMART_SHORTCUT_KEYS)
 
@@ -739,6 +742,95 @@ class ShortcutRow(QFrame):
         else:
             self.keys.set_inner(not_set_chip())
             self.keys.setAccessibleName("Set a %s shortcut" % self.name)
+
+    def set_last(self, last):
+        theme.set_prop(self, "last", bool(last), children=False)
+
+
+class _ShortcutKeycaps(_KeysButton):
+    def __init__(self, parent=None):
+        super().__init__("Screen chat shortcut", parent)
+
+    def set_hotkey(self, hotkey):
+        keys = keycap_labels(hotkey)
+        self.set_inner(mid_keys(keys))
+        self.setAccessibleName(" + ".join(keys))
+
+
+class _SettingsShortcutCapture(HotkeyCaptureButton):
+    def _inside(self, obj):
+        return obj is self.button or super()._inside(obj)
+
+
+class ScreenChatShortcutRow(QFrame):
+    def __init__(self, app, parent=None):
+        super().__init__(parent)
+        self.app = app
+        self.name = "Screen chat"
+        self.setProperty("gusan", "row")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 14, 0, 14)
+        outer.setSpacing(6)
+        row = QHBoxLayout()
+        row.setSpacing(16)
+        left = QWidget(self)
+        left.setFixedWidth(200)
+        title = QHBoxLayout(left)
+        title.setContentsMargins(0, 0, 0, 0)
+        title.setSpacing(10)
+        title.addWidget(icon_label("wand", 18, "muted", parent=left))
+        title.addWidget(text_label("Screen chat", 14, 600, role="label", parent=left), 1)
+        row.addWidget(left)
+        self.capture = _SettingsShortcutCapture(cfg_of(app).get("screen_chat_hotkey", "ctrl+alt+g"),
+                                           accessible_name="Screen chat shortcut", allow_mouse=False)
+        old_keys = self.capture.keys
+        self.capture.keys = _ShortcutKeycaps(self.capture)
+        self.capture.keys.clicked.connect(self.capture.start_capture)
+        self.capture.layout().replaceWidget(old_keys, self.capture.keys)
+        old_keys.hide()
+        old_keys.deleteLater()
+        self.capture.set_hotkey(self.capture.hotkey())
+        self.capture.captured.connect(self._captured)
+        self.capture.refused.connect(self._error)
+        self.capture.capturing_changed.connect(lambda on: call(app, "suspend_hotkeys", on))
+        row.addWidget(self.capture)
+        row.addStretch()
+        self.capture.layout().removeWidget(self.capture.button)
+        right = QWidget(self)
+        right.setFixedWidth(150)
+        links = QHBoxLayout(right)
+        links.setContentsMargins(0, 0, 0, 0)
+        links.addStretch()
+        self.capture.button.setFont(theme.font(14, 700))
+        self.capture.button.setFixedHeight(24)
+        links.addWidget(self.capture.button)
+        row.addWidget(right)
+        outer.addLayout(row)
+        self.error_label = text_label("", 12, role="error", parent=self)
+        self.error_label.setWordWrap(True)
+        self.error_label.hide()
+        outer.addWidget(self.error_label)
+
+    def _error(self, text):
+        self.error_label.setText(text)
+        self.error_label.setVisible(bool(text))
+
+    def _captured(self, combo):
+        cfg = cfg_of(self.app)
+        ok = call(self.app, "set_setting", "screen_chat_hotkey", combo)
+        if ok:
+            self._error("")
+        else:
+            owners = (("hotkey", "Dictation"), ("live_assist_hotkey", "Live Assistant"),
+                      ("smart_actions_hotkey", "Smart Actions"))
+            owner = next((name for key, name in owners if settings_apply.norm_hotkey(cfg.get(key))
+                          == settings_apply.norm_hotkey(combo)), None)
+            self._error((owner + " uses that shortcut. Pick another.") if owner else
+                        "Couldn't use that shortcut. Try another.")
+        self.refresh(cfg)
+
+    def refresh(self, cfg):
+        self.capture.set_hotkey(cfg.get("screen_chat_hotkey", "ctrl+alt+g"))
 
     def set_last(self, last):
         theme.set_prop(self, "last", bool(last), children=False)
@@ -1903,8 +1995,11 @@ class SettingsPage(QWidget):
         blk, bv = self._block("Shortcuts", parent=sec)
         self.shortcut_rows = []
         for spec in SHORTCUTS:
-            r = ShortcutRow(*spec)
-            r.open_page.connect(lambda route: go(self, self.app, route, focus="hotkey"))
+            if spec[0] == ("screen_chat_hotkey",):
+                r = ScreenChatShortcutRow(self.app)
+            else:
+                r = ShortcutRow(*spec)
+                r.open_page.connect(lambda route: go(self, self.app, route, focus="hotkey"))
             self.shortcut_rows.append(r)
         bv.addWidget(self._group(self.shortcut_rows))          # padding 4px 20px, as on the board
         inner.addWidget(blk)

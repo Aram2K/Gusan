@@ -103,6 +103,8 @@ import updater
 from file_jobs import FILE_DEFAULTS
 from calendar_service import DEFAULTS as CALENDAR_DEFAULTS
 import live_context              # Qt-free: start_session() hands a calendar agenda to a session
+import screen_chat
+import foreground
 
 # ── Managed cloud transcription (Pro moat) ────────────────────────────────────
 MANAGED_PROXY_URL = "https://hftcelxzfoubheqeoool.supabase.co/functions/v1/transcribe-proxy"
@@ -259,6 +261,7 @@ DEFAULT = {
     "notion_owner": "",
     # Live Assistance overlay (ui/live_assist.py): private copilot during calls.
     "live_assist_hotkey": "ctrl+alt+a",
+    "screen_chat_hotkey": "ctrl+alt+g",
     "live_assist_private": True,     # excluded from screen capture
     "live_assist_opacity": 0.96,
     "live_assist_theme": "light",
@@ -377,7 +380,8 @@ def _migrate_config(loaded, on_disk):
         # shortcut"). A shortcut the user picked is kept.
         if not settings_apply.norm_hotkey(on_disk.get("smart_actions_hotkey", "")):
             taken = {settings_apply.norm_hotkey(loaded.get("hotkey")),
-                     settings_apply.norm_hotkey(loaded.get("live_assist_hotkey"))}
+                     settings_apply.norm_hotkey(loaded.get("live_assist_hotkey")),
+                     settings_apply.norm_hotkey(loaded.get("screen_chat_hotkey"))}
             loaded["smart_actions_hotkey"] = ("" if SMART_ACTIONS_HOTKEY_DEFAULT in taken
                                               else SMART_ACTIONS_HOTKEY_DEFAULT)
     loaded["config_schema_version"] = CONFIG_SCHEMA_VERSION
@@ -555,6 +559,11 @@ def load_config():
         data = {}
     loaded = {**DEFAULT, **data}
     _migrate_config(loaded, data)
+    if "screen_chat_hotkey" not in data:
+        taken = {settings_apply.norm_hotkey(loaded.get(key))
+                 for key in ("hotkey", "live_assist_hotkey", "smart_actions_hotkey")}
+        if settings_apply.norm_hotkey(loaded["screen_chat_hotkey"]) in taken:
+            loaded["screen_chat_hotkey"] = ""
     # Every load (not a schema step: a current file must be healed too) - the 2.1.2 test builds' Gladia picks.
     import engine_choice
     engine_choice.heal_speech_settings(loaded)
@@ -4176,6 +4185,7 @@ class AppController(QObject):
     # silently no-ops because those threads have no Qt event loop.
     sig_hotkey = Signal()
     sig_assist_hotkey = Signal()
+    sig_screen_chat_hotkey = Signal()
     sig_smart_hotkey = Signal()         # the Smart Actions shortcut (one dictation as a Smart Action)
     sig_enter = Signal()
     sig_escape = Signal()
@@ -4296,6 +4306,8 @@ class AppController(QObject):
         # action the take it started runs (_start / _stop_impl).
         self._registered_smart_hotkey = None
         self._smart_listener = None
+        self._registered_screen_chat_hotkey = None
+        self._screen_chat_listener = None
         self._smart_next = False
         self._oneshot_action = None
         # A Smart take transcribed with its own speech model: load Dictation's
@@ -4384,11 +4396,13 @@ class AppController(QObject):
         # regardless of which thread emits the signal.
         self.sig_hotkey.connect(self._on_hotkey, Qt.QueuedConnection)
         self.sig_assist_hotkey.connect(self.toggle_live_assist, Qt.QueuedConnection)
+        self.sig_screen_chat_hotkey.connect(self.open_screen_chat, Qt.QueuedConnection)
         # Before any hotkey registers: the first one's "macOS blocks it" must be heard.
         self.sig_mac_permissions.connect(self._on_mac_permissions_needed, Qt.QueuedConnection)
         self._setup_assist_hotkey(self.cfg.get("live_assist_hotkey", ""))
         self.sig_smart_hotkey.connect(self._on_smart_hotkey, Qt.QueuedConnection)
         self._setup_smart_hotkey(self.cfg.get("smart_actions_hotkey", ""))
+        self._setup_screen_chat_hotkey(self.cfg.get("screen_chat_hotkey", ""))
         self.sig_enter.connect(self._on_enter, Qt.QueuedConnection)
         self.sig_escape.connect(self._on_escape, Qt.QueuedConnection)
         self.sig_update_available.connect(self._prompt_update, Qt.QueuedConnection)
@@ -4562,11 +4576,11 @@ class AppController(QObject):
         "backend", "whisper_model", "action_model", "language",
         "translate_target", "meeting_audio_mode", "save_history",
         "cleanup_enabled", "restore_clipboard",
-        "smart_actions_hotkey", "smart_actions_speech_model",
+        "smart_actions_hotkey", "screen_chat_hotkey", "smart_actions_speech_model",
         "live_assist_speech_model",
         "notion_auto_send",
     )
-    _TRACKED_AS_SET = ("smart_actions_hotkey",)
+    _TRACKED_AS_SET = ("smart_actions_hotkey", "screen_chat_hotkey")
     # Reported as a class ("auto" | "local" | "cloud" | "cloud_best" | "own_key"), never as a
     # model name (engine_choice.live_speech_class).
     _TRACKED_AS_CLASS = ("live_assist_speech_model",)
@@ -4604,6 +4618,7 @@ class AppController(QObject):
             "privacy_mode": self.cfg.get("privacy_mode", False),
             "backend": self.cfg.get("backend", "local"),
             "smart_actions_hotkey": bool(self.cfg.get("smart_actions_hotkey")),
+            "screen_chat_hotkey": bool(self.cfg.get("screen_chat_hotkey")),
             "smart_actions_speech_model": self.cfg.get("smart_actions_speech_model") or "",
         })
 
@@ -6701,7 +6716,9 @@ class AppController(QObject):
         hotkey = "+".join(p.strip().lower() for p in (hotkey or "").split("+") if p.strip())
         dictation = "+".join(p.strip().lower()
                              for p in (self.cfg.get("hotkey") or "").split("+") if p.strip())
-        if not hotkey or hotkey == dictation or hotkeys.is_bare_typing_key(hotkey):
+        taken = {dictation, settings_apply.norm_hotkey(self.cfg.get("smart_actions_hotkey")),
+                 settings_apply.norm_hotkey(self.cfg.get("screen_chat_hotkey"))}
+        if not hotkey or hotkey in taken or hotkeys.is_bare_typing_key(hotkey):
             return False
         try:
             if sys.platform == "win32":
@@ -6747,7 +6764,8 @@ class AppController(QObject):
         self._release_smart_hotkey()
         hotkey = settings_apply.norm_hotkey(hotkey)
         taken = {settings_apply.norm_hotkey(self.cfg.get("hotkey")),
-                 settings_apply.norm_hotkey(self.cfg.get("live_assist_hotkey"))}
+                 settings_apply.norm_hotkey(self.cfg.get("live_assist_hotkey")),
+                 settings_apply.norm_hotkey(self.cfg.get("screen_chat_hotkey"))}
         if (not hotkey or hotkey in taken or hotkey.startswith("mouse:")
                 or hotkeys.is_bare_typing_key(hotkey)):
             return False
@@ -6818,6 +6836,69 @@ class AppController(QObject):
             self.live_assist = card
         return self.live_assist
 
+    def _release_screen_chat_hotkey(self):
+        hk = getattr(self, "_registered_screen_chat_hotkey", None)
+        if hk is not None:
+            try:
+                import keyboard as kbd_lib
+                kbd_lib.remove_hotkey(hk)
+            except Exception:
+                pass
+            self._registered_screen_chat_hotkey = None
+        listener = getattr(self, "_screen_chat_listener", None)
+        if listener is not None:
+            try:
+                listener.stop()
+            except Exception:
+                pass
+            self._screen_chat_listener = None
+
+    def _setup_screen_chat_hotkey(self, hotkey):
+        self._release_screen_chat_hotkey()
+        hotkey = settings_apply.norm_hotkey(hotkey)
+        taken = {settings_apply.norm_hotkey(self.cfg.get(k))
+                 for k in ("hotkey", "live_assist_hotkey", "smart_actions_hotkey")}
+        if (not hotkey or hotkey in taken or hotkey.startswith("mouse:")
+                or hotkeys.is_bare_typing_key(hotkey)):
+            return False
+        try:
+            if sys.platform == "win32":
+                import keyboard as kbd_lib
+                kbd_lib.add_hotkey(hotkey, lambda: self.sig_screen_chat_hotkey.emit(),
+                                   suppress=False, trigger_on_release=False)
+                self._registered_screen_chat_hotkey = hotkey
+            else:
+                from pynput import keyboard as pynput_keyboard
+                hotkeys.prepare_pynput_listeners()
+                listener = pynput_keyboard.GlobalHotKeys({
+                    self._to_pynput_hotkey(hotkey): lambda: self.sig_screen_chat_hotkey.emit(),
+                })
+                listener.daemon = True
+                listener.start()
+                self._screen_chat_listener = listener
+            return True
+        except Exception as e:
+            logger.warning("Could not register Screen chat hotkey %s: %s", hotkey, e)
+            return False
+
+    def open_screen_chat(self, target=None, from_tray=False):
+        if getattr(self, "_hotkeys_suspended", False) is True:
+            return
+        window = getattr(self, "screen_chat_window", None)
+        if window is None or not window.isVisible():
+            self._screen_chat_target = target if from_tray else foreground.remember()
+        open_window = getattr(self, "_open_screen_chat_window", None)
+        if callable(open_window):
+            open_window()
+
+    def _open_screen_chat_window(self):
+        from ui.screen_chat import ScreenChatWindow
+        window = getattr(self, "screen_chat_window", None)
+        if window is None:
+            window = ScreenChatWindow(self)
+            self.screen_chat_window = window
+        window.open_chat(getattr(self, "_screen_chat_target", None))
+
     def toggle_live_assist(self):
         """Show/hide the private Live Assistant card (its hotkey, the tray)."""
         try:
@@ -6848,6 +6929,7 @@ class AppController(QObject):
             self._unregister_mouse_listener()
             self._setup_assist_hotkey("")          # releases it, registers nothing
             self._release_smart_hotkey()
+            self._release_screen_chat_hotkey()
         else:
             self.apply_tray_bindings()
         return True
@@ -6890,6 +6972,7 @@ class AppController(QObject):
         # of letting both fire on one keypress.
         self._setup_assist_hotkey(self.cfg.get("live_assist_hotkey", ""))
         self._setup_smart_hotkey(self.cfg.get("smart_actions_hotkey", ""))
+        self._setup_screen_chat_hotkey(self.cfg.get("screen_chat_hotkey", ""))
 
     # ── Event Callbacks ──
     def _on_levels(self, levels):
@@ -7551,7 +7634,7 @@ class AppController(QObject):
             threading.Thread(target=_restore, daemon=True).start()
         return pasted
 
-    def _resolve_action_engine(self, action_model=None):
+    def _resolve_action_engine(self, action_model=None, *, allow_live_session=True):
         """Resolve (model, config) for a Smart Action / meeting-notes run,
         applying Pro routing: a signed-in Pro user runs through the managed cloud
         (our key, no BYO key needed) unless they deliberately picked a local LLM
@@ -7578,7 +7661,7 @@ class AppController(QObject):
         # A free Live Assistant session (one a month) may use Gusan Cloud for
         # its answers. The id is what the server checks. Local / privacy stays local.
         sid = getattr(self, "_live_session_id", None)
-        if sid and not self.cfg.get("privacy_mode") and self.cfg.get("live_assist_writer") != "local":
+        if allow_live_session and sid and not self.cfg.get("privacy_mode") and self.cfg.get("live_assist_writer") != "local":
             token = action_config.get("_managed_token") if isinstance(action_config, dict) else None
             if not token:
                 try:
@@ -8105,6 +8188,7 @@ class AppController(QObject):
         self._unregister_kbd_hotkey()
         self._unregister_mouse_listener()
         self._release_smart_hotkey()
+        self._release_screen_chat_hotkey()
         self._recorder_down = True
         self.recorder.shutdown()
         self.qapp.quit()
