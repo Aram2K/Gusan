@@ -582,6 +582,7 @@ class TestBuild(unittest.TestCase):
         self.assertEqual(len(usage), 4)   # mic, Apple events, input monitoring, call sound (Interpreter)
         for text in usage:
             self.assertTrue(text.startswith("Gusan "), text)
+            self.assertNotIn("'", text)   # PlistBuddy: "Unclosed Quotes", and the key is silently missing
         self.assertNotRegex(plist, r"['\"]Transcribe ")
         self.assertIn('-volname "Gusan"', _step(mac, "Package as DMG"))
         self.assertNotIn("--osx-bundle-identifier", mac)   # the bundle id stays what --name gives
