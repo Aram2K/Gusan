@@ -134,7 +134,7 @@ from ui.pages import meeting_delete, meeting_speakers_ui
 from ui.pages import meeting_views as views
 from ui.pages.meeting_views import (AUDIO_MODES, LANGS, NOTICE_TEXT, UPSELL_RECORD, BgRunner, ElidedLabel,
                                     Faces, call_mark, call_name, dot_label, dot_pixmap, fmt_duration, fmt_when,
-                                    glyph, google_label, icon_label, tlabel)
+                                    calendar_label, glyph, google_label, icon_label, tlabel)
 
 logger = logging.getLogger("transcribe")
 
@@ -161,7 +161,12 @@ _SETTING_KEYS = {
     ASK_KEY, LINK_ONLY_KEY, CONSENT_KEY, "notion_api_key", "notion_parent_page", "notion_auth_mode",
     "notion_workspace_name", "notion_parent_title", "notion_auto_send", "notion_reconnect",
     "live_assist_hotkey", "live_assist_private", "google_oauth_client_id", "google_oauth_client_secret",
+    # Transcribes with (ui.pages.live_speech, meeting=True)
+    "meeting_speech_model", "mix_languages", "admin_tier_override", "google_api_key", "mistral_api_key",
+    # Live captions (captions.py)
+    "captions_on", "captions_language", "captions_who", "captions_in_share", "captions_font", "captions_colors",
 }
+UPSELL_CAPTIONS = "Live captions"
 
 
 def _now_ts():
@@ -1319,7 +1324,7 @@ class StartCard(QFrame):
         cs = QHBoxLayout(self.cal_sub)
         cs.setContentsMargins(0, 0, 0, 0)
         cs.setSpacing(6)
-        cs.addWidget(google_label(14, self.cal_sub), 0, Qt.AlignVCenter)
+        cs.addWidget(calendar_label(14, self.cal_sub), 0, Qt.AlignVCenter)
         self.cal_sub_label = label("", "muted", self.cal_sub)
         cs.addWidget(self.cal_sub_label, 0, Qt.AlignVCenter)
         cs.addStretch(1)
@@ -1838,7 +1843,7 @@ class ComingUp(QWidget):
         head.setContentsMargins(0, 0, 12, 0)
         head.setSpacing(8)
         head.addWidget(label("Coming up", "h2", self), 0, Qt.AlignVCenter)
-        head.addWidget(google_label(16, self), 0, Qt.AlignVCenter)
+        head.addWidget(calendar_label(16, self), 0, Qt.AlignVCenter)
         head.addStretch(1)
         head.addWidget(icon_label("bell_on", 14, "muted", parent=self), 0, Qt.AlignVCenter)
         head.addWidget(label("Ask me to record", "muted", self), 0, Qt.AlignVCenter)
@@ -2725,8 +2730,9 @@ class NotesOption(QFrame):
 
 class MeetingRail(SettingsRail):
     """'Meeting settings': Google Calendar, Send notes to Notion (right below it),
-    Meeting language, Notes written by, Remind me to tell people; the speech
-    model this runs on in the foot."""
+    Meeting language, Transcribes with (the Live Assistant's picker, for meetings: Automatic picks by the
+    meeting language - founder 2026-11-11), Live captions (PRO; when on: Captions in, Show, Show in screen
+    sharing), Notes written by, Remind me to tell people."""
 
     def __init__(self, page, parent=None):
         super().__init__("Meeting settings", icon="gear", parent=parent)
@@ -2753,7 +2759,7 @@ class MeetingRail(SettingsRail):
         self.cal_cancel.clicked.connect(self._cal_cancel)
         cl.addWidget(self.cal_cancel)
         self.cal_row = self.add_row(SettingRow("Google Calendar", self.cal_control))
-        _label_icon(self.cal_row, google_label(16))
+        _label_icon(self.cal_row, calendar_label(16))
         self.ask_toggle = Toggle("Ask me to record before each meeting", True)
         self.ask_toggle.toggled.connect(lambda on: self.page.set_setting(ASK_KEY, bool(on)))
         self.ask_row = self.add_row(SettingRow("Ask me to record", self.ask_toggle, hint="1 min before"))
@@ -2798,6 +2804,49 @@ class MeetingRail(SettingsRail):
         self.lang_combo.setFixedWidth(278)
         self.lang_combo.activated.connect(self._on_lang)
         self.add_row(SettingRow("Meeting language", self.lang_combo, stacked=True))
+        # Transcribes with: Automatic (by the meeting language) / a model on this computer / Gusan Cloud /
+        # your own key - the Live Assistant's row, for meetings (cfg meeting_speech_model). Its muted line
+        # says what runs, so the card no longer has a "Runs on ..." foot.
+        from ui.pages.live_speech import LiveSpeechRow
+        self.speech = LiveSpeechRow(page.app, open_settings=lambda: self.page.open_route("settings", section="speech"),
+                                    meeting=True)
+        self.add_row(self.speech.row)
+        # Live captions (captions.py, founder 2026-11-11): words at the bottom of the screen while a meeting runs.
+        import captions as _captions
+        self.cap_toggle = Toggle("Live captions", False)
+        self.cap_toggle.toggled.connect(self._on_captions)
+        self.cap_row = self.add_row(SettingRow("Live captions", self.cap_toggle, pro=True,
+                                               hint="Words at the bottom of your screen as they're said"))
+        self.cap_lang = QComboBox()
+        self.cap_lang.setAccessibleName("Captions in")
+        self.cap_lang.setFont(theme.font(13.5))
+        self.cap_lang.setFixedHeight(36)
+        self.cap_lang.setFixedWidth(278)
+        for code, text in _captions.LANGUAGES:
+            self.cap_lang.addItem(text, code)
+        self.cap_lang.activated.connect(
+            lambda _i: self.page.set_setting(_captions.CFG_LANGUAGE, self.cap_lang.currentData() or ""))
+        self.cap_lang_row = self.add_row(SettingRow("Captions in", self.cap_lang, stacked=True))
+        self.cap_who = QComboBox()
+        self.cap_who.setAccessibleName("Whose words")
+        self.cap_who.setFont(theme.font(13.5))
+        self.cap_who.setFixedHeight(36)
+        for code, text in _captions.WHO_NAMES:
+            self.cap_who.addItem(text, code)
+        self.cap_who.activated.connect(
+            lambda _i: self.page.set_setting(_captions.CFG_WHO, self.cap_who.currentData() or _captions.WHO_BOTH))
+        self.cap_who_row = self.add_row(SettingRow("Show", self.cap_who))
+        # The look: a few fonts and colour pairs, each a tile showing it (ui/captions_style.py).
+        from ui.captions_style import StyleTiles
+        self.cap_font = StyleTiles("font", on_pick=lambda k: self.page.set_setting(_captions.CFG_FONT, k))
+        self.cap_font_row = self.add_row(SettingRow("Font", self.cap_font, stacked=True))
+        self.cap_colors = StyleTiles("colors", on_pick=lambda k: self.page.set_setting(_captions.CFG_COLORS, k))
+        self.cap_colors_row = self.add_row(SettingRow("Colors", self.cap_colors, stacked=True,
+                                                      hint="The call, then you"))
+        self.cap_share = Toggle("Show in screen sharing", False)
+        self.cap_share.toggled.connect(lambda on: self.page.set_setting(_captions.CFG_IN_SHARE, bool(on)))
+        self.cap_share_row = self.add_row(SettingRow("Show in screen sharing", self.cap_share,
+                                                     hint="Off: only you see them"))
         # Notes written by
         opts = QWidget()
         ol = QVBoxLayout(opts)
@@ -2819,24 +2868,6 @@ class MeetingRail(SettingsRail):
         self.consent_toggle = Toggle("Remind me to tell people", True)
         self.consent_toggle.toggled.connect(lambda on: self.page.set_setting(CONSENT_KEY, bool(on)))
         self.add_row(SettingRow("Remind me to tell people", self.consent_toggle))
-        # Foot: what transcribes meetings
-        foot = QWidget()
-        fl = QHBoxLayout(foot)
-        fl.setContentsMargins(0, 0, 0, 0)
-        fl.setSpacing(8)
-        fc = QVBoxLayout()
-        fc.setSpacing(0)
-        self.runs_label = label("", "muted", foot)
-        fc.addWidget(self.runs_label)
-        self.runs_model = label("", "model", foot)
-        fc.addWidget(self.runs_model)
-        fl.addLayout(fc, 1)
-        self.change_btn = Button("Change", "link", "s", parent=foot)
-        self.change_btn.setFont(theme.font(12.5, 600))
-        self.change_btn.setAccessibleName("Change the speech model")
-        self.change_btn.clicked.connect(lambda: self.page.open_route("settings", section="speech"))
-        fl.addWidget(self.change_btn, 0, Qt.AlignVCenter)
-        self.set_foot(foot)
         self._cal_error = ""
         self.sync_settings()
         self.sync_calendar()
@@ -2853,21 +2884,8 @@ class MeetingRail(SettingsRail):
             tog.update()
         self.sync_notes_by()
         self.sync_notion(cfg)
-        info = views.runs_on(self.page.app, "dictation")
-        if info:
-            kind = info.get("kind")
-            if kind == "cloud":
-                self.runs_label.setText("Runs on Gusan Cloud")
-                self.runs_model.setText(info.get("model_name") or "")
-            elif kind == "own_key":
-                self.runs_label.setText("Runs with your own key")
-                self.runs_model.setText(" · ".join(x for x in (info.get("plain"), info.get("model_name")) if x))
-            else:
-                self.runs_label.setText("Runs on %s · this computer" % (info.get("plain") or "Balanced"))
-                self.runs_model.setText(info.get("model_name") or "")
-        else:
-            self.runs_label.setText("Runs on this computer")
-            self.runs_model.setText("")
+        self.speech.refresh()
+        self.sync_captions(cfg)
 
     def sync_notion(self, cfg=None):
         """The Notion rows: Connect | Manage + Disconnect | Reconnect + Disconnect,
@@ -2981,6 +2999,54 @@ class MeetingRail(SettingsRail):
         code = self.lang_combo.currentData()
         if code:
             self.page.set_setting("meeting_language", code)
+
+    # ── live captions ──
+    def sync_captions(self, cfg=None):
+        import captions as _captions
+        cfg = cfg if cfg is not None else self.page.cfg()
+        on = bool(cfg.get(_captions.CFG_ON)) and self.page.is_pro()
+        for w, value in ((self.cap_toggle, on), (self.cap_share, bool(cfg.get(_captions.CFG_IN_SHARE)))):
+            w.blockSignals(True)
+            w.setChecked(value)
+            w.blockSignals(False)
+            w.update()
+        for box, value in ((self.cap_lang, cfg.get(_captions.CFG_LANGUAGE) or ""),
+                           (self.cap_who, cfg.get(_captions.CFG_WHO) or _captions.WHO_BOTH)):
+            i = box.findData(value)
+            box.blockSignals(True)
+            box.setCurrentIndex(i if i >= 0 else 0)
+            box.blockSignals(False)
+        self.cap_font.set_value(cfg.get(_captions.CFG_FONT) or "clean")
+        self.cap_colors.set_value(cfg.get(_captions.CFG_COLORS) or "yellow")
+        for row in (self.cap_lang_row, self.cap_who_row, self.cap_font_row, self.cap_colors_row, self.cap_share_row):
+            row.setVisible(on)
+        # Privacy mode never translates (it would send the words to Gusan Cloud): the row says so.
+        self.cap_lang_row.set_hint("Privacy mode is on: captions stay as spoken"
+                                   if cfg.get("privacy_mode") and (cfg.get(_captions.CFG_LANGUAGE) or "") else "")
+        # Which words: Fast = real time; Best accuracy / a model on this computer = that engine's, a few seconds later.
+        line = ""
+        try:
+            import engine_choice
+            app = self.page.app
+            speech = engine_choice.meeting_speech_session(app)
+            engine = engine_choice.meeting_speech_engine(app)
+            name = engine.get("model_name") or engine.get("plain") or ""
+            realtime = engine_choice.realtime_speech(speech if speech and speech[0] else None, cfg)
+            line = ("Real time · %s" if realtime else "A few seconds behind · %s") % name if name else ""
+        except Exception:
+            logger.debug("captions line", exc_info=True)
+        self.cap_row.set_model(line if on else "")
+
+    def _on_captions(self, on):
+        import captions as _captions
+        if on and not self.page.is_pro():
+            self.page.call("_pro_upsell", UPSELL_CAPTIONS)
+            self.sync_captions()
+            return
+        if not self.page.set_setting(_captions.CFG_ON, bool(on)):
+            self.sync_captions()
+            return
+        self.sync_captions()
 
     def _pick_cloud(self):
         auth = getattr(self.page.app, "auth", None)

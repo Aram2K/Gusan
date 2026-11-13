@@ -525,6 +525,67 @@ class TestRealTimeMeeting(_Base):
         self.assertEqual(raw.calls, [])
 
 
+class TestLiveCaptionWords(_Base):
+    """Live captions (captions.py, 2026-11-11): the sentence being said, word by word, with the side that is loud -
+    and a meeting with captions on opens its live stream even on a model on this computer (Pro)."""
+
+    def test_the_sentence_being_said_goes_to_the_captions_with_the_loud_side(self):
+        app = _App(meeting_audio_mode="smart_meeting")
+        app.recorder._live_fed_s = 10.0
+        asked = []
+        app.recorder.live_source_energy = lambda start, end: asked.append((start, end)) or (9.0, 1.0)
+        s = self.session(app)
+        parts = _Recorder(s.live_partial)
+        s.start("x")
+        self.assertEqual(app.recorder.on_live_partial, s._on_live_partial)
+        s._on_live_partial("Where are we")
+        self.assertEqual(parts.calls, [("Where are we", "You")])
+        self.assertEqual(asked, [(8.5, 10.0)])                       # the last moment
+        app.recorder.live_source_energy = lambda start, end: (0.5, 9.5)
+        s._on_live_partial("Almost")
+        self.assertEqual(parts.calls[-1], ("Almost", "Them"))
+
+    def test_nothing_before_the_start_nothing_empty_and_the_callback_is_given_back(self):
+        app = _App()
+        app.recorder.on_live_partial = before = object()
+        s = self.session(app)
+        parts = _Recorder(s.live_partial)
+        s._on_live_partial("Too early")
+        s.start("x")
+        s._on_live_partial("   ")
+        self.assertEqual(parts.calls, [])
+        s._on_live_partial("One mic")
+        self.assertEqual(parts.calls, [("One mic", "")])             # one source: no side
+        s._restore_recorder_callbacks()
+        self.assertIs(app.recorder.on_live_partial, before)
+
+    def test_captions_are_real_time_only_on_fast(self):
+        """Founder 2026-11-11: Best accuracy - the accurate words, later; Fast - real time. Same in every language."""
+        for cfg, speech_pick, want in (
+                ({"backend": "managed", "managed_speech_profile": "fast"}, "", True),
+                ({"backend": "managed", "managed_speech_profile": "best"}, "", False),
+                ({"backend": "local"}, "cloud", True),                    # the meeting's own pick: Fast
+                ({"backend": "local"}, "cloud:best", False),
+                ({"backend": "local"}, "small", False),                   # a model on this computer
+                ({"backend": "managed", "privacy_mode": True}, "", False)):
+            app = _App(pro=True, meeting_speech_model=speech_pick, **cfg)
+            s = self.session(app)
+            s.start("x", language="fr")
+            self.assertEqual(s.captions_realtime(), want, (cfg, speech_pick))
+
+    def test_every_finished_piece_goes_to_the_captions_shown_or_not(self):
+        app = _App(meeting_audio_mode="smart_meeting", captions_on=True)
+        app.recorder.live_showing = lambda: True                      # the live view shows the stream...
+        s = self.session(app)
+        pieces = _Recorder(s.caption_piece)
+        s.start("x")
+        s._on_chunk_transcribed(0, "Accurate words.", "hy")
+        self.assertEqual([p[0] for p in pieces.calls], ["Accurate words."])   # ... the captions still get the piece
+        self.assertEqual(pieces.calls[0][2], "hy")
+        s._on_chunk_transcribed(1, "", "hy")
+        self.assertEqual(len(pieces.calls), 1)
+
+
 class TestOutcome(_Base):
     def _record(self, app=None, notes="## Summary\n- Ship Friday", **start):
         app = app or _App()
@@ -3320,13 +3381,45 @@ class TestLiveSessionStart(_Base):
             self.assertEqual(app.prewarmed, [{}])                    # the plain prewarm, no speech
             self.assertIsNone(s._session_speech)
 
-    def test_meetings_and_the_calendar_keep_dictations_model(self):
+    # Meetings' own "Transcribes with" (cfg meeting_speech_model, founder 2026-11-11: a meeting set to
+    # Armenian was written by Whisper Base on this computer - "not good, there is no Armenian").
+    def test_meetings_and_the_calendar_use_their_own_pick_never_the_live_assistants(self):
         for source in ("page", "calendar", "classic"):
-            app, s = self._start(source, live_assist_speech_model="cloud:best", backend="local")
-            self.assertEqual(app.recorder.started, {"capture_mode": "default_mic", "language": "hy"}, source)
-            self.assertNotIn("speech", app.recorder.started)
+            app, s = self._start(source, live_assist_speech_model="cloud:best", meeting_speech_model="small",
+                                 backend="local")
+            self.assertEqual(app.recorder.started["speech"], ("local", "small", None), source)
+            self.assertEqual(app.prewarmed, [{"speech": ("local", "small", None)}], source)
+            self.assertEqual(s._session_speech, ("local", "small", None), source)
+
+    def test_a_meeting_in_armenian_on_automatic_goes_to_gusan_cloud_on_a_pro_plan(self):
+        for source in ("page", "calendar", "classic"):
+            app, s = self._start(source, backend="local")              # Dictation: Whisper on this computer
+            self.assertEqual(app.recorder.started["speech"], ("managed", None, "fast"), source)
+            self.assertEqual(s._session_speech, ("managed", None, "fast"), source)
+
+    def test_a_meeting_in_armenian_without_pro_takes_the_armenian_model_when_it_is_here(self):
+        with patch("engine_choice.hy_usable", return_value=True):
+            app, s = self._start("page", pro=False, backend="local")
+        self.assertEqual(app.recorder.started["speech"][:2], ("local", "hy-fastconformer"))
+        with patch("engine_choice.hy_usable", return_value=False):
+            app, s = self._start("page", pro=False, backend="local")
+        self.assertNotIn("speech", app.recorder.started)                 # Whisper, and the card's hint says why
+        self.assertIsNone(s._session_speech)
+
+    def test_a_meeting_in_another_language_on_automatic_keeps_dictations_model(self):
+        for source in ("page", "calendar", "classic"):
+            app, s = self._start(source, backend="local", live_assist_language="fr")
+            self.assertEqual(app.recorder.started, {"capture_mode": "default_mic", "language": "fr"}, source)
             self.assertEqual(app.prewarmed, [{}], source)
             self.assertIsNone(s._session_speech, source)
+
+    def test_a_problem_in_the_meetings_choice_is_dictations_model_not_a_refused_start(self):
+        app = _App(pro=True, backend="local")
+        s = self.session(app)
+        with patch("engine_choice.meeting_speech_session", side_effect=RuntimeError("boom")):
+            ok, code, _msg = s.start("Call", language="hy", source="page")
+        self.assertEqual((ok, code), (True, ""))
+        self.assertNotIn("speech", app.recorder.started)
 
     def test_a_live_session_the_recorder_tagged_by_fast_pieces_counts_as_the_live_assistant(self):
         app = _App(pro=True, backend="local", live_assist_language="hy")
@@ -3457,6 +3550,18 @@ class TestFinalRereadOfALiveSession(_SpeakerBase):
         self.assertEqual(rec.reads, 1)
         self.assertEqual(rec.models, ["small"])                      # not Dictation's "base"
         self.assertIn("bad local whisper text", s._text)             # the re-read's words, as always
+
+    def test_a_meeting_on_its_own_model_is_read_again_with_that_model(self):
+        rec = _CloudRec(backend="local", whisper_model="small")
+        s, _folder, _app = self._run(rec, source="page", speech_cfg={"meeting_speech_model": "small"})
+        self.assertEqual(rec.models, ["small"])                      # not Dictation's "base"
+
+    def test_a_meeting_on_a_gusan_cloud_pick_keeps_the_clouds_words_in_any_language(self):
+        rec = _CloudRec()
+        s, _folder, _app = self._run(rec, source="page", live_assist_language="en",
+                                     speech_cfg={"meeting_speech_model": "cloud:best"}, pro=True)
+        self.assertEqual(rec.reads, 0)                               # picked for its words: never replaced
+        self.assertNotIn("bad local whisper", s._text)
 
     def test_automatic_on_a_local_dictation_is_read_again_with_dictations_model(self):
         rec = _CloudRec(backend="local")
@@ -3708,8 +3813,16 @@ class TestRecoveringACloudSession(_SavedMeeting):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][1].get("model"), "hy-fastconformer")
 
-    def test_a_saved_model_that_is_not_the_armenian_one_is_ignored(self):
-        d = self._folder(speech_model="large-v3")                    # (a made-up or hand-edited meta.json)
+    def test_a_saved_model_picked_for_meetings_is_used_again(self):
+        d = self._folder(speech_model="large-v3")                    # (a model picked on the Meetings card)
+        s = self.session(_App())
+        calls = self._build(s, _outcome(("You: rebuilt",)))
+        with patch.object(msess.actions, "process", return_value="## Notes"):
+            self.assertTrue(s.retry_notes(None, folder=str(d)))
+        self.assertEqual(calls[0][1].get("model"), "large-v3")
+
+    def test_a_saved_model_that_is_not_a_known_one_is_ignored(self):
+        d = self._folder(speech_model="no-such-model")               # (a made-up or hand-edited meta.json)
         s = self.session(_App())
         calls = self._build(s, _outcome(("You: rebuilt",)))
         with patch.object(msess.actions, "process", return_value="## Notes"):
@@ -3729,3 +3842,21 @@ class TestRecoveringACloudSession(_SavedMeeting):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSessionModelIsRemembered(_Base):
+    def test_a_model_picked_for_meetings_is_kept_for_later_re_reads(self):
+        app = _App(pro=True, backend="local", meeting_speech_model="medium")
+        s = self.session(app)
+        s.start("Call", language="fr", source="page")
+        meta = ms.load_meta(s.meeting_dir)
+        self.assertEqual(meta.get("speech_model"), "medium")
+        self.assertEqual(msess.MeetingCore._saved_speech_kwargs(s.meeting_dir), {"model": "medium"})
+
+    def test_captions_off_sends_no_pieces_to_the_captions(self):
+        app = _App(meeting_audio_mode="smart_meeting")
+        s = self.session(app)
+        pieces = _Recorder(s.caption_piece)
+        s.start("x")
+        s._on_chunk_transcribed(0, "Words.", "en")
+        self.assertEqual(pieces.calls, [])

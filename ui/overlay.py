@@ -136,6 +136,9 @@ WIN_W, WIN_H = 440, 124        # fixed transparent window; the capsule is painte
 PILL_H = 40
 PILL_H_ERROR = 54
 PILL_MAX_W = WIN_W - 40
+# A Smart Action's steps (pill_copy.steps: transcribe, the web, then each kind of writing) - one icon at a time in the
+# icon slot, changing as the work moves on (founder, 2026-11-12).
+STEP_FADE_S = 0.3              # one step's icon crossfading into the next
 REC_W_HINT = 204               # recording, while the Enter/Esc keycaps show
 REC_W = 180                    # recording, once the timer has taken their place
 SMART_W = 20                   # a Smart Action take is this much wider (its wand mark)
@@ -361,6 +364,9 @@ class Overlay(QWidget):
         self._task_kind = None            # what a Smart Action writes (pill_copy.KINDS) or None
         self._task_detail = ""            # e.g. the language of a translation
         self._writing = False             # set_task() came: a Smart Action writes this take
+        self._steps = []                  # the take's steps in order (pill_copy.steps)
+        self._steps_wait = False          # the answer is streamed: the web step lasts until writing_started()
+        self._writing_at = None           # when the streamed answer's first words came
         self._ctx = {}                    # speech model / writer names (pill_copy.busy's ctx)
         self._audio_s = None              # how long the take was (s)
         self._done_kind = None
@@ -493,6 +499,7 @@ class Overlay(QWidget):
         self._hide_at = None
         self._smart = bool(smart)
         self._task_kind, self._task_detail, self._writing = None, "", False
+        self._steps, self._steps_wait, self._writing_at = [], False, None
         self._ctx = {}
         self._audio_s = None
         self._done_kind = None
@@ -542,7 +549,24 @@ class Overlay(QWidget):
         self._ctx["on_selection"] = bool(isinstance(info, dict) and info.get("on_selection"))
         web = info.get("web") if isinstance(info, dict) else None
         self._ctx["web"] = web if web == "deep" else bool(web)
+        # The row of steps: transcribe, the web when it searches, then every kind of writing asked for, in order.
+        kinds = info.get("kinds") if isinstance(info, dict) and isinstance(info.get("kinds"), list) else None
+        if kinds is None:
+            kinds = [self._task_kind] if self._task_kind else []
+        self._steps = pill_copy.steps(kinds, web=bool(self._ctx["web"]))
+        self._steps_wait = bool(isinstance(info, dict) and info.get("streamed"))
         self._kick()
+
+    def writing_started(self):
+        """The streamed answer's first words came (main: config _on_writing): the web search is over - the pill
+        moves on to the writing now, not on a timer. GUI thread (call_soon)."""
+        if self._writing and self._writing_at is None:
+            self._writing_at = time.monotonic()
+            self._kick()
+
+    def _current_step(self, elapsed):
+        writing = time.monotonic() - self._writing_at if self._writing_at is not None else None
+        return pill_copy.current_step(self._steps, elapsed, writing=writing, waiting=self._steps_wait)
 
     def set_speech(self, info):
         """What transcribes this take: {"speech": "Whisper Small",
@@ -918,6 +942,9 @@ class Overlay(QWidget):
         elapsed = time.monotonic() - self._state_at if self.overlay_state == now_state else 0.0
         if writing:
             ctx = dict(self._ctx, smart=True, elapsed=elapsed)
+            if self._step_row():
+                index, _in_step = self._current_step(elapsed)
+                return pill_copy.step_line(self._steps, index, self._task_detail, ctx)
             return pill_copy.busy(pill_copy.WRITING, self._task_kind, self._task_detail, ctx)
         if "speech" not in self._ctx:
             # main didn't say (set_speech): the configured model, once per take.
@@ -1511,7 +1538,10 @@ class Overlay(QWidget):
         purple = self._smart or self._writing
         col = self._accent(pal, purple)
         t = (now - (self._vis_at if t0 is None else t0)) if self._motion else None
-        self._paint_icon(p, self._busy_icon(vis), cx, cy, pal, col, t)
+        if vis == "processing" and self._step_row():
+            self._paint_step_icon(p, cx, cy, pal, col, t)
+        else:
+            self._paint_icon(p, self._busy_icon(vis), cx, cy, pal, col, t)
 
         x = rect.left() + TEXT_X
         avail = max(0.0, fit_w - TEXT_X - 16.0)
@@ -1564,6 +1594,33 @@ class Overlay(QWidget):
                 text = QFontMetricsF(self._f_small).elidedText(text, Qt.ElideRight, sw)
             self._blit(p, x + lw, rect.top(), self._text(text, self._f_small, _ink(pal, 135), sw + 4.0,
                                                          rect.height()))
+
+    # ── a Smart Action's steps, one icon at a time ──
+    # The founder (2026-11-12, after a row of icons): "one icon at a time" - the icon slot shows the step in
+    # progress and changes as the work moves on (transcribing, the web, summarizing, the list ...), crossfading.
+    _STEP_ICON = {"transcribe": "wave", "web": "web", "think": "think", "message": "reply"}
+
+    def _step_row(self):
+        """Does this take go through steps (a Smart Action with more than the transcription)?"""
+        return self._writing and len(self._steps) >= 2
+
+    def _paint_step_icon(self, p, cx, cy, pal, col, t):
+        """The icon of the step in progress, in the one icon slot; the step before it fades out under it during the
+        first STEP_FADE_S of a new step."""
+        elapsed = time.monotonic() - self._state_at if self.overlay_state == PROCESSING else 0.0
+        index, in_step = self._current_step(elapsed)
+        icon = self._STEP_ICON.get(self._steps[index], self._steps[index])
+        k = 1.0
+        if t is not None and index > 1 and in_step < STEP_FADE_S:
+            k = _smoothstep(0.0, STEP_FADE_S, in_step)
+        op = p.opacity()
+        if k < 1.0:
+            before = self._steps[index - 1]
+            p.setOpacity(op * (1.0 - k))
+            self._paint_icon(p, self._STEP_ICON.get(before, before), cx, cy, pal, col, t)
+            p.setOpacity(op * k)
+        self._paint_icon(p, icon, cx, cy, pal, col, t)
+        p.setOpacity(op)
 
     # ── the busy icons: one per case, in the icon slot (about 18 px) ──
     # Static parts are cached sprites (22 x 22, drawn round their centre);

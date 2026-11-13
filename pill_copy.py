@@ -275,6 +275,102 @@ def _writing(kind, detail, ctx, elapsed):
     return title, line
 
 
+# ── the steps of a Smart Action, in order (founder, 2026-11-11) ──────────────
+# "If we're doing something, first transcribe, then search the web, then summarize, then make a bullet point format -
+# the icons in that order, and show them all until it has done them." The pill shows a row of the take's steps -
+# transcribe, the web (when it searches), then every kind of writing asked for in a logical order (condense first,
+# then shape, then language, then the message it goes in) - the one in progress moving, the done ones dim, the next
+# ones faint. The server answers all at once (it searches first, ~2 s, then writes), so the pill moves on by time:
+# the web for WEB_STEP_S, then each writing step for KIND_STEP_S, the last one until the answer comes.
+STEP_TRANSCRIBE, STEP_WEB, STEP_THINK = "transcribe", "web", "think"
+WEB_STEP_S = 2.0
+KIND_STEP_S = 1.6
+MAX_KINDS = 4
+_KIND_ORDER = (SUMMARY, NOTES, LIST, POLISH, TRANSLATE, REPLY, EMAIL, MESSAGE)
+_KIND_RES = (
+    (SUMMARY, re.compile(r"\bsumm?ar(?:y|ies|i[sz]e|i[sz]ing)\b|\brecap\b|\btl;?dr\b|\bkey (?:points|takeaways)\b|"
+                         r"\bgist\b|\bcondense\b|\bshorten\b", re.I)),
+    (NOTES, re.compile(r"\b(?:meeting )?notes\b|\bmeeting minutes\b", re.I)),   # (not "in ten minutes")
+    (LIST, re.compile(r"\bbullet(?:ed)?(?:[- ]?points?| list)?\b|\b(?:to-?do|check) ?list\b|\blist\b|\bnumbered\b",
+                      re.I)),
+    (POLISH, _AI_RULES[2][1]),
+    (TRANSLATE, re.compile(r"\btranslat(?:e|ion|ing)\b", re.I)),
+    (REPLY, _EMAIL_WORDS[0][1]),
+    (EMAIL, _EMAIL_RE),
+    (MESSAGE, _EMAIL_WORDS[2][1]),
+)
+
+
+def kinds(text, main=None):
+    """Every kind of writing a Smart Action's request asks for, in the order the work is done (_KIND_ORDER), at most
+    MAX_KINDS; ``main`` (intent()'s kind) is always one of them. Never raises."""
+    found = {main} if main in KINDS else set()
+    try:
+        t = str(text or "")
+        if len(t) > _HEAD + _TAIL + 200:
+            t = t[:_HEAD] + " … " + t[-_TAIL:]
+        for kind, rx in _KIND_RES:
+            if rx.search(t):
+                found.add(kind)
+        if TRANSLATE not in found and _REWRITE_IN_RE.search(t):
+            found.add(TRANSLATE)
+    except Exception:
+        pass
+    if REPLY in found:
+        found.discard(EMAIL)                         # a reply is the email
+    if EMAIL in found:
+        found.discard(MESSAGE)
+    return [k for k in _KIND_ORDER if k in found][:MAX_KINDS]
+
+
+def steps(kind_list, web=False):
+    """The take's steps in order: transcribe, the web (when it searches), then its kinds of writing (or "think")."""
+    out = [STEP_TRANSCRIBE]
+    if web:
+        out.append(STEP_WEB)
+    out.extend([k for k in (kind_list or ()) if k in KINDS] or [STEP_THINK])
+    return out
+
+
+def current_step(step_list, elapsed, writing=None, waiting=False):
+    """(index, seconds in that step) of the step in progress, ``elapsed`` seconds after the Smart Action began (the
+    transcription is done by then). ``writing``: seconds since the answer started coming (a streamed answer says
+    when), None when not known; ``waiting``: the answer will say - the web step lasts until it does, never a timer."""
+    if len(step_list) < 2:
+        return 0, _num(elapsed)
+    t = max(0.0, _num(elapsed))
+    i = 1
+    if step_list[1] == STEP_WEB:
+        if writing is not None:
+            if len(step_list) == 2:
+                return 1, t
+            t = max(0.0, _num(writing))
+        elif waiting or t < WEB_STEP_S or len(step_list) == 2:
+            return 1, t
+        else:
+            t -= WEB_STEP_S
+        i = 2
+    k = min(len(step_list) - 1 - i, int(t // KIND_STEP_S))
+    return i + k, t - k * KIND_STEP_S
+
+
+def step_line(step_list, index, detail="", ctx=None):
+    """(title, sub) for the step in progress."""
+    ctx = ctx if isinstance(ctx, dict) else {}
+    key = step_list[index] if 0 <= index < len(step_list) else STEP_THINK
+    if key == STEP_WEB:
+        title = RESEARCHING_WEB if ctx.get("web") == "deep" else SEARCHING_WEB
+        line = writer_line(ctx)
+        if ctx.get("on_selection"):
+            line = ON_SELECTION + (" \u00b7 " + line if line else "")
+        return title, line
+    kind = key if key in KINDS else None
+    last = index >= len(step_list) - 1
+    # the slow-down lines ("Still writing") only on the last step, which lasts until the answer comes
+    elapsed = _num(ctx.get("elapsed")) if last else 0.0
+    return _writing(kind, detail if kind == TRANSLATE else "", dict(ctx, web=False), elapsed)
+
+
 def busy(stage, kind=None, detail="", ctx=None):
     """(title, sub) while the pill works.
 
@@ -422,4 +518,8 @@ def task(text, app):
         runs = {}
     runs = runs if isinstance(runs, dict) else {}
     kind, detail = intent(text, rules=runs.get("kind") == "basic")
-    return kind, detail, writer_info(runs)
+    info = writer_info(runs)
+    info = dict(info) if isinstance(info, dict) else {}
+    # The pill's row of steps: every kind asked for - the built-in rules write one thing, so only theirs.
+    info["kinds"] = ([kind] if kind else []) if runs.get("kind") == "basic" else kinds(text, kind)
+    return kind, detail, info

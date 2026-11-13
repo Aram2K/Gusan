@@ -54,7 +54,7 @@ import calendar_sync
 import invite_context
 from ui import calendar_door, theme
 from ui.components import Button, Card, label
-from ui.components.glyphs import GoogleTile, call_mark, google_label
+from ui.components.glyphs import GoogleTile, call_mark, calendar_label
 from ui.pages.home import Runs, _Hairline, cfg_of, colored, connect_signals, go, text_label
 
 logger = logging.getLogger("transcribe")
@@ -208,7 +208,7 @@ class UpcomingSection(QObject):
         self.title_label = label(TITLE, "h2", self.head)
         self.title_label.setTextFormat(Qt.PlainText)        # every label here is plain text, the fixed ones too
         head.addWidget(self.title_label, 0, Qt.AlignVCenter)
-        head.addWidget(google_label(16, self.head), 0, Qt.AlignVCenter)
+        head.addWidget(calendar_label(16, self.head), 0, Qt.AlignVCenter)
         head.addStretch(1)
         self.see_all = _button(SEE_ALL, "link", 13, 600, self.head)
         self.see_all.setAccessibleName("See all meetings")

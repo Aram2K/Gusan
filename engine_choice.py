@@ -395,9 +395,9 @@ def _tuples(rows):
 # "live_assistant" is the Live Assistant's ANSWER writer; "live_assistant_speech" is what
 # transcribes a Live Assistant session (its own pick, or Automatic).
 FEATURES = ("dictation", "smart_actions", "meeting_notes", "live_assistant", "audio_to_text",
-            "smart_actions_speech", "live_assistant_speech")
+            "smart_actions_speech", "live_assistant_speech", "meeting_speech")
 _FEATURE_ALIASES = {
-    "speech": "dictation", "meetings": "dictation", "meeting_speech": "dictation",
+    "speech": "dictation", "meetings": "meeting_speech",
     "smart": "smart_actions", "notes": "meeting_notes", "live_assist": "live_assistant",
     "files": "audio_to_text", "file": "audio_to_text", "smart_speech": "smart_actions_speech",
     "live_speech": "live_assistant_speech", "live_assist_speech": "live_assistant_speech",
@@ -431,6 +431,9 @@ SMART_SPEECH_SAME_LABEL = "Same as Dictation"
 #   "cloud:best"        Gusan Cloud, the best profile: "Best accuracy" (Pro, never in Privacy mode)
 #   "own:google[:id]"   your own Google key, one of GEMINI_SPEECH_MODELS (never in Privacy mode)
 LIVE_SPEECH_KEY = "live_assist_speech_model"
+# Meetings' own "Transcribes with" (Meetings card, between Meeting language and Notes written by): the same
+# values, rows and Automatic rules as the Live Assistant's, read for a meeting - see meeting_view.
+MEETING_SPEECH_KEY = "meeting_speech_model"
 LIVE_SPEECH_AUTO = ""
 LIVE_SPEECH_AUTO_LABEL = "Automatic"
 LIVE_SPEECH_CLOUD = "cloud"
@@ -1573,6 +1576,91 @@ def _canonical_live(kind, model, value):
     return f"{LIVE_SPEECH_OWN_GOOGLE}:{model}" if kind == LIVE_OWN else value
 
 
+# ── Meetings' "Transcribes with" (cfg meeting_speech_model) ─────────────────────
+# A meeting used to transcribe with Dictation's engine, whatever its language: on this computer that was
+# Whisper, which writes Armenian as gibberish. Now it has the Live Assistant's picker and rules (founder,
+# 2026-11-11: "a proper transcription based on the choice of the language"): Automatic (the default) is
+# Dictation's, except in a language local Whisper is poor at (Armenian) while Dictation runs local
+# Whisper - then Gusan Cloud (Fast: OpenAI's live model writes it on screen, his engine test's pick) when
+# allowed, else the Armenian model on this computer when it is downloaded, else Whisper with the hint that
+# names what does better. A pick (a model on this computer, Gusan Cloud Fast / Best accuracy, your own
+# Google key) runs as chosen. Every function below is its live_speech_* twin on meeting_view(cfg).
+def meeting_view(cfg):
+    """``cfg`` as the live_speech_* functions read it for a meeting: the meeting's own pick in place of the
+    Live Assistant's, and the meeting language ("" = the dictation language) in place of Call language."""
+    cfg = cfg or {}
+    return dict(cfg, **{LIVE_SPEECH_KEY: cfg.get(MEETING_SPEECH_KEY) or "",
+                        "live_assist_language": cfg.get("meeting_language") or ""})
+
+
+def _meeting_context(app_or_cfg, pro=None, signed_in=None):
+    cfg, pro, signed_in = _context(app_or_cfg, pro, signed_in)
+    return meeting_view(cfg), pro, signed_in
+
+
+def meeting_speech_session(app_or_cfg, pro=None, language=None, signed_in=None):
+    """What a meeting transcribes with, as start_recording's ``speech=`` (live_speech_session)."""
+    cfg, pro, signed_in = _meeting_context(app_or_cfg, pro, signed_in)
+    return live_speech_session(cfg, pro, language, signed_in)
+
+
+def meeting_speech_engine(app_or_cfg, pro=None, signed_in=None, language=None, downloaded=None):
+    """The runs_on dict of what transcribes a meeting (live_speech_engine; feature "meeting_speech")."""
+    cfg, pro, signed_in = _meeting_context(app_or_cfg, pro, signed_in)
+    res = live_speech_engine(cfg, pro, signed_in, language, downloaded)
+    res["feature"] = "meeting_speech"
+    return res
+
+
+def meeting_speech_rows(app_or_cfg=None, pro=None, signed_in=None, language=None):
+    """The rows of the Meetings card's "Transcribes with" picker (live_speech_rows)."""
+    cfg, pro, signed_in = _meeting_context(app_or_cfg, pro, signed_in)
+    return live_speech_rows(cfg, pro, signed_in, language)
+
+
+def meeting_speech_pick(app_or_cfg, pro=None, signed_in=None):
+    """The picker value really in force for meetings (live_speech_pick)."""
+    cfg, pro, signed_in = _meeting_context(app_or_cfg, pro, signed_in)
+    return live_speech_pick(cfg, pro, signed_in)
+
+
+def meeting_speech_note(app_or_cfg, pro=None, language=None, signed_in=None, engine=None, report=None):
+    """The plain hint under the Meetings picker (live_speech_note)."""
+    cfg, pro, signed_in = _meeting_context(app_or_cfg, pro, signed_in)
+    return live_speech_note(cfg, pro, language, signed_in, engine=engine, report=report)
+
+
+def realtime_speech(speech, cfg):
+    """Is what transcribes a meeting real time - Gusan Cloud Fast (its live stream)? ``speech``: the session's
+    start_recording(speech=...) tuple, or None = Dictation's (cfg backend + managed_speech_profile). Live captions
+    take the live stream only then; on Best accuracy, a model on this computer or your own key they take that engine's
+    finished pieces - a few seconds later, the accurate words (founder, 2026-11-11: "if I have chosen best accuracy I
+    don't care much about the speed")."""
+    cfg = cfg or {}
+    if speech and speech[0]:
+        backend = speech[0]
+        profile = speech[2] if len(speech) > 2 else None
+    else:
+        backend = cfg.get("backend") or "local"
+        profile = cfg.get(SPEECH_PROFILE_KEY)
+    if cfg.get("privacy_mode") or backend != "managed":
+        return False
+    return cloud_profile(profile) == CLOUD_FAST
+
+
+def set_meeting_speech(app_or_cfg, value, *, pro=None, downloaded=None, turn_off_privacy=False):
+    """The config change for the Meetings card's "Transcribes with" (set_live_speech's rules and answers;
+    the change is saved as meeting_speech_model)."""
+    cfg, pro, _signed_in = _context(app_or_cfg, pro)
+    res = set_live_speech(meeting_view(cfg), value, pro=pro, downloaded=downloaded,
+                          turn_off_privacy=turn_off_privacy)
+    changes = dict(res.get("changes") or {})
+    if LIVE_SPEECH_KEY in changes:
+        changes[MEETING_SPEECH_KEY] = changes.pop(LIVE_SPEECH_KEY)
+    res["changes"] = changes
+    return res
+
+
 def take_engine(cfg, report, feature="live_assistant_speech"):
     """The runs_on dict of what a take REALLY runs, from the recorder's speech_report() - the
     card's truth, whatever the settings say now (they may have changed since the take began).
@@ -1976,6 +2064,8 @@ def runs_on(app_or_cfg, feature, *, pro=None, signed_in=None, action_model=None,
         return smart_speech_engine(cfg, pro, downloaded)
     if feature == "live_assistant_speech":
         return live_speech_engine(cfg, pro, signed_in, language, downloaded)
+    if feature == "meeting_speech":
+        return meeting_speech_engine(cfg, pro, signed_in, language, downloaded)
     if feature == "audio_to_text":
         return file_engine(cfg, file_model, pro, language, signed_in)
     if feature == "live_assistant":

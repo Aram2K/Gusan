@@ -903,6 +903,54 @@ def run_managed_action_stream(text, mode, token, on_token, source_lang="auto",
     return _final(parts, think, template_opened)
 
 
+INTERPRET_MAX_CHARS = 1500       # the server's ceiling for one phrase (smart-action INTERPRET_MAX_CHARS)
+
+
+def interpret_phrase(text, target_lang, token, source_lang="auto", context=(), timeout=(5, 12)):
+    """One sentence translated by Gusan Cloud's "interpret" mode (the Interpreter's: the server writes the prompt,
+    translates only - never answers what was said - and keeps names and numbers). Live captions use it for a
+    sentence at a time. Returns the translation ("" when nothing came back); raises ActionAPIError (its code:
+    "pro_required", "signed_out", ...) like the other Pro calls."""
+    if not token:
+        raise ActionAPIError("Sign in with Pro to translate captions.", "signed_out")
+    text = str(text or "").strip()[:INTERPRET_MAX_CHARS]
+    if not text:
+        return ""
+    body = {"mode": "interpret", "text": text, "target_lang": str(target_lang or "en"),
+            "source_lang": str(source_lang or "auto"),
+            "context": [str(c)[:300] for c in (context or ()) if str(c).strip()][-3:]}
+    try:
+        resp = requests.post(SMART_ACTION_URL, json=body, headers={"Authorization": f"Bearer {token}"},
+                             stream=True, timeout=timeout)
+    except requests.RequestException as e:
+        raise ActionAPIError(f"Network error reaching Gusan Cloud: {e}", "network")
+    _raise_for_managed_status(resp)
+    if "text/event-stream" not in (resp.headers.get("Content-Type") or ""):
+        return strip_think(_json_or_error(resp).get("text") or "").strip()
+    parts = []
+    think = ThinkFilter(_answer_family(resp) in ("deepseek", "qwen"))
+    try:
+        for data in _sse_data_lines(resp):
+            if data == "[DONE]":
+                break
+            try:
+                obj = json.loads(data)
+            except Exception:
+                continue
+            if obj.get("error"):
+                if parts:
+                    break
+                raise ActionAPIError(_error_text(obj["error"]))
+            choice = (obj.get("choices") or [{}])[0]
+            parts.append(think.feed((choice.get("delta") or {}).get("content") or ""))
+    except requests.RequestException:
+        pass                                # what came is kept
+    finally:
+        _close(resp)
+    parts.append(think.flush())
+    return "".join(parts).strip()
+
+
 def warm_up_managed(token, timeout=5, session_id=""):
     """Ask the server to wake the live model - a scale-to-zero GPU endpoint
     can take a while to start - while the user is still settling into the

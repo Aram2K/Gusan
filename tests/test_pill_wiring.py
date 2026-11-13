@@ -103,7 +103,7 @@ class TestPillWiring(unittest.TestCase):
         self.assertLess(names.index("set_task"), names.index("process"))
         self.assertLess(names.index("set_task"), names.index("set_state", names.index("set_state") + 1))
         args, _k = self._call(log, "set_task")
-        self.assertEqual(args, ("list", "", {"writer": "Gusan Cloud", "writer_local": False}))
+        self.assertEqual(args, ("list", "", {"writer": "Gusan Cloud", "writer_local": False, "kinds": ["list"]}))
         self.assertEqual(self._call(log, "show_done"), ((True,), {"kind": "list"}))
 
     def test_a_translation_names_its_language(self):
@@ -121,7 +121,7 @@ class TestPillWiring(unittest.TestCase):
             log = self._run("write an email to John the report is ready", tier="free",
                             action_model="qwen_tiny")
         self.assertEqual(self._call(log, "set_task")[0],
-                         ("email", "", {"writer": "Qwen 1.5B", "writer_local": True}))
+                         ("email", "", {"writer": "Qwen 1.5B", "writer_local": True, "kinds": ["email"]}))
 
     def test_the_speech_model_comes_before_transcribing(self):
         from ui import overlay as ov_mod
@@ -150,7 +150,7 @@ class TestPillWiring(unittest.TestCase):
     def test_the_pill_words_never_break_a_take(self):
         with mock.patch("engine_choice.runs_on", side_effect=RuntimeError("boom")):
             log = self._run("make a todo list call David")
-        self.assertEqual(self._call(log, "set_task")[0], ("list", "", {}))
+        self.assertEqual(self._call(log, "set_task")[0], ("list", "", {"kinds": ["list"]}))
         self.assertIn("process", self._names(log))
         self.assertEqual(self._call(log, "show_done"), ((True,), {"kind": "list"}))
 
@@ -160,7 +160,7 @@ class TestPillWiring(unittest.TestCase):
         with mock.patch.dict(sys.modules, {"engine_choice": None}):
             log = self._run("write an email to John the report is ready", backend="local", model="small")
             self.assertIsNone(sys.modules["engine_choice"])
-        self.assertEqual(self._call(log, "set_task")[0], ("email", "", {}))
+        self.assertEqual(self._call(log, "set_task")[0], ("email", "", {"kinds": ["email"]}))
         self.assertEqual(self._call(log, "set_speech")[0], ({"speech": "Whisper Small", "speech_local": True},))
         self.assertIn("process", self._names(log))
 

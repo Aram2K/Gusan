@@ -284,7 +284,10 @@ def test_the_page_builds_for_every_plan(shell, meetings_root, tier):
     assert lv.start_card.record_btn.pro_tag.text() == "PRO"
     assert lv.start_card.title_edit.text().startswith("Meeting · ")
     assert lv.rail.title_label.text() == "Meeting settings"
-    assert "this computer" in lv.rail.runs_label.text()
+    # Transcribes with (the Live Assistant's row, for meetings) says what runs; no "Runs on" foot any more.
+    assert lv.rail.speech.combo.currentData() == ""                      # Automatic
+    assert "Whisper" in lv.rail.speech.line.text()
+    assert not hasattr(lv.rail, "runs_label")
 
 
 def test_every_view_has_named_controls(shell, meetings_root):
@@ -529,10 +532,7 @@ def test_settings_apply_through_set_setting(shell, meetings_root):
     assert rail.opt_local.radio.isChecked()
     app.cfg["whisper_model"] = "small"
     page.on_setting_changed("whisper_model")
-    assert rail.runs_label.text() == "Runs on Balanced · this computer"
-    assert rail.runs_model.text() == "Whisper Small"
-    rail.change_btn.click()
-    assert win.current_route() == "settings"
+    assert rail.speech.line.text().startswith("Whisper Small")          # Automatic follows Dictation's model
 
 
 def test_free_users_keep_notes_on_this_computer(shell, meetings_root):

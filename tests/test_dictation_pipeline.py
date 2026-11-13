@@ -123,8 +123,9 @@ class TestNewConfigDefaults(unittest.TestCase):
         self.assertTrue(main.DEFAULT["vocabulary_share_with_cloud"])
 
     def test_clipboard_defaults(self):
-        self.assertTrue(main.DEFAULT["restore_clipboard"])
-        self.assertEqual(main.DEFAULT["clipboard_restore_delay_ms"], 400)
+        # 2.1.6: the last result always stays on the clipboard (the restore lost words when a paste didn't land).
+        self.assertFalse(main.DEFAULT["restore_clipboard"])
+        self.assertEqual(main.DEFAULT["hotkey_mode"], "toggle")
 
     def test_schema_version_present(self):
         # 2 = Gusan 2.0, 3 = the Smart Actions shortcut (main._migrate_config
@@ -192,34 +193,121 @@ class TestRichPaste(unittest.TestCase):
         self.assertIn("☐ Call David", plain)
         self.assertNotIn("**", plain)
         self.assertIn("<b>Send</b>", html)
-        # Ctrl+V went out, and the user's clipboard came back: the check
-        # compares with the plain text that was really put there.
+        # Ctrl+V went out, and the result STAYS on the clipboard (2.1.6): if the paste didn't land, Ctrl+V has it.
         self.assertTrue(kbd.press.called)
-        self.assertEqual(copies, ["old clip"])
-        self.assertEqual(clip, "old clip")
+        self.assertEqual(copies, [])
+        self.assertEqual(clip.replace("\r\n", "\n"), plain)
 
     def test_no_rich_clipboard_falls_back_to_the_plain_text(self):
         import rich_text
         for failure in (False, RuntimeError("no GUI thread")):
             pasted, copies, posted, clip, _kbd = self._paste(self.MD, rich=True, set_rich=failure)
             self.assertTrue(pasted)
-            self.assertEqual(copies, [rich_text.to_plain(self.MD), "old clip"], failure)
+            self.assertEqual(copies, [rich_text.to_plain(self.MD)], failure)
 
-    def test_someone_elses_clipboard_is_never_overwritten(self):
-        _p, copies, _posted, clip, _k = self._paste(self.MD, rich=True,
+    def test_ctrl_v_always_finds_the_result_on_the_clipboard(self):
+        import rich_text
+        # A clipboard that didn't take the write (another program held it a moment) is written once more.
+        _p, copies, posted, _clip, _k = self._paste(self.MD, rich=True,
                                                     clipboard_after=lambda now: "they copied this")
-        self.assertEqual(copies, [])                 # nothing restored over their copy
+        self.assertEqual(copies, [])                                       # written again WITH its HTML
+        self.assertEqual(len(posted), 2)
+        self.assertEqual(posted[1][0], rich_text.to_plain(self.MD))
 
     def test_prose_without_markup_is_pasted_as_is(self):
         text = "Sure, Thursday works. See you then."
         _p, copies, posted, _c, _k = self._paste(text, rich=True)
         self.assertEqual(posted, [])                 # no HTML for plain prose
-        self.assertEqual(copies, [text, "old clip"])
+        self.assertEqual(copies, [text])
 
     def test_dictation_is_never_rendered(self):
         _p, copies, posted, _c, _k = self._paste(self.MD, rich=False)
         self.assertEqual(posted, [])
-        self.assertEqual(copies, [self.MD, "old clip"])        # the exact words, byte for byte
+        self.assertEqual(copies, [self.MD])                    # the exact words, byte for byte, left there
+
+
+
+class TestHoldToTalk(unittest.TestCase):
+    """2.1.6 (founder 2026-11-12, like Wispr Flow): hold the shortcut while you talk, let go to stop; a quick tap keeps
+    the take on until the next press; a key that can't be watched leaves it press-to-stop."""
+
+    def _watch(self, downs, tap_after=None, pressed_at=None):
+        from types import SimpleNamespace
+        from unittest import mock
+        stops = []
+        token = object()
+        app = SimpleNamespace(is_rec=True, HOLD_TAP_S=main.AppController.HOLD_TAP_S, HOLD_POLL_S=0.0)
+        app._hold_take = token
+        app._stop = lambda: stops.append(1)
+        seq = iter(downs)
+        later = [tap_after if tap_after is not None else 5.0] * 50
+        clock = iter(later if pressed_at is not None else [0.0] + later)   # (a given press time needs no start read)
+        with mock.patch("win_hotkeys.key_down", lambda hk: next(seq)), \
+                mock.patch.object(main.time, "monotonic", lambda: next(clock)), \
+                mock.patch.object(main.time, "sleep", lambda s: None):
+            main.AppController._watch_hold(app, "alt+r", token, pressed_at)
+        return stops, app
+
+    def test_letting_go_stops_the_take(self):
+        stops, app = self._watch([True, True, False])
+        self.assertEqual(stops, [1])
+        self.assertIsNone(app._hold_take)
+
+    def test_a_quick_tap_keeps_it_on(self):
+        stops, _app = self._watch([False], tap_after=0.1)
+        self.assertEqual(stops, [])
+
+    def test_a_key_that_cant_be_watched_is_press_to_stop(self):
+        stops, _app = self._watch([None])
+        self.assertEqual(stops, [])
+
+    def test_the_key_state_is_read_from_the_shortcut(self):
+        import win_hotkeys
+        from unittest import mock
+        if sys.platform != "win32":
+            self.assertIsNone(win_hotkeys.key_down("alt+r"))
+            return
+        self.assertIsNone(win_hotkeys.key_down("mouse:x1"))
+        with mock.patch("ctypes.windll.user32.GetAsyncKeyState", lambda vk: 0x8000 if vk == ord("R") else 0):
+            self.assertTrue(win_hotkeys.key_down("alt+r"))
+            self.assertFalse(win_hotkeys.key_down("alt+s"))
+
+    def test_the_tap_is_measured_from_the_press_not_from_the_start(self):
+        # The take took 0.5 s to start (mic, selection); the key comes up 0.2 s later: a 0.7 s hold, not a tap.
+        stops, _app = self._watch([False], tap_after=0.7, pressed_at=0.0)
+        self.assertEqual(stops, [1])
+
+    def test_a_held_key_repeating_is_not_a_second_press(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        stops = []
+        app = SimpleNamespace(is_rec=True, _hold_take=object(), _hold_key="alt+r", cfg={"hotkey_mode": "hold"},
+                              _busy=False, _cancel_processing=False, _hotkeys_suspended=False)
+        app._stop = lambda: stops.append(1)
+        with mock.patch("win_hotkeys.key_down", lambda hk: True), \
+                mock.patch.object(main.threading, "Thread", lambda target=None, **kw: SimpleNamespace(start=target)):
+            main.AppController._on_hotkey(app)
+        self.assertEqual(stops, [])                                         # still held: ignored
+        with mock.patch("win_hotkeys.key_down", lambda hk: False), \
+                mock.patch.object(main.threading, "Thread", lambda target=None, **kw: SimpleNamespace(start=target)):
+            main.AppController._on_hotkey(app)
+        self.assertEqual(stops, [1])                                        # a real second press stops it
+
+
+class TestKeyWait(unittest.TestCase):
+    def test_off_windows_the_paste_waits_only_the_short_time_it_always_did(self):
+        from unittest import mock
+        slept = []
+        with mock.patch.object(main.sys, "platform", "darwin"), \
+                mock.patch.object(main.time, "sleep", lambda s: slept.append(s)):
+            main.AppController._wait_keys_released()
+        self.assertEqual(slept, [0.35])
+
+
+class TestStopListensOn(unittest.TestCase):
+    def test_the_stop_keeps_listening_unless_half_a_second_of_silence(self):
+        # founder 2026-11-12: "keep half a second more, so you don't cut the last words"
+        self.assertEqual(main.STOP_SILENCE_S, 0.5)
 
 
 if __name__ == "__main__":

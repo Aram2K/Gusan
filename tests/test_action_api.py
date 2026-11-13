@@ -160,6 +160,28 @@ class _Stream:
         self.closed = True
 
 
+class TestCaptionTranslation(unittest.TestCase):
+    """Live captions translate a sentence at a time through Gusan Cloud's "interpret" mode (the Interpreter's)."""
+
+    def test_one_sentence_in_the_translation_out(self):
+        resp = _Stream(_sse(_chunk("Hello, "), _chunk("how are you?", "stop")))
+        with patch.object(action_api.requests, "post", return_value=resp) as post:
+            out = action_api.interpret_phrase("Բարեւ, ինչպե՞ս ես։", "en", "tok", "hy", ["earlier one", " "])
+        self.assertEqual(out, "Hello, how are you?")
+        body = post.call_args.kwargs["json"]
+        self.assertEqual(body, {"mode": "interpret", "text": "Բարեւ, ինչպե՞ս ես։", "target_lang": "en",
+                                "source_lang": "hy", "context": ["earlier one"]})
+        self.assertEqual(post.call_args.kwargs["headers"], {"Authorization": "Bearer tok"})
+        self.assertTrue(resp.closed)
+
+    def test_signed_out_and_empty(self):
+        with self.assertRaises(action_api.ActionAPIError):
+            action_api.interpret_phrase("hi", "fr", None)
+        with patch.object(action_api.requests, "post") as post:
+            self.assertEqual(action_api.interpret_phrase("   ", "fr", "tok"), "")
+        post.assert_not_called()
+
+
 NOTES_TEXT = "You: hello\nThem: hi there. " + "word " * 5000
 OPENAI_CFG = {"action_api_provider": "openai_compatible", "action_api_key": "k"}
 GEMINI_CFG = {"action_api_provider": "gemini", "action_api_key": "k"}
@@ -416,3 +438,22 @@ class TestNotesStreams(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStreamedSmartAction(unittest.TestCase):
+    def test_the_answer_is_streamed_when_the_pill_waits_for_its_first_words(self):
+        import actions
+        seen = []
+        cfg = {"_managed_token": "tok", "_on_writing": lambda: seen.append("writing")}
+
+        def stream(text, mode, token, on_token, **kw):
+            on_token("Hel")
+            on_token("lo")
+            return "Hello"
+        with patch.object(actions.action_api, "run_managed_action_stream", stream), \
+                patch.object(actions.action_api, "run_managed_action", side_effect=AssertionError("not streamed")):
+            self.assertEqual(actions._managed_answer("hi", "smart_auto", "tok", config=cfg), "Hello")
+        self.assertEqual(seen, ["writing"])                                  # once, at the first words
+        with patch.object(actions.action_api, "run_managed_action", return_value="Plain") as plain:
+            self.assertEqual(actions._managed_answer("hi", "smart_auto", "tok", config={}), "Plain")
+        plain.assert_called_once()

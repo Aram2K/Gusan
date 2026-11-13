@@ -218,7 +218,12 @@ DEFAULT = {
     "vocabulary": [],
     "vocabulary_share_with_cloud": True,
     # Put the user's clipboard back after we paste.
-    "restore_clipboard": True,
+    # Off since 2.1.6 and no longer offered: the founder (2026-11-12) saw "Pasted" with nothing pasted - and then the
+    # clipboard was put back, so the words were gone. The last result now always stays on the clipboard (Ctrl+V).
+    "restore_clipboard": False,
+    # Dictation and Smart Actions shortcuts: "toggle" = press to start, press again to stop; "hold" = hold while you
+    # talk, let go to stop (a quick tap keeps it on until the next press).
+    "hotkey_mode": "toggle",
     "clipboard_restore_delay_ms": 400,
     # Notion export (meeting notes -> Notion). notion_api_key is the access token
     # from "Connect Notion" or a pasted own-integration secret; with
@@ -314,6 +319,18 @@ DEFAULT = {
     **CALENDAR_DEFAULTS,
     "meeting_language": "",               # "" = the dictation language
     "meeting_notes_model": "",            # "" = action_model (meeting_session picks a real engine)
+    # Meetings' "Transcribes with" (engine_choice.MEETING_SPEECH_KEY): the Live Assistant's values and rules
+    # for the meeting language - "" = Automatic (Dictation's, but Gusan Cloud / the Armenian model for a
+    # meeting in Armenian, where local Whisper is poor).
+    "meeting_speech_model": "",
+    # Live captions (captions.py): words at the bottom of the screen while a meeting runs (Pro). Language "" = as
+    # spoken, else translated into it; whose words "both" | "them" | "me"; in screen sharing or hidden from it.
+    "captions_on": False,
+    "captions_language": "",
+    "captions_who": "both",
+    "captions_in_share": False,
+    "captions_font": "clean",
+    "captions_colors": "yellow",
     "meeting_consent_reminder": True,     # the consent line on the Meetings start card
     # The Smart Actions shortcut: one take runs as a Smart Action (Control+S
     # on a Mac). "" = not set (Alt+S was another shortcut's at migration).
@@ -1191,6 +1208,12 @@ def cfg_float(name, default, minimum=None, maximum=None):
         value = min(float(maximum), value)
     return value
 
+# The Stop keeps listening ~0.5 s (the post-roll) so the last word is not cut, unless the speaker had already been silent
+# this long. It was 0.3 s; a soft last syllable can read as silence that short (founder 2026-11-12: "keep half a second
+# more, so you don't cut the last words").
+STOP_SILENCE_S = 0.5
+
+
 class AudioRecorder:
     def __init__(self):
         self.recording        = False
@@ -1270,6 +1293,9 @@ class AudioRecorder:
         self._live_session = None
         self.on_live_text = None
         self.on_live_final = None
+        # The sentence being said so far, of a meeting's live stream (on_live_partial(text) - meeting_session: live
+        # captions).
+        self.on_live_partial = None
         # Whether this take got any audio at all, and what to call when it got none (NO_SOUND_S).
         self._got_audio = False
         self.on_no_sound = None
@@ -2283,7 +2309,8 @@ class AudioRecorder:
         read_errors   = 0
 
         post_roll_chunks = 0
-        # ~512ms post-roll after stop to catch final spoken syllables in flight.
+        # ~512ms post-roll after stop to catch final spoken syllables in flight (skipped only after STOP_SILENCE_S of
+        # real silence before the Stop).
         # 256ms still clipped word endings when the hotkey was pressed while the
         # last word was being finished; the extra quarter second costs little.
         max_post_roll = 8
@@ -2355,7 +2382,7 @@ class AudioRecorder:
 
         while self.recording or post_roll_chunks > 0:
             if self.stop_requested and post_roll_chunks == 0:
-                if (self._abort or silence_sec >= 0.3
+                if (self._abort or silence_sec >= STOP_SILENCE_S
                         or getattr(self, "paused", False)
                         or (not meeting_cadence and speech_sec == 0.0
                             and self._chunk_idx > 0)):
@@ -2853,10 +2880,17 @@ class AudioRecorder:
                 cb = getattr(self, "on_live_final", None)
                 if cb is not None:
                     cb(text, lang, start, end)
+
+            def on_meeting_partial(text):
+                cb = getattr(self, "on_live_partial", None)
+                if cb is not None:
+                    cb(text)
             if meeting:
-                # Every finished sentence to the meeting (its live view, the Live Assistant); never the pill.
+                # Every finished sentence to the meeting (its live view, the Live Assistant); never the pill. The
+                # sentence being said, word by word, for live captions.
                 session = live_stt.LiveSession(self.get_auth_token, language, languages, terms, purpose="meeting",
-                                               on_utterance=on_utterance, engine=engine)
+                                               on_utterance=on_utterance, on_partial=on_meeting_partial,
+                                               engine=engine)
             else:
                 session = live_stt.LiveSession(self.get_auth_token, language, languages, terms, purpose="dictation",
                                                on_partial=on_partial, on_final=on_final, engine=engine)
@@ -4348,6 +4382,16 @@ class AppController(QObject):
         from meeting_session import MeetingSession
         self.meeting_session = MeetingSession(self)
         self.meeting_session.finished.connect(self._on_meeting_finished)
+        # Live captions (ui/captions_controller.py): the caption window while a meeting runs with captions on.
+        try:
+            from ui.captions_controller import CaptionsController
+            self.captions = CaptionsController(self, parent=self)
+            self.captions.attach(self.meeting_session)
+            self.sig_setting_changed.connect(self.captions.on_setting_changed)
+            self.sig_auth_changed.connect(self.captions.sync)       # Pro started or ended
+        except Exception:
+            logger.warning("Live captions unavailable", exc_info=True)
+            self.captions = None
         # Audio to text's one job queue; it owns _file_job_running. A missing
         # model comes through self.downloads (one download, shared progress).
         import file_jobs
@@ -4563,13 +4607,14 @@ class AppController(QObject):
         "translate_target", "meeting_audio_mode", "save_history",
         "cleanup_enabled", "restore_clipboard",
         "smart_actions_hotkey", "smart_actions_speech_model",
-        "live_assist_speech_model",
+        "live_assist_speech_model", "meeting_speech_model",
+        "captions_on", "captions_language", "captions_who", "captions_in_share",
         "notion_auto_send",
     )
     _TRACKED_AS_SET = ("smart_actions_hotkey",)
     # Reported as a class ("auto" | "local" | "cloud" | "cloud_best" | "own_key"), never as a
     # model name (engine_choice.live_speech_class).
-    _TRACKED_AS_CLASS = ("live_assist_speech_model",)
+    _TRACKED_AS_CLASS = ("live_assist_speech_model", "meeting_speech_model")
 
     def track(self, event, props=None):
         """Record an anonymous usage event (a no-op when analytics is off)."""
@@ -4635,6 +4680,8 @@ class AppController(QObject):
             # The Live Assistant's own pick, by class only (no model names, no text).
             self.track("backend_selected", {"feature": "live_assist",
                                             "choice": now["live_assist_speech_model"]})
+        if "meeting_speech_model" in changed:
+            self.track("backend_selected", {"feature": "meetings", "choice": now["meeting_speech_model"]})
         props = {"changed": ",".join(changed)}
         props.update({k: now[k] for k in changed})
         self.track("settings_saved", props)
@@ -4786,6 +4833,9 @@ class AppController(QObject):
                 # The Live Assistant is back on Automatic (your own key and the models on
                 # this computer need no plan: they stay).
                 self.cfg["live_assist_speech_model"] = ""
+                _changed = True
+            if self.cfg.get("meeting_speech_model") in ("cloud", "cloud:best"):
+                self.cfg["meeting_speech_model"] = ""          # Meetings too
                 _changed = True
             if _changed:
                 # An automatic fallback, not a user choice: keep it out of the
@@ -6925,6 +6975,8 @@ class AppController(QObject):
             # meeting - it would clobber the meeting's audio stream. Tell the
             # user instead. (Notes written from a saved transcript don't use
             # the recorder: dictation works meanwhile.)
+            smart_key = getattr(self, "_smart_next", False) is True
+            pressed_at = time.monotonic()        # (hold to talk: a tap is measured from the press, not the start)
             if AppController._meeting_holds_recorder(self):
                 if getattr(self, "_smart_next", False) is True:
                     # The Smart Actions shortcut: name it, not Alt+R.
@@ -6936,8 +6988,44 @@ class AppController(QObject):
                 self.show_tray_hint("Meeting Recording Active", body)
                 return
             self._start()
+            if self.is_rec and (self.cfg or {}).get("hotkey_mode") == "hold":
+                # Hold while you talk: the take stops when the shortcut's key is let go.
+                key = self.cfg.get("smart_actions_hotkey" if smart_key else "hotkey") or ""
+                self._hold_key = key
+                token = self._hold_take = object()
+                threading.Thread(target=self._watch_hold, args=(key, token, pressed_at), daemon=True,
+                                 name="gusan-hold").start()
         else:
+            if getattr(self, "_hold_take", None) is not None:
+                import win_hotkeys
+                if win_hotkeys.key_down(getattr(self, "_hold_key", "")):
+                    # The held key repeating (the keyboard-hook fallback fires on every repeat): not a second press.
+                    return
+            self._hold_take = None
             threading.Thread(target=self._stop, daemon=True).start()
+
+    HOLD_TAP_S = 0.3            # a press shorter than this is a tap: the take stays on until the next press
+    HOLD_POLL_S = 0.02
+
+    def _watch_hold(self, hotkey, token, pressed_at=None):
+        """Hold while you talk (cfg hotkey_mode "hold", like Wispr Flow's push to talk): the take that ``token`` names
+        stops when the shortcut's key is let go. A quick tap (under HOLD_TAP_S) keeps it on until the next press, and
+        a key that can't be watched (a mouse button, not Windows) leaves it as press-to-stop. Worker thread."""
+        import win_hotkeys
+        started = pressed_at if pressed_at is not None else time.monotonic()
+        while getattr(self, "_hold_take", None) is token and self.is_rec:
+            down = win_hotkeys.key_down(hotkey)
+            if down is None:
+                return
+            if not down:
+                if time.monotonic() - started < self.HOLD_TAP_S:
+                    logger.info("[main] hold to talk: a tap - the take stays on until the next press")
+                    return
+                self._hold_take = None
+                logger.info("[main] hold to talk: key let go - stopping")
+                self._stop()
+                return
+            time.sleep(self.HOLD_POLL_S)
 
     def _add_win_hotkey(self, hotkey, emit):
         """Windows: a global shortcut registered with the system (win_hotkeys): Windows takes the combination, so the
@@ -7429,7 +7517,7 @@ class AppController(QObject):
             return text
 
     @staticmethod
-    def should_restore_clipboard(pasted, restore_enabled, prev_was_text, still_ours):
+    def should_restore_clipboard(pasted, restore_enabled, prev_was_text, still_ours):  # (kept for old callers)
         """Whether to put the user's previous clipboard back after a paste.
 
         Pure so the rules are testable:
@@ -7443,13 +7531,14 @@ class AppController(QObject):
         return bool(restore_enabled and pasted and prev_was_text and still_ours)
 
     @staticmethod
-    def _wait_keys_released(max_s=0.35):
+    def _wait_keys_released(max_s=1.0):
         """Paste once the keys that stopped the dictation are up - a held Alt
-        or Ctrl would turn Ctrl+V into another shortcut. By the time the text
-        is ready they almost always are, so this returns at once (it used to
-        always sleep 350 ms)."""
+        or Ctrl would turn Ctrl+V into another shortcut (Ctrl+Alt+V pastes
+        nothing). By the time the text is ready they almost always are, so this
+        returns at once; it waits up to a second for a slow release (it was
+        0.35 s, and a still-held Alt lost the paste)."""
         if sys.platform != "win32":
-            time.sleep(max_s)
+            time.sleep(min(max_s, 0.35))         # (the keys can't be read here: the short wait it always had)
             return
         try:
             state = ctypes.windll.user32.GetAsyncKeyState
@@ -7483,27 +7572,19 @@ class AppController(QObject):
             pyperclip.copy(plain)
         return plain
 
-    def _paste_via_clipboard(self, text, restore=True, rich=False):
-        """Copy `text`, send the paste chord, then restore the prior clipboard.
+    def _paste_via_clipboard(self, text, restore=None, rich=False):
+        """Copy `text` and send the paste chord. The text STAYS on the clipboard
+        (founder 2026-11-12: "it should always be on the clipboard, the last
+        thing" - if the paste didn't land where the cursor is, Ctrl+V still
+        has it). There is no "Put my clipboard back" any more: it restored the
+        previous clipboard 0.4 s later even when the paste had not landed, and
+        the words were lost (``restore`` is accepted and ignored).
 
         ``rich``: a Smart Action's Markdown, pasted as HTML + nice plain text
         (_rich_copy). Plain dictation (exact words) is never changed.
 
-        Returns True if the paste chord was sent. The restore is deliberately
-        delayed: the target app reads the clipboard asynchronously after Ctrl+V,
-        so restoring immediately would race and paste the OLD content.
+        Returns True if the paste chord was sent.
         """
-        cfg = self._effective_cfg()
-        prev, prev_was_text = None, False
-        if restore and cfg.get("restore_clipboard", True):
-            try:
-                prev = pyperclip.paste()
-                prev_was_text = isinstance(prev, str) and prev != ""
-            except Exception:
-                prev, prev_was_text = None, False
-
-        # What is on the clipboard now: the restore below puts the user's
-        # back only while it is still ours.
         put = None
         if rich:
             try:
@@ -7514,12 +7595,21 @@ class AppController(QObject):
         if put is None:
             put = text
             pyperclip.copy(text)
+        # Ctrl+V must find THIS text: a clipboard another program held open a moment can refuse the write.
+        try:
+            now = pyperclip.paste()
+            if not (isinstance(now, str) and now.replace("\r\n", "\n") == put.replace("\r\n", "\n")):
+                time.sleep(0.05)
+                again = AppController._rich_copy(text) if rich else None     # (rich: keep its HTML too)
+                if again is None:
+                    pyperclip.copy(put)
+        except Exception:
+            pass
 
         pasted = False
         if sys.platform == "darwin" and mac_permissions.accessibility_granted() is False:
-            # macOS drops the Cmd+V silently without Accessibility, and the
-            # restore below would then take the text away too. Leave it on the
-            # clipboard (pasted stays False) and say how to fix it.
+            # macOS drops the Cmd+V silently without Accessibility: the text stays on the
+            # clipboard (pasted stays False) and the app says how to fix it.
             logger.warning("[Paste] macOS Accessibility is off - text left on the clipboard")
             self.sig_mac_permissions.emit("paste")
         else:
@@ -7531,24 +7621,6 @@ class AppController(QObject):
                 pasted = True
             except Exception as e:
                 logger.warning("[Paste] %s", e)
-
-        if self.should_restore_clipboard(
-                pasted, cfg.get("restore_clipboard", True), prev_was_text, True):
-            def _restore():
-                try:
-                    delay = int(cfg.get("clipboard_restore_delay_ms", 400))
-                except (TypeError, ValueError):
-                    delay = 400
-                time.sleep(max(0, min(delay, 5000)) / 1000.0)
-                try:
-                    # Someone else may have taken the clipboard meanwhile.
-                    # (Qt writes Windows text with \r\n line ends.)
-                    now = pyperclip.paste()
-                    if isinstance(now, str) and now.replace("\r\n", "\n") == put.replace("\r\n", "\n"):
-                        pyperclip.copy(prev)
-                except Exception:
-                    pass
-            threading.Thread(target=_restore, daemon=True).start()
         return pasted
 
     def _resolve_action_engine(self, action_model=None):
@@ -7790,7 +7862,12 @@ class AppController(QObject):
             if web_info is not None and web_sources.smart_search_wanted(text):
                 depth = web_sources.search_depth(text, action_mode)
                 self.overlay.call_soon(self.overlay.set_task, pill_kind, pill_detail,
-                                       dict(pill_info or {}, on_selection=bool(sel), web="deep" if depth == "deep" else True))
+                                       dict(pill_info or {}, on_selection=bool(sel), web="deep" if depth == "deep" else True,
+                                            streamed=True))
+                # The answer is streamed: its first words say the search is over and the writing has begun - the pill
+                # moves from "Searching the web" to the writing then, not on a timer.
+                action_config = dict(action_config or {},
+                                     _on_writing=lambda: self.overlay.call_soon(self.overlay.writing_started))
             try:
                 output_text = actions.process(
                     action_input,
@@ -7857,7 +7934,7 @@ class AppController(QObject):
             APP_VERSION,
         )
 
-        self._wait_keys_released(0.35)
+        self._wait_keys_released()
         if action_mode == actions.ACTION_SMART_SELECTION:
             AppController._deliver_selection_result(self, sel_kind, output_text, pill_kind, sources)
         elif action_mode != actions.ACTION_TRANSCRIBE_ONLY and sources:

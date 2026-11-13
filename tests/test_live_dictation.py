@@ -50,6 +50,11 @@ class TestWhenItRuns(unittest.TestCase):
     def test_a_dictation_on_gusan_cloud_streams(self):
         self.assertTrue(self._wanted())
 
+    def test_a_meeting_on_this_computer_never_streams_not_even_for_captions(self):
+        """Captions follow Transcribes with (2026-11-11): a model on this computer gives them its own words; the
+        audio never goes to the cloud for captions alone."""
+        self.assertFalse(self._wanted("smart_meeting", backend="local", captions_on=True))
+
     def _engine(self, capture_mode=None, **cfg):
         r = _rec()
         with mock.patch.dict(main.cfg, dict({"privacy_mode": False, "live_stt": True}, **cfg)), \

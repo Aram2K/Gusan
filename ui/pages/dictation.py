@@ -23,7 +23,8 @@ Settings this page writes:
     mix_languages               Languages you mix (only shown for Mixed languages)
     cleanup_enabled             Clean up mistakes
     cleanup_remove_fillers      Remove filler words (on unless the config says False)
-    restore_clipboard           Put my clipboard back
+    hotkey_mode                 The shortcut: Press to start and stop | Hold while you talk (2.1.6; it took the place
+                                of "Put my clipboard back": the last result now always stays on the clipboard)
     overlay_theme               Dictation bar look: auto | light | dark
     overlay_private             Hide bar in screen shares
     backend (+ managed_provider) Gusan Cloud speech, via engine_choice.set_speech_source
@@ -62,8 +63,9 @@ Integration notes for Wave 4
 
 import logging
 import os
+import sys
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEasingCurve, QEvent, QPointF, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QFontMetricsF, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QCheckBox, QComboBox, QFileDialog,
                                QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout, QLabel, QMenu, QPlainTextEdit,
@@ -77,6 +79,10 @@ from ui.components.controls import keycap_labels
 from ui.components.hotkey_capture import HotkeyCaptureButton
 from ui.components.model_combo import MARK_DOWNLOAD, PlainNameCombo, combo as _rail_combo
 from ui.pages import home as H
+
+# The shortcut's two ways (cfg hotkey_mode): its plain line under the switch.
+HOTKEY_MODE_HINTS = ("Press the shortcut to start, press it again to stop",
+                     "Hold the shortcut while you talk, let go to stop. A quick tap keeps it on")
 
 logger = logging.getLogger("transcribe")
 
@@ -438,22 +444,60 @@ class LangTag(QWidget):
 EARLIER = "Earlier"
 
 
+EARLIER_OPEN_MS = 240          # the older dictations slide open / closed
+EARLIER_TURN_MS = 200          # the chevron turns
+
+
+def _motion():
+    from ui import glass
+    return glass.animations_enabled()               # (safe: True when the setting can't be read)
+
+
 class EarlierToggle(QAbstractButton):
     """The "Earlier" heading of the dictation list: everything older than yesterday sits under it, closed until it is
     clicked (the founder, 2026-11-09: "not show every single recording, just put everything under Earlier").
-    "Earlier  126  >" closed, "Earlier  126  v" open."""
+    It looks like the Today / Yesterday headings - "Earlier  126" with the count quieter - and its chevron turns from
+    right (closed) to down (open) (2026-11-12: the pill and the jump "look a bit weird").
+    ``turning``: the chevron starts from the other position and turns (a list rebuilt open or closed)."""
 
-    def __init__(self, count, opened=False, parent=None):
+    def __init__(self, count, opened=False, parent=None, turning=False):
         super().__init__(parent)
         self.count = int(count)
         self.setCheckable(True)
         self.setChecked(bool(opened))
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.StrongFocus)
-        self.setFixedHeight(34)
+        self.setFixedHeight(32)
         self.setAttribute(Qt.WA_Hover, True)
-        self.toggled.connect(lambda _on: self._name())
+        self._angle = 90.0 if opened else 0.0
+        self._turn = QVariantAnimation(self)
+        self._turn.setDuration(EARLIER_TURN_MS)
+        self._turn.setEasingCurve(QEasingCurve.OutCubic)
+        self._turn.valueChanged.connect(self._on_turn)
+        self.toggled.connect(self._on_toggled)
         self._name()
+        if turning:
+            self.turn_to(self._angle, start=90.0 - self._angle)
+
+    def _on_turn(self, value):
+        self._angle = float(value)
+        self.update()
+
+    def turn_to(self, angle, start=None):
+        """The chevron turns to ``angle`` (0 = right, 90 = down)."""
+        start = self._angle if start is None else start
+        self._turn.stop()
+        if not _motion():
+            self._angle = angle
+            self.update()
+            return
+        self._turn.setStartValue(float(start))
+        self._turn.setEndValue(float(angle))
+        self._turn.start()
+
+    def _on_toggled(self, on):
+        self._name()
+        self.turn_to(90.0 if on else 0.0)
 
     def _name(self):
         state = "open" if self.isChecked() else "closed"
@@ -461,41 +505,47 @@ class EarlierToggle(QAbstractButton):
         self.update()
 
     def sizeHint(self):
-        return QSize(200, 34)
+        return QSize(200, 32)
 
     def paintEvent(self, _e):
+        from ui.components import icons
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
-        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        if self.underMouse() or self.hasFocus():
-            p.setPen(Qt.NoPen)
-            p.setBrush(theme.qcolor("bg2"))
-            p.drawRoundedRect(r, 8, 8)
-        x = 8
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        hot = self.underMouse() or self.hasFocus()
+        x = 2.0                                              # where the Today / Yesterday headings start
         f = theme.font(12, 700)
-        p.setFont(f)
-        p.setPen(theme.qcolor("muted"))
         fm = QFontMetricsF(f)
-        p.drawText(QRectF(x, 0, fm.horizontalAdvance(EARLIER) + 2, self.height()), Qt.AlignLeft | Qt.AlignVCenter,
-                   EARLIER)
-        x += fm.horizontalAdvance(EARLIER) + 8
-        # the count, in a soft pill
-        cf = theme.font(11, 700)
+        p.setFont(f)
+        p.setPen(theme.qcolor("text2" if hot else "muted"))
+        tw = fm.horizontalAdvance(EARLIER)
+        p.drawText(QRectF(x, 0, tw + 2, self.height()), Qt.AlignLeft | Qt.AlignVCenter, EARLIER)
+        x += tw + 7
+        # the count: the same size, quieter
+        cf = theme.font(12, 500)
         cfm = QFontMetricsF(cf)
         num = str(self.count)
-        pw = cfm.horizontalAdvance(num) + 12
-        pill = QRectF(x, (self.height() - 18) / 2.0, pw, 18)
-        p.setPen(Qt.NoPen)
-        p.setBrush(theme.qcolor("bg2" if not (self.underMouse() or self.hasFocus()) else "line"))
-        p.drawRoundedRect(pill, 9, 9)
         p.setFont(cf)
-        p.setPen(theme.qcolor("muted"))
-        p.drawText(pill, Qt.AlignCenter, num)
-        x += pw + 8
-        # the chevron: right while closed, down while open
-        from ui.components import icons
-        pm = icons.pixmap("chev_d" if self.isChecked() else "chev_r", 14, "muted", sw=2)
-        p.drawPixmap(int(x), int((self.height() - 14) / 2), pm)
+        ink = theme.qcolor("muted")
+        ink.setAlpha(170)
+        p.setPen(ink)
+        nw = cfm.horizontalAdvance(num)
+        p.drawText(QRectF(x, 0, nw + 2, self.height()), Qt.AlignLeft | Qt.AlignVCenter, num)
+        x += nw + 6
+        # the chevron, turning: right while closed, down while open
+        pm = icons.pixmap("chev_r", 13, "text2" if hot else "muted", sw=2)
+        cx, cy = x + 6.5, self.height() / 2.0
+        p.save()
+        p.translate(cx, cy)
+        p.rotate(self._angle)
+        p.drawPixmap(QPointF(-6.5, -6.5), pm)
+        p.restore()
+        if self.hasFocus():
+            ring = theme.qcolor("blue")
+            ring.setAlpha(150)
+            p.setPen(QPen(ring, 1.4))
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(QRectF(0.7, 3.5, x + 16.0, self.height() - 7.0), 7, 7)
         p.end()
 
 
@@ -850,7 +900,15 @@ class DictationPage(QWidget):
         self.row_cleanup = toggle_row("cleanup_enabled", "Clean up mistakes", "Drops made-up “Thank you.” lines")
         # On unless the config says False (main.DEFAULT, text_cleanup: one default).
         self.row_fillers = toggle_row("cleanup_remove_fillers", "Remove filler words", "um, uh, you know", True)
-        self.row_clipboard = toggle_row("restore_clipboard", "Put my clipboard back", "After each paste")
+        # The shortcut, like Wispr Flow's: press to start and press again to stop, or hold it while you talk.
+        from ui.components.controls import Segmented
+        self.hotkey_mode = Segmented(["Press to start", "Hold to talk"],
+                                     1 if cfg.get("hotkey_mode") == "hold" else 0, "How the shortcut works", size="s")
+        self.hotkey_mode.changed.connect(self._on_hotkey_mode)
+        self.row_hotkey_mode = rail.add_row(SettingRow("Press or hold", self.hotkey_mode, stacked=True,
+                                                       hint=HOTKEY_MODE_HINTS[0]))
+        # Holding is watched with Windows' key state (win_hotkeys.key_down): elsewhere it would do nothing yet.
+        self.row_hotkey_mode.setVisible(sys.platform == "win32")
         self.bar_look = BarLook(str(cfg.get("overlay_theme") or "auto"), on_pick=self._on_bar_look)
         self.row_bar = rail.add_row(SettingRow("Dictation bar look", self.bar_look, stacked=True))
         self.row_private = toggle_row("overlay_private", "Hide bar in screen shares")
@@ -929,6 +987,9 @@ class DictationPage(QWidget):
                 t.blockSignals(True)
                 t.setChecked(bool(cfg.get(key, default)))
                 t.blockSignals(False)
+            hold = cfg.get("hotkey_mode") == "hold"
+            self.hotkey_mode.set_index(1 if hold else 0)
+            self.row_hotkey_mode.set_hint(HOTKEY_MODE_HINTS[1 if hold else 0])
             self.bar_look.set_value(str(cfg.get("overlay_theme") or "auto"))
             self.bar_preview.set_look(bar_theme(cfg))
             self._sync_smart_line()
@@ -1019,6 +1080,12 @@ class DictationPage(QWidget):
             QTimer.singleShot(0, self.sync_from_cfg)
             return False
         return True
+
+    def _on_hotkey_mode(self, index):
+        hold = index == 1
+        self.row_hotkey_mode.set_hint(HOTKEY_MODE_HINTS[1 if hold else 0])
+        if not self._syncing:
+            self._apply("hotkey_mode", "hold" if hold else "toggle")
 
     def _on_toggle(self, key, on):
         if self._syncing:
@@ -1316,7 +1383,9 @@ class DictationPage(QWidget):
         return list(self._entries)
 
     def shown_rows(self):
-        return [w for w in self.list_box.findChildren(DictationRow) if not w.isHidden()]
+        closing = getattr(self, "_earlier_closing", None)       # the older rows sliding shut count as closed
+        return [w for w in self.list_box.findChildren(DictationRow)
+                if not w.isHidden() and (closing is None or w.parentWidget() is not closing)]
 
     def _on_search(self, text):
         self._query = text
@@ -1333,9 +1402,14 @@ class DictationPage(QWidget):
             w = it.widget()
             if w is not None:
                 w.hide()
+                w.setParent(None)                    # gone from the list at once (its rows too), not at deleteLater
                 w.deleteLater()
 
     def _render_list(self):
+        self._earlier_closing = None
+        anim, self._earlier_anim = getattr(self, "_earlier_anim", None), None
+        if anim is not None:
+            anim.stop()                          # it slides a box this redraw takes away
         self._clear_list()
         self.more_button.hide()
         if not self._loaded:
@@ -1372,12 +1446,15 @@ class DictationPage(QWidget):
         first_group = True
         first = True
         self.earlier_toggle = None
+        self._earlier_box = None
+        turning, self._earlier_turning = getattr(self, "_earlier_turning", False), False
+        lay, parent = self.list_lay, self.list_box
         for e in shown:
             g = group_for(e)
             if g != group:
                 group = g
                 if g == EARLIER:
-                    tog = EarlierToggle(earlier_count, self._earlier_open, self.list_box)
+                    tog = EarlierToggle(earlier_count, self._earlier_open, self.list_box, turning=turning)
                     tog.setContentsMargins(0, 0, 0, 0)
                     tog.toggled.connect(self._toggle_earlier)
                     if not first_group:
@@ -1388,19 +1465,26 @@ class DictationPage(QWidget):
                     first = True
                     if not self._earlier_open:
                         break
+                    # the older rows live in their own box under the row: it slides open and closed
+                    box = self._earlier_box = QWidget(self.list_box)
+                    box_lay = QVBoxLayout(box)
+                    box_lay.setContentsMargins(0, 0, 0, 0)
+                    box_lay.setSpacing(0)
+                    self.list_lay.addWidget(box)
+                    lay, parent = box_lay, box
                 else:
                     lb = H.text_label(g, 12, 700, "muted", parent=self.list_box)
                     lb.setContentsMargins(2, 2 if first_group else 18, 2, 8)
                     self.list_lay.addWidget(lb)
                     first_group = False
                     first = True
-            row = DictationRow(e, now, self.list_box, first=first)
+            row = DictationRow(e, now, parent, first=first)
             row.delete_requested.connect(self._ask_delete)
-            self.list_lay.addWidget(row)
+            lay.addWidget(row)
             first = False
         if earlier_count and self.earlier_toggle is None and not self._earlier_open:
             # (every recent row drawn: the closed "Earlier" row comes after them)
-            tog = EarlierToggle(earlier_count, False, self.list_box)
+            tog = EarlierToggle(earlier_count, False, self.list_box, turning=turning)
             tog.toggled.connect(self._toggle_earlier)
             self.list_lay.addSpacing(10)
             self.list_lay.addWidget(tog)
@@ -1410,12 +1494,66 @@ class DictationPage(QWidget):
         self._fix_tab_order()
 
     def _toggle_earlier(self, on):
+        """Open: the older dictations are built in their box and it slides open; close: the box slides shut first,
+        then the list is drawn closed. The chevron turns meanwhile (EarlierToggle)."""
         self._earlier_open = bool(on)
         self._limit = LIST_PAGE
-        self._render_list()
+        anim = getattr(self, "_earlier_anim", None)
+        if anim is not None:
+            anim.stop()
+        if on:
+            self._earlier_turning = True
+            self._render_list()
+            self._slide_earlier(opening=True)
+        else:
+            box = getattr(self, "_earlier_box", None)
+            if box is None or not _motion():
+                self._earlier_turning = False
+                self._render_list()
+            else:
+                self._earlier_closing = box
+                self._slide_earlier(opening=False)
         tog = getattr(self, "earlier_toggle", None)
         if tog is not None:
             tog.setFocus(Qt.OtherFocusReason)
+
+    def _slide_earlier(self, opening):
+        box = getattr(self, "_earlier_box", None)
+        if box is None:
+            return
+        full = max(1, box.sizeHint().height())
+        if not _motion():
+            box.setMaximumHeight(16777215)
+            return
+        anim = QVariantAnimation(self)
+        anim.setDuration(EARLIER_OPEN_MS)
+        anim.setEasingCurve(QEasingCurve.OutCubic if opening else QEasingCurve.InOutCubic)
+        anim.setStartValue(0 if opening else box.height())
+        anim.setEndValue(full if opening else 0)
+        def step(v, b=box):
+            try:
+                b.setMaximumHeight(max(0, int(v)))
+            except RuntimeError:
+                anim.stop()                      # the box went with a redraw
+
+        def done():
+            if self._earlier_anim is not anim:
+                return                           # a redraw stopped it
+            self._earlier_anim = None
+            if opening:
+                try:
+                    box.setMaximumHeight(16777215)
+                except RuntimeError:
+                    pass
+            else:
+                self._earlier_closing = None
+                if not self._earlier_open:
+                    self._render_list()          # drawn closed now that the box is shut
+        anim.valueChanged.connect(step)
+        anim.finished.connect(done)
+        box.setMaximumHeight(0 if opening else box.height())
+        self._earlier_anim = anim
+        anim.start()
 
     def _poll_store(self):
         if not self.isVisible():
@@ -1575,7 +1713,7 @@ class DictationPage(QWidget):
 
     def on_setting_changed(self, key):
         if key in ("hotkey", "language", "mix_languages", "cleanup_enabled", "cleanup_remove_fillers",
-                   "restore_clipboard", "overlay_theme", "overlay_private", SMART_HOTKEY_KEY, "backend", "whisper_model",
+                   "hotkey_mode", "overlay_theme", "overlay_private", SMART_HOTKEY_KEY, "backend", "whisper_model",
                    "managed_provider", "privacy_mode", "mistral_stt_model", "google_stt_model",
                    "mistral_api_key", "google_api_key"):
             self.sync_from_cfg()

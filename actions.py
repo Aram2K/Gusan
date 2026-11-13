@@ -1,3 +1,4 @@
+import logging
 import re
 
 import action_api
@@ -5,6 +6,8 @@ import local_llm
 import notes_prompt
 import smart_prompt
 import vocabulary
+
+logger = logging.getLogger("transcribe")
 
 
 ACTION_TRANSCRIBE_ONLY = "transcribe_only"
@@ -214,6 +217,25 @@ def normalize_translate_target(code):
     return code if code in TRANSLATE_TARGETS else "en"
 
 
+def _managed_answer(text, mode, token, **kw):
+    """A Smart Action's answer from Gusan Cloud. When the caller wants to know the moment the writing begins
+    (config["_on_writing"]: the pill moves from "Searching the web" to the writing then), the answer is streamed and
+    its first words call it once; otherwise it comes in one piece, as ever. Same answer either way."""
+    on_writing = (kw.get("config") or {}).get("_on_writing")
+    if not callable(on_writing):
+        return action_api.run_managed_action(text, mode, token, **kw)
+    fired = []
+
+    def on_token(_t):
+        if not fired:
+            fired.append(1)
+            try:
+                on_writing()
+            except Exception:
+                logger.debug("_on_writing failed", exc_info=True)
+    return action_api.run_managed_action_stream(text, mode, token, on_token, **kw)
+
+
 def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_ID, config=None):
     mode = normalize_action_mode(mode)
     model = normalize_action_model(model)
@@ -249,7 +271,7 @@ def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_I
                 routed = _run_smart_rule_based(text, source_lang, target_lang, config)
                 return routed if routed is not None else _clean_transcript(text)
             try:
-                return action_api.run_managed_action(
+                return _managed_answer(
                     text, ACTION_SMART_AUTO, token,
                     source_lang=source_lang, target_lang=target_lang,
                     vocab_block=vocab_block,
@@ -317,7 +339,7 @@ def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_I
                     return _notes_from_stream(lambda info: action_api.run_managed_action_stream(
                         text, mode, token, _drop_token, source_lang=source_lang, target_lang=target_lang,
                         vocab_block=vocab_block, image_b64=(config or {}).get("_image_png_b64"), info=info))
-                return action_api.run_managed_action(
+                return _managed_answer(
                     text, mode, token, source_lang=source_lang, target_lang=target_lang,
                     vocab_block=vocab_block,
                     image_b64=(config or {}).get("_image_png_b64"),

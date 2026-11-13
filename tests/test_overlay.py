@@ -333,6 +333,34 @@ class TestOverlay(unittest.TestCase):
         corner = img.pixelColor(2, 2)
         return centre, corner
 
+    # ── a Smart Action's steps, one icon at a time (2026-11-12) ──
+    def test_a_smart_action_goes_through_its_steps_in_order_one_icon_at_a_time(self):
+        ov = self.ov
+        hud = self.hud
+        hud.show_overlay(ov.RECORDING, smart=True)
+        hud.set_state(ov.TRANSCRIBING)
+        hud.set_task("summary", "", {"writer": "Gusan Cloud", "writer_local": False, "kinds": ["summary", "list"],
+                                     "web": True})
+        hud.set_state(ov.PROCESSING)
+        self.assertEqual(hud._steps, ["transcribe", "web", "summary", "list"])
+        hud._state_at = time.monotonic() - 0.5
+        self.assertEqual(hud._busy_label("processing")[0], "Searching the web")
+        hud._state_at = time.monotonic() - 2.5
+        self.assertEqual(hud._busy_label("processing")[0], "Summarizing")
+        hud._state_at = time.monotonic() - 9.0
+        self.assertEqual(hud._busy_label("processing")[0], "Making your list")
+        # one icon, in the one slot: the step in progress (the list's), never a row
+        icons = []
+        hud._paint_icon = lambda p, icon, *a: icons.append(icon)
+        hud._paint_step_icon(MagicMock(), 0.0, 0.0, None, None, None)
+        self.assertEqual(icons, ["list"])
+        del hud._paint_icon
+        hud.set_task("summary", "", {"kinds": ["summary"]})                 # no web
+        self.assertEqual(hud._steps, ["transcribe", "summary"])
+        self._render()                                                    # draws without an error
+        hud.show_overlay(ov.RECORDING, smart=False)
+        self.assertEqual(hud._steps, [])                                  # a new take starts clean
+
     # ── a Smart Action take (D4) ──
     def test_a_smart_take_is_marked_and_every_show_resets_it(self):
         ov = self.ov

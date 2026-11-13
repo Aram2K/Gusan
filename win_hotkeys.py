@@ -57,6 +57,22 @@ def parse(hotkey):
     return (mods, key) if key is not None else None
 
 
+def key_down(hotkey):
+    """Is the shortcut's key (its letter / F-key / named key, not the modifiers) held down right now? True / False, or
+    None when it can't be told (not Windows, a mouse button, an unknown key). For "hold while you talk": the take
+    stops when the key is let go (main.AppController._watch_hold)."""
+    if sys.platform != "win32":
+        return None
+    parsed = parse(hotkey)
+    if parsed is None:
+        return None
+    try:
+        import ctypes
+        return bool(ctypes.windll.user32.GetAsyncKeyState(parsed[1]) & 0x8000)
+    except Exception:
+        return None
+
+
 def available():
     """Windows, and not switched off (TRANSCRIBE_NO_WIN_HOTKEYS=1: the test runs never take real shortcuts)."""
     import os

@@ -346,8 +346,22 @@ _SIGNALS = (
     ("sig_chunk", (str,)),
     ("sig_summary", (str,)),
     ("sig_status", (str,)),
+    # The sentence being said so far + who (the live stream's partial words; GUI thread) - live captions
+    # (captions.py) show it word by word; the live view keeps showing finished sentences only.
+    ("live_partial", (str, str)),
+    # Every finished piece (text, who, language; GUI thread), shown or not on the live view: live captions on Best
+    # accuracy / a model on this computer take these (captions_realtime False).
+    ("caption_piece", (str, str, str)),
+    # Every sentence the live stream finished (text, who, its language; GUI thread) - live captions on Fast.
+    ("caption_line", (str, str, str)),
     # internal: a transcribed piece + speaker hint, worker -> GUI thread.
     ("_piece", (str, str)),
+    # internal: the live stream's partial words + speaker hint, stream thread -> GUI thread.
+    ("_partial", (str, str)),
+    # internal: a finished piece for the captions, worker -> GUI thread.
+    ("_cap_piece", (str, str, str)),
+    # internal: a live sentence for the captions, stream thread -> GUI thread.
+    ("_cap_line", (str, str, str)),
 )
 
 
@@ -674,6 +688,9 @@ class MeetingCore:
             on_change=self._speakers_changed, spawn=lambda fn: self._spawn(fn))
         self._make_signals()
         self._piece.connect(self._on_piece)
+        self._partial.connect(self._on_partial_gui)
+        self._cap_piece.connect(self._on_cap_piece_gui)
+        self._cap_line.connect(self._on_cap_line_gui)
         self.sig_summary.connect(self._set_live_summary)
         self.sig_status.connect(self._forward_status)
         self.proc_signals.finished.connect(self._on_processing_finished)
@@ -1011,6 +1028,7 @@ class MeetingCore:
             "on_source_levels": getattr(rec, "on_source_levels", None),
             "on_chunk_gap": getattr(rec, "on_chunk_gap", None),
             "on_live_final": getattr(rec, "on_live_final", None),
+            "on_live_partial": getattr(rec, "on_live_partial", None),
         }
         self._gap_marked = False
         # Live speaker labels (live_speakers.py): built off the GUI thread at the first live sentence.
@@ -1018,6 +1036,7 @@ class MeetingCore:
         rec.on_chunk_gap = self._on_chunk_gap
         rec.on_chunk_complete = self._on_chunk_transcribed
         rec.on_live_final = self._on_live_final
+        rec.on_live_partial = self._on_live_partial
         rec.on_levels = self._on_audio_levels
         rec.on_partial = lambda *a, **k: None
         rec.on_lang_detected = lambda *a, **k: None
@@ -1064,9 +1083,12 @@ class MeetingCore:
         # leaves a fake "recording" state.
         try:
             # A Live Assistant session transcribes with ITS OWN pick (Transcribes with on the
-            # Live Assistant page: engine_choice.live_speech_session); every other source with
-            # Dictation's model, exactly as before.
-            speech = self._live_speech(app, rec, language) if source == "live_assist" else None
+            # Live Assistant page: engine_choice.live_speech_session); every other source with the
+            # Meetings card's (engine_choice.meeting_speech_session: Automatic = Dictation's, except
+            # in a language local Whisper is poor at - Armenian - where Gusan Cloud or the Armenian model
+            # transcribes; founder 2026-11-11).
+            speech = (self._live_speech(app, rec, language) if source == "live_assist"
+                      else self._meeting_speech(app, rec, language))
             self._session_speech = speech
             if speech:
                 rec.start_recording(capture_mode=meeting_mode, language=language, speech=speech)
@@ -1117,11 +1139,12 @@ class MeetingCore:
             # Written now, not only at Stop: a session the app never finishes keeps the mark,
             # so its recovery doesn't replace the cloud's words with a local re-read.
             first["transcribed_with"] = TRANSCRIBED_CLOUD
-        armenian = self._local_armenian_model(rec)
-        if armenian:
-            # The words are the Armenian model's (a local take): a later Identify speakers or
-            # recovery reads the recording with it again - never with Dictation's Whisper.
-            first["speech_model"] = armenian
+        own_model = self._local_session_model(rec)
+        if own_model:
+            # The words are a model of the session's own (the Armenian model, or a model picked on the
+            # Meetings card): a later Identify speakers or recovery reads the recording with it again -
+            # never with Dictation's Whisper.
+            first["speech_model"] = own_model
         self._write_meta(**first)
 
         # Only now that the device is open does the overlay go live (a failed
@@ -1166,6 +1189,19 @@ class MeetingCore:
             speech = engine_choice.live_speech_session(app.cfg, pro, language, signed_in)
         except Exception:
             logger.debug("Live Assistant speech choice ignored", exc_info=True)
+            return None
+        return speech if speech and speech[0] else None
+
+    def _meeting_speech(self, app, rec, language):
+        """The ``speech=`` of a Meetings or calendar session (engine_choice.meeting_speech_session), or
+        None = like Dictation. Never raises, like _live_speech."""
+        try:
+            import engine_choice
+            pro = bool(app.is_pro()) if callable(getattr(app, "is_pro", None)) else False
+            signed_in = bool(getattr(getattr(app, "auth", None), "is_authenticated", pro))
+            speech = engine_choice.meeting_speech_session(app.cfg, pro, language, signed_in)
+        except Exception:
+            logger.debug("Meetings speech choice ignored", exc_info=True)
             return None
         return speech if speech and speech[0] else None
 
@@ -1473,6 +1509,7 @@ class MeetingCore:
         rec.on_source_levels = saved.get("on_source_levels")
         rec.on_chunk_gap = saved.get("on_chunk_gap")
         rec.on_live_final = saved.get("on_live_final")
+        rec.on_live_partial = saved.get("on_live_partial")
 
     def _on_audio_levels(self, levels):
         pass  # the dictation bar's 20 bands - unused by meetings
@@ -1526,6 +1563,11 @@ class MeetingCore:
             try:
                 self.sig_chunk.emit(text)
                 self._piece.emit(text, self._speaker_for(idx))
+            except RuntimeError:
+                pass  # session already destroyed
+        if text and self._cfg().get("captions_on"):
+            try:
+                self._cap_piece.emit(text, self._speaker_for(idx), str(lang or ""))
             except RuntimeError:
                 pass  # session already destroyed
 
@@ -1583,8 +1625,56 @@ class MeetingCore:
         try:
             self.sig_chunk.emit(text)
             self._piece.emit(text, who)
+            self._cap_line.emit(text, who or "", str(lang or ""))
         except RuntimeError:
             pass  # session already destroyed
+
+    def _on_live_partial(self, text):
+        """The sentence being said so far (the live stream's partial words, about 0.2 s behind the voice): for live
+        captions only. Who: the side that was loud over the last moment (mic = "You", the call = "Them"). Runs on the
+        live stream's thread."""
+        text = (text or "").strip()
+        if self.state != STATE_RECORDING or not text:
+            return
+        who = ""
+        if self._session_audio_mode == "smart_meeting":
+            rec = getattr(self.app, "recorder", None) if self.app else None
+            getter = getattr(rec, "live_source_energy", None)
+            try:
+                now = float(getattr(rec, "_live_fed_s", 0.0) or 0.0)
+                who = speaker_hint(getter(max(0.0, now - 1.5), now)) if callable(getter) and now > 0 else ""
+            except Exception:
+                who = ""
+        try:
+            self._partial.emit(text, who)
+        except RuntimeError:
+            pass  # session already destroyed
+
+    def _on_partial_gui(self, text, who):
+        if self.state == STATE_RECORDING:
+            self.live_partial.emit(text, who or "")
+
+    def _on_cap_piece_gui(self, text, who, lang):
+        if self.state == STATE_RECORDING:
+            self.caption_piece.emit(text, who or "", lang or "")
+
+    def _on_cap_line_gui(self, text, who, lang):
+        if self.state == STATE_RECORDING:
+            self.caption_line.emit(text, who or "", lang or "")
+
+    def captions_from_pieces(self):
+        """Do live captions take the finished pieces now - not real time (Best accuracy, a model on this computer),
+        or the live stream gave up?"""
+        return not self.captions_realtime() or not self._live_showing()
+
+    def captions_realtime(self):
+        """Do this meeting's live captions take the live stream (Gusan Cloud Fast) - else its finished pieces
+        (Best accuracy, a model on this computer, your own key: engine_choice.realtime_speech)?"""
+        try:
+            import engine_choice
+            return engine_choice.realtime_speech(self._session_speech, self._cfg())
+        except Exception:
+            return False
 
     def _on_chunk_gap(self, idx, kind=""):
         """A piece the cloud could not transcribe in a language local Whisper is poor at
@@ -2163,10 +2253,27 @@ class MeetingCore:
         """Must the words of this take stay as they are - never be replaced by reading the recording
         again with local Whisper? True for a take whose words came from the cloud (_live_cloud_words)
         when it is a Live Assistant session (always) or a session in a language local Whisper is
-        poor at (Armenian: Whisper's text there is far worse than the cloud's)."""
+        poor at (Armenian: Whisper's text there is far worse than the cloud's), or a meeting whose own
+        "Transcribes with" pick is a cloud one (meeting_speech_model: chosen for its words)."""
         if not self._live_cloud_words(rec):
             return False
-        return self._source == "live_assist" or bool(self._poor_language(rec))
+        speech = self._session_speech
+        picked_cloud = bool(speech and speech[0] in ("managed", "google"))
+        return self._source == "live_assist" or picked_cloud or bool(self._poor_language(rec))
+
+    def _local_session_model(self, rec):
+        """The model on this computer that reads THIS session when it is not simply Dictation's: the Armenian model
+        (_local_armenian_model), or the one picked for the session (Meetings' / the Live Assistant's Transcribes
+        with). "" otherwise. Kept in meta.json (``speech_model``) for later re-reads."""
+        armenian = self._local_armenian_model(rec)
+        if armenian:
+            return armenian
+        speech = self._session_speech
+        if speech and speech[0] == "local" and speech[1]:
+            report = self._speech_report(rec)
+            if report.get("backend") in (None, "", "local"):
+                return str(speech[1])
+        return ""
 
     def _local_armenian_model(self, rec):
         """The Armenian speech model's id when THIS take's words are read by it on this computer (the
@@ -2183,13 +2290,14 @@ class MeetingCore:
 
     @staticmethod
     def _saved_speech_kwargs(folder):
-        """{"model": <id>} for meeting_speakers.build_transcript when a saved session's words were the
-        Armenian model's (meta ``speech_model``): the recording is read with it again. {} otherwise
-        (Dictation's model, as always)."""
+        """{"model": <id>} for meeting_speakers.build_transcript when a saved session's words were a model of
+        its own (meta ``speech_model``: the Armenian model, or a model picked on the Meetings card): the
+        recording is read with it again. {} otherwise (Dictation's model, as always)."""
         try:
+            import hardware
             import speech_hy
             value = str(meeting_store.load_meta(folder).get("speech_model") or "")
-            return {"model": value} if speech_hy.is_hy_model(value) else {}
+            return {"model": value} if (speech_hy.is_hy_model(value) or hardware.is_speech_id(value)) else {}
         except Exception:
             return {}
 
@@ -2223,7 +2331,10 @@ class MeetingCore:
         _KEEP_PLAIN: a cloud session whose pieces can't be placed in the recording keeps its
         plain transcript (it is never put through local Whisper)."""
         if self._source != "live_assist" and not self._keeps_cloud_words(rec):
-            return None, None
+            # (a meeting on a model of its own - the Armenian model, or a Whisper model picked on the
+            # Meetings card - is read again with that model, never Dictation's)
+            speech = self._session_speech
+            return None, (speech[1] if speech and speech[0] == "local" and speech[1] else None)
         if self._keeps_cloud_words(rec):
             segments = None
             placer = getattr(rec, "piece_segments", None)
@@ -3345,6 +3456,12 @@ if _QObject is not None:
         sig_summary = _QtSignal(str)
         sig_status = _QtSignal(str)
         _piece = _QtSignal(str, str)
+        live_partial = _QtSignal(str, str)
+        _partial = _QtSignal(str, str)
+        caption_piece = _QtSignal(str, str, str)
+        _cap_piece = _QtSignal(str, str, str)
+        caption_line = _QtSignal(str, str, str)
+        _cap_line = _QtSignal(str, str, str)
 
         MY_NOTES_SAVE_MS = 1500
         RECAP_TICK_MS = 1000

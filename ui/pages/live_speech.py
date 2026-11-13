@@ -32,6 +32,10 @@ picker lists REAL model names with a small chip for where each runs - LOCAL (thi
   Privacy mode (the "Privacy mode is on" question). Your own key: Privacy mode (its own question).
   A model that is not on this computer: the download question, then the download.
 * Free, guests and Pro all see the row; Starting a session is the Pro action (the card's).
+
+The Meetings card has the same row (``LiveSpeechRow(app, ..., meeting=True)``, founder 2026-11-11): the same
+rows and Automatic rules, read for a meeting - its own pick (cfg meeting_speech_model) and the meeting language
+(engine_choice.meeting_*). Its words name meetings ("Meetings will use it once it is ready").
 """
 import logging
 
@@ -58,6 +62,10 @@ DOWNLOAD_DIDNT_START = "The download didn't start. Try again."
 APPLIES_NEXT = "The session running now keeps what it started with. This applies from the next one."
 DOWNLOAD_TAIL = "The Live Assistant will use it once it is ready."
 HY_STOPPED = "The download was stopped. Automatic is back."
+# The Meetings card's row (meeting=True).
+MEETING_SPEECH_KEY = "meeting_speech_model"         # engine_choice.MEETING_SPEECH_KEY
+MEETING_APPLIES_NEXT = "The meeting being recorded keeps what it started with. This applies from the next one."
+MEETING_DOWNLOAD_TAIL = "Meetings will use it once it is ready."
 
 # Settings that change what this row shows.
 WATCHED = frozenset({
@@ -65,6 +73,7 @@ WATCHED = frozenset({
     "admin_tier_override", "backend", "whisper_model", "managed_provider", "google_api_key",
     "google_stt_model", "mistral_api_key", "mistral_stt_model",
 })
+MEETING_WATCHED = (WATCHED - {SPEECH_KEY, "live_assist_language"}) | {MEETING_SPEECH_KEY, "meeting_language"}
 
 
 def _alive(obj):
@@ -97,6 +106,16 @@ def _live_session_running(app):
     try:
         return (getattr(session, "state", "") == "recording"
                 and getattr(session, "source", "") == "live_assist")
+    except Exception:
+        return False
+
+
+def _meeting_running(app):
+    """Is a meeting (Meetings, the calendar - not the Live Assistant) being recorded right now?"""
+    session = getattr(app, "meeting_session", None)
+    try:
+        return (getattr(session, "state", "") == "recording"
+                and getattr(session, "source", "") != "live_assist")
     except Exception:
         return False
 
@@ -138,9 +157,11 @@ def _set_many(app, changes):
 class LiveSpeechRow(QWidget):
     """See the module docstring. ``self.row`` is the SettingRow to add to the rail."""
 
-    def __init__(self, app, open_settings=None, parent=None):
+    def __init__(self, app, open_settings=None, parent=None, meeting=False):
         super().__init__(parent)
         self.app = app
+        self._meeting = bool(meeting)               # the Meetings card's row (see the module notes)
+        self._key = MEETING_SPEECH_KEY if self._meeting else SPEECH_KEY
         self._open_settings = open_settings
         self._note = ""                         # e.g. a download that didn't start
         self._dl_connected = None
@@ -185,19 +206,31 @@ class LiveSpeechRow(QWidget):
     def _tick(self):
         if not _alive(self):
             return
-        running = _live_session_running(self.app)
+        running = self._running()
         if (running and self.isVisible()) or running != self._was_running:
             self._was_running = running
             self.refresh()
+
+    def _running(self):
+        """Is a session of this row's kind (a Live Assistant one, or a meeting) being recorded?"""
+        return _meeting_running(self.app) if self._meeting else _live_session_running(self.app)
+
+    def _cfg_view(self):
+        """cfg as the engine_choice live_speech_* functions read it for this row (a meeting's view)."""
+        cfg = _cfg(self.app)
+        if not self._meeting:
+            return cfg
+        import engine_choice
+        return engine_choice.meeting_view(cfg)
 
     # ── what the picker lists ──
     def _engine(self):
         try:
             import engine_choice
-            return engine_choice.runs_on(self.app, "live_assistant_speech",
-                                         downloaded=self._downloaded())
+            feature = "meeting_speech" if self._meeting else "live_assistant_speech"
+            return engine_choice.runs_on(self.app, feature, downloaded=self._downloaded())
         except Exception:
-            logger.debug("runs_on live_assistant_speech failed", exc_info=True)
+            logger.debug("runs_on speech failed", exc_info=True)
             return {}
 
     def _rows(self):
@@ -205,7 +238,7 @@ class LiveSpeechRow(QWidget):
         Automatic would pick right now for the call's language."""
         try:
             import engine_choice
-            return engine_choice.live_speech_rows(_cfg(self.app), _is_pro(self.app), _signed_in(self.app))
+            return engine_choice.live_speech_rows(self._cfg_view(), _is_pro(self.app), _signed_in(self.app))
         except Exception:
             logger.debug("live_speech_rows failed", exc_info=True)
             return [{"value": "", "name": "Automatic", "title": "Automatic", "line": "Automatic",
@@ -280,7 +313,7 @@ class LiveSpeechRow(QWidget):
         """The picker value really in force (engine_choice.live_speech_pick)."""
         try:
             import engine_choice
-            return engine_choice.live_speech_pick(_cfg(self.app), _is_pro(self.app), _signed_in(self.app))
+            return engine_choice.live_speech_pick(self._cfg_view(), _is_pro(self.app), _signed_in(self.app))
         except Exception:
             return ""
 
@@ -325,7 +358,7 @@ class LiveSpeechRow(QWidget):
     def _running_report(self):
         """The recorder's speech_report() of the session being recorded now (what it REALLY
         runs and what has answered), or None when no session of this page's kind runs."""
-        if not _live_session_running(self.app):
+        if not self._running():
             return None
         rec = getattr(self.app, "recorder", None)
         getter = getattr(rec, "speech_report", None)
@@ -343,7 +376,7 @@ class LiveSpeechRow(QWidget):
         Flash · Cloud"), and the calm words when a language local Whisper is poor at could not be
         read just now. The same words as the card's."""
         import engine_choice
-        cfg = _cfg(self.app)
+        cfg = self._cfg_view()
         take = engine_choice.take_engine(cfg, report)
         line = engine_choice.live_speech_status(take, report)
         note = engine_choice.live_speech_note(cfg, _is_pro(self.app), report.get("language"),
@@ -357,7 +390,7 @@ class LiveSpeechRow(QWidget):
         rows = self._rows()
         if rows != self._rows_seen:
             self._fill(rows)                          # Automatic's pick, the plan and the own-key rows follow
-        if self._note == APPLIES_NEXT and not _live_session_running(self.app):
+        if self._note == self._applies_next() and not self._running():
             self._note = ""                           # the session it spoke of is over
         self._connect_downloads()
         self._mark_rows()
@@ -385,8 +418,11 @@ class LiveSpeechRow(QWidget):
         box.setAccessibleDescription(" ".join(x for x in (line, note) if x))
         self.row.set_hint(self._note)
 
+    def _applies_next(self):
+        return MEETING_APPLIES_NEXT if self._meeting else APPLIES_NEXT
+
     def watches(self, key):
-        return key in WATCHED
+        return key in (MEETING_WATCHED if self._meeting else WATCHED)
 
     def on_setting_changed(self, key):
         if self.watches(key):
@@ -438,7 +474,7 @@ class LiveSpeechRow(QWidget):
         """A Whisper model not on this computer: a small popup asks; Download starts it and
         picks it, Not now leaves everything as it is."""
         if hy_model.is_hy(mid):
-            if hy_model.confirm_download(self, "The Live Assistant"):
+            if hy_model.confirm_download(self, "Meetings" if self._meeting else "The Live Assistant"):
                 self._apply(mid)
             return
         try:
@@ -449,7 +485,8 @@ class LiveSpeechRow(QWidget):
         plain = getattr(info, "plain", "") or mid
         real = getattr(info, "real", "")
         size = getattr(info, "size", "")
-        body = (size + " - " if size else "") + DOWNLOAD_TAIL      # (mini_prompt's own words name Smart Actions)
+        tail = MEETING_DOWNLOAD_TAIL if self._meeting else DOWNLOAD_TAIL
+        body = (size + " - " if size else "") + tail               # (mini_prompt's own words name Smart Actions)
         if mini_prompt.ask(self, mini_prompt.download_title(plain, real), body, "Download", "Not now",
                            icon="download"):
             self._apply(mid)
@@ -460,7 +497,7 @@ class LiveSpeechRow(QWidget):
         if not hy_model.cancel(self.app):
             return
         if self.value() == hy_model.HY_ID:
-            _set_many(self.app, {SPEECH_KEY: ""})
+            _set_many(self.app, {self._key: ""})
         self._note = HY_STOPPED
         self.refresh()
 
@@ -469,7 +506,8 @@ class LiveSpeechRow(QWidget):
         on disk); then draw what is really set."""
         try:
             import engine_choice
-            res = engine_choice.set_live_speech(self.app, value, turn_off_privacy=turn_off_privacy)
+            setter = engine_choice.set_meeting_speech if self._meeting else engine_choice.set_live_speech
+            res = setter(self.app, value, turn_off_privacy=turn_off_privacy)
         except Exception:
             logger.warning("set_live_speech failed", exc_info=True)
             res = {"ok": False, "problem": "error", "changes": {}, "upsell": ""}
@@ -484,8 +522,8 @@ class LiveSpeechRow(QWidget):
         if value and value not in CLOUD_VALUES and not value.startswith(OWN_PREFIX):
             self._download(value)
         _set_many(self.app, res.get("changes"))      # refused: the redraw shows the real value
-        if _live_session_running(self.app):
-            self._note = self._note or APPLIES_NEXT   # (a failed download's own words come first)
+        if self._running():
+            self._note = self._note or self._applies_next()   # (a failed download's own words come first)
         self.refresh()
 
     def _download(self, mid):
@@ -551,4 +589,4 @@ class LiveSpeechRow(QWidget):
             self.refresh()
 
 
-__all__ = ["LiveSpeechRow", "TITLE", "WATCHED"]
+__all__ = ["LiveSpeechRow", "MEETING_WATCHED", "TITLE", "WATCHED"]

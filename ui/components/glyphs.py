@@ -104,10 +104,10 @@ def dot_label(color, size=8, parent=None):
     return lb
 
 
-def google_pixmap(size=16):
-    """The Google G (assets/google_g.svg)."""
+def google_pixmap(size=16, asset="google_g.svg"):
+    """The Google G (assets/google_g.svg), or another of the assets' pictures."""
     dpr = _dpr()
-    key = ("google", size, dpr)
+    key = (asset, size, dpr)
     hit = _CACHE.get(key)
     if hit is not None:
         return hit
@@ -115,7 +115,7 @@ def google_pixmap(size=16):
     pm = QPixmap(int(round(size * dpr)), int(round(size * dpr)))
     pm.setDevicePixelRatio(dpr)
     pm.fill(Qt.transparent)
-    path = resource_path("assets", "google_g.svg")
+    path = resource_path("assets", asset)
     if os.path.isfile(path):
         p = QPainter(pm)
         p.setRenderHint(QPainter.Antialiasing, True)
@@ -133,14 +133,28 @@ def google_label(size=16, parent=None):
     return lb
 
 
+def calendar_pixmap(size=16):
+    """The Google Calendar mark (assets/google_calendar.svg) - wherever the Google picture stands for the calendar
+    (founder 2026-11-12: "I don't want the Google sign, I want the Google Calendar sign")."""
+    return google_pixmap(size, "google_calendar.svg")
+
+
+def calendar_label(size=16, parent=None):
+    lb = QLabel(parent)
+    lb.setPixmap(calendar_pixmap(size))
+    lb.setFixedSize(size, size)
+    lb.setAccessibleName("Google Calendar")
+    return lb
+
+
 class GoogleTile(QWidget):
-    """The Google G on a small white disc (the Connect card)."""
+    """The Google Calendar mark on a small white disc (the Connect card)."""
 
     def __init__(self, size=40, g=20, parent=None):
         super().__init__(parent)
         self._size, self._g = size, g
         self.setFixedSize(size, size + 2)
-        self.setAccessibleName("Google")
+        self.setAccessibleName("Google Calendar")
 
     def paintEvent(self, _e):
         p = QPainter(self)
@@ -153,7 +167,7 @@ class GoogleTile(QWidget):
         p.setPen(QPen(theme.qcolor("line"), 1))
         p.drawEllipse(r)
         off = (self._size - self._g) / 2.0
-        p.drawPixmap(int(off), int(off), google_pixmap(self._g))
+        p.drawPixmap(int(off), int(off), calendar_pixmap(self._g))
         p.end()
 
 

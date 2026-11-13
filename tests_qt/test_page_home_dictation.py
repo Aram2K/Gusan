@@ -6,6 +6,7 @@ the stores (history.json, meetings, transcripts) are real files in the
 session's throwaway data folder."""
 import json
 import shutil
+import sys
 from datetime import datetime, timedelta
 
 import pytest
@@ -619,7 +620,9 @@ def test_dictation_builds_for_every_plan(dict_page, tier):
     # What the board shows; "Languages you mix" (Wave 4: taken over from the
     # retired Settings window) sits under Language, shown only for Mixed languages.
     rail_rows = [r.label.text() for r in page.rail.rows() if not r.isHidden()]
-    assert rail_rows == ["Shortcut", "Language", "Model", "Clean up mistakes", "Remove filler words", "Put my clipboard back",
+    # "Press or hold" is offered where holding can be watched (Windows: win_hotkeys.key_down)
+    hold = ["Press or hold"] if sys.platform == "win32" else []
+    assert rail_rows == ["Shortcut", "Language", "Model", "Clean up mistakes", "Remove filler words", *hold,
                          "Dictation bar look", "Hide bar in screen shares", "Gusan Cloud speech"]
     assert [r.label.text() for r in page.rail.rows()][2] == "Languages you mix"
     assert page.row_mix.isHidden()
@@ -685,7 +688,6 @@ def test_dictation_rows_copy_and_highlight(dict_page):
 @pytest.mark.parametrize("key,row_attr,default", [
     ("cleanup_enabled", "row_cleanup", True),
     ("cleanup_remove_fillers", "row_fillers", True),      # on out of the box
-    ("restore_clipboard", "row_clipboard", True),
     ("overlay_private", "row_private", True),
 ])
 def test_dictation_toggles_apply_at_once(dict_page, key, row_attr, default):
@@ -1184,3 +1186,64 @@ def test_older_dictations_wait_under_one_closed_earlier_row(dict_page):
     page._render_list()
     assert page.highlight("2026-08-01 10:00:00")                         # jumping to an old one opens "Earlier"
     assert page.earlier_toggle.isChecked()
+
+
+def test_the_shortcut_is_press_to_start_or_hold_to_talk(dict_page):
+    """2.1.6 (founder 2026-11-12, like Wispr Flow): press the shortcut to start and again to stop, or hold it while you
+    talk. It took the place of "Put my clipboard back" (the last result now always stays on the clipboard)."""
+    page, app, _ = dict_page()
+    seg = page.hotkey_mode
+    assert seg.index() == 0 and page.row_hotkey_mode.hint_label.text().startswith("Press the shortcut")
+    seg._buttons[1].click()
+    assert ("set_setting", "hotkey_mode", "hold") in app.calls
+    assert page.row_hotkey_mode.hint_label.text().startswith("Hold the shortcut")
+    seg._buttons[0].click()
+    assert ("set_setting", "hotkey_mode", "toggle") in app.calls
+    assert not hasattr(page, "row_clipboard")
+
+
+def test_earlier_slides_open_and_shut_and_its_chevron_turns(dict_page, monkeypatch):
+    from ui.pages import dictation
+    from ui.pages.dictation import EarlierToggle
+    monkeypatch.setattr(dictation, "_motion", lambda: True)          # (CI runners may have animations off)
+    page, _, _ = dict_page()
+    tog = page.earlier_toggle
+    assert tog._angle == 0.0
+    tog.click()
+    box = page._earlier_box
+    assert box is not None and page.earlier_toggle.isChecked()
+    assert len(page.shown_rows()) == 5                                   # the older rows are there at once
+    assert box.maximumHeight() < 16777215 or not page._earlier_anim      # sliding open
+    page._earlier_anim.setCurrentTime(page._earlier_anim.duration())
+    assert box.maximumHeight() == 16777215
+    page.earlier_toggle.click()                                          # closing: counted closed at once
+    assert len(page.shown_rows()) == 3
+    page._earlier_anim.setCurrentTime(page._earlier_anim.duration())
+    QApplication.processEvents()
+    assert page._earlier_box is None and not page.earlier_toggle.isChecked()
+    t = EarlierToggle(4, opened=False, turning=False)
+    t.turn_to(90.0)
+    t._turn.setCurrentTime(t._turn.duration())
+    assert t._angle == 90.0
+
+
+def test_earlier_without_animations_opens_and_closes_at_once(dict_page, monkeypatch):
+    from ui.pages import dictation
+    monkeypatch.setattr(dictation, "_motion", lambda: False)
+    page, _, _ = dict_page()
+    page.earlier_toggle.click()
+    assert len(page.shown_rows()) == 5 and page._earlier_box.maximumHeight() == 16777215
+    page.earlier_toggle.click()
+    assert len(page.shown_rows()) == 3 and page._earlier_box is None
+
+
+def test_a_redraw_while_earlier_slides_stops_the_slide(dict_page, monkeypatch):
+    from ui.pages import dictation
+    monkeypatch.setattr(dictation, "_motion", lambda: True)
+    page, _, _ = dict_page()
+    page.earlier_toggle.click()
+    anim = page._earlier_anim
+    assert anim is not None
+    page._render_list()                                                  # e.g. a new dictation landed
+    assert page._earlier_anim is None and anim.state() == anim.State.Stopped
+    QApplication.processEvents()

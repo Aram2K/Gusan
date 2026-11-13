@@ -281,7 +281,7 @@ class TestContext(unittest.TestCase):
         half.__spec__ = mock.MagicMock(_initializing=True)
         with mock.patch.dict(sys.modules, {"engine_choice": half}):
             self.assertEqual(pc.speech_info("local", "small"), {"speech": "Whisper Small", "speech_local": True})
-            self.assertEqual(pc.task("make a todo list call mom", object()), ("list", "", {}))
+            self.assertEqual(pc.task("make a todo list call mom", object()), ("list", "", {"kinds": ["list"]}))
         half.speech_model_name.assert_not_called()
         half.runs_on.assert_not_called()
 
@@ -323,17 +323,73 @@ class TestContext(unittest.TestCase):
         from types import SimpleNamespace
         app = SimpleNamespace(cfg={}, is_pro=lambda: True, auth=SimpleNamespace(is_authenticated=True))
         self.assertEqual(pc.task("translate to Spanish good morning", app),
-                         ("translate", "Spanish", {"writer": "Gusan Cloud", "writer_local": False}))
-        # The built-in rules write: the pill follows their routing.
+                         ("translate", "Spanish", {"writer": "Gusan Cloud", "writer_local": False,
+                                                   "kinds": ["translate"]}))
+        # The built-in rules write: the pill follows their routing (and they write one thing).
         free = SimpleNamespace(cfg={}, is_pro=lambda: False, auth=None)
         self.assertEqual(pc.task("summarize this email from John", free),
-                         ("email", "", {"writer": "", "writer_local": True}))
+                         ("email", "", {"writer": "", "writer_local": True, "kinds": ["email"]}))
+        # An AI writer does every kind asked for: the pill's row has them all, in the order the work is done.
+        self.assertEqual(pc.task("summarize this in bullet points and email it to Anna", app)[2]["kinds"],
+                         ["summary", "list", "email"])
 
     def test_task_never_raises(self):
         with mock.patch("engine_choice.runs_on", side_effect=RuntimeError("boom")):
-            self.assertEqual(pc.task("make a todo list call mom", object()), ("list", "", {}))
+            self.assertEqual(pc.task("make a todo list call mom", object()), ("list", "", {"kinds": ["list"]}))
         self.assertEqual(pc.task(None, None)[:2], (None, ""))
+
+
+class TestSteps(unittest.TestCase):
+    """A Smart Action's steps in a row (founder 2026-11-11): transcribe, then the web, then the writing - in the order
+    the work is done, every one shown until the answer comes."""
+
+    def test_every_kind_asked_for_in_the_order_of_the_work(self):
+        cases = {
+            "search the web for the latest AI news, summarize it and make bullet points": ["summary", "list"],
+            "email Anna a summary of this": ["summary", "email"],
+            "make it more professional and translate to Spanish": ["polish", "translate"],
+            "translate this into French and send it as a message": ["translate", "message"],
+            "reply to this email saying yes": ["reply"],
+            "listen, what's the weather": [],
+        }
+        for text, want in cases.items():
+            self.assertEqual(pc.kinds(text), want, text)
+        self.assertEqual(pc.kinds("hello", pc.LIST), ["list"])               # the main kind is always in
+        self.assertEqual(len(pc.kinds("summarize, notes, list, polish, translate, email")), pc.MAX_KINDS)
+
+    def test_the_row(self):
+        self.assertEqual(pc.steps(["summary", "list"], web=True), ["transcribe", "web", "summary", "list"])
+        self.assertEqual(pc.steps([], web=True), ["transcribe", "web", "think"])
+        self.assertEqual(pc.steps(["email"]), ["transcribe", "email"])
+
+    def test_the_step_in_progress_moves_on_and_the_last_one_waits_for_the_answer(self):
+        row = ["transcribe", "web", "summary", "list"]
+        at = [pc.current_step(row, t)[0] for t in (0.0, 1.9, 2.1, 2.0 + pc.KIND_STEP_S + 0.1, 60.0)]
+        self.assertEqual(at, [1, 1, 2, 3, 3])
+        self.assertEqual([pc.current_step(["transcribe", "summary", "list"], t)[0] for t in (0, 2, 30)], [1, 2, 2])
+        self.assertEqual(pc.current_step(["transcribe", "web"], 30)[0], 1)
+
+    def test_its_words(self):
+        row = ["transcribe", "web", "summary", "translate"]
+        ctx = {"writer": "Gusan Cloud", "writer_local": False}
+        self.assertEqual(pc.step_line(row, 1, "", ctx), ("Searching the web", "Gusan Cloud"))
+        self.assertEqual(pc.step_line(row, 1, "", dict(ctx, web="deep"))[0], "Researching the web")
+        self.assertEqual(pc.step_line(row, 2, "French", ctx), ("Summarizing", "Gusan Cloud"))
+        self.assertEqual(pc.step_line(row, 3, "French", ctx)[0], "Translating to French")
+        self.assertEqual(pc.step_line(row, 3, "French", dict(ctx, elapsed=9))[1], "Still translating")
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStepsFollowTheAnswer(unittest.TestCase):
+    def test_a_streamed_answer_keeps_the_web_step_until_its_first_words(self):
+        row = ["transcribe", "web", "summary", "list"]
+        self.assertEqual(pc.current_step(row, 9.0, waiting=True)[0], 1)              # still searching
+        self.assertEqual(pc.current_step(row, 9.0, writing=0.2, waiting=True)[0], 2)  # writing began
+        self.assertEqual(pc.current_step(row, 9.0, writing=pc.KIND_STEP_S + 0.1)[0], 3)
+
+    def test_minutes_in_a_reminder_is_not_meeting_notes(self):
+        self.assertEqual(pc.kinds("remind me in ten minutes to call Anna"), [])
+        self.assertEqual(pc.kinds("write the meeting minutes"), ["notes"])

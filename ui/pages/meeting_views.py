@@ -19,7 +19,7 @@ from collections import deque
 
 from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication, QIcon, QLinearGradient, QPainter
-from PySide6.QtWidgets import (QBoxLayout, QCheckBox, QFileDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout,
+from PySide6.QtWidgets import (QBoxLayout, QCheckBox, QComboBox, QFileDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout,
                                QLabel, QMenu, QPlainTextEdit, QProgressBar, QScrollArea,
                                QSizePolicy, QStackedWidget, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
@@ -29,11 +29,11 @@ from app_info import APP_NAME
 from ui import privacy_prompt, theme
 from ui.components import clipboard as rich_clipboard
 from ui.components import (AudioPlayer, Button, Card, Chip, Divider, IconButton, Keycaps, PageHeader, ProTag,
-                           Segmented, icons, label, mini_prompt)
+                           Segmented, Toggle, icons, label, mini_prompt)
 # The glyph kit moved to ui/components/glyphs.py so Home can draw it without this file; every name stays
 # importable from here (the Meetings page and the tests use them as ``views.<name>``).
 from ui.components.glyphs import (CALL_TONES, GoogleTile, _CACHE, _GLYPHS, _dpr, call_mark, call_name,  # noqa: F401
-                                  dot_label, dot_pixmap, glyph, google_label, google_pixmap, icon_label)
+                                  calendar_label, dot_label, dot_pixmap, glyph, google_label, google_pixmap, icon_label)
 from ui.pages import meeting_speakers_ui
 
 logger = logging.getLogger("transcribe")
@@ -545,10 +545,10 @@ def hidden_status(app):
         return None
 
 
-def runs_on(app, feature):
+def runs_on(app, feature, **kwargs):
     try:
         import engine_choice
-        return engine_choice.runs_on(app, feature)
+        return engine_choice.runs_on(app, feature, **kwargs)
     except Exception:
         logger.debug("runs_on(%s) failed", feature, exc_info=True)
         return None
@@ -705,21 +705,26 @@ class TranscriptPane(Card):
         self.empty.hide()
         bar = self.scroll.verticalScrollBar()
         self._follow = bar.value() >= bar.maximum() - 4
-        row = QWidget()
+        # Every widget of the row is made INSIDE the row: a label shown before it had a parent opened for a moment as a
+        # little window of its own (the founder saw one flash at every new line, 2026-11-12).
+        row = QWidget(self._lay.parentWidget())
+        row.hide()
         h = QHBoxLayout(row)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(12)
-        who_lb = tlabel((who or "").upper(), 11, 800, "blue" if who == "You" else "muted", letter_spacing=0.88)
+        who_lb = tlabel((who or "").upper(), 11, 800, "blue" if who == "You" else "muted", letter_spacing=0.88,
+                        parent=row)
         who_lb.setFixedWidth(46)
         who_lb.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         who_lb.setContentsMargins(0, 3, 0, 0)
-        who_lb.setVisible(self._labels)
         h.addWidget(who_lb, 0, Qt.AlignTop)
-        t = tlabel(text, 14.5, 400, "ink", wrap=True)
+        who_lb.setVisible(self._labels)
+        t = tlabel(text, 14.5, 400, "ink", wrap=True, parent=row)
         t.setTextInteractionFlags(Qt.TextSelectableByMouse)
         t.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         h.addWidget(t, 1)
         self._lay.addWidget(row)
+        row.show()                                       # in place now: shown inside the transcript, never alone
         self._lines.append((row, who_lb, t, who or ""))
         while len(self._lines) > self.LIMIT:
             old = self._lines.pop(0)
@@ -963,6 +968,27 @@ class LiveView(QWidget):
         self.pause_btn = Button("Pause", "secondary", "l", icon="pause", full=True, parent=acts)
         self.pause_btn.clicked.connect(self._pause)
         al.addWidget(self.pause_btn)
+        # Live captions, on and off (and whose words) in the middle of the meeting (captions.py).
+        self.cap_box = QWidget(acts)
+        cl = QHBoxLayout(self.cap_box)
+        cl.setContentsMargins(2, 2, 0, 0)
+        cl.setSpacing(8)
+        self.cap_switch = Toggle("Live captions", False, parent=self.cap_box)
+        self.cap_switch.toggled.connect(self._toggle_captions)
+        cl.addWidget(self.cap_switch, 0, Qt.AlignVCenter)
+        cl.addWidget(label("Captions", "label", self.cap_box), 0, Qt.AlignVCenter)
+        cl.addStretch(1)
+        import captions as _captions
+        self.cap_who = QComboBox(self.cap_box)
+        self.cap_who.setAccessibleName("Whose words in the captions")
+        self.cap_who.setFont(theme.font(12.5))
+        self.cap_who.setFixedHeight(30)
+        for code, text in _captions.WHO_NAMES:
+            self.cap_who.addItem(text, code)
+        self.cap_who.activated.connect(
+            lambda _i: self.page.set_setting(_captions.CFG_WHO, self.cap_who.currentData() or _captions.WHO_BOTH))
+        cl.addWidget(self.cap_who, 0, Qt.AlignVCenter)
+        al.addWidget(self.cap_box)
         self.back_btn = Button("Back to meetings", "secondary", "l", icon="chev_l", full=True, parent=acts)
         self.back_btn.clicked.connect(self._back)
         self.back_btn.hide()
@@ -1044,8 +1070,32 @@ class LiveView(QWidget):
         self.sync_assist()
         return self.assist_box
 
+    # ── live captions ──
+    def sync_captions(self):
+        import captions as _captions
+        cfg = getattr(self.app, "cfg", None) or {}
+        on = bool(cfg.get(_captions.CFG_ON)) and self.page.is_pro()
+        self.cap_switch.blockSignals(True)
+        self.cap_switch.setChecked(on)
+        self.cap_switch.blockSignals(False)
+        self.cap_switch.update()
+        i = self.cap_who.findData(cfg.get(_captions.CFG_WHO) or _captions.WHO_BOTH)
+        self.cap_who.blockSignals(True)
+        self.cap_who.setCurrentIndex(i if i >= 0 else 0)
+        self.cap_who.blockSignals(False)
+        self.cap_who.setVisible(on)
+
+    def _toggle_captions(self, on):
+        import captions as _captions
+        if on and not self.page.is_pro():
+            self.page.call("_pro_upsell", "Live captions")
+        else:
+            self.page.set_setting(_captions.CFG_ON, bool(on))
+        self.sync_captions()
+
     # ── state ──
     def sync_assist(self):
+        self.sync_captions()
         cfg = getattr(self.app, "cfg", None) or {}
         hk = cfg.get("live_assist_hotkey") or ""
         try:
@@ -1069,7 +1119,22 @@ class LiveView(QWidget):
             lab.setVisible(bool(ic))
 
     def sync_model(self):
-        self.transcript.set_model(runs_on(self.app, "dictation"))
+        """The live transcript's engine line: what transcribes THIS session - a meeting's own pick (the
+        Meetings card's Transcribes with: Automatic follows the meeting language), or a Live Assistant
+        session's - never simply Dictation's."""
+        s = self.page.session()
+        running = s is not None and getattr(s, "phase", getattr(s, "state", "")) in ("recording", "paused")
+        # A change of Transcribes with during a recording is for the NEXT meeting (the picker says so): the
+        # meeting being recorded keeps the line it started with.
+        if running and getattr(self, "_model_for", None) is s:
+            return
+        feature, language = "meeting_speech", None
+        if s is not None:
+            if getattr(s, "source", "") == "live_assist":
+                feature = "live_assistant_speech"
+            language = getattr(s, "_session_language", None) or None
+        self.transcript.set_model(runs_on(self.app, feature, language=language))
+        self._model_for = s if running else None
 
     def sync_people(self):
         """The header's sub-line: who is on the call and the language. Called again when the people change (names read off
@@ -1129,6 +1194,7 @@ class LiveView(QWidget):
         self.status_box.setVisible(not recording)
         self.stop_btn.setVisible(recording)
         self.pause_btn.setVisible(recording)
+        self.cap_box.setVisible(recording)
         self.back_btn.setVisible(not recording)
         self.my_notes.setReadOnly(not recording)
         self.assist_box.setVisible(recording)
