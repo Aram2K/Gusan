@@ -176,7 +176,7 @@ class CaptionsOverlay(QWidget):
             sample = BOX_SAMPLE[:captions.MAX_CHARS]
             fits = avail_width * WIDTH_SHARE * 0.96
             while px > 12 and QFontMetricsF(caption_font(self._font_key, px)).horizontalAdvance(sample) > fits:
-                px -= 2
+                px -= 1                  # (1 px steps: a bigger size cut down to fit is never smaller than a smaller one)
         return px
 
     def _box_left(self):

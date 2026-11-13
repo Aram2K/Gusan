@@ -180,12 +180,22 @@ def test_the_size_picked_makes_the_text_bigger_but_never_wider_than_the_screen(q
     from ui.captions_overlay import BOX_SAMPLE, WIDTH_SHARE, caption_font
     width = QFontMetricsF(caption_font("clean", narrow)).horizontalAdvance(BOX_SAMPLE[:captions.MAX_CHARS])
     assert width <= 700 * WIDTH_SHARE
+    narrow_sizes = []
+    for key, _name, _scale in captions.SIZES:                            # cut down to fit: never smaller than
+        ov.set_size(key)                                                 # the size below it
+        narrow_sizes.append(ov.font_px(1080, 500))
+    assert narrow_sizes == sorted(narrow_sizes)
     ov.set_size("nonsense")
     assert ov._size == "m"
 
 
 def test_a_size_change_in_the_middle_of_a_meeting_applies_at_once(qapp, glass_calls):
+    from types import SimpleNamespace
+    from PySide6.QtCore import QRect
     ov = _overlay()
+    # an ordinary 1080p screen (a CI runner's own is so small that every size is cut down to fit its width)
+    screen = SimpleNamespace(geometry=lambda: QRect(0, 0, 1920, 1080), availableGeometry=lambda: QRect(0, 0, 1920, 1040))
+    ov._screen = lambda: screen
     ov.start()
     before = (ov._px, ov.height())
     ov.set_size("xl")
