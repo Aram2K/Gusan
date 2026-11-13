@@ -28,6 +28,20 @@ KINDS = {
 }
 
 NOTES = (
+    ("2.1.6", (
+        ("new", "Live captions in meetings",
+         "Your call's words at the bottom of the screen, as spoken or in your language."),
+        ("new", "Transcribes with, for meetings",
+         "Pick how meetings are transcribed for each language. Captions follow it."),
+        ("new", "Press or hold",
+         "On Windows: press to start and stop, or hold the shortcut while you talk."),
+        ("better", "Smart Actions show one step at a time",
+         "Transcribing, searching the web, summarizing: one icon at a time, in order."),
+        ("better", "Your last words are kept",
+         "Dictation listens half a second longer, so the end of a sentence is not cut."),
+        ("fixed", "Every result stays on your clipboard",
+         "If a paste does not land, press Ctrl+V and it is there."),
+    )),
     ("2.1.5", (
         ("fixed", "Best accuracy sticks in Smart Actions",
          "Choosing Best accuracy under Transcribes with no longer goes back to Fast."),

@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "Gusan"
-APP_VERSION = "2.1.5"
+APP_VERSION = "2.1.6"
 
 _HERE = Path(__file__).resolve().parent
 
