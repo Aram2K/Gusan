@@ -165,6 +165,7 @@ _SETTING_KEYS = {
     "meeting_speech_model", "mix_languages", "admin_tier_override", "google_api_key", "mistral_api_key",
     # Live captions (captions.py)
     "captions_on", "captions_language", "captions_who", "captions_in_share", "captions_font", "captions_colors",
+    "captions_size",
 }
 UPSELL_CAPTIONS = "Live captions"
 
@@ -2843,6 +2844,9 @@ class MeetingRail(SettingsRail):
         self.cap_colors = StyleTiles("colors", on_pick=lambda k: self.page.set_setting(_captions.CFG_COLORS, k))
         self.cap_colors_row = self.add_row(SettingRow("Colors", self.cap_colors, stacked=True,
                                                       hint="The call, then you"))
+        self.cap_size = StyleTiles("size", on_pick=lambda k: self.page.set_setting(_captions.CFG_SIZE, k))
+        self.cap_size_row = self.add_row(SettingRow("Size", self.cap_size, stacked=True,
+                                                    hint="You can change it during a meeting too"))
         self.cap_share = Toggle("Show in screen sharing", False)
         self.cap_share.toggled.connect(lambda on: self.page.set_setting(_captions.CFG_IN_SHARE, bool(on)))
         self.cap_share_row = self.add_row(SettingRow("Show in screen sharing", self.cap_share,
@@ -3018,7 +3022,9 @@ class MeetingRail(SettingsRail):
             box.blockSignals(False)
         self.cap_font.set_value(cfg.get(_captions.CFG_FONT) or "clean")
         self.cap_colors.set_value(cfg.get(_captions.CFG_COLORS) or "yellow")
-        for row in (self.cap_lang_row, self.cap_who_row, self.cap_font_row, self.cap_colors_row, self.cap_share_row):
+        self.cap_size.set_value(cfg.get(_captions.CFG_SIZE) or _captions.DEFAULT_SIZE)
+        for row in (self.cap_lang_row, self.cap_who_row, self.cap_font_row, self.cap_colors_row, self.cap_size_row,
+                    self.cap_share_row):
             row.setVisible(on)
         # Privacy mode never translates (it would send the words to Gusan Cloud): the row says so.
         self.cap_lang_row.set_hint("Privacy mode is on: captions stay as spoken"

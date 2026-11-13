@@ -104,6 +104,39 @@ def test_a_line_rolling_out_fades_and_the_sides_never_overlap(qapp, glass_calls)
     ov.grab()                                                            # draws without an error
 
 
+def test_two_lines_are_never_on_top_of_each_other(qapp, glass_calls):
+    """Founder 2026-11-13: "sometimes the sentences are coming one on top of each other" - a new line's first word
+    showed in the place the line before was still gliding out of."""
+    from ui import captions_overlay as co
+    clock = Clock()
+    ov = _overlay(clock)
+    for size in ("m", "xl"):
+        ov.set_size(size)
+        ov._set_font(ov.font_px(1080, 1920))
+        ov.resize(1600, 500)
+        ov.set_view({"them": [], "me": []})
+        for _ in range(100):
+            clock.t += 0.016
+            ov._tick()
+        first = "Oui, parce que tu configures ton ChatGPT".split()
+        ov.set_view({"them": [(10, first)], "me": []})
+        for _ in range(100):
+            clock.t += 0.016
+            ov._tick()
+        worst = 0.0
+        for step in range(60):
+            if step in (0, 5, 10):
+                ov.set_view({"them": [(10, first), (11, "Sois quelqu'un qui".split()[:1 + step // 5])], "me": []})
+            clock.t += 0.016
+            ov._tick()
+            old, new = [ln for ln in ov._sides["them"].lines if ln.leaving_at is None]
+            if max(ov._word_alpha(w, clock.t) for w in new.words) > 0.02:     # the new line shows ...
+                worst = max(worst, ov._line_h - (old.y - new.y))             # ... only once the old one made room
+        assert worst <= co.CLEAR_PX + 0.5, (size, worst)
+        assert ov._line_h >= ov._px * 1.4                                      # room for the outlines
+    ov.set_size("m")
+
+
 def test_a_line_is_written_from_the_left_and_its_words_never_move(qapp, glass_calls):
     """Founder 2026-11-12: every word added pushed the words before it to the left."""
     clock = Clock()
@@ -130,6 +163,50 @@ def test_the_look_follows_the_card(qapp, glass_calls):
     assert ov._font_key == "clean" and ov._colors["me"] == (255, 226, 132)
     assert color_pair("gold")[0] == (255, 214, 96)
     assert caption_font("classic", 20).pixelSize() == 20
+
+
+def test_the_size_picked_makes_the_text_bigger_but_never_wider_than_the_screen(qapp, glass_calls):
+    ov = _overlay()
+    sizes = []
+    for key, _name, _scale in captions.SIZES:
+        ov.set_size(key)
+        sizes.append(ov.font_px(1080, 1920))
+    assert sizes == sorted(sizes) and len(set(sizes)) == len(sizes)     # Small < Medium < Large < Extra large
+    ov.set_size("m")
+    assert ov.font_px(1080, 1920) == 30                                  # Medium is the size it always was
+    ov.set_size("xl")
+    narrow = ov.font_px(1080, 700)                                       # a narrow window: it shrinks to fit
+    from PySide6.QtGui import QFontMetricsF
+    from ui.captions_overlay import BOX_SAMPLE, WIDTH_SHARE, caption_font
+    width = QFontMetricsF(caption_font("clean", narrow)).horizontalAdvance(BOX_SAMPLE[:captions.MAX_CHARS])
+    assert width <= 700 * WIDTH_SHARE
+    ov.set_size("nonsense")
+    assert ov._size == "m"
+
+
+def test_a_size_change_in_the_middle_of_a_meeting_applies_at_once(qapp, glass_calls):
+    ov = _overlay()
+    ov.start()
+    before = (ov._px, ov.height())
+    ov.set_size("xl")
+    assert ov._px > before[0] and ov.height() > before[1]                # bigger text, a taller window
+    ov.stop()
+
+
+def test_while_words_wait_the_window_looks_often_so_each_comes_on_time(qapp, glass_calls):
+    from ui.captions_overlay import CaptionsOverlay, PACE_POLL_MS, POLL_MS
+    clock = Clock()
+    feed = captions.CaptionFeed(lambda: {"captions_who": "both"}, clock=clock, start_thread=False)
+    ov = CaptionsOverlay(feed, clock=clock)
+    ov.start()
+    feed.final("one two three four five six", "Them", paced=True)
+    ov.pull()
+    assert ov._poll.isActive() and ov._poll.interval() == PACE_POLL_MS
+    for _ in range(100):                                                  # 5 s of the window looking
+        clock.t += PACE_POLL_MS / 1000.0
+        ov.pull()
+    assert not feed.pacing() and ov._poll.interval() == POLL_MS           # all written: the slow look again
+    ov.stop()
 
 
 def test_without_animations_words_simply_appear(qapp, glass_calls):
@@ -186,7 +263,8 @@ def test_it_comes_with_a_recording_and_goes_with_it(qapp, monkeypatch):
     session.state_changed.emit("recording")
     assert ctl.running and len(started) == 1
     session.live_partial.emit("Hello um there", "Them")
-    assert [ws for _i, ws in ctl.feed.view()["them"]] == [["Hello", "there"]]
+    assert [ws for _i, ws in ctl.feed.view()["them"]] == [["Hello"]]       # the first word at once ...
+    assert ctl.feed.lanes["them"].live == ["Hello", "there"] and ctl.feed.pacing()   # ... the next at reading pace
     session.caption_line.emit("Hello there.", "You", "en")
     assert ctl.feed.view()["me"]
     session.state = "processing"
@@ -228,6 +306,11 @@ def test_the_switches_apply_in_the_middle_of_a_meeting(qapp, monkeypatch, glass_
     monkeypatch.setattr(ctl.overlay, "set_in_share", lambda on: shared.append(on))
     ctl.on_setting_changed("captions_in_share")
     assert shared == [True]
+    app.cfg["captions_size"] = "l"
+    sized = []
+    monkeypatch.setattr(ctl.overlay, "set_size", lambda key: sized.append(key))
+    ctl.on_setting_changed("captions_size")
+    assert sized == ["l"]
 
 
 def test_free_never_gets_captions_and_translations_use_the_sign_in(qapp, monkeypatch):
@@ -286,6 +369,13 @@ def test_the_meetings_card_has_live_captions_with_its_rows_only_when_on(shell, m
     assert all(t.accessibleName() for t in rail.cap_font.tiles + rail.cap_colors.tiles)
     rail.cap_font.grab()
     rail.cap_colors.grab()
+    # the size: an "Aa" of each size, Medium picked
+    assert rail.cap_size_row.isVisibleTo(rail)
+    assert [t.key for t in rail.cap_size.tiles] == ["s", "m", "l", "xl"] and rail.cap_size.value() == "m"
+    assert [t.accessibleName() for t in rail.cap_size.tiles] == ["Small", "Medium", "Large", "Extra large"]
+    rail.cap_size.tiles[3].click()
+    assert ("set_setting", "captions_size", "xl") in app.calls
+    rail.cap_size.grab()
 
     def y(w):
         from PySide6.QtCore import QPoint
@@ -316,9 +406,14 @@ def test_the_live_card_switch(shell, meetings_root):
     live.cap_who.setCurrentIndex(live.cap_who.findData("me"))
     live.cap_who.activated.emit(live.cap_who.currentIndex())
     assert ("set_setting", "captions_who", "me") in app.calls
+    # bigger in the middle of the meeting (founder 2026-11-13)
+    assert not live.cap_size.isHidden() and live.cap_size.value() == "m"
+    live.cap_size.tiles[2].click()
+    assert ("set_setting", "captions_size", "l") in app.calls
+    assert live.cap_size.sizeHint().width() <= 240                       # fits the live card's buttons
     live.cap_switch.click()
     assert ("set_setting", "captions_on", False) in app.calls
-    assert live.cap_who.isHidden()
+    assert live.cap_who.isHidden() and live.cap_size.isHidden()
 
 
 def test_a_new_live_line_never_flashes_a_window_of_its_own(shell, meetings_root):

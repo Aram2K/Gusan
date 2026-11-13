@@ -989,6 +989,11 @@ class LiveView(QWidget):
             lambda _i: self.page.set_setting(_captions.CFG_WHO, self.cap_who.currentData() or _captions.WHO_BOTH))
         cl.addWidget(self.cap_who, 0, Qt.AlignVCenter)
         al.addWidget(self.cap_box)
+        # The captions' size, while the meeting runs (founder 2026-11-13: "make it bigger within the meeting").
+        from ui.captions_style import StyleTiles
+        self.cap_size = StyleTiles("size", compact=True, parent=acts,
+                                   on_pick=lambda k: self.page.set_setting(_captions.CFG_SIZE, k))
+        al.addWidget(self.cap_size)
         self.back_btn = Button("Back to meetings", "secondary", "l", icon="chev_l", full=True, parent=acts)
         self.back_btn.clicked.connect(self._back)
         self.back_btn.hide()
@@ -1084,6 +1089,8 @@ class LiveView(QWidget):
         self.cap_who.setCurrentIndex(i if i >= 0 else 0)
         self.cap_who.blockSignals(False)
         self.cap_who.setVisible(on)
+        self.cap_size.set_value(cfg.get(_captions.CFG_SIZE) or _captions.DEFAULT_SIZE)
+        self.cap_size.setVisible(on)
 
     def _toggle_captions(self, on):
         import captions as _captions

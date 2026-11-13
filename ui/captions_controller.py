@@ -21,7 +21,8 @@ import captions
 logger = logging.getLogger("transcribe")
 
 WATCHED = frozenset({captions.CFG_ON, captions.CFG_LANGUAGE, captions.CFG_WHO, captions.CFG_IN_SHARE,
-                     captions.CFG_FONT, captions.CFG_COLORS, "admin_tier_override", "privacy_mode"})
+                     captions.CFG_FONT, captions.CFG_COLORS, captions.CFG_SIZE, "admin_tier_override",
+                     "privacy_mode"})
 
 
 class CaptionsController(QObject):
@@ -83,6 +84,7 @@ class CaptionsController(QObject):
         self.feed.on_change = self.overlay.nudge
         self.overlay.set_in_share(bool(self._cfg().get(captions.CFG_IN_SHARE)))
         self.overlay.set_style(self._cfg().get(captions.CFG_FONT), self._cfg().get(captions.CFG_COLORS))
+        self.overlay.set_size(self._cfg().get(captions.CFG_SIZE) or captions.DEFAULT_SIZE)
         self.overlay.start()
         logger.info("Live captions on (%s, %s)", self._cfg().get(captions.CFG_LANGUAGE) or "as spoken",
                     self.feed.who())
@@ -114,6 +116,8 @@ class CaptionsController(QObject):
             self.overlay.set_in_share(bool(self._cfg().get(captions.CFG_IN_SHARE)))
         elif key in (captions.CFG_FONT, captions.CFG_COLORS):
             self.overlay.set_style(self._cfg().get(captions.CFG_FONT), self._cfg().get(captions.CFG_COLORS))
+        elif key == captions.CFG_SIZE:
+            self.overlay.set_size(self._cfg().get(captions.CFG_SIZE) or captions.DEFAULT_SIZE)
         elif key == captions.CFG_LANGUAGE:
             self.feed.clear()                             # the next sentence comes in the new language
         else:
@@ -143,7 +147,7 @@ class CaptionsController(QObject):
                 st["first"] = time.monotonic()
 
     def _on_line(self, text, who, lang=""):
-        """A sentence the live stream finished (Fast): shown at once, in place of the words being said."""
+        """A sentence the live stream finished (Fast): in place of the words being said (at reading pace)."""
         if self.feed is not None and self.realtime():
             self._seen("line")
             self.feed.final(text, who, lang)

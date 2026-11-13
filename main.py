@@ -331,6 +331,7 @@ DEFAULT = {
     "captions_in_share": False,
     "captions_font": "clean",
     "captions_colors": "yellow",
+    "captions_size": "m",              # captions.SIZES: s | m | l | xl (also from the live card)
     "meeting_consent_reminder": True,     # the consent line on the Meetings start card
     # The Smart Actions shortcut: one take runs as a Smart Action (Control+S
     # on a Mac). "" = not set (Alt+S was another shortcut's at migration).
@@ -4608,7 +4609,7 @@ class AppController(QObject):
         "cleanup_enabled", "restore_clipboard",
         "smart_actions_hotkey", "smart_actions_speech_model",
         "live_assist_speech_model", "meeting_speech_model",
-        "captions_on", "captions_language", "captions_who", "captions_in_share",
+        "captions_on", "captions_language", "captions_who", "captions_in_share", "captions_size",
         "notion_auto_send",
     )
     _TRACKED_AS_SET = ("smart_actions_hotkey",)

@@ -12,9 +12,15 @@ there never move.
 
 The window: frameless, see-through, always on top, never takes the focus or a click (click-through); hidden from screen
 sharing and recordings unless cfg captions_in_share (ui.glass.exclude_from_capture, like the Live Assistant). Text:
-the system's UI font, semi-bold, sized to the screen (about 2.8 % of its height), with a dark outline and a soft
-shadow so it reads on any picture without a background.
+the system's UI font, semi-bold, sized to the screen (about 2.8 % of its height) times the size picked (cfg
+captions_size: Small to Extra large - also from the live card, in the middle of a meeting), with a dark outline and a
+soft shadow so it reads on any picture without a background.
+Readable (founder 2026-11-13): the feed writes every word at reading pace; while words wait, this looks often
+(PACE_POLL_MS) so each comes out on time, one after another. Lines never sit on top of each other ("sometimes the
+sentences are coming one on top of each other"): a new line's words wait until the line before has glided out of its
+place (_clear_s), and lines are LINE_SPACING apart - room for the outline even at Extra large.
 """
+import math
 import logging
 import re
 import time
@@ -32,15 +38,18 @@ OUTLINE = (6, 6, 10)
 FADE_IN_S = 0.28            # a word fades in this long
 STAGGER_S = 0.05            # words that arrive together appear this far apart ...
 MAX_LAG_S = 0.25            # ... never more than this behind the moment they came
-BOX_SAMPLE = "so we will look at the new version of the app today"   # ordinary text, for the box's width
+# ordinary text, for the box's width (its first captions.MAX_CHARS characters)
+BOX_SAMPLE = "so we will look at the new version of the app today and then we can talk about it"
 LEAVE_S = 0.45              # a line rolling out at the top fades this long
 LANE_IN_S, LANE_OUT_S = 0.3, 0.8
-FOLLOW = 7.0                # how quickly lines glide to their place (1/s; no overshoot)
+FOLLOW = 11.0               # how quickly lines glide to their place (1/s; no overshoot)
+CLEAR_PX = 1.5              # a new line's words show once the line before is this close to its new place
 FRAME_MS = 16
 POLL_MS = 300               # how often the words are looked at again (a side's captions expire by themselves)
+PACE_POLL_MS = 60           # ... while words wait to be written (each on time, never two at once)
 FONT_SHARE = 0.028          # of the screen's height
-FONT_MIN, FONT_MAX = 20, 46
-LINE_SPACING = 1.32
+FONT_MIN, FONT_MAX = 20, 46  # Medium; the other sizes scale both
+LINE_SPACING = 1.42        # (1.32 let the outlines of two lines touch)
 SIDE_GAP = 0.45             # between the two sides, in lines
 BOTTOM_SHARE = 0.065        # of the screen's height, above its bottom (the taskbar excluded)
 WIDTH_SHARE = 0.86
@@ -66,10 +75,11 @@ class _Word:
 
 
 class _Line:
-    __slots__ = ("id", "words", "y", "x", "leaving_at")
+    __slots__ = ("id", "words", "y", "x", "leaving_at", "shows_at")
 
-    def __init__(self, lid, y):
+    def __init__(self, lid, y, shows_at=0.0):
         self.id, self.words, self.y, self.x, self.leaving_at = lid, [], y, None, None
+        self.shows_at = shows_at        # its words wait until the lines before have made room
 
 
 class _Side:
@@ -100,6 +110,8 @@ class CaptionsOverlay(QWidget):
         self._in_share = False
         self._colors = dict(COLORS)
         self._font_key = "clean"
+        self._size = captions.DEFAULT_SIZE
+        self._on_screen = None
         self._px = 30
         self._animate = self._animations_on()
         self._last = clock()
@@ -119,11 +131,18 @@ class CaptionsOverlay(QWidget):
         return glass.animations_enabled()           # (safe: True when the setting can't be read)
 
     def _set_font(self, px):
+        old_h = getattr(self, "_line_h", 0.0)
         self._px = px
         font = caption_font(self._font_key, px)
         self._font = font
         self._fm = QFontMetricsF(font)
         self._line_h = px * LINE_SPACING
+        if old_h and abs(old_h - self._line_h) > 0.01:
+            ratio = self._line_h / old_h            # a new size: the lines keep their places, in the new size
+            for side in getattr(self, "_sides", {}).values():
+                side.height *= ratio
+                for ln in side.lines:
+                    ln.y *= ratio
         self._stroke = max(3.0, px * 0.17)
         # the box lines are written into (left-aligned, centred on the screen): about MAX_CHARS of ordinary text
         self._box_w = self._fm.horizontalAdvance(BOX_SAMPLE[:captions.MAX_CHARS])
@@ -136,6 +155,29 @@ class CaptionsOverlay(QWidget):
         self._colors = {"them": them, "me": me}
         self._set_font(self._px)
         self.update()
+
+    def set_size(self, key):
+        """The size picked (captions.SIZES); while on screen, at once (the live card's buttons)."""
+        key = key if any(k == key for k, _n, _s in captions.SIZES) else captions.DEFAULT_SIZE
+        if key == self._size:
+            return
+        self._size = key
+        if self.isVisible():
+            self.place(self._on_screen)
+            self._wake()
+
+    def font_px(self, screen_height, avail_width=None):
+        """The text size for a screen: about FONT_SHARE of its height, times the size picked - never wider than the
+        screen allows (about MAX_CHARS a line)."""
+        scale = captions.size_scale(self._size)
+        base = max(FONT_MIN, min(FONT_MAX, round(screen_height * FONT_SHARE)))
+        px = max(round(FONT_MIN * min(scale, 1.0)), round(base * scale))
+        if avail_width:
+            sample = BOX_SAMPLE[:captions.MAX_CHARS]
+            fits = avail_width * WIDTH_SHARE * 0.96
+            while px > 12 and QFontMetricsF(caption_font(self._font_key, px)).horizontalAdvance(sample) > fits:
+                px -= 2
+        return px
 
     def _box_left(self):
         return max(0.0, (self.width() - min(self._box_w, float(self.width()))) / 2.0)
@@ -159,9 +201,9 @@ class CaptionsOverlay(QWidget):
         screen = screen or self._screen()
         if screen is None:
             return
+        self._on_screen = screen
         full, avail = screen.geometry(), screen.availableGeometry()
-        px = max(FONT_MIN, min(FONT_MAX, round(full.height() * FONT_SHARE)))
-        self._set_font(px)
+        self._set_font(self.font_px(full.height(), avail.width()))
         width = int(avail.width() * WIDTH_SHARE)
         lines = 2 * captions.MAX_LINES + 1 + SIDE_GAP          # both sides, and a line rolling out at the top
         height = int(self._line_h * lines + self._stroke * 4)
@@ -217,6 +259,13 @@ class CaptionsOverlay(QWidget):
             logger.debug("captions view failed", exc_info=True)
             busy = True
         if busy and self.isVisible():
+            try:
+                pacing = bool(self.feed.pacing()) if hasattr(self.feed, "pacing") else False
+            except Exception:
+                pacing = False
+            interval = PACE_POLL_MS if pacing else POLL_MS
+            if self._poll.interval() != interval:
+                self._poll.setInterval(interval)
             if not self._poll.isActive():
                 self._poll.start()
         elif self._poll.isActive():
@@ -237,7 +286,11 @@ class CaptionsOverlay(QWidget):
             for idx, (lid, words) in enumerate(want):
                 ln = kept.get(lid)
                 if ln is None:
-                    ln = _Line(lid, self._slot_y(len(want) - 1 - idx))
+                    # A new line takes the place a line before it is leaving: its words wait until that line has
+                    # glided out of the way (no two lines on top of each other).
+                    moving = [k for k in kept.values() if k.id != lid]
+                    ln = _Line(lid, self._slot_y(len(want) - 1 - idx),
+                               now + self._clear_s() if (moving and self._animate) else 0.0)
                 # A word that only changed its punctuation or case (the finished sentence of what was being
                 # said: "so" -> "So,") keeps its place in the fade; a revised word fades in at once; new words
                 # come one after another.
@@ -254,6 +307,7 @@ class CaptionsOverlay(QWidget):
                             born = now                                     # revised
                         else:
                             born = min(max(now, side.last_birth + STAGGER_S), now + MAX_LAG_S)   # new
+                            born = max(born, ln.shows_at)
                             side.last_birth = born
                         added.append(_Word(w, born))
                     ln.words = ln.words[:same] + added
@@ -265,11 +319,15 @@ class CaptionsOverlay(QWidget):
     def _slot_y(self, from_bottom):
         return from_bottom * self._line_h
 
+    def _clear_s(self):
+        """How long a line takes to glide one line up, to within CLEAR_PX of its place."""
+        return math.log(max(1.0, self._line_h / CLEAR_PX)) / FOLLOW
+
     # ── motion ──
     def _wake(self):
-        self._last = self._clock()
         if not self._frame.isActive():
-            self._frame.start()
+            self._last = self._clock()          # (while running, the frames keep their own time: a look at the
+            self._frame.start()                 #  words every PACE_POLL_MS must not slow the motion down)
         self.update()
 
     def _tick(self):
