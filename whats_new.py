@@ -28,6 +28,14 @@ KINDS = {
 }
 
 NOTES = (
+    ("2.1.7", (
+        ("better", "Captions you can read",
+         "Words come one after another at reading pace, never in a burst."),
+        ("better", "More captions on screen",
+         "Three lines a side, wider lines, and they stay a little longer."),
+        ("new", "Caption size", "Small to Extra large, also on the meeting while it runs."),
+        ("fixed", "No lines on top of each other", "A new line waits until the line above has moved up."),
+    )),
     ("2.1.6", (
         ("new", "Live captions in meetings",
          "Your call's words at the bottom of the screen, as spoken or in your language."),
