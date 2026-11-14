@@ -28,6 +28,12 @@ KINDS = {
 }
 
 NOTES = (
+    ("2.1.9", (
+        ("better", "Pages open at once",
+         "The first click on a page after Gusan starts is as quick as the next ones."),
+        ("fixed", "Meeting chat names the right engine",
+         "Its footer follows the AI writer picked in Settings."),
+    )),
     ("2.1.8", (
         ("better", "Captions keep up with the call",
          "Words show the moment they are said. Translations come a phrase at a time."),
