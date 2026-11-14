@@ -471,8 +471,8 @@ class TestMeetingStartState(unittest.TestCase):
                          ("large-v3", "api_cerebras", "smart_meeting"))
         self.assertEqual(app.saves, 0)
         self.assertEqual(s._notes_engine, "qwen_3b")              # the saved meeting pick, live
-        self.assertEqual(app.recorder.started, {"capture_mode": "smart_meeting",
-                                                "language": "en"})
+        self.assertEqual(app.recorder.started, {"capture_mode": "smart_meeting", "language": "en",
+                                                "speech": ("managed", None, "best")})    # (Pro, Automatic: Best accuracy)
 
     def test_live_assist_hears_both_sides_without_changing_the_saved_mode(self):
         app = _App(meeting_audio_mode="default_mic")

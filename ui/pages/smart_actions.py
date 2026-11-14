@@ -131,6 +131,7 @@ WATCHED = frozenset({
     "google_api_key", "mistral_api_key", "privacy_mode", "admin_tier_override",
     "backend", "whisper_model", "managed_provider", "mistral_stt_model", "google_stt_model",
     "managed_speech_profile", "speech_key_id", "api_keys",
+    "cloud_writer_model",           # engine_choice.CLOUD_WRITER_KEY: the Gusan Cloud writer picked in Settings
 })
 
 # ("line", text, px, role, weight) | ("check", text) | ("rich", bold, rest) | ("signoff",)
@@ -1535,12 +1536,12 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
     def _refresh_writers(self):
         try:
             import engine_choice
-            cloud_model = engine_choice.CLOUD_SMART_MODEL
+            cloud_line = engine_choice.cloud_smart_line(_cfg(self.app))       # the writer picked in Settings
         except Exception:
-            cloud_model = "DeepSeek V4.1 Flash"
+            cloud_line = "DeepSeek V4.1 Flash · fastest"
         line, _mid = self._local_line()
         self.opt_local.set_model(line)
-        self.opt_cloud.set_model("%s · fastest" % cloud_model)
+        self.opt_cloud.set_model(cloud_line)
         checked, own_line = self._writer_state()
         self.opt_own.setVisible(checked == "own_key")
         if own_line:

@@ -457,3 +457,132 @@ class TestStreamedSmartAction(unittest.TestCase):
         with patch.object(actions.action_api, "run_managed_action", return_value="Plain") as plain:
             self.assertEqual(actions._managed_answer("hi", "smart_auto", "tok", config={}), "Plain")
         plain.assert_called_once()
+
+
+class TestClaudeOwnKey(unittest.TestCase):
+    """Founder 2026-11-14: "fix it, default Sonnet 5.5". Today's Claude models answer HTTP 400 "temperature is
+    deprecated" to a temperature (Haiku / Sonnet / Opus 5.5, Opus 4.8 - every own-key answer failed), think before
+    they answer unless told not to, and Claude 3.x is retired (404)."""
+
+    def _delta(self, text):
+        return {"type": "content_block_delta", "delta": {"type": "text_delta", "text": text}}
+
+    def _stop(self, reason):
+        return {"type": "message_delta", "delta": {"stop_reason": reason}}
+
+    def stream(self, cfg, lines):
+        resp = _Stream(lines)
+        with patch.object(action_api.requests, "post", return_value=resp) as post:
+            out = action_api.run_action_stream("reply to anna yes", "smart_auto", cfg, lambda d: None, info={})
+        return out, post
+
+    def test_no_temperature_and_each_model_answers_quickly(self):
+        lines = _sse(self._delta("Hi Anna"), self._stop("end_turn"), {"type": "message_stop"})
+        want = {"claude-haiku-5-5": {"thinking": {"type": "disabled"}, "output_config": {"effort": "low"}},
+                "claude-sonnet-5-5": {"thinking": {"type": "between_tools"}, "output_config": {"effort": "low"}},
+                "claude-opus-5-5": {"output_config": {"effort": "low"}},
+                "claude-opus-4-8": {"output_config": {"effort": "low"}},
+                "claude-some-future-model": {}}
+        for model, extra in want.items():
+            out, post = self.stream(dict(ANTHROPIC_CFG, action_api_model=model), lines)
+            body = post.call_args.kwargs["json"]
+            self.assertEqual(out, "Hi Anna", model)
+            self.assertNotIn("temperature", body, model)
+            self.assertEqual(body["model"], model)
+            for k, v in extra.items():
+                self.assertEqual(body[k], v, model)
+            if not extra:
+                self.assertNotIn("thinking", body, model)
+
+    def test_the_older_models_that_take_a_temperature_keep_theirs(self):
+        """Review 2026-11-14: the fix dropped it for every Claude model - Sonnet 4.6 and Haiku 4.5 still take one
+        (API version 2023-06-01) and answers were always written at 0.1."""
+        lines = _sse(self._delta("ok"), self._stop("end_turn"), {"type": "message_stop"})
+        for model in ("claude-sonnet-4-6", "claude-haiku-4-5-20251001", "claude-opus-4-6"):
+            _out, post = self.stream(dict(ANTHROPIC_CFG, action_api_model=model), lines)
+            body = post.call_args.kwargs["json"]
+            self.assertEqual(body["temperature"], 0.1, model)
+            self.assertNotIn("thinking", body, model)
+            self.assertNotIn("output_config", body, model)
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"content": [{"type": "text", "text": "Hi"}], "stop_reason": "end_turn"}
+        with patch.object(action_api.requests, "post", return_value=resp) as post:
+            action_api.run_action("hi", "smart_auto", dict(ANTHROPIC_CFG, action_api_model="claude-sonnet-4-6"))
+        self.assertEqual(post.call_args.kwargs["json"]["temperature"], 0.1)
+
+    def test_a_model_that_always_thinks_gets_room_for_it_on_top_of_the_answer(self):
+        """Review 2026-11-14: Opus 5.5's thinking counts in max_tokens - a live recap's 220 could be gone before
+        the first word of the answer."""
+        lines = _sse(self._delta("ok"), self._stop("end_turn"), {"type": "message_stop"})
+        asked = action_api._max_tokens_for("smart_auto", "reply to anna yes")
+        for model, room in (("claude-opus-5-5", action_api.CLAUDE_THINKING_ROOM), ("claude-sonnet-5-5", 0),
+                            ("claude-haiku-5-5", 0), ("claude-opus-4-8", 0), ("claude-sonnet-4-6", 0)):
+            _out, post = self.stream(dict(ANTHROPIC_CFG, action_api_model=model), lines)
+            self.assertEqual(post.call_args.kwargs["json"]["max_tokens"], asked + room, model)
+        self.assertGreaterEqual(action_api.CLAUDE_THINKING_ROOM, 2000)
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"content": [{"type": "text", "text": "Hi"}], "stop_reason": "end_turn"}
+        with patch.object(action_api.requests, "post", return_value=resp) as post:
+            action_api.run_action("hi", "smart_auto", dict(ANTHROPIC_CFG, action_api_model="claude-opus-5-5"))
+        self.assertEqual(post.call_args.kwargs["json"]["max_tokens"],
+                         action_api._max_tokens_for("smart_auto", "hi") + action_api.CLAUDE_THINKING_ROOM)
+
+    def test_sonnet_5_5_is_the_default_and_a_retired_model_moves_to_its_family(self):
+        lines = _sse(self._delta("ok"), self._stop("end_turn"), {"type": "message_stop"})
+        _out, post = self.stream(ANTHROPIC_CFG, lines)
+        self.assertEqual(post.call_args.kwargs["json"]["model"], "claude-sonnet-5-5")
+        for old, now in (("claude-3-5-haiku-latest", "claude-haiku-5-5"), ("claude-3-5-sonnet-latest", "claude-sonnet-5-5"),
+                         ("claude-3-opus-20240229", "claude-opus-5-5")):
+            _out, post = self.stream(dict(ANTHROPIC_CFG, action_api_model=old), lines)
+            self.assertEqual(post.call_args.kwargs["json"]["model"], now, old)
+
+    def test_anthropics_fallback_on_its_own_api_only(self):
+        lines = _sse(self._delta("ok"), self._stop("end_turn"), {"type": "message_stop"})
+        _out, post = self.stream(dict(ANTHROPIC_CFG, action_api_model="claude-sonnet-5-5"), lines)
+        self.assertEqual(post.call_args.kwargs["json"]["fallbacks"], "default")
+        self.assertEqual(post.call_args.kwargs["headers"]["anthropic-beta"], action_api.CLAUDE_FALLBACK_BETA)
+        _out, post = self.stream(dict(ANTHROPIC_CFG, action_api_model="claude-sonnet-5-5",
+                                      action_api_base_url="https://proxy.example.com/v1"), lines)
+        self.assertNotIn("fallbacks", post.call_args.kwargs["json"])          # another server may not know it
+        self.assertNotIn("anthropic-beta", post.call_args.kwargs["headers"])
+        _out, post = self.stream(dict(ANTHROPIC_CFG, action_api_model="claude-haiku-5-5"), lines)
+        self.assertNotIn("fallbacks", post.call_args.kwargs["json"])          # (Haiku has none)
+
+    def test_a_declined_answer_says_so(self):
+        with self.assertRaises(action_api.ActionAPIError) as e:
+            self.stream(dict(ANTHROPIC_CFG, action_api_model="claude-opus-5-5"),
+                        _sse(self._stop("refusal"), {"type": "message_stop"}))
+        self.assertEqual(str(e.exception), action_api.CLAUDE_REFUSED)
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"content": [], "stop_reason": "refusal"}
+        with patch.object(action_api.requests, "post", return_value=resp):
+            with self.assertRaises(action_api.ActionAPIError):
+                action_api.run_action("hi", "smart_auto", dict(ANTHROPIC_CFG, action_api_model="claude-haiku-5-5"))
+
+    def test_an_answer_declined_in_the_middle_is_never_handed_on_as_a_whole_one(self):
+        """Review 2026-11-14: the words written before Claude declined were pasted as the finished answer."""
+        cfg = dict(ANTHROPIC_CFG, action_api_model="claude-opus-5-5")
+        lines = _sse(self._delta("Dear Anna, I"), self._stop("refusal"), {"type": "message_stop"})
+        info = {}
+        with patch.object(action_api.requests, "post", return_value=_Stream(lines)):
+            out = action_api.run_action_stream("reply to anna yes", "smart_auto", cfg, lambda d: None, info=info)
+        self.assertEqual((out, info.get("cut")), ("Dear Anna, I", True))      # told it is cut: kept, and said so
+        with patch.object(action_api.requests, "post", return_value=_Stream(lines)):
+            with self.assertRaises(action_api.ActionAPIError) as e:           # nobody to tell: no half answer
+                action_api.run_action_stream("reply to anna yes", "smart_auto", cfg, lambda d: None)
+        self.assertEqual(str(e.exception), action_api.CLAUDE_REFUSED)
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"content": [{"type": "text", "text": "Dear Anna, I"}], "stop_reason": "refusal"}
+        with patch.object(action_api.requests, "post", return_value=resp):
+            with self.assertRaises(action_api.ActionAPIError):
+                action_api.run_action("hi", "smart_auto", cfg)
+
+    def test_the_whole_answer_request_has_no_temperature_either(self):
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"content": [{"type": "text", "text": "Hi"}], "stop_reason": "end_turn"}
+        with patch.object(action_api.requests, "post", return_value=resp) as post:
+            out = action_api.run_action("hi", "smart_auto", dict(ANTHROPIC_CFG, action_api_model="claude-haiku-5-5"))
+        self.assertEqual(out, "Hi")
+        body = post.call_args.kwargs["json"]
+        self.assertNotIn("temperature", body)
+        self.assertEqual(body["thinking"], {"type": "disabled"})

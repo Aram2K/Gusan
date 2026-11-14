@@ -331,7 +331,7 @@ DEFAULT = {
     "captions_in_share": False,
     "captions_font": "clean",
     "captions_colors": "yellow",
-    "captions_size": "m",              # captions.SIZES: s | m | l | xl (also from the live card)
+    "captions_size": 100,              # percent, 80-180 (captions.size_percent; a slider, also on the live card)
     "meeting_consent_reminder": True,     # the consent line on the Meetings start card
     # The Smart Actions shortcut: one take runs as a Smart Action (Control+S
     # on a Mac). "" = not set (Alt+S was another shortcut's at migration).
@@ -2821,17 +2821,20 @@ class AudioRecorder:
         Gladia, or for a language Gladia writes poorly (speech_langs.LIVE_POOR: Armenian) to OpenAI
         gpt-live-transcribe. Best accuracy never does - its text is its own engines' (ElevenLabs Scribe v2 first, the
         founder's pick for Armenian 2026-11-07; for every language since 2026-11-09: a live text in Best accuracy
-        was Gladia's, not the more accurate engines the row names)."""
+        was Gladia's, not the more accurate engines the row names).
+
+        A meeting and the Live Assistant too (founder 2026-11-14: "it should do based on what model I decide for
+        transcription so both have the same source not something else"): before, a meeting on Gusan Cloud always
+        streamed for its live view, so on Best accuracy the live transcript showed the stream's words (its "Thank
+        you." on quiet speech) beside captions and a saved transcript made of Best accuracy's. Now everything a
+        meeting shows comes from the engine picked in Transcribes with: Fast = the stream, real time; Best accuracy
+        = its finished pieces, a few seconds later."""
         if not AudioRecorder._live_wanted(self, capture_mode):
             return None
         import live_stt
-        if AudioRecorder._is_meeting(self, capture_mode):
-            # A meeting's live view (the notes come from the pieces whatever it is): OpenAI's live model for a
-            # language Gladia writes poorly, else Gladia.
-            poor = AudioRecorder._lang_setting(self) in speech_langs.LIVE_POOR
-            return live_stt.ENGINE_OPENAI if poor else live_stt.ENGINE_GLADIA
         import engine_choice
-        # A Smart Action with its own Gusan Cloud profile (cloud_model_override) uses that one.
+        # The take's own Gusan Cloud profile (cloud_model_override: a meeting's Transcribes with, the Live
+        # Assistant's, a Smart Action's), else Dictation's.
         profile = engine_choice.cloud_profile(getattr(self, "cloud_model_override", None)
                                               or cfg.get(engine_choice.SPEECH_PROFILE_KEY))
         if profile != engine_choice.CLOUD_FAST:
@@ -7938,14 +7941,11 @@ class AppController(QObject):
         self._wait_keys_released()
         if action_mode == actions.ACTION_SMART_SELECTION:
             AppController._deliver_selection_result(self, sel_kind, output_text, pill_kind, sources)
-        elif action_mode != actions.ACTION_TRANSCRIBE_ONLY and sources:
-            pasted = self._paste_via_clipboard(output_text, rich=True)
-            self.overlay.call_soon(self.overlay.show_done, pasted, kind=pill_kind, web_sources=len(sources))
         elif action_mode != actions.ACTION_TRANSCRIBE_ONLY:
             # A Smart Action's Markdown: real lists / bold / headings where
-            # the app takes HTML, nice plain text everywhere else.
-            pasted = self._paste_via_clipboard(output_text, rich=True)
-            self.overlay.call_soon(self.overlay.show_done, pasted, kind=pill_kind)  # "Email pasted"
+            # the app takes HTML, nice plain text everywhere else ("Email pasted") - or, with nowhere to
+            # type, copied and shown in the card.
+            AppController._deliver_smart_result(self, output_text, pill_kind, sources)
         else:
             pasted = self._paste_via_clipboard(output_text)   # the exact words, untouched
             self.overlay.call_soon(self.overlay.show_done, pasted)
@@ -8011,13 +8011,67 @@ class AppController(QObject):
             self.overlay.call_soon(self.overlay.show_done, False, web_sources=n)
             self._run_on_gui(AppController._show_answer_card, self, text, "answer", sources)
             return
-        if selection_reader.focus_editable() is False:
+        AppController._deliver_smart_result(self, text, pill_kind, sources)
+
+    def _deliver_smart_result(self, text, pill_kind=None, sources=()):
+        """Worker thread. A Smart Action's result: pasted where the cursor is, and always left on the clipboard.
+        Where nothing can be typed - and the app can tell: a desktop, a document being read, Gusan's own window
+        with no text box in use - it is copied and shown in the card ("Copied - press Ctrl+V to paste") instead
+        of a "Pasted" that pasted nothing (founder 2026-11-14: "it's just saying pasted, but I don't see anything
+        ... if it's not pasted, then it should show the pop-up screen and always copy on the clipboard"). The same
+        card when the paste keys could not be sent at all."""
+        said = {"kind": pill_kind}
+        if sources:
+            said["web_sources"] = len(sources)
+        if AppController._nowhere_to_type(self):
             AppController._copy_result(self, text)
-            self.overlay.call_soon(self.overlay.show_done, False, kind=pill_kind, web_sources=n)
-            self._run_on_gui(AppController._show_answer_card, self, text, "copied", sources)
+            self.overlay.call_soon(self.overlay.show_done, False, **said)
+            AppController._run_on_gui(self, AppController._show_answer_card, self, text, "copied", sources)
             return
-        pasted = self._paste_via_clipboard(text, restore=False, rich=True)
-        self.overlay.call_soon(self.overlay.show_done, pasted, kind=pill_kind, web_sources=n)
+        pasted = self._paste_via_clipboard(text, rich=True)
+        self.overlay.call_soon(self.overlay.show_done, pasted, **said)
+        if pasted is False:                              # the paste keys could not be sent: it is on the clipboard
+            AppController._run_on_gui(self, AppController._show_answer_card, self, text, "copied", sources)
+
+    def _nowhere_to_type(self):
+        """True when the app can TELL that nothing takes typing where the cursor is (else it pastes): Gusan's own
+        window is in front and no text box of it has the keyboard, or Windows says the place in front is read only
+        (selection_reader.focus_editable - it cannot say for a browser or an app built on one, nor on a Mac)."""
+        own = AppController._own_window_takes_typing(self)
+        if own is not None:
+            return not own
+        try:
+            import selection_reader
+            return selection_reader.focus_editable() is False
+        except Exception:
+            return False
+
+    def _own_window_takes_typing(self):
+        """Gusan's own window has the keyboard: True when a text box that takes typing has it, False when not.
+        None when another program is in front, or it could not be asked in time. Any thread (asked on the GUI
+        thread)."""
+        answer, done = [], threading.Event()
+
+        def ask():
+            try:
+                from PySide6.QtWidgets import QApplication, QLineEdit, QPlainTextEdit, QTextEdit, QWidget
+                if not isinstance(QApplication.activeWindow(), QWidget):
+                    answer.append(None)                  # another program is in front
+                else:
+                    w = QApplication.focusWidget()
+                    answer.append(bool(isinstance(w, (QLineEdit, QPlainTextEdit, QTextEdit))
+                                       and w.isEnabled() and not w.isReadOnly()))
+            except Exception:
+                answer.append(None)
+            finally:
+                done.set()
+        try:
+            AppController._run_on_gui(self, ask)
+        except Exception:
+            return None
+        if not done.wait(0.5):
+            return None
+        return answer[0] if answer else None
 
     def _show_answer_card(self, text, kind="answer", sources=()):
         """GUI thread: the small card above the pill (ui/answer_card.py); ``kind``: "answer" or "copied"; ``sources``:

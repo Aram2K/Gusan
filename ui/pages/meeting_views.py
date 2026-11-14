@@ -614,7 +614,12 @@ class _Fade(QWidget):
 
 
 class TranscriptPane(Card):
-    """'Live transcript': You / Them lines, newest at the bottom; older ones fade."""
+    """'Live transcript': You / Them lines, newest at the bottom; older ones fade.
+
+    The conversation in the caption language (founder 2026-11-14: "have the choice between the original or the
+    translated conversation"): while live captions are on in a language, a small switch - Original | that
+    language - sits beside the title (set_language); the lines then show their translation as it arrives
+    (set_translation: by the line's place in the session's live_lines()), as spoken until then."""
 
     FADE = (0.8, 0.6, 0.46, 0.38, 0.3, 0.25, 0.2, 0.16, 0.12)
     FULL = 4
@@ -626,6 +631,10 @@ class TranscriptPane(Card):
         head = QHBoxLayout()
         head.setSpacing(10)
         head.addWidget(label("Live transcript", "h3", self))
+        self.lang_switch = Segmented(["Original", "Translated"], 0, "Transcript language", size="s", parent=self)
+        self.lang_switch.changed.connect(self._on_lang_switch)
+        self.lang_switch.hide()
+        head.addWidget(self.lang_switch)
         head.addStretch(1)
         self.model_icon = icon_label("laptop", 15, "muted", parent=self)
         head.addWidget(self.model_icon)
@@ -653,6 +662,11 @@ class TranscriptPane(Card):
         self._fade = _Fade(self.scroll.viewport())
         self.scroll.viewport().installEventFilter(self)
         self._lines = []                 # (row, who label, text label, who)
+        self._spoken = []                # each line's words as spoken (the label may show their translation)
+        self._first = 0                  # where _lines[0] is in the session's live_lines() (older ones are dropped)
+        self._tr = {}                    # a line's place in live_lines() -> its translation
+        self._language = ""              # the language of the translations ("" = none: no switch)
+        self._translated = False         # the switch: show the translations
         self._labels = True
         bar = self.scroll.verticalScrollBar()
         bar.rangeChanged.connect(self._on_range)
@@ -686,17 +700,78 @@ class TranscriptPane(Card):
             row.hide()
             row.deleteLater()
         self._lines = []
+        self._spoken = []
+        self._first = 0
         self.empty.show()
         self._follow = True
 
-    def set_lines(self, lines):
+    def set_lines(self, lines, first=0):
+        """Show these lines; ``first`` is where the first of them is in the session's live_lines()."""
         self.clear()
+        self._first = max(0, int(first or 0))
         for who, text in lines or []:
             self.add_line(text, who, fade=False)
         self._apply_fade()
 
     def lines(self):
-        return [(w, t.text()) for _r, _wl, t, w in self._lines]
+        """[(who, the words as spoken)] - whatever the switch shows."""
+        return [(w, self._spoken[k]) for k, (_r, _wl, _t, w) in enumerate(self._lines)]
+
+    # ── Original | the caption language ──
+    def language(self):
+        return self._language
+
+    def shows_translation(self):
+        return bool(self._language) and self._translated
+
+    def set_language(self, code):
+        """The language the conversation is also kept in ("" = none). The switch shows only then; another language
+        (or none) starts from the words as spoken."""
+        code = str(code or "")
+        if code == self._language:
+            return
+        self._language = code
+        self._tr = {}
+        if code:
+            import meeting_translation
+            name = meeting_translation.language_name(code)
+            button = self.lang_switch.buttons()[1]
+            button.setText(name)
+            button.setAccessibleName(name)
+        else:
+            self._translated = False
+            self.lang_switch.set_index(0)
+        self.lang_switch.setVisible(bool(code))
+        self._retext()
+
+    def set_translations(self, translations):
+        """{place in live_lines(): translation} - what is known so far."""
+        self._tr = {int(k): str(v) for k, v in (translations or {}).items() if v}
+        self._retext()
+
+    def set_translation(self, index, text):
+        """One line's translation arrived."""
+        if not text:
+            return
+        self._tr[int(index)] = str(text)
+        k = int(index) - self._first
+        if self._translated and 0 <= k < len(self._lines):
+            self._lines[k][2].setText(str(text))
+
+    def _text_for(self, k):
+        if self._translated and self._language:
+            return self._tr.get(self._first + k) or self._spoken[k]
+        return self._spoken[k]
+
+    def _retext(self):
+        for k, (_row, _wl, t, _w) in enumerate(self._lines):
+            want = self._text_for(k)
+            if t.text() != want:
+                t.setText(want)
+
+    def _on_lang_switch(self, idx):
+        self._translated = bool(idx) and bool(self._language)
+        self._retext()
 
     def add_line(self, text, who="", fade=True):
         text = (text or "").strip()
@@ -719,7 +794,11 @@ class TranscriptPane(Card):
         who_lb.setContentsMargins(0, 3, 0, 0)
         h.addWidget(who_lb, 0, Qt.AlignTop)
         who_lb.setVisible(self._labels)
-        t = tlabel(text, 14.5, 400, "ink", wrap=True, parent=row)
+        self._spoken.append(text)
+        shown = text
+        if self._translated and self._language:          # its translation, when it is already here
+            shown = self._tr.get(self._first + len(self._spoken) - 1) or text
+        t = tlabel(shown, 14.5, 400, "ink", wrap=True, parent=row)
         t.setTextInteractionFlags(Qt.TextSelectableByMouse)
         t.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         h.addWidget(t, 1)
@@ -728,6 +807,9 @@ class TranscriptPane(Card):
         self._lines.append((row, who_lb, t, who or ""))
         while len(self._lines) > self.LIMIT:
             old = self._lines.pop(0)
+            self._spoken.pop(0)
+            self._tr.pop(self._first, None)
+            self._first += 1
             old[0].hide()
             old[0].deleteLater()
         if fade:
@@ -989,10 +1071,11 @@ class LiveView(QWidget):
             lambda _i: self.page.set_setting(_captions.CFG_WHO, self.cap_who.currentData() or _captions.WHO_BOTH))
         cl.addWidget(self.cap_who, 0, Qt.AlignVCenter)
         al.addWidget(self.cap_box)
-        # The captions' size, while the meeting runs (founder 2026-11-13: "make it bigger within the meeting").
-        from ui.captions_style import StyleTiles
-        self.cap_size = StyleTiles("size", compact=True, parent=acts,
-                                   on_pick=lambda k: self.page.set_setting(_captions.CFG_SIZE, k))
+        # The captions' size, while the meeting runs (founder 2026-11-13: "make it bigger within the meeting";
+        # 2026-11-14: a slider).
+        from ui.captions_style import SizeSlider
+        self.cap_size = SizeSlider(compact=True, parent=acts,
+                                   on_pick=lambda pct: self.page.set_setting(_captions.CFG_SIZE, int(pct)))
         al.addWidget(self.cap_size)
         self.back_btn = Button("Back to meetings", "secondary", "l", icon="chev_l", full=True, parent=acts)
         self.back_btn.clicked.connect(self._back)
@@ -1179,11 +1262,13 @@ class LiveView(QWidget):
         self.sync_model()
         self.sync_assist()
         try:
-            lines = list(s.live_lines())[-TranscriptPane.LIMIT:]
+            every = list(s.live_lines())
         except Exception:
-            lines = []
+            every = []
+        lines = every[-TranscriptPane.LIMIT:]
         if [(w or "", (t or "").strip()) for w, t in lines] != self.transcript.lines():
-            self.transcript.set_lines(lines)
+            self.transcript.set_lines(lines, first=len(every) - len(lines))
+        self.sync_translation()
         self.so_far.set_text(getattr(s, "_live_summary_text", "") or "")
         self._loading_notes = True
         try:
@@ -1254,6 +1339,26 @@ class LiveView(QWidget):
 
     def add_line(self, piece, who=""):
         self.transcript.add_line(piece, who)
+
+    def sync_translation(self):
+        """The transcript's Original | language switch: there while this meeting's words are also kept in the
+        caption language (the session says which), with the translations known so far."""
+        s = self.page.session()
+        language, known = "", {}
+        if s is not None and getattr(s, "phase", getattr(s, "state", "")) in ("recording", "paused"):
+            try:
+                language = s.translation_language()
+                lang, known = s.live_translation()
+                if lang != language:
+                    known = {}
+            except Exception:
+                language, known = "", {}
+        self.transcript.set_language(language)
+        if language:
+            self.transcript.set_translations(known)
+
+    def set_line_translation(self, index, text):
+        self.transcript.set_translation(index, text)
 
     def set_recap(self, text):
         self.so_far.set_text(text)
@@ -1760,6 +1865,12 @@ class NotesView(QWidget):
         self.tabs = Segmented(["Notes", "Transcript", "My notes"], 0, "Meeting view", parent=self)
         self.tabs.changed.connect(self.stack_index)
         bar.addWidget(self.tabs, 0, Qt.AlignVCenter)
+        # The conversation in the caption language (meeting_translation.py): Original | that language, on the
+        # Transcript of a meeting recorded with captions in another language.
+        self.tr_switch = Segmented(["Original", "Translated"], 0, "Transcript language", size="s", parent=self)
+        self.tr_switch.changed.connect(self._on_tr_switch)
+        self.tr_switch.hide()
+        bar.addWidget(self.tr_switch, 0, Qt.AlignVCenter)
         bar.addStretch(1)
         # One line when it fits. A long sentence (the Notion errors) wraps into the room the
         # buttons leave, right-aligned against Copy: it is never cut off and never pushes
@@ -2016,7 +2127,7 @@ class NotesView(QWidget):
                         written_by=written_by_row(meta.get("notes_engine_label")) if notes.strip() else None)
         for task in self.doc.tasks:
             task.box.setEnabled(not busy)       # the notes are being rewritten: nothing to tick yet
-        self.transcript.setHtml(transcript_html(d.get("transcript") or ""))
+        self.sync_translation()                     # (draws the transcript: as spoken, or in the caption language)
         mine = d.get("my_notes") or ""
         if self.my_notes.toPlainText() != mine:      # never jump the caret of someone typing
             self._loading = True
@@ -2154,6 +2265,61 @@ class NotesView(QWidget):
         self.stack.setCurrentIndex(i)
         if self.tabs.index() != i:
             self.tabs.set_index(i)
+        self._place_tr_switch()
+
+    # ── the conversation in the caption language ──
+    def sync_translation(self):
+        """Read this meeting's translation.json (None: it was not recorded with captions in another language) and
+        draw the Transcript - as spoken, or in that language when the switch says so."""
+        import meeting_translation
+        folder = self.folder or ""
+        if getattr(self, "_tr_folder", None) != folder:      # another meeting: as spoken again
+            self._tr_folder, self._tr_on, self._tr_asked = folder, False, False
+            self.tr_switch.set_index(0)
+        self._tr = meeting_translation.load(folder) if folder else None
+        if self._tr is not None:
+            name = meeting_translation.language_name(self._tr["language"])
+            button = self.tr_switch.buttons()[1]
+            button.setText(name)
+            button.setAccessibleName(name)
+        elif getattr(self, "_tr_on", False):
+            self._tr_on = False
+            self.tr_switch.set_index(0)
+        self._place_tr_switch()
+        self._draw_transcript()
+        self._fill_translation()
+
+    def shows_translation(self):
+        return bool(getattr(self, "_tr_on", False) and getattr(self, "_tr", None) is not None)
+
+    def _place_tr_switch(self):
+        self.tr_switch.setVisible(getattr(self, "_tr", None) is not None and self.stack.currentIndex() == 1)
+
+    def _on_tr_switch(self, idx):
+        self._tr_on = bool(idx) and getattr(self, "_tr", None) is not None
+        self._draw_transcript()
+        self._fill_translation()
+
+    def _draw_transcript(self):
+        text = (self.data or {}).get("transcript") or ""
+        self.transcript.setHtml(transcript_html(text, self._tr["lines"] if self.shows_translation() else None))
+
+    def _fill_translation(self):
+        """Shown in the caption language with paragraphs still as spoken (the transcript was rewritten with the
+        speakers' names since, or the translation is still on its way): ask for the rest, once a meeting opened."""
+        if not self.shows_translation() or getattr(self, "_tr_asked", False):
+            return
+        import meeting_translation
+        text = (self.data or {}).get("transcript") or ""
+        if all(p in self._tr["lines"] for p in meeting_translation.paragraphs(text)):
+            return
+        self._tr_asked = True
+        try:
+            s = self.page.session(create=True)
+            if s is not None and callable(getattr(s, "translate_meeting", None)):
+                s.translate_meeting(self.folder)
+        except Exception:
+            logger.debug("translation not asked for", exc_info=True)
 
     # ── actions ──
     def flash(self, text, tone="ok", ms=None):
@@ -2555,19 +2721,8 @@ def transcript_rows(text):
     characters (rich_text.transcript_paragraphs); ``label`` is the speaker on
     the first paragraph of a turn ("" on the rest); ``marker`` is True for a
     '— Resumed at 11:20 —' line."""
-    rows = []
-    for line in (text or "").splitlines():
-        if not line.strip():
-            continue
-        for i, para in enumerate(rich_text.transcript_paragraphs(line)):
-            if rich_text.is_marker(para):
-                rows.append(("", para, True))
-            elif i == 0:
-                label, body = rich_text.split_speaker(para)
-                rows.append((label, body, False))
-            else:
-                rows.append(("", para, False))
-    return rows
+    import meeting_translation
+    return meeting_translation.rows(text)       # (one reading of the transcript: its translation is kept by these rows)
 
 
 def transcript_row_html(row, label_color=None):
@@ -2581,11 +2736,14 @@ def transcript_row_html(row, label_color=None):
     return html_mod.escape(body)
 
 
-def transcript_html(text):
-    """The saved transcript: speaker names bold, readable paragraphs (D10)."""
+def transcript_html(text, translated=None):
+    """The saved transcript: speaker names bold, readable paragraphs (D10). ``translated`` ({paragraph as spoken:
+    its translation}, meeting_translation): each paragraph in that language, as spoken where it has none."""
     ink, muted, text2 = theme.qss_color("ink"), theme.qss_color("muted"), theme.qss_color("text2")
     rows = []
     for row in transcript_rows(text):
+        if translated and not row[2]:
+            row = (row[0], translated.get(row[1]) or row[1], row[2])
         if row[2]:
             rows.append("<p style='color:%s; font-style:italic; margin:0 0 10px 0; line-height:23px'>%s</p>"
                         % (muted, html_mod.escape(row[1])))

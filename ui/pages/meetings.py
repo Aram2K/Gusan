@@ -166,6 +166,7 @@ _SETTING_KEYS = {
     # Live captions (captions.py)
     "captions_on", "captions_language", "captions_who", "captions_in_share", "captions_font", "captions_colors",
     "captions_size",
+    "cloud_writer_model",           # engine_choice.CLOUD_WRITER_KEY: names the model under Notes written by
 }
 UPSELL_CAPTIONS = "Live captions"
 
@@ -216,12 +217,13 @@ def _local_writers():
         return {LOCAL_DEFAULT: ("Small", "Qwen 1.5B", "1.12 GB", "8 GB")}
 
 
-def _cloud_writer_model():
+def _cloud_writer_model(cfg=None):
+    """The model that writes meeting notes on Gusan Cloud, for the AI writer picked in Settings."""
     try:
         import engine_choice
-        return engine_choice.CLOUD_WRITER_MODEL
+        return engine_choice.cloud_notes_model(cfg or {})
     except Exception:
-        return "Mistral Small"
+        return "GPT-4.1"
 
 
 def create(main_app):
@@ -376,6 +378,8 @@ class MeetingsPage(QWidget):
     def _bind_session(self, s):
         self._session = s
         for name, slot in (("state_changed", self._on_phase), ("live_line", self._on_line),
+                           ("line_translated", self.live_view.set_line_translation),
+                           ("translation_saved", self._on_translation_saved),
                            ("recap", self.live_view.set_recap), ("status", self.live_view.set_status),
                            ("levels", self.live_view.set_levels), ("finished", self._on_finished),
                            ("error", self._on_error), ("speakers_changed", self._on_speakers_changed),
@@ -466,10 +470,17 @@ class MeetingsPage(QWidget):
                     and getattr(s, "_rewrite_only", False))
 
     def shows_live(self):
-        """The live view has this session to show: recording, paused, or the
-        notes of a just-recorded meeting being written."""
-        phase = self.phase()
-        return phase in ("recording", "paused") or (phase == "processing" and not self.is_rewriting())
+        """The live view has this session to show: recording or paused. Once Stop is pressed the list is the
+        place (founder 2026-11-14: "it should take it back to the meeting page and not keep it there until it's
+        loaded and writing notes"): the meeting sits there with "Writing notes..." and opens on its own page."""
+        return self.phase() in ("recording", "paused")
+
+    def is_writing(self, folder=None):
+        """The notes of the meeting just recorded are being written (not a rewrite of a saved one) - of
+        ``folder`` when given."""
+        if self.phase() != "processing" or self.is_rewriting():
+            return False
+        return folder is None or self.is_active_folder(folder)
 
     def is_active_folder(self, folder):
         s = self.session()
@@ -506,13 +517,13 @@ class MeetingsPage(QWidget):
         self.live_view.sync()
 
     def open_notes(self, folder, item=None, writing=False):
-        """Show a meeting's notes. A meeting the session is recording or writing opens on the live view - except
-        with ``writing=True`` and its notes being written (right after the Live Assistant's Stop): then the notes
-        view, whose banner says "Writing notes…" and which fills in when they are ready."""
-        if (self.is_active_folder(folder) and self.shows_live()
-                and not (writing and self.phase() == "processing")):
+        """Show a meeting's notes. A meeting being recorded opens on the live view. One whose notes are being
+        written (after Stop - a meeting's or the Live Assistant's) opens on its own page: the banner says
+        "Writing notes…" and the notes fill in when they are ready."""
+        if self.is_active_folder(folder) and self.shows_live():
             self.show_live()
             return
+        writing = writing or self.is_writing(folder)
         self._show("notes")
         if writing and self.is_active_folder(folder):
             self._writing_folder = str(folder)
@@ -556,8 +567,14 @@ class MeetingsPage(QWidget):
                 self.show_list(refresh=True)
         elif phase in ("recording", "paused"):
             self.show_live()
-        elif (phase == "processing" and not self.is_rewriting()) or (
-                phase == "failed" and not (getattr(self._session, "transcript", "") or "").strip()):
+        elif phase == "processing" and not self.is_rewriting():
+            # The notes of the meeting just stopped are being written: the list (its row says so), or the
+            # meeting's own page when that is what was open.
+            if self._view == "notes" and self.notes_view.folder:
+                self.notes_view.reload()
+            else:
+                self.show_list(refresh=True)
+        elif phase == "failed" and not (getattr(self._session, "transcript", "") or "").strip():
             if self._view in (None, "live"):
                 self.show_live()
             elif self._view == "notes" and self.notes_view.folder:
@@ -590,6 +607,8 @@ class MeetingsPage(QWidget):
         self.list_view.sync_settings()
         self.live_view.sync_model()
         self.live_view.sync_assist()
+        if key in ("captions_on", "captions_language", "privacy_mode", "admin_tier_override"):
+            self.live_view.sync_translation()      # the transcript's Original | language switch follows captions
         if key in ("google_oauth_client_id", "google_oauth_client_secret"):
             self.list_view.sync_calendar()
 
@@ -651,6 +670,8 @@ class MeetingsPage(QWidget):
         self.notes_view.sync_actions()
         if phase in ("recording", "paused") and self._view == "list":
             self.show_live()
+        elif phase == "processing" and self._view == "live" and not self.is_rewriting():
+            self.show_list(refresh=True)        # Stop: back to the meetings, the notes are written meanwhile
 
     def _on_line(self, piece, who=""):
         self.live_view.add_line(piece, who)
@@ -674,6 +695,13 @@ class MeetingsPage(QWidget):
             keep = bool(self._writing_folder) and self.is_same(self._writing_folder)
             self._writing_folder = ""
             self.notes_view.reload(keep_view=keep)
+
+    def _on_translation_saved(self, folder):
+        """A meeting's transcript in the caption language was written (translation.json): the meeting open here
+        offers it, or fills in what was still as spoken."""
+        if self._view != "notes" or not self.notes_view.folder or not folder or not self.is_same(folder):
+            return
+        self.notes_view.sync_translation()
 
     def _on_transcript_saved(self, folder):
         """The final transcript of a meeting just stopped is on disk (before its notes): the meeting open here reads
@@ -785,8 +813,16 @@ class ListView(QWidget):
         main.addWidget(self.meetings)
         main.addStretch(1)
         body.addLayout(main, 1)
+        # Beside the list: the meeting's settings and, under them, the captions' own card (founder 2026-11-14:
+        # "a section a bit as itself").
         self.rail = MeetingRail(page, self)
-        body.addWidget(self.rail, 0, Qt.AlignTop)
+        side = QVBoxLayout()
+        side.setContentsMargins(0, 0, 0, 0)
+        side.setSpacing(16)
+        side.addWidget(self.rail)
+        side.addWidget(self.rail.captions)
+        side.addStretch(1)
+        body.addLayout(side)
         root.addLayout(body, 1)
         self.sync_calendar()
         self.sync_session()
@@ -908,7 +944,7 @@ class LiveStrip(QFrame):
         self.hide()
 
     def _open(self):
-        if self.page.is_rewriting():            # a saved meeting's notes: its notes view
+        if self.page.phase() == "processing":   # notes being written (a rewrite, or after Stop): the meeting's page
             s = self.page.session()
             try:
                 folder = s.active_dir() if s is not None else None
@@ -2732,8 +2768,12 @@ class NotesOption(QFrame):
 class MeetingRail(SettingsRail):
     """'Meeting settings': Google Calendar, Send notes to Notion (right below it),
     Meeting language, Transcribes with (the Live Assistant's picker, for meetings: Automatic picks by the
-    meeting language - founder 2026-11-11), Live captions (PRO; when on: Captions in, Show, Show in screen
-    sharing), Notes written by, Remind me to tell people."""
+    meeting language - founder 2026-11-11), Notes written by, Remind me to tell people.
+
+    Live captions have a card of their own under it, ``captions`` (founder 2026-11-14: "a section a bit as itself
+    ... caption language, caption source, and the show / hidden while screen share"): Show captions (PRO) and, when
+    on, Caption language, Caption source, Size, Style, Show while screen sharing. Its rows are this rail's
+    attributes (cap_*), like before."""
 
     def __init__(self, page, parent=None):
         super().__init__("Meeting settings", icon="gear", parent=parent)
@@ -2813,13 +2853,16 @@ class MeetingRail(SettingsRail):
                                     meeting=True)
         self.add_row(self.speech.row)
         # Live captions (captions.py, founder 2026-11-11): words at the bottom of the screen while a meeting runs.
+        # A card of their own (the page puts it under this one), each row named for what it sets.
         import captions as _captions
+        self.captions = SettingsRail("Live captions", icon="text")
+        cap = self.captions
         self.cap_toggle = Toggle("Live captions", False)
         self.cap_toggle.toggled.connect(self._on_captions)
-        self.cap_row = self.add_row(SettingRow("Live captions", self.cap_toggle, pro=True,
-                                               hint="Words at the bottom of your screen as they're said"))
+        self.cap_row = cap.add_row(SettingRow("Show captions", self.cap_toggle, pro=True,
+                                              hint="Words at the bottom of your screen as they're said"))
         self.cap_lang = QComboBox()
-        self.cap_lang.setAccessibleName("Captions in")
+        self.cap_lang.setAccessibleName("Caption language")
         self.cap_lang.setFont(theme.font(13.5))
         self.cap_lang.setFixedHeight(36)
         self.cap_lang.setFixedWidth(278)
@@ -2827,30 +2870,36 @@ class MeetingRail(SettingsRail):
             self.cap_lang.addItem(text, code)
         self.cap_lang.activated.connect(
             lambda _i: self.page.set_setting(_captions.CFG_LANGUAGE, self.cap_lang.currentData() or ""))
-        self.cap_lang_row = self.add_row(SettingRow("Captions in", self.cap_lang, stacked=True))
+        self.cap_lang_row = cap.add_row(SettingRow("Caption language", self.cap_lang, stacked=True))
         self.cap_who = QComboBox()
-        self.cap_who.setAccessibleName("Whose words")
+        self.cap_who.setAccessibleName("Caption source")
         self.cap_who.setFont(theme.font(13.5))
         self.cap_who.setFixedHeight(36)
         for code, text in _captions.WHO_NAMES:
             self.cap_who.addItem(text, code)
         self.cap_who.activated.connect(
             lambda _i: self.page.set_setting(_captions.CFG_WHO, self.cap_who.currentData() or _captions.WHO_BOTH))
-        self.cap_who_row = self.add_row(SettingRow("Show", self.cap_who))
-        # The look: a few fonts and colour pairs, each a tile showing it (ui/captions_style.py).
-        from ui.captions_style import StyleTiles
-        self.cap_font = StyleTiles("font", on_pick=lambda k: self.page.set_setting(_captions.CFG_FONT, k))
-        self.cap_font_row = self.add_row(SettingRow("Font", self.cap_font, stacked=True))
-        self.cap_colors = StyleTiles("colors", on_pick=lambda k: self.page.set_setting(_captions.CFG_COLORS, k))
-        self.cap_colors_row = self.add_row(SettingRow("Colors", self.cap_colors, stacked=True,
-                                                      hint="The call, then you"))
-        self.cap_size = StyleTiles("size", on_pick=lambda k: self.page.set_setting(_captions.CFG_SIZE, k))
-        self.cap_size_row = self.add_row(SettingRow("Size", self.cap_size, stacked=True,
-                                                    hint="You can change it during a meeting too"))
-        self.cap_share = Toggle("Show in screen sharing", False)
+        self.cap_who_row = cap.add_row(SettingRow("Caption source", self.cap_who))
+        # The look, two small lines (founder 2026-11-14: the tiles and the stacked slider took "too much space"):
+        # Size - the slider beside its name; Style - the font (a dropdown) and the colours (four dots).
+        from ui.captions_style import ColorDots, FontCombo, SizeSlider
+        self.cap_size = SizeSlider(on_pick=lambda pct: self.page.set_setting(_captions.CFG_SIZE, int(pct)))
+        self.cap_size_row = cap.add_row(SettingRow("Size", self.cap_size))
+        style = QWidget()
+        style.setAccessibleName("Caption style")
+        sl = QHBoxLayout(style)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setSpacing(10)
+        self.cap_font = FontCombo(on_pick=lambda k: self.page.set_setting(_captions.CFG_FONT, k))
+        self.cap_font.setFixedWidth(122)
+        self.cap_colors = ColorDots(on_pick=lambda k: self.page.set_setting(_captions.CFG_COLORS, k))
+        sl.addWidget(self.cap_font)
+        sl.addWidget(self.cap_colors)
+        self.cap_style_row = cap.add_row(SettingRow("Style", style))
+        self.cap_share = Toggle("Show while screen sharing", False)
         self.cap_share.toggled.connect(lambda on: self.page.set_setting(_captions.CFG_IN_SHARE, bool(on)))
-        self.cap_share_row = self.add_row(SettingRow("Show in screen sharing", self.cap_share,
-                                                     hint="Off: only you see them"))
+        self.cap_share_row = cap.add_row(SettingRow("Show while screen sharing", self.cap_share,
+                                                    hint="Off: only you see them"))
         # Notes written by
         opts = QWidget()
         ol = QVBoxLayout(opts)
@@ -2959,7 +3008,7 @@ class MeetingRail(SettingsRail):
             except Exception:
                 pass
         self.opt_local.set_model(model)
-        self.opt_cloud.set_model(_cloud_writer_model())
+        self.opt_cloud.set_model(_cloud_writer_model(self.page.cfg()))     # follows the writer picked in Settings
         for b in (self.opt_cloud.radio, self.opt_local.radio):
             b.blockSignals(True)
         (self.opt_cloud.radio if choice == "cloud" else self.opt_local.radio).setChecked(True)
@@ -3023,9 +3072,10 @@ class MeetingRail(SettingsRail):
         self.cap_font.set_value(cfg.get(_captions.CFG_FONT) or "clean")
         self.cap_colors.set_value(cfg.get(_captions.CFG_COLORS) or "yellow")
         self.cap_size.set_value(cfg.get(_captions.CFG_SIZE) or _captions.DEFAULT_SIZE)
-        for row in (self.cap_lang_row, self.cap_who_row, self.cap_font_row, self.cap_colors_row, self.cap_size_row,
-                    self.cap_share_row):
+        for row in (self.cap_lang_row, self.cap_who_row, self.cap_size_row, self.cap_style_row, self.cap_share_row):
             row.setVisible(on)
+        self.cap_row.set_last(not on)                    # (the card's last row draws no line under itself)
+        self.cap_share_row.set_last(on)
         # Privacy mode never translates (it would send the words to Gusan Cloud): the row says so.
         self.cap_lang_row.set_hint("Privacy mode is on: captions stay as spoken"
                                    if cfg.get("privacy_mode") and (cfg.get(_captions.CFG_LANGUAGE) or "") else "")

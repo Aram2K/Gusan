@@ -490,14 +490,18 @@ def test_open_with_writing_lands_on_the_notes_view_of_a_meeting_being_written(wi
     assert nv.chat.isVisibleTo(nv)
 
 
-def test_without_writing_a_meeting_being_written_still_opens_on_the_live_view(window, meetings_root):
+def test_a_meeting_being_written_always_opens_on_its_own_page(window, meetings_root):
+    """Founder 2026-11-14: after Stop "it should take it back to the meeting page and not keep it there until it's
+    loaded and writing notes" - the live view is for a recording; a meeting whose notes are being written opens on
+    its own page (the banner says so), with or without ``writing``."""
     f = make_meeting(meetings_root, notes="")
     win, session = window("processing", f)
     page = win.open("meetings", meeting=str(f))
     _pump()
-    assert page.current_view() == "live"
+    assert page.current_view() == "notes" and page.notes_view.folder == str(f)
+    page.show_list()
     page.open_notes(str(f))                                              # a list row does the same
-    assert page.current_view() == "live"
+    assert page.current_view() == "notes"
 
 
 def test_a_recording_in_progress_is_never_taken_for_a_meeting_to_read(window, meetings_root):

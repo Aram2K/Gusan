@@ -515,6 +515,17 @@ def test_open_with_focus_on_the_shortcut(shell, tries):
     assert win.focusWidget() is page.shortcut.button
 
 
+def test_the_gusan_cloud_line_names_the_writer_picked_in_settings(pages, tries):
+    """Founder 2026-11-14: "why is it in the smart action still showing DeepSeek when it's Claude what I've chosen"
+    - Claude Haiku 5.5 answered (the server log); only the line was wrong."""
+    app = live_app("pro", action_model="managed", cloud_writer_model="claude")
+    page = pages("smart_actions", app)
+    assert page.opt_cloud.model_label.text() == "Claude Haiku 5.5"
+    app.cfg["cloud_writer_model"] = "openai"                  # changed in Settings > Speech & AI
+    page.on_setting_changed("cloud_writer_model")
+    assert page.opt_cloud.model_label.text() == "GPT-5.4 mini"
+
+
 def test_writes_with_free_shows_this_computer_and_gates_cloud(pages, tries, monkeypatch):
     import local_llm
     monkeypatch.setattr(local_llm, "model_downloaded", lambda model_id="qwen_tiny": True)

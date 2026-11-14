@@ -224,6 +224,10 @@ def build_scenarios():
     add("live_openai_fail", FULL_ENV, [SMART, LIVE],
         {"live": [{"status": 500}], "openai": [{"status": 500}]})
     add("notes_openai_fails", FULL_ENV, [NOTES], {"openai": [{"status": 500}]})
+    # the AI writer picked in Settings writes the meeting notes first (body.model; founder 2026-11-14)
+    add("notes_pick", FULL_ENV, [{"body": {**NOTES["body"], "model": m}}
+                                 for m in ("claude", "mistral", "gemini", "openai", "deepseek", "nonsense")], ALL_FAIL)
+    add("notes_pick_claude_ok", FULL_ENV, [{"body": {**NOTES["body"], "model": "claude", "stream": True}}])
     add("other_mistral_fails", FULL_ENV, [OTHER], {"mistral": [{"status": 500}]})
     # what goes to OpenAI
     add("defaults", ONLY_OPENAI, [SMART, LIVE, NOTES, NO_MODE, req("translate", max_tokens=5000)])
@@ -365,6 +369,20 @@ class TestSmartActionRoutes(unittest.TestCase):
             self.assertEqual(self.hosts(r[i]), want[key], f"request {i} ({key})")
             self.assertEqual(r[i]["status"], 502)
             self.assertEqual(r[i]["json"]["error"], "action_failed")
+
+    def test_meeting_notes_are_written_by_the_ai_writer_picked_first(self):
+        """Founder 2026-11-14: "this should be based on what we chose for the LLM in the settings - if it's
+        Anthropic then it shouldn't say Mistral Small". Before, notes kept their own order: OpenAI's whatever was
+        picked. The pick goes first, the rest stay behind it; a pick with no notes engine changes nothing."""
+        g = "gemini"
+        own = ["openai", "anthropic", "mistral", g, g]
+        want = {"claude": ["anthropic", "openai", "mistral", g, g], "mistral": ["mistral", "openai", "anthropic", g, g],
+                "gemini": [g, g, "openai", "anthropic", "mistral"], "openai": own, "deepseek": own, "nonsense": own}
+        r = self.sc("notes_pick")
+        for res, pick in zip(r, ("claude", "mistral", "gemini", "openai", "deepseek", "nonsense")):
+            self.assertEqual(self.hosts(res), want[pick], pick)
+        ok = self.sc("notes_pick_claude_ok")[0]
+        self.assertEqual((ok["status"], self.hosts(ok)), (200, ["anthropic"]))
 
     def test_the_openai_urls_are_the_chat_completions_endpoint(self):
         for res in self.sc("order"):

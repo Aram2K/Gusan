@@ -110,7 +110,7 @@ def test_two_lines_are_never_on_top_of_each_other(qapp, glass_calls):
     from ui import captions_overlay as co
     clock = Clock()
     ov = _overlay(clock)
-    for size in ("m", "xl"):
+    for size in (100, 160):
         ov.set_size(size)
         ov._set_font(ov.font_px(1080, 1920))
         ov.resize(1600, 500)
@@ -168,25 +168,27 @@ def test_the_look_follows_the_card(qapp, glass_calls):
 def test_the_size_picked_makes_the_text_bigger_but_never_wider_than_the_screen(qapp, glass_calls):
     ov = _overlay()
     sizes = []
-    for key, _name, _scale in captions.SIZES:
-        ov.set_size(key)
+    for pct in (80, 100, 130, 160):
+        ov.set_size(pct)
         sizes.append(ov.font_px(1080, 1920))
-    assert sizes == sorted(sizes) and len(set(sizes)) == len(sizes)     # Small < Medium < Large < Extra large
-    ov.set_size("m")
-    assert ov.font_px(1080, 1920) == 30                                  # Medium is the size it always was
-    ov.set_size("xl")
+    assert sizes == sorted(sizes) and len(set(sizes)) == len(sizes)     # each step bigger
+    ov.set_size(100)
+    assert ov.font_px(1080, 1920) == 30                                  # 100 % is the size it always was
+    ov.set_size(180)
     narrow = ov.font_px(1080, 700)                                       # a narrow window: it shrinks to fit
     from PySide6.QtGui import QFontMetricsF
     from ui.captions_overlay import BOX_SAMPLE, WIDTH_SHARE, caption_font
     width = QFontMetricsF(caption_font("clean", narrow)).horizontalAdvance(BOX_SAMPLE[:captions.MAX_CHARS])
     assert width <= 700 * WIDTH_SHARE
     narrow_sizes = []
-    for key, _name, _scale in captions.SIZES:                            # cut down to fit: never smaller than
-        ov.set_size(key)                                                 # the size below it
+    for pct in range(captions.SIZE_MIN, captions.SIZE_MAX + 1, captions.SIZE_STEP):   # cut down to fit: never
+        ov.set_size(pct)                                                               # smaller than the step below
         narrow_sizes.append(ov.font_px(1080, 500))
     assert narrow_sizes == sorted(narrow_sizes)
     ov.set_size("nonsense")
-    assert ov._size == "m"
+    assert ov._size == 100
+    ov.set_size("xl")                                                    # (what 2.1.7 saved)
+    assert ov._size == 160
 
 
 def test_a_size_change_in_the_middle_of_a_meeting_applies_at_once(qapp, glass_calls):
@@ -198,12 +200,14 @@ def test_a_size_change_in_the_middle_of_a_meeting_applies_at_once(qapp, glass_ca
     ov._screen = lambda: screen
     ov.start()
     before = (ov._px, ov.height())
-    ov.set_size("xl")
+    ov.set_size(150)
     assert ov._px > before[0] and ov.height() > before[1]                # bigger text, a taller window
     ov.stop()
 
 
-def test_while_words_wait_the_window_looks_often_so_each_comes_on_time(qapp, glass_calls):
+def test_words_show_at_once_and_while_a_line_is_read_the_window_looks_often(qapp, glass_calls):
+    """Founder 2026-11-14: never late on purpose - a piece shows whole at once; words wait only for a line to be
+    read, and then the window looks often so they show the moment they may."""
     from ui.captions_overlay import CaptionsOverlay, PACE_POLL_MS, POLL_MS
     clock = Clock()
     feed = captions.CaptionFeed(lambda: {"captions_who": "both"}, clock=clock, start_thread=False)
@@ -211,11 +215,19 @@ def test_while_words_wait_the_window_looks_often_so_each_comes_on_time(qapp, gla
     ov.start()
     feed.final("one two three four five six", "Them", paced=True)
     ov.pull()
-    assert ov._poll.isActive() and ov._poll.interval() == PACE_POLL_MS
-    for _ in range(100):                                                  # 5 s of the window looking
+    assert [ws for _i, ws in feed.view()["them"]] == [["one", "two", "three", "four", "five", "six"]]
+    assert ov._poll.interval() == POLL_MS                                  # nothing waits: the slow look
+    n = (captions.MAX_CHARS + 1) // 5
+    for name in ("aaaa", "bbbb", "cccc"):                                  # the screen full of fresh lines ...
+        feed.final(" ".join([name] * n), "Them", paced=True)
+    ov.pull()
+    feed.final(" ".join(["dddd"] * n), "Them", paced=True)                 # ... one more must wait for "aaaa"
+    ov.pull()
+    assert feed.pacing() and ov._poll.isActive() and ov._poll.interval() == PACE_POLL_MS
+    for _ in range(80):
         clock.t += PACE_POLL_MS / 1000.0
         ov.pull()
-    assert not feed.pacing() and ov._poll.interval() == POLL_MS           # all written: the slow look again
+    assert not feed.pacing() and ov._poll.interval() == POLL_MS
     ov.stop()
 
 
@@ -273,8 +285,8 @@ def test_it_comes_with_a_recording_and_goes_with_it(qapp, monkeypatch):
     session.state_changed.emit("recording")
     assert ctl.running and len(started) == 1
     session.live_partial.emit("Hello um there", "Them")
-    assert [ws for _i, ws in ctl.feed.view()["them"]] == [["Hello"]]       # the first word at once ...
-    assert ctl.feed.lanes["them"].live == ["Hello", "there"] and ctl.feed.pacing()   # ... the next at reading pace
+    assert [ws for _i, ws in ctl.feed.view()["them"]] == [["Hello", "there"]]   # as they are said
+    assert not ctl.feed.pacing()
     session.caption_line.emit("Hello there.", "You", "en")
     assert ctl.feed.view()["me"]
     session.state = "processing"
@@ -316,11 +328,11 @@ def test_the_switches_apply_in_the_middle_of_a_meeting(qapp, monkeypatch, glass_
     monkeypatch.setattr(ctl.overlay, "set_in_share", lambda on: shared.append(on))
     ctl.on_setting_changed("captions_in_share")
     assert shared == [True]
-    app.cfg["captions_size"] = "l"
+    app.cfg["captions_size"] = 130
     sized = []
-    monkeypatch.setattr(ctl.overlay, "set_size", lambda key: sized.append(key))
+    monkeypatch.setattr(ctl.overlay, "set_size", lambda value: sized.append(value))
     ctl.on_setting_changed("captions_size")
-    assert sized == ["l"]
+    assert sized == [130]
 
 
 def test_free_never_gets_captions_and_translations_use_the_sign_in(qapp, monkeypatch):
@@ -331,10 +343,14 @@ def test_free_never_gets_captions_and_translations_use_the_sign_in(qapp, monkeyp
     ctl2, s2, app2, _ = _controller(monkeypatch, captions_language="en")
     import action_api
     asked = []
+    limits = []
     monkeypatch.setattr(action_api, "interpret_phrase",
-                        lambda text, target, token, source, context: asked.append((text, target, token, source)) or "ok")
+                        lambda text, target, token, source, context, timeout=None:
+                        (asked.append((text, target, token, source)), limits.append(timeout)) and "ok")
     assert ctl2._translate("Բարեւ", "hy", "en", []) == "ok"
     assert asked == [("Բարեւ", "en", "tok", "hy")]
+    # one that hangs holds up the translations behind it (they show in the order said): a short limit, then as spoken
+    assert limits[0] is not None and max(limits[0]) <= 6
     assert ctl2._source_language() == "hy"
 
 
@@ -353,12 +369,29 @@ def test_the_meetings_card_has_live_captions_with_its_rows_only_when_on(shell, m
     app.cfg.update(captions_on=False, captions_language="", captions_who="both", captions_in_share=False)
     page = _open(win)
     rail = page.list_view.rail
-    assert rail.cap_row.isVisibleTo(rail) and rail.cap_row.pro_tag is not None
-    assert not rail.cap_lang_row.isVisibleTo(rail)
+    # a card of their own under the meeting settings (founder 2026-11-14: "a section a bit as itself ... caption
+    # language, caption source, and the show / hidden while screen share"), each row named for what it sets
+    card = rail.captions
+    assert card is not rail and card.title_label.text() == "Live captions" and card.isVisibleTo(page.list_view)
+    assert card.width() == rail.width()
+
+    def top(w):
+        from PySide6.QtCore import QPoint
+        return w.mapTo(page.list_view, QPoint(0, 0)).y()
+    assert top(card) >= top(rail) + rail.height()                        # under it, never over it
+    assert rail.cap_row.isVisibleTo(card) and rail.cap_row.pro_tag is not None
+    assert rail.cap_row.label.text() == "Show captions"
+    assert not rail.cap_lang_row.isVisibleTo(card)
+    assert rail.cap_row.property("last") is True                         # (off: the only row, no line under it)
     rail.cap_toggle.click()
     assert ("set_setting", "captions_on", True) in app.calls
-    assert rail.cap_lang_row.isVisibleTo(rail) and rail.cap_who_row.isVisibleTo(rail)
-    assert rail.cap_share_row.isVisibleTo(rail)
+    assert rail.cap_lang_row.isVisibleTo(card) and rail.cap_who_row.isVisibleTo(card)
+    assert rail.cap_share_row.isVisibleTo(card)
+    assert [r.label.text() for r in card.rows()] == ["Show captions", "Caption language", "Caption source", "Size",
+                                                     "Style", "Show while screen sharing"]
+    assert (rail.cap_lang.accessibleName(), rail.cap_who.accessibleName()) == ("Caption language", "Caption source")
+    assert rail.cap_share_row.property("last") is True and rail.cap_row.property("last") is False
+    assert all(row.parent() is not rail._body for row in card.rows())     # none of them is left on the meeting card
     assert rail.cap_lang.itemText(0) == "As spoken"
     rail.cap_lang.setCurrentIndex(rail.cap_lang.findData("en"))
     rail.cap_lang.activated.emit(rail.cap_lang.currentIndex())
@@ -368,29 +401,55 @@ def test_the_meetings_card_has_live_captions_with_its_rows_only_when_on(shell, m
     assert ("set_setting", "captions_who", "them") in app.calls
     rail.cap_share.click()
     assert ("set_setting", "captions_in_share", True) in app.calls
-    # the look: tiles showing each font and colour pair
-    assert rail.cap_font_row.isVisibleTo(rail) and rail.cap_colors_row.isVisibleTo(rail)
-    assert [t.key for t in rail.cap_font.tiles] == [k for k, _n in captions.FONTS]
+    # the look, small (founder 2026-11-14: the tiles and the stacked slider took "too much space"): ONE Style line -
+    # the font a dropdown, the colours four dots - and the size's slider beside its name
+    assert rail.cap_style_row.isVisibleTo(card)
+    assert not hasattr(rail, "cap_font_row") and not hasattr(rail, "cap_colors_row")
+    assert [rail.cap_font.itemData(i) for i in range(rail.cap_font.count())] == [k for k, _n in captions.FONTS]
+    assert [d.key for d in rail.cap_colors.dots] == [k for k, _n, _a, _b in captions.COLORS]
     assert rail.cap_font.value() == "clean" and rail.cap_colors.value() == "yellow"
-    rail.cap_font.tiles[1].click()
+    rail.cap_font.setCurrentIndex(1)
+    rail.cap_font.activated.emit(1)
     assert ("set_setting", "captions_font", "bold") in app.calls and rail.cap_font.value() == "bold"
-    rail.cap_colors.tiles[2].click()
-    assert ("set_setting", "captions_colors", "green") in app.calls
-    assert all(t.accessibleName() for t in rail.cap_font.tiles + rail.cap_colors.tiles)
-    rail.cap_font.grab()
+    rail.cap_colors.dots[2].click()
+    assert ("set_setting", "captions_colors", "green") in app.calls and rail.cap_colors.value() == "green"
+    assert rail.cap_font.accessibleName() == "Caption font"
+    assert all(d.accessibleName() and "the call, then you" in d.toolTip() for d in rail.cap_colors.dots)
+    rail.cap_font.set_value("nonsense")                                  # an unknown saved look: the first one
+    rail.cap_colors.set_value("nonsense")
+    assert rail.cap_font.value() == "clean" and rail.cap_colors.value() == "yellow"
     rail.cap_colors.grab()
-    # the size: an "Aa" of each size, Medium picked
-    assert rail.cap_size_row.isVisibleTo(rail)
-    assert [t.key for t in rail.cap_size.tiles] == ["s", "m", "l", "xl"] and rail.cap_size.value() == "m"
-    assert [t.accessibleName() for t in rail.cap_size.tiles] == ["Small", "Medium", "Large", "Extra large"]
-    rail.cap_size.tiles[3].click()
-    assert ("set_setting", "captions_size", "xl") in app.calls
-    rail.cap_size.grab()
+    # each of the two lines is one row high (a name and its control side by side), and fits the card
+    assert rail.cap_style_row.height() <= 64 and rail.cap_size_row.height() <= 64
+    assert rail.cap_style_row.sizeHint().width() <= rail.width() and rail.cap_size_row.sizeHint().width() <= rail.width()
+    assert rail.cap_size_row.hint_label.isHidden()
+    # the slider's handle has its whole height (it was clipped: "broken and cut a bit")
+    from ui import captions_style
+    assert rail.cap_size.slider.height() >= captions_style.HANDLE + 4
+    # the size: a slider - small A, big A, the percent (founder 2026-11-14: "maybe a slider, must be more clear")
+    from PySide6.QtTest import QTest
+    assert rail.cap_size_row.isVisibleTo(card)
+    size = rail.cap_size
+    assert size.value() == 100 and size.pct.text() == "100%" and size.slider.accessibleName() == "Caption size"
+    assert size.small.text() == size.big.text() == "A" and size.big.font().pointSizeF() > size.small.font().pointSizeF()
+    size.slider.setValue(14)                                             # dragged to 140 %
+    assert size.pct.text() == "140%"
+    assert not any(c[:2] == ("set_setting", "captions_size") for c in app.calls)   # not saved while it moves ...
+    size.set_value(100)                    # the page refreshes meanwhile (review 2026-11-14: it undid the drag)
+    assert size.value() == 140 and size.pct.text() == "140%"
+    QTest.qWait(size._timer.interval() + 80)
+    assert ("set_setting", "captions_size", 140) in app.calls           # ... once it rests
+    size.slider.setSliderDown(True)                                      # held in the hand: the same
+    size.set_value(100)
+    assert size.value() == 140
+    size.slider.setSliderDown(False)
+    size.set_value(120)                                                  # at rest it follows the saved size
+    assert size.value() == 120 and size.pct.text() == "120%"
+    size.set_value(140)
+    assert not hasattr(size, "moving")                                   # (a signal nobody listened to)
+    size.grab()
 
-    def y(w):
-        from PySide6.QtCore import QPoint
-        return w.mapTo(rail, QPoint(0, 0)).y()
-    assert y(rail.speech.combo) < y(rail.cap_toggle) < y(rail.opt_cloud)  # after Transcribes with, before the notes
+    assert rail.cap_who_row.sizeHint().width() <= card.width()            # "Caption source" and its list on one line
 
 
 def test_free_people_get_the_pro_window(shell, meetings_root):
@@ -416,11 +475,14 @@ def test_the_live_card_switch(shell, meetings_root):
     live.cap_who.setCurrentIndex(live.cap_who.findData("me"))
     live.cap_who.activated.emit(live.cap_who.currentIndex())
     assert ("set_setting", "captions_who", "me") in app.calls
-    # bigger in the middle of the meeting (founder 2026-11-13)
-    assert not live.cap_size.isHidden() and live.cap_size.value() == "m"
-    live.cap_size.tiles[2].click()
-    assert ("set_setting", "captions_size", "l") in app.calls
+    # bigger in the middle of the meeting (founder 2026-11-13), with a slider (2026-11-14)
+    from PySide6.QtTest import QTest
+    assert not live.cap_size.isHidden() and live.cap_size.value() == 100
+    live.cap_size.slider.setValue(13)
+    QTest.qWait(live.cap_size._timer.interval() + 80)
+    assert ("set_setting", "captions_size", 130) in app.calls
     assert live.cap_size.sizeHint().width() <= 240                       # fits the live card's buttons
+    assert live.cap_size.pct.isHidden()                                  # (compact: no percent there)
     live.cap_switch.click()
     assert ("set_setting", "captions_on", False) in app.calls
     assert live.cap_who.isHidden() and live.cap_size.isHidden()

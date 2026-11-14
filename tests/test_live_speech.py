@@ -835,7 +835,9 @@ class TestOnlyTheLiveAssistantMovesOffDictationsModel(unittest.TestCase):
         c = cfg(live_assist_speech_model="cloud:best", backend="local")
         # engine_choice's Dictation line ignores it entirely
         self.assertEqual(ec.runs_on(c, "dictation", pro=True)["kind"], "local")
-        self.assertEqual(ec.runs_on(c, "meetings", pro=True)["kind"], "local")
+        self.assertEqual(ec.runs_on(c, "meetings", pro=False)["kind"], "local")
+        # (a Pro person's meetings have their own default since 2026-11-14: Best accuracy on Gusan Cloud)
+        self.assertEqual(ec.runs_on(c, "meetings", pro=True)["label"], "Gusan Cloud \u00b7 Best accuracy")
         self.assertEqual(ec.runs_on(c, "smart_actions_speech", pro=True)["kind"], "local")
         # ...and the recorder only sees a take's own speech=
         me = SimpleNamespace(backend_override=None, model_override=None, cloud_model_override=None)

@@ -44,9 +44,10 @@
 //   1000-a-day Smart Action ceiling within an hour.
 // * Everything else (the live recap, apps before 2.0 that send no mode):
 //   Mistral Small -> OpenAI (OPENAI_FAST_MODEL) -> Gemini Flash.
-// * body.model (optional, the AI writer the person picked in the app): for Smart Actions and Live
-//   Assistant answers that engine goes first, the rest of the chain follows as the fallback
-//   (preferRoutes). Meeting notes keep their own order.
+// * body.model (optional, the AI writer the person picked in the app): for Smart Actions, Live
+//   Assistant answers and meeting notes that engine goes first, the rest of the chain follows as the
+//   fallback (preferRoutes, preferNotes). Before 2026-11-14 meeting notes kept their own order: they
+//   were OpenAI's whatever was picked.
 // Not streamed, EVERY engine has a whole-answer time limit (its own, else
 // WHOLE_CAP_MS), and the chain as a whole stays inside NON_STREAM_DEADLINE_MS,
 // so the app's 45 s wait always ends with an answer or a clean error.
@@ -832,6 +833,18 @@ function preferRoutes(routes: Route[], prefer: unknown): Route[] {
   return first.length ? [...first, ...routes.filter((r) => routeFamily(r) !== want)] : routes;
 }
 
+// Meeting notes follow the pick too (founder 2026-11-14: "this should be based on what we chose for the LLM in
+// the settings - if it's Anthropic then it shouldn't say Mistral Small"): the picked engine writes them first,
+// the others stay behind it. A pick with no notes engine (Gusan's default, DeepSeek) leaves the order as it is.
+// Mistral and Gemini carry a short whole-answer cap in this chain (NOTES_TAIL_MS: they are fallbacks behind two
+// engines) that would only make them time out as the FIRST engine of notes that are not streamed: the one
+// that leads gets the first engine's time instead.
+function preferNotes(routes: Route[], prefer: unknown): Route[] {
+  const out = preferRoutes(routes, prefer);
+  if (out === routes || !out.length || !out[0].capMs) return out;
+  return [{ ...out[0], capMs: undefined, wholeMs: OPENAI_NOTES_MS }, ...out.slice(1)];
+}
+
 // ── the Interpreter (mode "interpret") ─────────────────────────────────────
 // Language names read better to a model than codes; a code not listed here is named as a code.
 const LANGUAGE_NAMES: Record<string, string> = {
@@ -1303,12 +1316,11 @@ Deno.serve(async (req) => {
       messages.unshift({ role: "system", content: note });
     }
   }
-  // The person's pick leads Smart Actions and Live Assistant answers; meeting notes keep their own
-  // order (their tail engines have a short whole-answer cap and would only time out first), and so
-  // does the Interpreter (its chain is the fastest first).
+  // The person's pick leads Smart Actions, Live Assistant answers and meeting notes (preferNotes); the
+  // Interpreter keeps its own order (its chain is the fastest first).
   const chain = interpret ? await interpretRoutes(messages, maxTokens)
                           : await routesFor(live, smart, notes, messages, maxTokens, stream);
-  const routes = notes || interpret ? chain : preferRoutes(chain, body?.model);
+  const routes = interpret ? chain : notes ? preferNotes(chain, body?.model) : preferRoutes(chain, body?.model);
   if (!routes.length) {
     console.error("no chat engine configured: set MISTRAL_STT_KEY, GOOGLE_STT_KEY, OPENAI_TOKEN or CLAUDE_LLM_KEY");
     return json({ error: interpret ? "provider_unavailable" : "actions_not_configured" }, 503);

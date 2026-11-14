@@ -13,10 +13,11 @@ there never move.
 The window: frameless, see-through, always on top, never takes the focus or a click (click-through); hidden from screen
 sharing and recordings unless cfg captions_in_share (ui.glass.exclude_from_capture, like the Live Assistant). Text:
 the system's UI font, semi-bold, sized to the screen (about 2.8 % of its height) times the size picked (cfg
-captions_size: Small to Extra large - also from the live card, in the middle of a meeting), with a dark outline and a
+captions_size: a percent, the slider - also from the live card, in the middle of a meeting), with a dark outline and a
 soft shadow so it reads on any picture without a background.
-Readable (founder 2026-11-13): the feed writes every word at reading pace; while words wait, this looks often
-(PACE_POLL_MS) so each comes out on time, one after another. Lines never sit on top of each other ("sometimes the
+Never late on purpose (founder 2026-11-14): the feed shows every word the moment it is known; words wait only for
+a line to be read before it rolls off, and while they wait this looks often (PACE_POLL_MS) so they show the moment
+they may. Lines never sit on top of each other ("sometimes the
 sentences are coming one on top of each other"): a new line's words wait until the line before has glided out of its
 place (_clear_s), and lines are LINE_SPACING apart - room for the outline even at Extra large.
 """
@@ -36,13 +37,13 @@ logger = logging.getLogger("transcribe")
 COLORS = {"them": (255, 255, 255), "me": (255, 226, 132)}     # the call white, you a soft yellow (captions.COLORS)
 OUTLINE = (6, 6, 10)
 FADE_IN_S = 0.28            # a word fades in this long
-STAGGER_S = 0.05            # words that arrive together appear this far apart ...
-MAX_LAG_S = 0.25            # ... never more than this behind the moment they came
+STAGGER_S = 0.05            # words that arrive together type in this far apart ("tack, tack, tack") ...
+MAX_LAG_S = 0.4             # ... a whole phrase within this - never a block at once, never late on purpose
 # ordinary text, for the box's width (its first captions.MAX_CHARS characters)
 BOX_SAMPLE = "so we will look at the new version of the app today and then we can talk about it"
 LEAVE_S = 0.45              # a line rolling out at the top fades this long
 LANE_IN_S, LANE_OUT_S = 0.3, 0.8
-FOLLOW = 11.0               # how quickly lines glide to their place (1/s; no overshoot)
+FOLLOW = 16.0               # how quickly lines glide to their place (1/s; no overshoot): a new line waits ~0.2 s
 CLEAR_PX = 1.5              # a new line's words show once the line before is this close to its new place
 FRAME_MS = 16
 POLL_MS = 300               # how often the words are looked at again (a side's captions expire by themselves)
@@ -156,12 +157,12 @@ class CaptionsOverlay(QWidget):
         self._set_font(self._px)
         self.update()
 
-    def set_size(self, key):
-        """The size picked (captions.SIZES); while on screen, at once (the live card's buttons)."""
-        key = key if any(k == key for k, _n, _s in captions.SIZES) else captions.DEFAULT_SIZE
-        if key == self._size:
+    def set_size(self, value):
+        """The size picked (a percent, captions.size_percent); while on screen, at once (the live card's slider)."""
+        pct = captions.size_percent(value)
+        if pct == self._size:
             return
-        self._size = key
+        self._size = pct
         if self.isVisible():
             self.place(self._on_screen)
             self._wake()
@@ -169,7 +170,7 @@ class CaptionsOverlay(QWidget):
     def font_px(self, screen_height, avail_width=None):
         """The text size for a screen: about FONT_SHARE of its height, times the size picked - never wider than the
         screen allows (about MAX_CHARS a line)."""
-        scale = captions.size_scale(self._size)
+        scale = self._size / 100.0
         base = max(FONT_MIN, min(FONT_MAX, round(screen_height * FONT_SHARE)))
         px = max(round(FONT_MIN * min(scale, 1.0)), round(base * scale))
         if avail_width:

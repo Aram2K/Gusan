@@ -279,6 +279,8 @@ def test_writer_key(provider, key, base=None, model=None, post=None, get=None, t
                         json={"contents": [{"parts": [{"text": "ping"}]}],
                               "generationConfig": {"maxOutputTokens": 1}}, timeout=timeout)
         elif pid == actions.API_ANTHROPIC_ID:
+            import action_api
+            m = action_api.claude_model(m)      # (a retired Claude 3.x answers 404: test its current model)
             resp = post(f"{b}/messages",
                         headers={"x-api-key": key, "anthropic-version": "2023-06-01",
                                  "Content-Type": "application/json"},

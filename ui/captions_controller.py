@@ -8,8 +8,8 @@ Words in - the same engine as Transcribes with (founder, 2026-11-11: quality fir
     and each finished one (live_line; the finished pieces instead when the stream gave up);
   * Best accuracy, a model on this computer, your own key: that engine's finished pieces (caption_piece), a few
     seconds behind the voice, the transcript's own accurate words - still appearing word by word.
-Translations: action_api.interpret_phrase (Gusan Cloud's "interpret" mode), one sentence at a time, on
-captions.CaptionFeed's own thread.
+Translations: action_api.interpret_phrase (Gusan Cloud's "interpret" mode), a phrase at a time, on
+captions.CaptionFeed's own threads (a few at once, shown in the order said).
 """
 import logging
 import time
@@ -19,6 +19,10 @@ from PySide6.QtCore import QObject
 import captions
 
 logger = logging.getLogger("transcribe")
+
+# A caption translation takes about 2 s. Translations show in the order said, so one that hangs holds up the ones
+# behind it: after this long (to connect, then without a word from the server) the phrase is shown as spoken.
+TRANSLATE_TIMEOUT = (4, 6)
 
 WATCHED = frozenset({captions.CFG_ON, captions.CFG_LANGUAGE, captions.CFG_WHO, captions.CFG_IN_SHARE,
                      captions.CFG_FONT, captions.CFG_COLORS, captions.CFG_SIZE, "admin_tier_override",
@@ -175,7 +179,8 @@ class CaptionsController(QObject):
         rec = getattr(self.app, "recorder", None)
         getter = getattr(rec, "get_auth_token", None)
         token = getter() if callable(getter) else None
-        return action_api.interpret_phrase(text, target, token, source or "auto", context)
+        return action_api.interpret_phrase(text, target, token, source or "auto", context,
+                                           timeout=TRANSLATE_TIMEOUT)
 
 
-__all__ = ["CaptionsController", "WATCHED"]
+__all__ = ["CaptionsController", "TRANSLATE_TIMEOUT", "WATCHED"]

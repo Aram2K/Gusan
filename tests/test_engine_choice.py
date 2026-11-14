@@ -86,9 +86,25 @@ class TestWriter(unittest.TestCase):
         r = ec.runs_on({"action_model": "rule_based"}, "smart_actions", pro=True, downloaded=NOTHING)
         self.assertEqual(r["label"], "Gusan Cloud · DeepSeek V4.1 Flash")
         self.assertEqual(r["model_id"], actions.API_MANAGED_ID)
-        # Meeting notes are written by Mistral Small (smart-action routes by mode; Claude Sonnet 5.5 comes first once its key has a workspace).
+        # Meeting notes: the server's notes engine (its log, 2026-11-14: GPT-4.1 - the card said Mistral Small).
         r = ec.runs_on({"action_model": "rule_based"}, "meeting_notes", pro=True, downloaded=NOTHING)
-        self.assertEqual(r["label"], "Gusan Cloud · Mistral Small")
+        self.assertEqual(r["label"], "Gusan Cloud · GPT-4.1")
+
+    def test_meeting_notes_are_named_by_the_ai_writer_picked_in_settings(self):
+        """Founder 2026-11-14: "this should be based on what we chose for the LLM in the settings - if it's
+        Anthropic then it shouldn't say Mistral Small"."""
+        want = {"": "GPT-4.1", "deepseek": "GPT-4.1", "openai": "GPT-4.1", "claude": "Claude Sonnet 5.5",
+                "mistral": "Mistral Small", "gemini": "Gemini 2.5 Flash", "nonsense": "GPT-4.1"}
+        for pick, model in want.items():
+            cfg = {"action_model": "rule_based", "cloud_writer_model": pick}
+            self.assertEqual(ec.cloud_notes_model(cfg), model, pick)
+            r = ec.runs_on(cfg, "meeting_notes", pro=True, downloaded=NOTHING)
+            self.assertEqual(r["label"], "Gusan Cloud · " + model, pick)
+        self.assertEqual(set(ec.CLOUD_NOTES_MODELS) | {"deepseek"}, set(ec.CLOUD_WRITER_NAMES))
+        # (Smart Actions keep their own answer model for the same pick)
+        r = ec.runs_on({"action_model": "rule_based", "cloud_writer_model": "claude"}, "smart_actions", pro=True,
+                       downloaded=NOTHING)
+        self.assertEqual(r["label"], "Gusan Cloud · Claude Haiku 5.5")
         # Pro but signed out (no token): stays basic, as actions.process does.
         r = ec.runs_on({"action_model": "managed"}, "smart_actions", pro=True, signed_in=False,
                        downloaded=NOTHING)
@@ -595,7 +611,42 @@ class TestSetWriter(unittest.TestCase):
         self.assertEqual(ec.writer_model_for("openai", {"action_api_model": "deepseek-chat"}), "deepseek-chat")
         self.assertEqual(ec.writer_model_for("gemini", {"action_api_model": "gemini-1.5-flash"}),
                          "gemini-2.5-flash")
-        self.assertEqual(ec.writer_model_for("anthropic", {"action_api_model": "gpt-5.5"}), "claude-sonnet-4-6")
+        self.assertEqual(ec.writer_model_for("anthropic", {"action_api_model": "gpt-5.5"}), "claude-sonnet-5-5")
+
+    def test_claude_list_is_current_with_sonnet_5_5_first(self):
+        """Founder 2026-11-14: "fix it, default Sonnet 5.5" - Claude 3.x is retired (404)."""
+        models = [m for m, _note in ec.WRITER_PROVIDERS[actions.API_ANTHROPIC_ID]["models"]]
+        self.assertEqual(ec.WRITER_PROVIDERS[actions.API_ANTHROPIC_ID]["default"], "claude-sonnet-5-5")
+        self.assertEqual(models[:3], ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"])
+        self.assertFalse([m for m in models if m.startswith("claude-3")])
+        for m in models:
+            self.assertIn(m, ec.MODEL_NAMES, m)
+        self.assertEqual(ec.writer_model_for("anthropic", {"action_api_model": "claude-3-5-haiku-latest"}),
+                         "claude-haiku-5-5")
+        self.assertEqual(ec.writer_model_for("anthropic", {"action_api_model": "claude-3-opus-20240229"}),
+                         "claude-opus-5-5")
+
+    def test_the_smart_actions_cloud_line_names_the_writer_picked(self):
+        """Founder 2026-11-14: the Smart Actions card said DeepSeek with Claude picked (Claude answered)."""
+        self.assertEqual(ec.cloud_smart_line({"cloud_writer_model": "claude"}), "Claude Haiku 5.5")
+        self.assertEqual(ec.cloud_smart_line({"cloud_writer_model": "openai"}), "GPT-5.4 mini")
+        self.assertEqual(ec.cloud_smart_line({"cloud_writer_model": "mistral"}), "Mistral Small")
+        self.assertEqual(ec.cloud_smart_line({}), "DeepSeek V4.1 Flash \u00b7 fastest")
+
+    def test_one_name_for_the_model_that_answers_wherever_it_is_shown(self):
+        """Review 2026-11-14: the card's names were a second table, and "Runs on" still said the family
+        ("Anthropic Claude") where the card named the model."""
+        for fam in ec.CLOUD_WRITER_NAMES:
+            cfg = {"cloud_writer_model": fam}
+            smart = ec.runs_on(cfg, "smart_actions", pro=True, signed_in=True)
+            self.assertEqual(smart["model_name"], ec.cloud_answer_model(cfg), fam)
+            self.assertIn(smart["model_name"], ec.cloud_smart_line(cfg), fam)
+            live = ec.runs_on(cfg, "live_assistant", pro=True, signed_in=True)
+            self.assertEqual(live["model_name"], ec.cloud_answer_model(cfg, "live_assistant"), fam)
+        self.assertEqual(ec.cloud_answer_model({"cloud_writer_model": "openai"}, "live_assistant"), "GPT-5.4 nano")
+        notes = {fam: note for fam, _name, note in ec.CLOUD_WRITERS}
+        self.assertEqual(notes["openai"], "GPT-5.4 mini \u00b7 Live Assistant: GPT-5.4 nano")   # the picker, as before
+        self.assertEqual(notes["claude"], "Claude Haiku 5.5")
         self.assertEqual([m[1] for m in ec.writer_models("cerebras")], ["Qwen 3.8 27B", "gpt-oss 120B"])
 
     def test_catalogs_match_the_backend(self):

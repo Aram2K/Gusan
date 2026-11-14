@@ -86,7 +86,7 @@ class TestSelectionTake(unittest.TestCase):
         self.assertEqual(mode, SELECTION)
         self.assertIn("<selected_text>\nBonjour à tous.\n</selected_text>", text)
         self.assertIn("<instruction>call David and book the room</instruction>", text)
-        self.assertEqual(app.pastes, [("Hello everyone.", {"restore": False, "rich": True})])
+        self.assertEqual(app.pastes, [("Hello everyone.", {"rich": True})])       # (it stays on the clipboard)
         self.assertEqual(app.cards, [])
 
     def test_history_keeps_the_words_and_the_result_never_the_selection(self):
@@ -111,6 +111,16 @@ class TestSelectionTake(unittest.TestCase):
         app = self._run(selected="")
         self.assertEqual([m for m, _t in app.processed], [SMART])
         self.assertEqual(app.pastes[0][1], {"rich": True})
+
+    def test_a_smart_action_with_nowhere_to_type_is_copied_and_shown_too(self):
+        """Founder 2026-11-14: "it's just saying pasted, but I don't see anything ... if it's not pasted, then it
+        should show the pop-up screen and always copy on the clipboard" - every Smart Action, selection or not."""
+        app = self._run(selected="", editable=False)
+        self.assertEqual([m for m, _t in app.processed], [SMART])
+        self.assertEqual(app.pastes, [])
+        todo = "## To-do\n\n- [ ] Call David"
+        self.assertEqual(app.cards, [("copied", todo)])
+        self.assertEqual(app.copied, [todo])
 
     def test_no_ai_that_can_read_it_is_a_smart_action_as_before(self):
         app = self._run(engine="rule_based", token=None)

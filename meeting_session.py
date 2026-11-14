@@ -354,6 +354,13 @@ _SIGNALS = (
     ("caption_piece", (str, str, str)),
     # Every sentence the live stream finished (text, who, its language; GUI thread) - live captions on Fast.
     ("caption_line", (str, str, str)),
+    # The conversation in the caption language (meeting_translation.py): a line of the live transcript got its
+    # translation (its index in live_lines(), the text; GUI thread); a meeting folder's saved transcript did
+    # (translation.json was written; any thread).
+    ("line_translated", (int, str)),
+    ("translation_saved", (str,)),
+    # internal: a translated live line (index, language, text), worker -> GUI thread.
+    ("_line_tr", (int, str, str)),
     # internal: a transcribed piece + speaker hint, worker -> GUI thread.
     ("_piece", (str, str)),
     # internal: the live stream's partial words + speaker hint, stream thread -> GUI thread.
@@ -461,15 +468,20 @@ def split_sentences(text):
     return [s for s in re.split(r"(?<=[.!?])\s+", (text or "").strip()) if s]
 
 
-def engine_label(engine):
+def engine_label(engine, cfg=None):
     """Plain "who wrote the notes" text for an engine id (meta
-    notes_engine_label; the page prefixes "Written by")."""
+    notes_engine_label; the page prefixes "Written by"). ``cfg`` (the notes pass it): Gusan Cloud is named
+    by the model that writes NOTES for the AI writer picked in Settings (engine_choice.cloud_notes_model)."""
     local = {"qwen_tiny": "Qwen 1.5B", "qwen_3b": "Qwen 3B", "qwen_7b": "Qwen 7B",
              "gemma_2b": "Gemma 2 2B"}
     if engine == actions.API_MANAGED_ID:
         try:
-            import hardware
-            model = hardware.CLOUD_WRITER_MODEL
+            if cfg is not None:
+                import engine_choice
+                model = engine_choice.cloud_notes_model(cfg)
+            else:
+                import hardware
+                model = hardware.CLOUD_WRITER_MODEL
         except Exception:
             model = "Mistral Small"
         return "Gusan Cloud · " + model
@@ -627,6 +639,13 @@ class MeetingCore:
         self._notes_notice = ""
         self._live_text = ""
         self._live_lines = []
+        # The conversation in the caption language (meeting_translation.py): the live lines' translations by
+        # their index, the language they are in, the worker pool, and the folders whose saved transcript is
+        # being translated.
+        self._tr_lines = {}
+        self._tr_language = ""
+        self._translator = None
+        self._tr_folders = set()
         self._live_summary_text = ""
         self._last_summary_at = 0.0
         self._summary_running = False
@@ -688,6 +707,7 @@ class MeetingCore:
             on_change=self._speakers_changed, spawn=lambda fn: self._spawn(fn))
         self._make_signals()
         self._piece.connect(self._on_piece)
+        self._line_tr.connect(self._on_line_translated)
         self._partial.connect(self._on_partial_gui)
         self._cap_piece.connect(self._on_cap_piece_gui)
         self._cap_line.connect(self._on_cap_line_gui)
@@ -774,6 +794,9 @@ class MeetingCore:
                 self.transcript_saved.emit(folder)
             except RuntimeError:
                 pass                             # session already destroyed
+            language = self.translation_language()
+            if language:                         # captions were on in a language: the saved conversation too
+                self.translate_meeting(folder, language)
 
     @property
     def identifying(self):
@@ -1061,6 +1084,7 @@ class MeetingCore:
         self._paused_total = 0.0
         self._live_text = ""
         self._live_lines = []
+        self._drop_translator()
         self._live_summary_text = ""
         self._last_summary_at = time.time()
         self._summary_len_at_last = 0
@@ -1498,6 +1522,7 @@ class MeetingCore:
         """Restore the recorder callbacks that were active before the meeting
         took over (the dictation/overlay handlers). Falls back to safe no-ops so
         a missing saved handler can never leave a dangling reference."""
+        self._drop_translator()             # the recording is over: no live line is translated any more
         if not (self.app and getattr(self.app, "recorder", None)):
             return
         rec = self.app.recorder
@@ -1730,6 +1755,102 @@ class MeetingCore:
         self._live_lines.append((who or "", piece))
         self.chunk_text.emit(piece)
         self.live_line.emit(piece, who or "")
+        self._translate_line(len(self._live_lines) - 1, piece)
+
+    # ── the conversation in the caption language (meeting_translation.py) ──
+    def translation_language(self):
+        """The language the conversation is also kept in right now ("" = none): the caption language while live
+        captions are on (Pro, never in Privacy mode)."""
+        try:
+            import meeting_translation
+            app = self.app
+            pro = bool(app.is_pro()) if callable(getattr(app, "is_pro", None)) else False
+            return meeting_translation.target(self._cfg(), pro)
+        except Exception:
+            return ""
+
+    def live_translation(self):
+        """(language, {index in live_lines(): translation}) of the meeting being recorded."""
+        return self._tr_language, dict(self._tr_lines)
+
+    def _translate_text(self, text, source, target, context):
+        import action_api
+        rec = getattr(self.app, "recorder", None) if self.app else None
+        getter = getattr(rec, "get_auth_token", None)
+        token = getter() if callable(getter) else None
+        return action_api.interpret_phrase(text, target, token, source or "auto", context, timeout=(5, 10))
+
+    def _drop_translator(self):
+        tr, self._translator = self._translator, None
+        self._tr_lines, self._tr_language = {}, ""
+        if tr is not None:
+            tr.close()
+
+    def _translate_line(self, index, text):
+        """GUI thread: a new line of the live transcript - translated too while a caption language is on. When the
+        language is picked (or changed) in the middle of a meeting, the lines said before follow."""
+        language = self.translation_language()
+        tr = self._translator
+        if tr is not None and tr.language != language:
+            self._drop_translator()
+            tr = None
+        if not language:
+            return
+        try:
+            if tr is None:
+                import meeting_translation
+                tr = self._translator = meeting_translation.Translator(
+                    self._translate_text, language,
+                    lambda key, _text, got, lang=language: self._line_tr.emit(int(key), lang, got or ""))
+                self._tr_language = language
+                for i, (_who, earlier) in enumerate(self._live_lines[:index]):
+                    tr.submit(i, earlier)
+            tr.submit(index, text)
+        except Exception:
+            logger.debug("live line not translated", exc_info=True)
+
+    def _on_line_translated(self, index, language, text):
+        # GUI thread
+        if not text or language != self._tr_language or not (0 <= index < len(self._live_lines)):
+            return
+        self._tr_lines[index] = text
+        self.line_translated.emit(index, text)
+
+    def translate_meeting(self, folder, language=None):
+        """Translate a saved meeting's transcript into ``language`` (default: the one its translation.json is in,
+        else the caption language) in the background; ``translation_saved(folder)`` when it is there. What is
+        already translated is kept, so asking again only fills what is missing (a transcript rewritten with the
+        speakers' names). Returns False when there is nothing to do (no language, or it is already running)."""
+        folder = str(folder or "")
+        if not folder:
+            return False
+        try:
+            import meeting_translation
+            old = meeting_translation.load(folder)
+            language = language or (old["language"] if old else "") or self.translation_language()
+            if not language or folder in self._tr_folders:
+                return False
+            self._tr_folders.add(folder)
+            if old is None or old["language"] != language:
+                meeting_translation.save(folder, language, {})      # the pages offer the language at once
+        except Exception:
+            logger.debug("meeting not translated", exc_info=True)
+            return False
+
+        def work():
+            try:
+                n = meeting_translation.translate_saved(folder, language, self._translate_text)
+                logger.info("Transcript translated (%s): %d paragraphs", language, n)
+            except Exception:
+                logger.warning("Translating the transcript failed", exc_info=True)
+            finally:
+                self._tr_folders.discard(folder)
+                try:
+                    self.translation_saved.emit(folder)
+                except RuntimeError:
+                    pass                         # session already destroyed
+        self._spawn(work)
+        return True
 
     # ── rolling recap ("So far") ──
     def _maybe_recap(self, now=None):
@@ -2494,7 +2615,7 @@ class MeetingCore:
             if (kind == "cloud" and not has_key) or (kind == "managed" and not has_token):
                 # Degrading keeps the notes alive - but NEVER silently: the
                 # notice says what happened, and Retry stays offered.
-                downgraded_from = engine_label(engine) if kind == "managed" \
+                downgraded_from = engine_label(engine, self._cfg()) if kind == "managed" \
                     else info.get("label", engine)
                 engine = actions.RULE_BASED_ID
             used = engine
@@ -2565,7 +2686,7 @@ class MeetingCore:
             except Exception:
                 logger.warning("Could not save meeting artifacts", exc_info=True)
             self._write_meta(**self._result_meta(
-                notes_engine=used, notes_engine_label=engine_label(used), notes_error=None))
+                notes_engine=used, notes_engine_label=engine_label(used, self._cfg()), notes_error=None))
             self._notes_saved.set()
             self._name_meeting(notes, engine, engine_config, used)
             self._save_history_entry(notes)
@@ -3456,6 +3577,9 @@ if _QObject is not None:
         sig_summary = _QtSignal(str)
         sig_status = _QtSignal(str)
         _piece = _QtSignal(str, str)
+        line_translated = _QtSignal(int, str)
+        translation_saved = _QtSignal(str)
+        _line_tr = _QtSignal(int, str, str)
         live_partial = _QtSignal(str, str)
         _partial = _QtSignal(str, str)
         caption_piece = _QtSignal(str, str, str)

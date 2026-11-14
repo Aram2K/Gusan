@@ -186,6 +186,11 @@ class TestHelpers(unittest.TestCase):
 
     def test_labels_titles_and_sentences(self):
         self.assertEqual(msess.engine_label("managed"), "Gusan Cloud · Mistral Small")
+        # the notes name the model that writes NOTES for the AI writer picked in Settings (founder 2026-11-14)
+        self.assertEqual(msess.engine_label("managed", {}), "Gusan Cloud · GPT-4.1")
+        self.assertEqual(msess.engine_label("managed", {"cloud_writer_model": "claude"}),
+                         "Gusan Cloud · Claude Sonnet 5.5")
+        self.assertEqual(msess.engine_label("qwen_tiny", {"cloud_writer_model": "claude"}), "This computer · Qwen 1.5B")
         self.assertEqual(msess.engine_label("qwen_tiny"), "This computer · Qwen 1.5B")
         self.assertEqual(msess.engine_label("rule_based"), "Built-in formatter")
         self.assertTrue(msess.engine_label("api_cerebras").endswith("· your key"))
@@ -224,7 +229,9 @@ class TestStart(_Base):
         self.assertEqual(phases.calls, [("recording",)])
         self.assertTrue(s.is_busy)
         self.assertEqual(s.active_dir(), s.meeting_dir)
-        self.assertEqual(app.recorder.started, {"capture_mode": "default_mic", "language": "en"})
+        # (a Pro person's meeting on Automatic: Best accuracy - founder 2026-11-14)
+        self.assertEqual(app.recorder.started, {"capture_mode": "default_mic", "language": "en",
+                                                "speech": ("managed", None, "best")})
         # The recorder now reports to the session.
         self.assertEqual(app.recorder.on_chunk_complete, s._on_chunk_transcribed)
         self.assertEqual(app.recorder.on_source_levels, s._on_source_levels)
@@ -241,7 +248,8 @@ class TestStart(_Base):
                    meeting_audio_mode="system_only")
         s = self.session(app)
         s.start()
-        self.assertEqual(app.recorder.started, {"capture_mode": "system_only", "language": "fr"})
+        self.assertEqual(app.recorder.started, {"capture_mode": "system_only", "language": "fr",
+                                                "speech": ("managed", None, "best")})
         self.assertEqual(s._notes_engine, "qwen_3b")
         self.assertEqual(s.title, "Untitled Meeting")
         self.assertEqual(s._source, "page")
@@ -562,7 +570,8 @@ class TestLiveCaptionWords(_Base):
     def test_captions_are_real_time_only_on_fast(self):
         """Founder 2026-11-11: Best accuracy - the accurate words, later; Fast - real time. Same in every language."""
         for cfg, speech_pick, want in (
-                ({"backend": "managed", "managed_speech_profile": "fast"}, "", True),
+                # Automatic, a Pro person's meeting: Best accuracy (founder 2026-11-14), whatever Dictation runs
+                ({"backend": "managed", "managed_speech_profile": "fast"}, "", False),
                 ({"backend": "managed", "managed_speech_profile": "best"}, "", False),
                 ({"backend": "local"}, "cloud", True),                    # the meeting's own pick: Fast
                 ({"backend": "local"}, "cloud:best", False),
@@ -612,7 +621,7 @@ class TestOutcome(_Base):
                          "## Summary\n- Ship Friday")
         meta = ms.load_meta(folder)
         self.assertEqual(meta["notes_engine"], "managed")
-        self.assertEqual(meta["notes_engine_label"], "Gusan Cloud · Mistral Small")
+        self.assertEqual(meta["notes_engine_label"], "Gusan Cloud · GPT-4.1")
         self.assertIs(meta["seen"], False)
         self.assertEqual(meta["language"], "en")
         self.assertEqual(meta["notices"], [])
@@ -3394,8 +3403,8 @@ class TestLiveSessionStart(_Base):
     def test_a_meeting_in_armenian_on_automatic_goes_to_gusan_cloud_on_a_pro_plan(self):
         for source in ("page", "calendar", "classic"):
             app, s = self._start(source, backend="local")              # Dictation: Whisper on this computer
-            self.assertEqual(app.recorder.started["speech"], ("managed", None, "fast"), source)
-            self.assertEqual(s._session_speech, ("managed", None, "fast"), source)
+            self.assertEqual(app.recorder.started["speech"], ("managed", None, "best"), source)     # (Best accuracy, like every
+            self.assertEqual(s._session_speech, ("managed", None, "best"), source)                  # Pro meeting on Automatic)
 
     def test_a_meeting_in_armenian_without_pro_takes_the_armenian_model_when_it_is_here(self):
         with patch("engine_choice.hy_usable", return_value=True):
@@ -3406,12 +3415,26 @@ class TestLiveSessionStart(_Base):
         self.assertNotIn("speech", app.recorder.started)                 # Whisper, and the card's hint says why
         self.assertIsNone(s._session_speech)
 
-    def test_a_meeting_in_another_language_on_automatic_keeps_dictations_model(self):
+    def test_a_meeting_in_another_language_on_automatic_keeps_dictations_model_without_pro(self):
         for source in ("page", "calendar", "classic"):
-            app, s = self._start(source, backend="local", live_assist_language="fr")
+            app, s = self._start(source, pro=False, backend="local", live_assist_language="fr")
             self.assertEqual(app.recorder.started, {"capture_mode": "default_mic", "language": "fr"}, source)
             self.assertEqual(app.prewarmed, [{}], source)
             self.assertIsNone(s._session_speech, source)
+
+    def test_a_pro_persons_meeting_on_automatic_is_best_accuracy_in_any_language(self):
+        """Founder 2026-11-14: "by default, if they are pro, they should have the best accuracy model" - meetings
+        only; a pick of their own (Fast, a model on this computer) and Privacy mode still win."""
+        for source in ("page", "calendar", "classic"):
+            app, s = self._start(source, backend="local", live_assist_language="fr")
+            self.assertEqual(app.recorder.started["speech"], ("managed", None, "best"), source)
+            self.assertEqual(s._session_speech, ("managed", None, "best"), source)
+        app, s = self._start("page", backend="local", meeting_speech_model="cloud")
+        self.assertEqual(s._session_speech, ("managed", None, "fast"))
+        app, s = self._start("page", backend="local", meeting_speech_model="small")
+        self.assertEqual(s._session_speech[:2], ("local", "small"))
+        app, s = self._start("page", backend="local", privacy_mode=True, live_assist_language="fr")
+        self.assertIsNone(s._session_speech)
 
     def test_a_problem_in_the_meetings_choice_is_dictations_model_not_a_refused_start(self):
         app = _App(pro=True, backend="local")

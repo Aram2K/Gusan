@@ -245,11 +245,50 @@ class TestCloudWriterChoice(unittest.TestCase):
                             config={"_managed_token": "T", "cloud_writer_model": "gemini"})
         self.assertEqual(seen.get("prefer"), "gemini")
 
+    def test_meeting_notes_pass_the_pick_and_the_meetings_id(self):
+        """Review 2026-11-14: the streamed notes request sent neither - the writer picked in Settings never reached
+        the server (the card said Claude, the server wrote with its own first engine), and without the meeting's id
+        a Free account's retry of the same meeting counted as a second cloud note and was refused."""
+        seen = {}
+
+        def fake(text, mode, token, on_token, **kw):
+            seen.update(kw)
+            return "## Summary\n- ok"
+        with mock.patch.object(actions.action_api, "run_managed_action_stream", side_effect=fake):
+            actions.process("Anna: we ship on Tuesday.", actions.ACTION_MEETING_NOTES, model=actions.API_MANAGED_ID,
+                            config={"_managed_token": "T", "cloud_writer_model": "claude",
+                                    "_note_ref": "C:/meetings/20261114_141508"})
+        self.assertEqual((seen.get("prefer"), seen.get("note_ref")), ("claude", "C:/meetings/20261114_141508"))
+        body = {}
+
+        class Resp:
+            status_code = 200
+            headers = {"Content-Type": "application/json"}
+
+            def json(self):
+                return {"text": "## Summary\n- ok"}
+
+            def close(self):
+                pass
+
+        def post(url, json=None, **kw):
+            body.update(json or {})
+            return Resp()
+        with mock.patch.object(actions.action_api.requests, "post", side_effect=post):
+            actions.process("Anna: we ship on Tuesday.", actions.ACTION_MEETING_NOTES, model=actions.API_MANAGED_ID,
+                            config={"_managed_token": "T", "cloud_writer_model": "claude",
+                                    "_note_ref": "C:/meetings/20261114_141508"})
+        self.assertEqual((body.get("mode"), body.get("model"), body.get("note_ref")),
+                         ("meeting_notes", "claude", "C:/meetings/20261114_141508"))
+
     def test_the_server_moves_the_pick_first(self):
         src = open(os.path.join(ROOT, "supabase", "functions", "smart-action", "index.ts"), encoding="utf-8").read()
         self.assertIn("function preferRoutes(", src)
         # meeting notes and the Interpreter's phrases (mode "interpret") keep their own order
-        self.assertIn("const routes = notes || interpret ? chain : preferRoutes(chain, body?.model);", src)
+        # ... for meeting notes too (founder 2026-11-14); only the Interpreter keeps its own order
+        self.assertIn("const routes = interpret ? chain : notes ? preferNotes(chain, body?.model) : "
+                      "preferRoutes(chain, body?.model);", src)
+        self.assertIn("function preferNotes(", src)
         for fam in action_api.CLOUD_WRITER_FAMILIES:
             self.assertIn('"%s"' % fam, src)
 

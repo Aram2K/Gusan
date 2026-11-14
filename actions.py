@@ -336,9 +336,16 @@ def process(text, mode, source_lang="auto", target_lang="en", model=RULE_BASED_I
         if token:
             try:
                 if mode == ACTION_MEETING_NOTES:
+                    # With what the request for an answer carries below: the meeting's id (note_ref - a Free
+                    # account's one cloud note a month: a retry or the title of the SAME meeting does not count
+                    # again) and the AI writer picked in Settings (prefer). The streamed notes sent neither
+                    # (review 2026-11-14): the pick never reached the server, and with no id the server counted
+                    # every request as a new meeting, so a Free retry was refused.
                     return _notes_from_stream(lambda info: action_api.run_managed_action_stream(
                         text, mode, token, _drop_token, source_lang=source_lang, target_lang=target_lang,
-                        vocab_block=vocab_block, image_b64=(config or {}).get("_image_png_b64"), info=info))
+                        vocab_block=vocab_block, image_b64=(config or {}).get("_image_png_b64"), info=info,
+                        note_ref=(config or {}).get("_note_ref") or "",
+                        prefer=(config or {}).get("cloud_writer_model") or ""))
                 return _managed_answer(
                     text, mode, token, source_lang=source_lang, target_lang=target_lang,
                     vocab_block=vocab_block,

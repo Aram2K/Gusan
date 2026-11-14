@@ -161,7 +161,7 @@ def test_a_meeting_from_start_to_notes_on_the_gui_thread(qapp, meetings_root):
     assert meeting_store.load_my_notes(folder) == "Ask Anna about the budget"
     meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
     assert meta["title"] == "Weekly sync" and meta["attendees_list"] == ["Anna", "David"]
-    assert meta["notes_engine_label"] == "Gusan Cloud · Mistral Small"
+    assert meta["notes_engine_label"] == "Gusan Cloud · GPT-4.1"          # the server's notes engine (no pick)
     assert meta["seen"] is False and meta["language"] == "en"
     assert ("release",) in app.calls
     # The recorder's dictation callbacks are back.
@@ -260,6 +260,11 @@ def test_classic_window_follows_the_session(qapp, meetings_root, meetings_window
 
     live.stop_btn.click()
     assert s.state == s.STATE_PROCESSING
+    assert page.current_view() == "list"                   # Stop: back to the meetings (founder 2026-11-14) ...
+    assert _wait_for(lambda: s.phase == "done", timeout=10)
+    assert page.current_view() == "list"                   # ... and nobody is moved when the notes land
+    assert _wait_for(lambda: bool(page.list_view.meetings.rows), timeout=10)
+    page.list_view.meetings.rows[0].click()
     assert _wait_for(lambda: page.current_view() == "notes", timeout=10)
     nv = page.notes_view
     assert nv.data["title"] == "From elsewhere"
@@ -296,7 +301,8 @@ def test_classic_window_start_and_retry(qapp, meetings_root, monkeypatch):
     assert s.start(title="Board", attendees="CEO, CFO", language="en")[0]
     assert s.state == s.STATE_RECORDING and s.title == "Board"
     assert s._source == "page"
-    assert app.recorder.started == {"capture_mode": "default_mic", "language": "en"}
+    assert app.recorder.started == {"capture_mode": "default_mic", "language": "en",
+                                    "speech": ("managed", None, "best")}      # (Pro, Automatic: Best accuracy)
 
     # The notes fail once: the transcript is kept and Retry rewrites them.
     calls = []

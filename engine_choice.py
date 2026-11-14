@@ -432,8 +432,12 @@ SMART_SPEECH_SAME_LABEL = "Same as Dictation"
 #   "own:google[:id]"   your own Google key, one of GEMINI_SPEECH_MODELS (never in Privacy mode)
 LIVE_SPEECH_KEY = "live_assist_speech_model"
 # Meetings' own "Transcribes with" (Meetings card, between Meeting language and Notes written by): the same
-# values, rows and Automatic rules as the Live Assistant's, read for a meeting - see meeting_view.
+# values and rows as the Live Assistant's, read for a meeting - see meeting_view. Its Automatic has one rule of
+# its own (founder 2026-11-14: "by default, if they are pro, they should have the best accuracy model" - for
+# meetings only): a signed-in Pro person, Privacy mode off, gets Gusan Cloud Best accuracy. Everyone else, and
+# a Pro person in Privacy mode, keeps the Live Assistant's Automatic (Dictation's model, with its language rule).
 MEETING_SPEECH_KEY = "meeting_speech_model"
+MEETING_VIEW = "_meeting_view"                 # set by meeting_view: this cfg is read for a meeting
 LIVE_SPEECH_AUTO = ""
 LIVE_SPEECH_AUTO_LABEL = "Automatic"
 LIVE_SPEECH_CLOUD = "cloud"
@@ -494,11 +498,14 @@ CLOUD_SMART_MODEL = hardware.CLOUD_SMART_MODEL        # Smart Actions on Gusan C
 # fallback (smart-action preferRoutes). Meeting notes keep the server's order. OpenAI and Claude
 # are named by family: the server runs a different model of each for answers and for notes.
 CLOUD_WRITER_KEY = "cloud_writer_model"
+# The model that answers for a pick named by its family: (Smart Actions, the Live Assistant) - smart-action's
+# OPENAI_FAST_MODEL / OPENAI_LIVE_MODEL / CLAUDE_FAST_MODEL. Named here once: the picker's notes, the Smart Actions
+# card and the "Runs on" lines all read it (cloud_answer_model).
+CLOUD_ANSWER_MODELS = {"openai": ("GPT-5.4 mini", "GPT-5.4 nano"), "claude": ("Claude Haiku 5.5", "Claude Haiku 5.5")}
 CLOUD_WRITERS = (
     ("deepseek", hardware.CLOUD_LIVE_MODEL, "Gusan's default · fastest"),
-    # The models smart-action runs by default for answers (OPENAI_FAST_MODEL / OPENAI_LIVE_MODEL / CLAUDE_FAST_MODEL).
-    ("openai", "OpenAI GPT", "GPT-5.4 mini · Live Assistant: GPT-5.4 nano"),
-    ("claude", "Anthropic Claude", "Claude Haiku 5.5"),
+    ("openai", "OpenAI GPT", "%s · Live Assistant: %s" % CLOUD_ANSWER_MODELS["openai"]),
+    ("claude", "Anthropic Claude", CLOUD_ANSWER_MODELS["claude"][0]),
     ("mistral", "Mistral Small", "By Mistral AI"),
     ("gemini", "Gemini 2.5 Flash", "By Google"),
 )
@@ -513,6 +520,39 @@ def cloud_writer_family(cfg):
 
 def cloud_writer_name(cfg):
     return CLOUD_WRITER_NAMES[cloud_writer_family(cfg)]
+
+
+def cloud_answer_model(cfg, feature="smart_actions"):
+    """The model that answers on Gusan Cloud for the writer picked: its own name, or - for a pick named by family
+    (OpenAI, Claude) - the family's model for ``feature`` ("smart_actions" | "live_assistant"). Founder 2026-11-14:
+    the Smart Actions card said DeepSeek with Claude picked (the server log showed Claude Haiku 5.5 answering)."""
+    fam = cloud_writer_family(cfg)
+    models = CLOUD_ANSWER_MODELS.get(fam)
+    if models:
+        return models[1 if feature == "live_assistant" else 0]
+    return CLOUD_WRITER_NAMES[fam]
+
+
+# The model that writes MEETING NOTES on Gusan Cloud for the writer picked (smart-action, mode "meeting_notes":
+# OpenAI's notes model -> Claude Sonnet 5.5 -> Mistral Small -> Gemini Flash, the picked family first). Gusan's
+# default pick (DeepSeek) writes no notes: the server's first engine does. Founder 2026-11-14: "this should be
+# based on what we chose for the LLM in the settings - if it's Anthropic then it shouldn't say Mistral Small"
+# (the card said Mistral Small whatever was picked, and the server's log showed GPT-4.1 writing them).
+CLOUD_NOTES_DEFAULT = "GPT-4.1"
+CLOUD_NOTES_MODELS = {"openai": CLOUD_NOTES_DEFAULT, "claude": "Claude Sonnet 5.5", "mistral": "Mistral Small",
+                      "gemini": "Gemini 2.5 Flash"}
+
+
+def cloud_notes_model(cfg):
+    """The model that writes meeting notes on Gusan Cloud, for the writer picked in Settings."""
+    return CLOUD_NOTES_MODELS.get(cloud_writer_family(cfg), CLOUD_NOTES_DEFAULT)
+
+
+def cloud_smart_line(cfg):
+    """The Gusan Cloud line of the Smart Actions writer card: the model that answers, for the pick."""
+    model = cloud_answer_model(cfg)
+    return "%s · fastest" % model if cloud_writer_family(cfg) == "deepseek" else model
+
 
 # Mistral's /audio/transcriptions only takes Voxtral Mini (same as main.py).
 MISTRAL_STT_DEFAULT = "voxtral-mini-latest"
@@ -569,11 +609,11 @@ WRITER_PROVIDERS = {
     actions.API_ANTHROPIC_ID: {
         "name": "Anthropic Claude", "key_field": "action_api_key", "key_fallback": None,
         "base_url": None, "default_url": "https://api.anthropic.com/v1",
-        "default": "claude-sonnet-4-6",
-        "models": [("claude-opus-4-8", ""), ("claude-sonnet-4-6", ""), ("claude-haiku-4-5-20251001", "cheaper"),
-                   ("claude-3-5-sonnet-latest", ""), ("claude-3-5-haiku-latest", "cheaper"),
-                   ("claude-3-5-opus-latest", ""), ("claude-3-haiku-20240307", "cheaper"),
-                   ("claude-3-opus-20240229", "")],
+        # Founder 2026-11-14: default Sonnet 5.5. Claude 3.x is retired (404) and gone from the list
+        # (action_api.claude_model moves a saved one to its family's current model).
+        "default": "claude-sonnet-5-5",
+        "models": [("claude-sonnet-5-5", ""), ("claude-opus-5-5", ""), ("claude-haiku-5-5", "cheaper"),
+                   ("claude-opus-4-8", ""), ("claude-sonnet-4-6", ""), ("claude-haiku-4-5-20251001", "cheaper")],
     },
 }
 _PROVIDER_ALIASES = {
@@ -591,10 +631,10 @@ MODEL_NAMES = {
     "gemini-2.5-pro": "Gemini 2.5 Pro", "gemini-3.5-flash": "Gemini 3.5 Flash",
     "gemini-3.1-flash-lite": "Gemini 3.1 Flash-Lite",
     "gemini-3-flash-preview": "Gemini 3 Flash (preview)",
+    "claude-sonnet-5-5": "Claude Sonnet 5.5", "claude-opus-5-5": "Claude Opus 5.5",
+    "claude-haiku-5-5": "Claude Haiku 5.5",
     "claude-opus-4-8": "Claude Opus 4.8", "claude-sonnet-4-6": "Claude Sonnet 4.6",
-    "claude-haiku-4-5-20251001": "Claude Haiku 4.5", "claude-3-5-sonnet-latest": "Claude 3.5 Sonnet",
-    "claude-3-5-haiku-latest": "Claude 3.5 Haiku", "claude-3-5-opus-latest": "Claude 3.5 Opus",
-    "claude-3-haiku-20240307": "Claude 3 Haiku", "claude-3-opus-20240229": "Claude 3 Opus",
+    "claude-haiku-4-5-20251001": "Claude Haiku 4.5",
     "gpt-5.5": "GPT-5.5", "gpt-5.4": "GPT-5.4", "gpt-5.4-mini": "GPT-5.4 mini", "gpt-4o": "GPT-4o",
     "gpt-4o-mini": "GPT-4o mini", "gpt-3.5-turbo": "GPT-3.5 Turbo",
     "ministral-14b-2512": "Ministral 14B", "ministral-8b-2512": "Ministral 8B",
@@ -675,6 +715,9 @@ def writer_model_for(provider, cfg):
     saved = str((cfg or {}).get("action_api_model") or "").strip()
     if not saved or saved in _DEAD_MODELS:
         return info["default"]
+    if pid == actions.API_ANTHROPIC_ID and saved.lower().startswith("claude-3"):
+        import action_api
+        return action_api.claude_model(saved)        # retired (404): its family's current model
     for other, other_info in WRITER_PROVIDERS.items():
         if other != pid and any(saved == m for m, _ in other_info["models"]):
             return info["default"]
@@ -1336,6 +1379,8 @@ def _live_route(cfg, pro, language=None, signed_in=None):
     if kind == LIVE_OWN and not private and _has_google_key(cfg):
         return ("google", None, model), False
     # Automatic (also a pick that can't run now)
+    if cfg.get(MEETING_VIEW) and allowed:
+        return ("managed", None, CLOUD_BEST), True       # a Pro person's meetings: Best accuracy by default
     lang = live_speech_language(cfg, language)
     if (speech_langs.local_whisper_poor(lang, cfg)
             and (speech_engine(cfg, pro)["kind"] == "local" or _mistral_cannot(cfg, lang))):
@@ -1489,7 +1534,10 @@ def live_speech_engine(cfg, pro, signed_in=None, language=None, downloaded=None)
     res["auto"] = automatic
     res["downgrade"] = ""             # (the server chooses by profile now: whatever ran is simply named)
     res["language_name"] = speech_langs.local_whisper_poor(lang, cfg)
-    res["reason"] = "language" if (automatic and backend in ("managed", "local")) else ""
+    # Why Automatic left Dictation's model: "pro" (a Pro person's meetings default to Best accuracy), "language"
+    # (local Whisper is poor at the call's language).
+    pro_default = automatic and backend == "managed" and cloud_profile(cloud) == CLOUD_BEST
+    res["reason"] = "pro" if pro_default else "language" if (automatic and backend in ("managed", "local")) else ""
     res["note"] = live_speech_note(cfg, pro, language, signed_in, engine=res)
     return res
 
@@ -1590,7 +1638,7 @@ def meeting_view(cfg):
     Live Assistant's, and the meeting language ("" = the dictation language) in place of Call language."""
     cfg = cfg or {}
     return dict(cfg, **{LIVE_SPEECH_KEY: cfg.get(MEETING_SPEECH_KEY) or "",
-                        "live_assist_language": cfg.get("meeting_language") or ""})
+                        "live_assist_language": cfg.get("meeting_language") or "", MEETING_VIEW: True})
 
 
 def _meeting_context(app_or_cfg, pro=None, signed_in=None):
@@ -1942,7 +1990,8 @@ def writer_engine(cfg, pro, signed_in, feature="smart_actions", action_model=Non
         return _basic(feature)
     if kind == "managed":
         if token:
-            model = cloud_writer_name(cfg) if feature == "smart_actions" else CLOUD_WRITER_MODEL
+            model = (cloud_answer_model(cfg, feature) if feature == "smart_actions"
+                     else cloud_notes_model(cfg) if feature == "meeting_notes" else CLOUD_WRITER_MODEL)
             return _result(feature, "cloud", GUSAN_CLOUD, GUSAN_CLOUD, model, WHERE_CLOUD,
                            f"{GUSAN_CLOUD} · {model}", actions.API_MANAGED_ID, pro=True)
         return _basic(feature)
@@ -1974,7 +2023,7 @@ def live_engine(cfg, pro, signed_in, downloaded=None):
     if cfg.get("privacy_mode") or cfg.get("live_assist_writer") == "local":
         chosen = engine if kind == "local_llm" else _first_on_disk(on_disk)
     elif token:
-        name = cloud_writer_name(cfg)
+        name = cloud_answer_model(cfg, feature)
         return _result(feature, "cloud", GUSAN_CLOUD, GUSAN_CLOUD, name, WHERE_CLOUD,
                        f"{GUSAN_CLOUD} · {name}", actions.API_MANAGED_ID, pro=True)
     elif (engine == actions.RULE_BASED_ID or kind is None

@@ -5,30 +5,37 @@ What he asked for, and the decisions:
   * captions follow Transcribes with ("if I have chosen best accuracy I don't care much about the speed; if I choose
     Fast I want the real time"): on Fast they take the meeting's live stream (Gladia, or OpenAI's live model for
     Armenian) word by word as it is being said; on Best accuracy, a model on this computer or your own key they take
-    that engine's finished pieces - later, the accurate words. A piece (up to ~25 s of talk) is let out at reading
-    pace (PACE_WPS words a second, faster when behind: everything shown within CATCH_UP_S), so two lines never skip
-    words.
-  * translated or not (cfg captions_language: "" = as spoken): a translation needs the whole sentence, so translated
-    captions come a sentence at a time, about a second after it ends (the server's "interpret" mode, the Interpreter's).
+    that engine's finished pieces - later, the accurate words.
+  * translated or not (cfg captions_language: "" = as spoken), in PHRASES (founder 2026-11-14: "it's removing
+    everything and writing everything back ... very slow ... I want it tack, tack, tack"): whole translated sentences
+    swapped two lines at a time and waited for the speaker to finish; now, as the live words settle, every
+    PHRASE_WORDS settled words (or at a comma, from PHRASE_MIN_WORDS) go to the server's "interpret" mode (the
+    Interpreter's) with the phrases before as context, and the sentence's end goes when it is finished - a few
+    translated words at a time, close behind the voice. Up to TRANSLATE_WORKERS translations are on their way at
+    once (one at a time could not keep up with a phrase every two seconds) and show in the order said.
   * "both with different colours and without overlapping": two sides that never mix - "them" (the call; everyone in a
     meeting with one source) and "me" (your microphone: the live stream's "You"), each in its own lines, and a switch
     for whose words (cfg captions_who: "both" | "them" | "me") that also works in the middle of a meeting.
   * filler words removed (text_cleanup's list, Dictation's "Remove filler words") from captions as spoken.
   * best practice (BBC / DCMP / university caption guides): at most two lines a side, about 32-42 characters a line,
     roll-up as new words come (live captions), a minimum time on screen, then they fade.
-  * readable (founder 2026-11-13: "people cannot manage to read it ... the first sentence of every phrase is coming
-    like a burst; keep a bit longer; a bigger size, also in the middle of a meeting"): EVERY word - the live stream's,
-    a finished piece's, a translation's - comes out at reading pace (READ_WPS, a little faster only to catch up, never
-    more than MAX_WPS), one after another in the order said; the start of a phrase never lands all at once. A new
-    sentence starts on a new line (when the line before is half full), the captions stay HOLD_S after their last word,
-    and the size is a setting (SIZES, cfg captions_size) the live card can change too. Then: "keep 3 sentences on the
-    screen and a bit more space, to fill a bigger part of the screen" - three lines a side, about MAX_CHARS 60 a line
-    (wider than the guides' 32-42, his call).
+  * readable (founder 2026-11-13: "people cannot manage to read it ... keep a bit longer; a bigger size, also in the
+    middle of a meeting"; "keep 3 sentences on the screen and a bit more space"): three lines a side, about MAX_CHARS
+    60 a line (wider than the guides' 32-42, his call), one flow that rolls up a line at a time, every line stays
+    LINE_TTL_S after it last changed and then leaves for good, and the size is a setting (cfg captions_size: a percent
+    of the screen-based size, SIZE_MIN-SIZE_MAX; founder 2026-11-14: "maybe a slider, must be more clear") the live
+    card can change too.
+  * never late on purpose (founder 2026-11-14: "I hope it's not purposefully delaying it ... it should really be
+    catching up with the words ... if you have the full sentence, just show the full sentence, but keep it"): a word
+    is on screen the moment it is known - the words being said as they come, a finished sentence, piece or
+    translation whole, at once. Only one thing holds words back: showing them would push a line off the screen before
+    it could be read (READ_WPS, at least MIN_LINE_S since it last changed) - and never for more than MAX_WAIT_S.
 
 Qt-free: the overlay (ui/captions_overlay.py) draws; this keeps the words. A "line" is (id, [words]): the id stays the
 same while the line is on screen, so the overlay can fade in only the new words and slide lines up smoothly.
 """
 import collections
+import difflib
 import logging
 import re
 import threading
@@ -43,7 +50,7 @@ CFG_WHO = "captions_who"                  # whose words: "both" | "them" | "me"
 CFG_IN_SHARE = "captions_in_share"        # False = hidden from screen sharing and recordings (like the Live Assistant)
 CFG_FONT = "captions_font"                # FONTS
 CFG_COLORS = "captions_colors"            # COLORS
-CFG_SIZE = "captions_size"                # SIZES
+CFG_SIZE = "captions_size"                # percent (SIZE_MIN..SIZE_MAX); 2.1.7 saved a SIZES key
 WHO_BOTH, WHO_THEM, WHO_ME = "both", "them", "me"
 WHO = (WHO_BOTH, WHO_THEM, WHO_ME)
 SIDES = ("them", "me")
@@ -63,16 +70,29 @@ COLORS = (("yellow", "White and yellow", (255, 255, 255), (255, 226, 132)),
           ("green", "White and green", (255, 255, 255), (150, 236, 172)),
           ("gold", "Yellow and white", (255, 214, 96), (255, 255, 255)))
 # The size: the screen-based size times this (founder 2026-11-13: "the possibility to have it in a bigger size").
+# A slider (founder 2026-11-14), in steps of SIZE_STEP percent of the screen-based size; 100 = the size it always was.
+SIZE_MIN, SIZE_MAX, SIZE_STEP = 80, 180, 10
+DEFAULT_SIZE = 100
+# 2.1.7 saved one of four keys: still read.
 SIZES = (("s", "Small", 0.8), ("m", "Medium", 1.0), ("l", "Large", 1.3), ("xl", "Extra large", 1.65))
-DEFAULT_SIZE = "m"
 
 
-def size_scale(key):
-    """The font scale of a SIZES key (Medium for an unknown one)."""
-    for k, _name, scale in SIZES:
-        if k == key:
-            return scale
-    return 1.0
+def size_percent(value):
+    """The size as a percent (SIZE_MIN..SIZE_MAX, in SIZE_STEP steps): a number, or a 2.1.7 key; 100 when unknown."""
+    if isinstance(value, bool) or value is None:
+        return DEFAULT_SIZE
+    try:
+        p = float(value)
+    except (TypeError, ValueError):
+        p = next((scale * 100 for k, _n, scale in SIZES if k == value), DEFAULT_SIZE)
+    if p != p:                                                       # NaN
+        return DEFAULT_SIZE
+    return int(min(SIZE_MAX, max(SIZE_MIN, round(p / SIZE_STEP) * SIZE_STEP)))
+
+
+def size_scale(value):
+    """The font scale of a saved size (percent or 2.1.7 key)."""
+    return size_percent(value) / 100.0
 
 
 # Captions in: as spoken, or translated into one of these (the server's interpret mode names them all).
@@ -83,18 +103,27 @@ LANGUAGES = (("", "As spoken"), ("en", "English"), ("hy", "Armenian"), ("fr", "F
 
 MAX_CHARS = 60          # a line, about (the guides say 32-42; founder 2026-11-13: fill more of the screen)
 MAX_LINES = 3           # a side (the guides: two; founder 2026-11-13: "keep 3 sentences on the screen")
-HOLD_S = 7.0            # a side's captions stay this long after its last word, then fade (was 4.5: too short)
-KEEP_LINES = MAX_LINES + 2
-TRANSLATE_CONTEXT = 3   # earlier sentences of the same side, sent as context only
-TRANSLATE_BACKLOG = 3   # a translation queue longer than this drops its oldest sentences (captions keep up with the call)
-READ_WPS = 3.0          # words a second every caption is written at (180 a minute: the guides' comfortable reading)
-MAX_WPS = 4.5           # ... a little faster only to catch up, never faster than this
-CATCH_UP_S = 8.0        # ... the pace rises so what waits would be out in about this long (up to MAX_WPS)
-PIECE_CATCH_UP_S = 20.0  # ... a finished piece (Best accuracy: ~25 s of talk at once) has until the next one comes
-STALL_S = 0.35          # after a busy moment the words due come one after another again, not in a heap
-NEW_LINE_AT = MAX_CHARS // 2   # a new sentence starts on a new line when the line before is at least this full
+LINE_TTL_S = 10.0       # a line leaves the screen this long after it last changed, newer lines or not (founder
+                        # 2026-11-14: "time sensitive ... the limit should be 10 seconds for each sentence")
+HOLD_S = LINE_TTL_S     # ... so a side's captions are gone this long after its last word
+TRANSLATE_CONTEXT = 4   # earlier phrases of the same side, sent as context only
+TRANSLATE_WORKERS = 3   # translations on their way at once (one takes about 2 s, a phrase comes every 2 s: one at a
+                        # time fell behind the voice); they show in the order said
+TRANSLATE_BACKLOG = 4   # phrases waiting for a free worker beyond this (the server is slow or down): the oldest are
+                        # dropped - captions keep up with the call
+SENT_SLACK = 3          # the finished sentence may be this many words longer where its phrases ended (sent_upto)
+PHRASE_WORDS = 6        # settled words that go to translation without waiting for the sentence's end ...
+PHRASE_MIN_WORDS = 3    # ... or fewer, from this many, when they end at a comma (a clause)
+READ_WPS = 4.0          # a line may roll off the screen only once it could be read at this pace (240 a minute) ...
+MIN_LINE_S = 1.5        # ... and never sooner than this after it last changed
+MAX_WAIT_S = 3.0        # ... and a word never waits longer than this for it: the captions keep up with the call
+TYPE_AT_ONCE = 8        # finished words up to this many show at once (a phrase); more type in ...
+TYPE_WPS = 15.0         # ... this fast, so a block of lines is never swapped at once (Best accuracy's 10-second
+                        # pieces: 30 words in 2 s) - far faster than anyone reads, it only keeps the roll-up
 GAP_MARK = "[...]"
 _SENTENCE_END = re.compile(r"[.!?\u2026\u3002\uff01\uff1f\u0589\u055e]['\")\]\u00bb\u201d]*$")
+_CLAUSE_END = re.compile(r"[,;:\u060c\u3001\uff0c\u055d]['\")\]\u00bb\u201d]*$")
+_WORDLIKE = re.compile(r"[^\w]+", re.UNICODE)
 
 
 def side_of(who):
@@ -136,11 +165,20 @@ def ends_sentence(word):
     return bool(_SENTENCE_END.search(str(word or "")))
 
 
+def ends_clause(word):
+    """Does this word end a clause or a sentence ("well,", "now.")? A translation phrase may stop there."""
+    return ends_sentence(word) or bool(_CLAUSE_END.search(str(word or "")))
+
+
+def _same_word(a, b):
+    return _WORDLIKE.sub("", str(a)).lower() == _WORDLIKE.sub("", str(b)).lower()
+
+
 def place(lines, words, next_id, max_chars=MAX_CHARS):
-    """``words`` added after ``lines`` ([(id, [words])]) the way a caption fills: on the last line while it fits, else
-    on a new line (a word longer than a line gets one of its own). A new sentence starts on a new line when the line
-    before is at least half full (easier to read; a short "Yes." keeps the next words beside it). Returns (lines,
-    next_id) - new lists, the given ones are not changed."""
+    """``words`` added after ``lines`` ([(id, [words])]) the way roll-up captions fill: on the last line while it
+    fits, else on a new line (a word longer than a line gets one of its own) - one flow, so lines roll up one at a time
+    (a new line for every sentence swapped blocks of lines at once). Returns (lines, next_id) - new lists, the given
+    ones are not changed."""
     out = [(i, list(ws)) for i, ws in lines]
     for w in words:
         if out:
@@ -148,9 +186,7 @@ def place(lines, words, next_id, max_chars=MAX_CHARS):
             if not last:
                 last.append(w)
                 continue
-            text = " ".join(last)
-            new_sentence = ends_sentence(last[-1]) and len(text) >= NEW_LINE_AT
-            if not new_sentence and len(text) + 1 + len(w) <= max_chars:
+            if len(" ".join(last)) + 1 + len(w) <= max_chars:
                 last.append(w)
                 continue
         out.append((next_id, [w]))
@@ -159,127 +195,224 @@ def place(lines, words, next_id, max_chars=MAX_CHARS):
 
 
 class Lane:
-    """One side's captions: the lines of its finished sentences, and the words of the sentence being said.
+    """One side's captions: the lines on screen, the sentence being said, and finished words not shown yet.
 
-    Every word is written at reading pace (pace(): READ_WPS a second, up to MAX_WPS when more waits), in the order
-    said: first the finished words waiting (``pending``), then the sentence being said (``live``, of which ``shown``
-    are on screen). A word that arrives when nothing waits comes out at once - the first of a phrase - and the next
-    ones follow one by one, never all together."""
+    A word is on screen the moment it is known (see the module notes: never late on purpose). Words wait only when
+    showing them would push a line off the screen before it could be read - at most MAX_WAIT_S. A line that left the
+    screen (rolled above it, or its LINE_TTL_S passed) never comes back."""
 
     def __init__(self, clock=time.monotonic):
         self._clock = clock
-        self.lines = []          # [(id, [words])] - words on screen (finished sentences)
+        self.lines = []          # [(id, [words])] - finished words on screen
         self.live = []           # the sentence being said (live stream partial)
-        self.shown = 0           # ... how many of its words are on screen
-        self.pending = []        # finished words waiting to be written (a finished piece, a translation, a sentence's end)
-        self.next_at = None      # when the next word may come out
-        self.catch_up = CATCH_UP_S
+        self.live_shown = 0      # ... how many of its words are on screen (all, unless a line is still being read)
+        self.live_at = None      # ... when it last changed
+        self.pending = []        # finished words not on screen yet (a block typing in, or a line being read)
+        self.waiting_since = None
+        self.type_at = None      # a block typing in: when its next word comes
         self.next_id = 1
         self.at = None           # when its words last changed
+        self._shown = []         # [(id, [words])] on screen at the last look
+        self._changed = {}       # line id -> when its words last changed on screen
+        self._stale = None       # a sentence nobody finished that left the screen (the same words do not bring it back)
 
     def clear(self):
-        self.lines, self.live, self.pending, self.at, self.next_at, self.shown = [], [], [], None, None, 0
+        self.lines, self.live, self.pending, self.at, self.waiting_since, self.type_at = [], [], [], None, None, None
+        self.live_shown, self.live_at, self._shown, self._changed, self._stale = 0, None, [], {}, None
 
     def backlog(self):
         """Words said but not on screen yet."""
-        return len(self.pending) + max(0, len(self.live) - self.shown)
+        return len(self.pending) + max(0, len(self.live) - self.live_shown)
 
     @staticmethod
-    def rate(backlog, catch_up=CATCH_UP_S):
-        """Words a second: reading pace, faster only when more waits (so it would be out in ``catch_up`` seconds)."""
-        return min(MAX_WPS, max(READ_WPS, backlog / catch_up))
+    def read_s(words):
+        """How long a line must have been on screen, unchanged, before it may roll off."""
+        return max(MIN_LINE_S, len(words) / READ_WPS)
 
-    def _arrived(self, waited):
-        """New words: when nothing was waiting, the first comes out at once (never sooner than the pace after the
-        word before it)."""
-        now = self._clock()
-        if not waited:
-            self.next_at = now if self.next_at is None else max(self.next_at, now)
-        self.at = now
+    def _fits(self, after, now):
+        """Could the screen become ``after`` without a line leaving it unread? (Always, once words waited
+        MAX_WAIT_S: the captions keep up with the call.)"""
+        if self.waiting_since is not None and now - self.waiting_since >= MAX_WAIT_S:
+            return True
+        stay = {i for i, ws in [(i, ws) for i, ws in after if ws][-MAX_LINES:]}
+        for lid, ws in self._shown:
+            if lid not in stay:
+                changed = self._changed.get(lid)
+                if changed is not None and now - changed < self.read_s(ws):
+                    return False
+        return True
 
-    def queue(self, words, catch_up=CATCH_UP_S):
-        """Finished words to write at reading pace (a finished piece: ``catch_up`` PIECE_CATCH_UP_S; a translated
-        sentence)."""
+    def _put(self, after, next_id, now):
+        self.lines, self.next_id, self.at = after[-MAX_LINES:], next_id, now
+
+    def _release(self, now):
+        """Put the waiting finished words on screen - a phrase all at once when it fits, a longer block typed in at
+        TYPE_WPS, never pushing off a line still being read."""
+        if not self.pending:
+            self.type_at = None
+            if self.live_shown >= len(self.live):
+                self.waiting_since = None                       # (words being said that wait keep counting: view)
+            return
+        if self.type_at is None and len(self.pending) <= TYPE_AT_ONCE:
+            after, nid = place(self.lines, self.pending, self.next_id)
+            if self._fits(after, now):
+                self._put(after, nid, now)
+                self.pending, self.waiting_since = [], None
+                return
+        if self.type_at is None and len(self.pending) > TYPE_AT_ONCE:
+            self.type_at = now                                   # a block: type it in
+        while self.pending and (self.type_at is None or self.type_at <= now):
+            after, nid = place(self.lines, self.pending[:1], self.next_id)
+            if not self._fits(after, now):
+                break
+            self._put(after, nid, now)
+            self.pending.pop(0)
+            if self.type_at is not None:
+                self.type_at = max(self.type_at, now - 0.25) + 1.0 / TYPE_WPS
+        if not self.pending:
+            self.waiting_since = self.type_at = None
+        elif self.waiting_since is None and (self.type_at is None or self.type_at <= now):
+            self.waiting_since = now                            # (typing in is not waiting)
+
+    def queue(self, words, *_old):
+        """Finished words (a finished piece, a translated phrase): on screen at once, whole - after anything still
+        waiting."""
         words = list(words)
         if not words:
             return
-        waited = self.backlog() > 0
         self._fresh()
         self.pending.extend(words)
-        self.catch_up = catch_up
-        self._arrived(waited)
+        self.at = self._clock()
 
     def drop_live(self):
-        self.live, self.shown = [], 0
+        self.live, self.live_shown, self.live_at = [], 0, None
 
     def pace(self):
-        """Write the words that are due, one after another. True when any were."""
-        backlog = self.backlog()
-        if not backlog:
-            return False
-        now = self._clock()
-        if self.next_at is None:
-            self.next_at = now
-        self.next_at = max(self.next_at, now - STALL_S)
-        written = 0
-        while backlog and self.next_at <= now:
-            if self.pending:
-                word = self.pending.pop(0)
-                self.lines, self.next_id = place(self.lines, [word], self.next_id)
-                self.lines = self.lines[-KEEP_LINES:]
-            else:
-                self.shown += 1
-            self.next_at += 1.0 / self.rate(backlog, self.catch_up)
-            backlog -= 1
-            written += 1
-        if written:
-            self.at = now
-        return written > 0
+        """Show what may be shown now. True when anything new came on screen."""
+        before = self.backlog()
+        self._release(self._clock())
+        return self.backlog() < before
 
     def _fresh(self):
         """After its captions faded, a side starts on a new line."""
-        if self.at is not None and self._clock() - self.at > HOLD_S and not self.backlog():
-            self.lines = []
+        if self.at is not None and self._clock() - self.at > HOLD_S and not self.pending:
+            self.lines, self._shown, self._changed = [], [], {}
             self.drop_live()
 
     def partial(self, words):
-        """The sentence being said, so far (a revised word keeps its place; new words follow at pace)."""
-        waited = self.backlog() > 0
+        """The sentence being said, so far: on screen as it comes (a revised word changes in its place)."""
+        words = list(words)
+        if words and words == self._stale:
+            return                                    # the sentence that already left the screen, said again as it was
+        self._stale = None
         self._fresh()
-        self.live = list(words)
-        self.shown = min(self.shown, len(self.live))
-        self.catch_up = CATCH_UP_S
-        self._arrived(waited)
+        now = self._clock()
+        if words != self.live:
+            self.live_at = now
+        self.live = words
+        self.live_shown = min(self.live_shown, len(self.live))
+        self.at = now
 
     def final(self, words):
-        """The live stream finished the sentence being said: the words of it already on screen stay, the rest follow
-        at pace."""
-        waited = self.backlog() > 0
-        self._fresh()
+        """The live stream finished the sentence being said: the finished words take its place, at once. Its words
+        already on screen stay there (the finished ones in their place); only words that would push a line off
+        before it could be read wait - behind them, not instead of them."""
         words = list(words)
-        keep = words[:self.shown] if not self.pending else []
-        if keep:
-            self.lines, self.next_id = place(self.lines, keep, self.next_id)
-            self.lines = self.lines[-KEEP_LINES:]
+        self._stale = None
+        self._fresh()
+        shown = self.live_shown
         self.drop_live()
-        self.pending.extend(words[len(keep):])
-        self.catch_up = CATCH_UP_S
-        self._arrived(waited)
+        if self.pending or not words:                 # (behind a block still typing in: after it)
+            self.queue(words)
+            return
+        now = self._clock()
+        n, least = len(words), min(shown, len(words))
+        while n > least:
+            after, nid = place(self.lines, words[:n], self.next_id)
+            if self._fits(after, now):
+                break
+            n -= 1
+        if n:
+            after, nid = place(self.lines, words[:n], self.next_id)
+            self._put(after, nid, now)
+        self.pending = words[n:]
+        self.at = now
+        if not self.pending:
+            self.waiting_since = None
+        elif self.waiting_since is None:
+            self.waiting_since = now
+
+    def _expire(self, now):
+        """A line unchanged for LINE_TTL_S leaves the screen, even while newer lines stay - with every line above
+        it (never a hole, never an older line back). The sentence being said stays while it changes; one nobody
+        finished (the live stream stopped in the middle of it) leaves the same way."""
+        if self.live and self.live_at is not None and now - self.live_at > LINE_TTL_S:
+            self._stale = list(self.live)
+            self.drop_live()
+        last = -1
+        for n, (lid, _ws) in enumerate(self.lines):
+            changed = self._changed.get(lid)
+            if changed is not None and now - changed > LINE_TTL_S:
+                last = n
+        if last >= 0:
+            self.lines = self.lines[last + 1:]
 
     def view(self):
-        """The lines on screen now (at most MAX_LINES), [] once the side has been quiet for HOLD_S."""
-        self.pace()
-        if self.at is None or (self._clock() - self.at > HOLD_S and not self.backlog()):
-            return []
-        lines, _ = place(self.lines, self.live[:self.shown], self.next_id)
-        return [(i, ws) for i, ws in lines if ws][-MAX_LINES:]
+        """The lines on screen now (at most MAX_LINES): [] once every line had its LINE_TTL_S."""
+        now = self._clock()
+        self._expire(now)
+        self._release(now)
+        k = 0 if self.pending else len(self.live)
+        while k > 0:
+            after, _ = place(self.lines, self.live[:k], self.next_id)
+            if self._fits(after, now):
+                break
+            k -= 1
+        if not self.pending:
+            if k == len(self.live):
+                self.waiting_since = None
+            elif self.waiting_since is None:
+                self.waiting_since = now              # the words being said wait for a line to be read too
+        self.live_shown = k
+        lines, _ = place(self.lines, self.live[:k], self.next_id)
+        visible = [(i, ws) for i, ws in lines if ws][-MAX_LINES:]
+        if visible:                                   # a line that rolled above the screen is gone for good
+            top = visible[0][0]
+            self.lines = [(i, ws) for i, ws in self.lines if i >= top]
+        before = dict(self._shown)
+        for lid, ws in visible:
+            if before.get(lid) != ws:
+                self._changed[lid] = now
+                self.at = now
+        on_screen = {i for i, _ in visible}
+        self._changed = {i: t for i, t in self._changed.items() if i in on_screen}
+        self._shown = visible
+        return visible
+
+
+def _new_phrase():
+    return {"sent": [], "prev": [], "side": None}
+
+
+def sent_upto(sent, words):
+    """How many of a finished sentence's ``words`` the phrases already sent (``sent``: live words) cover. The
+    finished sentence is not the live words plus a tail - the engine revises it (a number as digits, a word joined
+    or dropped) - so the place is found by the words, not by counting. In doubt a word is said twice, never lost."""
+    if not sent:
+        return 0
+    a = [_WORDLIKE.sub("", str(w)).lower() for w in sent]
+    b = [_WORDLIKE.sub("", str(w)).lower() for w in words[:len(sent) + SENT_SLACK]]
+    blocks = [m for m in difflib.SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks() if m.size]
+    if sum(m.size for m in blocks) * 2 < len(a):
+        return min(len(sent), len(words))             # hardly the same words: by the count
+    return blocks[-1].b + blocks[-1].size
 
 
 class CaptionFeed:
     """The meeting's words in, the captions out (view()). ``settings()`` is the app's cfg (read each time, so a switch
     in the middle of a meeting applies at once). ``translate(text, source_lang, target_lang, context)`` returns the
     translation (it may raise: the sentence is then shown as spoken). ``on_change()`` is called when the view may have
-    changed - from the translation thread too, so the overlay marshals it to its own thread."""
+    changed - from the translation threads too, so the overlay marshals it to its own thread."""
 
     def __init__(self, settings, translate=None, on_change=None, clock=time.monotonic, start_thread=True,
                  spoken_language=None):
@@ -291,14 +424,21 @@ class CaptionFeed:
         self._clock = clock
         self.lanes = {s: Lane(clock) for s in SIDES}
         self._said = {s: collections.deque(maxlen=TRANSLATE_CONTEXT) for s in SIDES}
+        self._phrase = _new_phrase()          # the sentence being said: its words already sent to translation
         self._lock = threading.Lock()
-        self._queue = collections.deque()
-        self._wake = threading.Event()
+        self._more = threading.Condition(self._lock)
+        self._queue = collections.deque()     # (number, side, spoken, lang, target, context) waiting for a worker
+        self._seq = 0                         # the number of the next phrase sent ...
+        self._out = 0                         # ... and of the next one to show: translations show in the order said
+        self._done = {}                       # number -> (side, words) | None, translated but not its turn yet
         self._closed = False
-        self._thread = None
+        self._threads = []
         if start_thread and translate is not None:
-            self._thread = threading.Thread(target=self._worker, daemon=True, name="gusan-captions-translate")
-            self._thread.start()
+            for n in range(TRANSLATE_WORKERS):
+                t = threading.Thread(target=self._worker, daemon=True, name="gusan-captions-translate-%d" % (n + 1))
+                t.start()
+                self._threads.append(t)
+        self._thread = self._threads[0] if self._threads else None
 
     # ── settings ──
     def _cfg(self):
@@ -349,12 +489,14 @@ class CaptionFeed:
 
     # ── words in ──
     def partial(self, text, who=""):
-        """The sentence being said, so far (real time). Not shown while translating into another language: a
-        translation needs the whole sentence."""
+        """The sentence being said, so far (real time): shown as it comes - or, translating into another language,
+        sent to translation a phrase at a time as its words settle (a sentence whose first phrase went that way
+        stays that way, on that side, to its end)."""
         if self._closed:
             return
         side = side_of(who)
-        if not self._as_spoken(side):
+        if self._phrase["sent"] or not self._as_spoken(side):
+            self._phrase_partial(side, text)
             return
         with self._lock:
             self._drop_other_live(side)
@@ -370,8 +512,8 @@ class CaptionFeed:
                 lane.drop_live()
 
     def final(self, text, who="", language="", paced=False):
-        """A finished sentence: the live stream's (it replaces the words being said: those on screen stay, the rest
-        follow), or a finished piece (``paced``: written after what waits). Both at reading pace."""
+        """A finished sentence: the live stream's (it takes the place of the words being said), or a finished piece
+        (``paced``: after anything still waiting). Shown at once, whole."""
         if self._closed:
             return
         side = side_of(who)
@@ -379,40 +521,76 @@ class CaptionFeed:
         if lang:
             self._heard[side] = lang
         target = self.target()
+        words = words_of(text)
+        if not paced:
+            phrase, self._phrase = self._phrase, _new_phrase()
+            if phrase["sent"]:
+                # Phrases of this sentence are on screen or on their way, translated, on the phrase's side: its end
+                # follows them the same way, on the same side - also when the speaker labels put the finished
+                # sentence on the other side, or it turns out to be in the caption language (shown as spoken it
+                # would be there twice).
+                rest = " ".join(words[sent_upto(phrase["sent"], words):])
+                if rest:
+                    self._send(phrase["side"] or side, rest, lang or "auto", target)
+                return
         if self._as_spoken(side, lang):
             with self._lock:
-                if not paced:
-                    self._drop_other_live(side)
                 if paced:
-                    self.lanes[side].queue(words_of(text), PIECE_CATCH_UP_S)
+                    self.lanes[side].queue(words)
                 else:
-                    self.lanes[side].final(words_of(text))
+                    self._drop_other_live(side)
+                    self.lanes[side].final(words)
             self._changed()
             return
-        spoken = clean(text)
-        if not spoken:
+        if words:                                            # translated, whole
+            self._send(side, " ".join(words), lang or "auto", target)
+
+    def _phrase_partial(self, side, text):
+        """The live words of a sentence being translated: once PHRASE_WORDS of them are settled (the same in two
+        updates in a row) - or PHRASE_MIN_WORDS ending at a comma - they go to translation as a phrase."""
+        words = words_of(text)
+        phrase = self._phrase
+        prev, sent = phrase["prev"], len(phrase["sent"])
+        phrase["prev"] = words
+        settled = 0
+        while settled < min(len(prev), len(words)) and _same_word(prev[settled], words[settled]):
+            settled += 1
+        unsent = words[sent:settled]
+        if len(unsent) >= PHRASE_WORDS or (len(unsent) >= PHRASE_MIN_WORDS and ends_clause(unsent[-1])):
+            phrase["side"] = phrase["side"] or side          # (which source is loud may change in mid-sentence)
+            phrase["sent"] = words[:settled]
+            self._send(phrase["side"], " ".join(unsent), self._heard.get(side) or "auto", self.target())
+
+    def _send(self, side, spoken, lang, target):
+        """One phrase or sentence to translate, with the side's phrases before it as context."""
+        spoken = clean(spoken, fillers=False)
+        if not spoken or not target:
             return
         with self._lock:
             context = list(self._said[side])
             self._said[side].append(spoken)
-            self._queue.append((side, spoken, lang or "auto", target, context))
-            while len(self._queue) > TRANSLATE_BACKLOG:
-                self._queue.popleft()                       # behind the call: the newest sentences matter
-        self._wake.set()
+            self._queue.append((self._seq, side, spoken, lang or "auto", target, context))
+            self._seq += 1
+            late = False
+            while len(self._queue) > TRANSLATE_BACKLOG:      # far behind the call (the server is slow or down): the
+                self._done[self._queue.popleft()[0]] = None  # newest phrases matter
+                late = True
+            if late:
+                self._show_done()
+            self._more.notify()
 
     # ── translations ──
     def _worker(self):
-        while not self._closed:
-            self._wake.wait(0.5)
-            self._wake.clear()
-            while not self._closed:
-                with self._lock:
-                    if not self._queue:
-                        break
-                    side, spoken, lang, target, context = self._queue.popleft()
-                self._translate_one(side, spoken, lang, target, context)
+        while True:
+            with self._lock:
+                while not self._queue and not self._closed:
+                    self._more.wait(0.5)
+                if self._closed:
+                    return
+                item = self._queue.popleft()
+            self._translate_one(*item)
 
-    def _translate_one(self, side, spoken, lang, target, context):
+    def _translate_one(self, seq, side, spoken, lang, target, context):
         text = ""
         try:
             text = str(self._translate(spoken, lang, target, context) or "").strip()
@@ -420,11 +598,27 @@ class CaptionFeed:
             logger.info("Caption translation failed (%s): shown as spoken", getattr(e, "code", "") or type(e).__name__)
         if self._closed:
             return
-        if target != self.target():
-            return                                           # the language was changed meanwhile
+        # (a language changed meanwhile: nothing to show)
+        words = words_of(text or spoken, fillers=False) if target == self.target() else []
         with self._lock:
-            self.lanes[side].queue(words_of(text or spoken, fillers=False))
-        self._changed()
+            if seq < self._out:
+                return                                       # cleared meanwhile
+            self._done[seq] = (side, words) if words else None
+            shown = self._show_done()
+        if shown:
+            self._changed()
+
+    def _show_done(self):
+        """Translations in the order their words were said (several are on their way at once; one that came back
+        early waits for the ones before it). Under the lock. Returns how many were put on screen."""
+        n = 0
+        while self._out in self._done:
+            item = self._done.pop(self._out)
+            self._out += 1
+            if item:
+                self.lanes[item[0]].queue(item[1])
+                n += 1
+        return n
 
     def drain(self):
         """Tests: translate what is queued, on this thread."""
@@ -445,27 +639,35 @@ class CaptionFeed:
     def busy(self):
         """Is anything on screen, waiting to come out or being translated? (The overlay looks again only then.)"""
         with self._lock:
-            return bool(self._queue) or any(lane.view() or lane.backlog() for lane in self.lanes.values())
+            return self._out < self._seq or any(lane.view() or lane.backlog() for lane in self.lanes.values())
 
     def pacing(self):
-        """Are words waiting to be written? (The overlay then looks often, so each comes out on time.)"""
+        """Are words waiting for a line to be read? (The overlay then looks often, so they show the moment they may.)"""
         with self._lock:
             return any(lane.backlog() for lane in self.lanes.values())
 
     def clear(self):
+        """Nothing on screen, nothing on its way (the caption language changed): translations still out are dropped
+        when they come back, and the sentence being said starts over."""
         with self._lock:
             for lane in self.lanes.values():
                 lane.clear()
             self._queue.clear()
+            self._done.clear()
+            self._out = self._seq
+            self._phrase = _new_phrase()
+            for said in self._said.values():
+                said.clear()
         self._changed()
 
     def close(self):
         self._closed = True
-        self._wake.set()
+        with self._lock:
+            self._more.notify_all()
 
 
 __all__ = ["CFG_COLORS", "CFG_FONT", "CFG_IN_SHARE", "CFG_LANGUAGE", "CFG_ON", "CFG_SIZE", "CFG_WHO", "COLORS",
-           "CaptionFeed", "DEFAULT_SIZE", "FONTS", "FONT_FAMILIES", "HOLD_S", "LANGUAGES", "Lane",
-           "MAX_CHARS", "SIZES", "WHO_NAMES", "ends_sentence", "size_scale",
-           "MAX_LINES", "SIDES", "WHO", "WHO_BOTH", "WHO_ME", "WHO_THEM", "clean", "place", "shows", "side_of",
-           "words_of"]
+           "CaptionFeed", "DEFAULT_SIZE", "FONTS", "FONT_FAMILIES", "HOLD_S", "LANGUAGES", "LINE_TTL_S", "Lane",
+           "MAX_CHARS", "MAX_LINES", "SIDES", "SIZES", "SIZE_MAX", "SIZE_MIN", "SIZE_STEP", "TRANSLATE_WORKERS",
+           "WHO", "WHO_BOTH", "WHO_ME", "WHO_NAMES", "WHO_THEM", "clean", "ends_clause", "ends_sentence", "place",
+           "sent_upto", "shows", "side_of", "size_percent", "size_scale", "words_of"]

@@ -61,13 +61,29 @@ class TestWhenItRuns(unittest.TestCase):
                 mock.patch.object(AR, "_backend", lambda self: "managed"):
             return AR._live_engine(r, capture_mode)
 
-    def test_a_meetings_live_view_is_gladia_or_openai_for_armenian_whatever_the_profile(self):
-        """A meeting's live view only (the pieces make its notes): OpenAI's live model for Armenian (the best in
-        the founder's test), Gladia for the rest - on Fast and Best accuracy alike."""
-        for profile in ("fast", "best"):
-            self.assertEqual(self._engine("smart_meeting", language="fr", managed_speech_profile=profile), "gladia")
-            self.assertEqual(self._engine("smart_meeting", language="hy", managed_speech_profile=profile), "openai")
+    def test_a_meeting_streams_only_on_fast_like_everything_else(self):
+        """Founder 2026-11-14: "it should do based on what model I decide for transcription so both have the same
+        source" - a meeting on Best accuracy streamed for its live view all the same, and the live transcript showed
+        the stream's words ("Thank you." on quiet speech) beside captions made of Best accuracy's. Fast: OpenAI's
+        live model for Armenian (the best in the founder's test), Gladia for the rest."""
+        self.assertEqual(self._engine("smart_meeting", language="fr", managed_speech_profile="fast"), "gladia")
+        self.assertEqual(self._engine("smart_meeting", language="hy", managed_speech_profile="fast"), "openai")
+        for lang in ("fr", "hy", "multi", "auto"):
+            self.assertIsNone(self._engine("smart_meeting", language=lang, managed_speech_profile="best"), lang)
         self.assertIsNone(self._engine("smart_meeting", language="en", privacy_mode=True))
+
+    def test_the_meetings_own_pick_decides_not_dictations(self):
+        """Transcribes with (the take's own profile, cloud_model_override) comes before Dictation's profile."""
+        def engine(own, dictation):
+            r = _rec(cloud_model_override=own)
+            with mock.patch.dict(main.cfg, {"privacy_mode": False, "live_stt": True, "language": "fr",
+                                            "managed_speech_profile": dictation}), \
+                    mock.patch.object(AR, "_backend", lambda self: "managed"):
+                return AR._live_engine(r, "smart_meeting")
+        self.assertIsNone(engine("best", "fast"))                # the meeting: Best accuracy; Dictation: Fast
+        self.assertEqual(engine("fast", "best"), "gladia")       # ... and the other way round
+        self.assertEqual(engine(None, "fast"), "gladia")         # Automatic: like Dictation
+        self.assertIsNone(engine(None, "best"))
 
     def test_only_fast_streams_best_accuracy_never_does(self):
         """The founder's pick (2026-11-07): Armenian Fast = OpenAI gpt-live-transcribe (Gladia writes it poorly),

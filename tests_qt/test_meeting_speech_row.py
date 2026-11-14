@@ -27,25 +27,30 @@ def _row(tier="pro", **cfg):
     return app, LiveSpeechRow(app, meeting=True)
 
 
-def test_automatic_moves_an_armenian_meeting_to_gusan_cloud_on_pro(qapp):
+def test_automatic_is_best_accuracy_for_a_pro_persons_meeting(qapp):
+    """Founder 2026-11-14: "by default, if they are pro, they should have the best accuracy model" (meetings)."""
     app, row = _row("pro", meeting_language="hy")
     assert row.combo.currentData() == ""                                  # Automatic
-    assert row.line.text().endswith("for Armenian")
-    assert "Cloud" in row.line.text()
+    assert row.line.text().startswith("Best accuracy") and "Cloud" in row.line.text()
     assert not row.note.isVisibleTo(row)                                  # no "Whisper isn't reliable" hint
+    app, row = _row("pro", meeting_language="fr")
+    assert row.line.text().startswith("Best accuracy")                   # in every language
+    app, row = _row("free", meeting_language="fr")
+    assert row.line.text().startswith("Whisper Base")                    # without Pro: Dictation's, as before
 
 
 def test_it_follows_the_meeting_language_not_the_call_language(qapp):
-    app, row = _row("pro", meeting_language="fr", live_assist_language="hy")
+    # (Privacy mode: a Pro person's Automatic is Dictation's model with its language rule, like everyone's)
+    app, row = _row("pro", meeting_language="fr", live_assist_language="hy", privacy_mode=True)
     assert "Armenian" not in row.line.text()
     assert row.line.text().startswith("Whisper Base")                     # Dictation's, as before
     app.cfg["meeting_language"] = "hy"
     row.on_setting_changed("meeting_language")
-    assert row.line.text().endswith("for Armenian")
+    assert row.note.isVisibleTo(row) and "Armenian" in row.note.text()    # the hint names the meeting's language
     # "" = the dictation language
     app.cfg.update(meeting_language="", language="hy")
     row.on_setting_changed("language")
-    assert row.line.text().endswith("for Armenian")
+    assert row.note.isVisibleTo(row) and "Armenian" in row.note.text()
 
 
 def test_a_pick_is_the_meetings_own_never_the_live_assistants(qapp):

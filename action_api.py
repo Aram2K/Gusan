@@ -30,7 +30,7 @@ PROVIDERS = {
         "label": "Anthropic API",
         "description": "Use your own Anthropic API key for cloud action modes.",
         "default_base_url": "https://api.anthropic.com/v1",
-        "default_model": "claude-sonnet-4-6",
+        "default_model": "claude-sonnet-5-5",
     },
     PROVIDER_CEREBRAS: {
         # Verified Sept 2026: qwen-3.8-27b streams ~1,850 tok/s, accepts PNG
@@ -187,7 +187,7 @@ class CutShort(str):
 
 # Why a model stops before it is done, in each provider's words (OpenAI / Mistral, Anthropic, Gemini).
 _CUT_REASONS = frozenset(("length", "model_length", "content_filter", "max_tokens", "model_context_window_exceeded",
-                          "MAX_TOKENS", "SAFETY", "RECITATION"))
+                          "refusal", "MAX_TOKENS", "SAFETY", "RECITATION"))
 
 
 def _note_finish(info, reason):
@@ -1340,11 +1340,82 @@ def _stream_gemini(text, mode, config, source_lang, target_lang, key, on_token, 
     return "".join(parts).strip()
 
 
+# ── Claude with your own key (founder 2026-11-14: "fix it, default Sonnet 5.5") ──
+# Today's Claude models refuse a temperature (HTTP 400 "temperature is deprecated" on Haiku / Sonnet / Opus 5.5 and
+# Opus 4.8 - every own-key answer failed; checked against the live API) and think before they answer unless told not
+# to. So no temperature for them, and Gusan Cloud's own settings (smart-action claudeRoute), speed first: Haiku 5.5
+# without thinking, Sonnet 5.5 at its lightest (between_tools), Opus 5.5 (its thinking can't be turned off) at low
+# effort - with room for that thinking on top of the answer's own limit (it counts in max_tokens: the 220 of a live
+# recap could be spent before the first word). The Claude 4 models before Opus 4.7 (Sonnet 4.6, Haiku 4.5) still take
+# a temperature and keep the 0.1 answers were always written at.
+# Opus / Sonnet 5.5 on Anthropic's own API also ask Anthropic to let another model answer when one declines.
+CLAUDE_DEFAULT_MODEL = "claude-sonnet-5-5"
+CLAUDE_FALLBACK_BETA = "server-side-fallback-2026-07-01"
+CLAUDE_REFUSED = "Claude declined to answer this one. Try other words, or pick another AI writer in Settings."
+CLAUDE_TEMPERATURE = 0.1          # where a model takes one
+CLAUDE_THINKING_ROOM = 4000       # tokens on top of the answer's limit, for a model that always thinks first
+_CLAUDE_ALWAYS_THINKS = ("claude-opus-5-5", "claude-fable", "claude-mythos")
+# Claude 3.x is retired (404): a saved one becomes the current model of its family.
+CLAUDE_RETIRED_FAMILIES = (("haiku", "claude-haiku-5-5"), ("opus", "claude-opus-5-5"), ("sonnet", "claude-sonnet-5-5"))
+
+
+def claude_model(model):
+    """The Claude model to ask: the one picked, the default when none is, a retired 3.x one's current family member."""
+    m = str(model or "").strip() or CLAUDE_DEFAULT_MODEL
+    if m.lower().startswith("claude-3"):
+        for family, now in CLAUDE_RETIRED_FAMILIES:
+            if family in m.lower():
+                return now
+        return CLAUDE_DEFAULT_MODEL
+    return m
+
+
+def _anthropic_api(base_url):
+    try:
+        return (urlsplit(str(base_url)).hostname or "") == "api.anthropic.com"
+    except Exception:
+        return False
+
+
+def claude_request(model, base_url=""):
+    """(body fields, headers) a Claude request adds for ``model``: thinking and effort for speed, Anthropic's fallback
+    for a declined answer (Opus / Sonnet 5.5 on api.anthropic.com), a temperature only where the model takes one."""
+    m = str(model or "").lower()
+    if m.startswith("claude-haiku-5"):
+        body = {"thinking": {"type": "disabled"}, "output_config": {"effort": "low"}}
+    elif m.startswith("claude-sonnet-5-5"):
+        body = {"thinking": {"type": "between_tools"}, "output_config": {"effort": "low"}}
+    elif m.startswith(_CLAUDE_ALWAYS_THINKS):
+        body = {"output_config": {"effort": "low"}}               # (their thinking can't be turned off)
+    elif m.startswith(("claude-sonnet-5", "claude-opus-5")):
+        body = {"thinking": {"type": "disabled"}, "output_config": {"effort": "low"}}
+    elif m.startswith(("claude-opus-4-8", "claude-opus-4-7")):
+        body = {"output_config": {"effort": "low"}}               # (no thinking unless asked)
+    elif m.startswith(("claude-sonnet-4", "claude-haiku-4", "claude-opus-4")):
+        body = {"temperature": CLAUDE_TEMPERATURE}                # Sonnet 4.6, Haiku 4.5 and the 4s before: as before
+    else:
+        body = {}                                                 # a model not known here: nothing it could refuse
+    headers = {}
+    if m.startswith(("claude-opus-5-5", "claude-sonnet-5-5")) and _anthropic_api(base_url):
+        body["fallbacks"] = "default"
+        headers["anthropic-beta"] = CLAUDE_FALLBACK_BETA
+    return body, headers
+
+
+def claude_max_tokens(model, asked):
+    """The request's max_tokens: the answer's limit - plus room to think for a model that always thinks first (its
+    thinking counts in max_tokens; only what is written is paid for)."""
+    if str(model or "").lower().startswith(_CLAUDE_ALWAYS_THINKS):
+        return int(asked) + CLAUDE_THINKING_ROOM
+    return int(asked)
+
+
 def _stream_anthropic(text, mode, config, source_lang, target_lang, key, on_token, info=None):
     begin_stream()
     provider_defaults = defaults(PROVIDER_ANTHROPIC)
     base_url = (config.get("action_api_base_url") or provider_defaults["default_base_url"]).rstrip("/")
-    model = (config.get("action_api_model") or provider_defaults["default_model"]).strip()
+    model = claude_model(config.get("action_api_model") or provider_defaults["default_model"])
+    extra, extra_headers = claude_request(model, base_url)
     messages = build_messages(text, mode, source_lang, target_lang,
                               vocab_block=config.get("_vocab_block", ""))
     system = messages[0]["content"]
@@ -1355,10 +1426,11 @@ def _stream_anthropic(text, mode, config, source_lang, target_lang, key, on_toke
     try:
         resp = requests.post(
             f"{base_url}/messages",
-            headers={"x-api-key": key, "anthropic-version": "2023-06-01",
-                     "Content-Type": "application/json"},
-            json={"model": model, "system": system, "messages": convo,
-                  "temperature": 0.1, "max_tokens": _max_tokens_for(mode, text), "stream": True},
+            headers=dict({"x-api-key": key, "anthropic-version": "2023-06-01",
+                          "Content-Type": "application/json"}, **extra_headers),
+            json=dict({"model": model, "system": system, "messages": convo,
+                       "max_tokens": claude_max_tokens(model, _max_tokens_for(mode, text)), "stream": True},
+                      **extra),
             stream=True, timeout=(10, 60),
         )
     except requests.RequestException as e:
@@ -1367,6 +1439,7 @@ def _stream_anthropic(text, mode, config, source_lang, target_lang, key, on_toke
         _json_or_error(resp)
     parts = []
     ended = False
+    stop = ""
     try:
         for data in _sse_data_lines(resp):
             try:
@@ -1380,6 +1453,7 @@ def _stream_anthropic(text, mode, config, source_lang, target_lang, key, on_toke
                     parts.append(delta)
                     on_token(delta)
             elif kind == "message_delta":
+                stop = str((obj.get("delta") or {}).get("stop_reason") or stop)
                 ended = _note_finish(info, (obj.get("delta") or {}).get("stop_reason")) or ended
             elif kind == "message_stop":
                 ended = True
@@ -1393,6 +1467,10 @@ def _stream_anthropic(text, mode, config, source_lang, target_lang, key, on_toke
         ended = True
     finally:
         _close(resp)
+    if stop == "refusal" and not ("".join(parts).strip() and isinstance(info, dict)):
+        # Declined - before a word, or in the middle of an answer whose caller is not told it is cut (``info``:
+        # the meeting notes and the chat say so above the text): half an answer is never handed on as a whole one.
+        raise ActionAPIError(CLAUDE_REFUSED)
     _unfinished(parts, info, ended)
     return "".join(parts).strip()
 
@@ -1471,7 +1549,8 @@ def _run_gemini(text, mode, config, source_lang, target_lang, key):
 def _run_anthropic(text, mode, config, source_lang, target_lang, key):
     provider_defaults = defaults(PROVIDER_ANTHROPIC)
     base_url = (config.get("action_api_base_url") or provider_defaults["default_base_url"]).rstrip("/")
-    model = (config.get("action_api_model") or provider_defaults["default_model"]).strip()
+    model = claude_model(config.get("action_api_model") or provider_defaults["default_model"])
+    extra, extra_headers = claude_request(model, base_url)
     messages = build_messages(text, mode, source_lang, target_lang,
                               vocab_block=config.get("_vocab_block", ""))
     # messages is [system, *few-shot turns, user]. Taking messages[1] as the
@@ -1485,22 +1564,24 @@ def _run_anthropic(text, mode, config, source_lang, target_lang, key):
     convo = anthropic_convo_with_image(convo, config.get("_image_png_b64"))
     resp = requests.post(
         f"{base_url}/messages",
-        headers={
+        headers=dict({
             "x-api-key": key,
             "anthropic-version": "2023-06-01",
             "Content-Type": "application/json",
-        },
-        json={
+        }, **extra_headers),
+        json=dict({
             "model": model,
             "system": system,
             "messages": convo,
-            "temperature": 0.1,
-            "max_tokens": _max_tokens_for(mode, text),
-        },
+            "max_tokens": claude_max_tokens(model, _max_tokens_for(mode, text)),
+        }, **extra),
         timeout=45,
     )
     data = _json_or_error(resp)
-    return "\n".join(part.get("text", "") for part in data.get("content", []) if part.get("type") == "text").strip()
+    out = "\n".join(part.get("text", "") for part in data.get("content", []) if part.get("type") == "text").strip()
+    if data.get("stop_reason") == "refusal":                # (also in mid-answer: half an answer is not the answer)
+        raise ActionAPIError(CLAUDE_REFUSED)
+    return out
 
 
 def _json_or_error(resp):

@@ -286,7 +286,8 @@ def test_the_page_builds_for_every_plan(shell, meetings_root, tier):
     assert lv.rail.title_label.text() == "Meeting settings"
     # Transcribes with (the Live Assistant's row, for meetings) says what runs; no "Runs on" foot any more.
     assert lv.rail.speech.combo.currentData() == ""                      # Automatic
-    assert "Whisper" in lv.rail.speech.line.text()
+    # (a Pro person's meetings default to Best accuracy - founder 2026-11-14; everyone else: Dictation's model)
+    assert ("Best accuracy" if tier == "pro" else "Whisper") in lv.rail.speech.line.text()
     assert not hasattr(lv.rail, "runs_label")
 
 
@@ -402,16 +403,26 @@ def test_record_follow_and_never_stop_on_leaving(shell, meetings_root):
     # Live Assistant: Pro -> the card.
     live.assist_btn.click()
     assert ("toggle_live_assist",) in app.calls
-    # Stop and write notes -> processing -> the notes.
+    # Stop and write notes -> back to the meetings at once (founder 2026-11-14: "it should take it back to the
+    # meeting page and not keep it there until it's loaded and writing notes"); the notes are written meanwhile.
+    folder = _meeting(meetings_root, "20261007_143000", "Q4 roadmap")
+    session.meeting_dir = str(folder)
     live.stop_btn.click()
     assert ("stop", "Ask Anna") in session.calls
-    assert live.status_box.isVisibleTo(page) and not live.stop_btn.isVisibleTo(page)
-    assert live.state_label.text() == "WRITING NOTES"
-    session.status.emit("Transcribing…")
-    assert live.status_label.text() == "Transcribing…"
-    folder = _meeting(meetings_root, "20261007_143000", "Q4 roadmap")
+    assert session.phase == "processing" and page.current_view() == "list"
+    strip = page.list_view.live_strip
+    assert strip.isVisibleTo(page)                                      # "Writing notes" says so on the list
+    # ... and the meeting opens on its OWN page meanwhile (the banner says so), never back on the live view
+    strip.open_btn.click()
+    assert page.current_view() == "notes" and page.notes_view.folder == str(folder)
+    assert page.notes_view.banner.accessibleName() == "Writing notes…"
+    page.show_list()
+    win.open("home")
+    assert win.open("meetings") is page and page.current_view() == "list"   # coming back: still the list
     session.phase = "done"
     session.finished.emit(str(folder), NOTES, "")
+    assert page.current_view() == "list"                                # nobody is moved when the notes land
+    page.list_view.meetings.rows[0].click()
     assert page.current_view() == "notes" and page.notes_view.folder == str(folder)
 
 
@@ -487,7 +498,12 @@ def test_a_real_session_from_record_to_notes(shell, meetings_root, monkeypatch):
     assert s.phase == "recording"
     page.live_view.my_notes.setPlainText("Ask Anna")
     page.live_view.stop_btn.click()
-    assert _wait_for(lambda: page.current_view() == "notes", timeout=10)
+    assert page.current_view() == "list"                    # Stop: back to the meetings, the notes are written meanwhile
+    assert _wait_for(lambda: s.phase == "done", timeout=10)
+    assert page.current_view() == "list"
+    assert _wait_for(lambda: [r.meeting["title"] for r in page.list_view.meetings.rows] == ["Weekly sync"], timeout=10)
+    page.list_view.meetings.rows[0].click()
+    assert page.current_view() == "notes"
     nv = page.notes_view
     assert nv.data["title"] == "Weekly sync"
     assert "We ship Friday" in nv.data["notes"] and nv.data["my_notes"] == "Ask Anna"
@@ -499,6 +515,111 @@ def test_a_real_session_from_record_to_notes(shell, meetings_root, monkeypatch):
 
 
 # ── settings ─────────────────────────────────────────────────────────────────
+# ── the conversation in the caption language (meeting_translation.py) ──
+def test_the_live_transcript_switches_between_original_and_the_caption_language(qapp, monkeypatch):
+    """Founder 2026-11-14: "if I have a caption on and I have a language that I want the caption on ... I want to
+    see original or the language that has been chosen" - during the call."""
+    from ui.pages.meeting_views import TranscriptPane
+    pane = TranscriptPane()
+    assert pane.lang_switch.isHidden() and not pane.shows_translation()          # no caption language: no switch
+    pane.add_line("Hello team.", "You")
+    pane.add_line("How are you?", "Them")
+    pane.set_language("fr")
+    assert not pane.lang_switch.isHidden()
+    assert [b.text() for b in pane.lang_switch.buttons()] == ["Original", "French"]
+    pane.set_translation(0, "Bonjour l'équipe.")
+    assert [t.text() for _r, _w, t, _who in pane._lines] == ["Hello team.", "How are you?"]     # Original still
+    pane.lang_switch.buttons()[1].click()
+    assert pane.shows_translation()
+    # a line shows its translation, one that has none yet shows as spoken - and gets it the moment it arrives
+    assert [t.text() for _r, _w, t, _who in pane._lines] == ["Bonjour l'équipe.", "How are you?"]
+    pane.set_translation(1, "Comment allez-vous ?")
+    assert pane._lines[1][2].text() == "Comment allez-vous ?"
+    pane.set_translations({0: "Bonjour l'équipe.", 1: "Comment allez-vous ?", 2: "Bien."})   # (one known early)
+    pane.add_line("Fine.", "You")
+    assert pane._lines[2][2].text() == "Bien."
+    assert pane.lines() == [("You", "Hello team."), ("Them", "How are you?"), ("You", "Fine.")]   # as spoken, always
+    pane.lang_switch.buttons()[0].click()
+    assert [t.text() for _r, _w, t, _who in pane._lines] == ["Hello team.", "How are you?", "Fine."]
+    # the lines kept are the last ones: a translation still finds its line by its place in the meeting
+    monkeypatch.setattr(TranscriptPane, "LIMIT", 2)
+    pane.lang_switch.buttons()[1].click()
+    pane.add_line("Line four.", "You")                                           # the oldest is dropped
+    pane.set_translation(3, "Ligne quatre.")
+    assert [t.text() for _r, _w, t, _who in pane._lines] == ["Bien.", "Ligne quatre."]
+    pane.set_lines([("You", "Six."), ("Them", "Seven.")], first=5)               # (the page opened late)
+    pane.set_translation(6, "Sept.")
+    assert [t.text() for _r, _w, t, _who in pane._lines] == ["Six.", "Sept."]
+    # captions off (or as spoken): the switch goes, the words as spoken stay
+    pane.set_language("")
+    assert pane.lang_switch.isHidden() and not pane.shows_translation()
+    assert [t.text() for _r, _w, t, _who in pane._lines] == ["Six.", "Seven."]
+    pane.set_language("de")                                                      # another language starts as spoken
+    assert pane.lang_switch.buttons()[1].text() == "German" and not pane.shows_translation()
+    pane.deleteLater()
+
+
+def test_the_live_view_follows_the_sessions_translations(shell, meetings_root):
+    session = FakeSession("recording")
+    session.live_lines = lambda: [("You", "Hello team."), ("Them", "How are you?")]
+    session.translation_language = lambda: session.language
+    session.live_translation = lambda: (session.language, dict(session.known))
+    session.language, session.known = "fr", {0: "Bonjour l'équipe."}
+    win, app = shell("pro", meeting_session=session)
+    page = _open(win)
+    pane = page.live_view.transcript
+    assert page.current_view() == "live" and pane.language() == "fr" and not pane.lang_switch.isHidden()
+    pane.lang_switch.buttons()[1].click()
+    assert [t.text() for _r, _w, t, _who in pane._lines] == ["Bonjour l'équipe.", "How are you?"]
+    page.live_view.set_line_translation(1, "Comment allez-vous ?")               # the session's line_translated
+    assert pane._lines[1][2].text() == "Comment allez-vous ?"
+    session.language, session.known = "", {}                                     # captions switched off meanwhile
+    page.on_setting_changed("captions_on")
+    assert pane.lang_switch.isHidden()
+    assert [t.text() for _r, _w, t, _who in pane._lines] == ["Hello team.", "How are you?"]
+
+
+def test_a_saved_meeting_switches_between_original_and_its_translation(shell, meetings_root):
+    """... and on the saved meeting: only one recorded with captions in another language (translation.json)."""
+    import meeting_translation
+    plain = _meeting(meetings_root, "20261007_143000", "Q4 roadmap", transcript="You: Hello team.\nThem: Fine, thanks.")
+    folder = _meeting(meetings_root, "20261008_143000", "Budget", transcript="You: Hello team.\nThem: Fine, thanks.")
+    meeting_translation.save(str(folder), "fr", {"Hello team.": "Bonjour l'équipe."})
+    session = FakeSession()
+    session.asked = []
+    session.translate_meeting = lambda f, language=None: session.asked.append(str(f)) or True
+    win, app = shell("pro", meeting_session=session)
+    page = _open(win, meeting=str(plain))
+    nv = page.notes_view
+    nv.stack_index(1)
+    assert nv.tr_switch.isHidden() and "Hello team." in nv.transcript.toPlainText()      # no translation: no switch
+    page.open_notes(str(folder))
+    QApplication.processEvents()
+    assert nv.tr_switch.isHidden()                                       # (on the Notes tab)
+    nv.stack_index(1)
+    assert not nv.tr_switch.isHidden()
+    assert [b.text() for b in nv.tr_switch.buttons()] == ["Original", "French"]
+    assert "Hello team." in nv.transcript.toPlainText() and not nv.shows_translation()
+    nv.tr_switch.buttons()[1].click()
+    text = nv.transcript.toPlainText()
+    assert "Bonjour l'équipe." in text and "Hello team." not in text
+    assert "Fine, thanks." in text                                       # not translated yet: as spoken ...
+    assert session.asked == [str(folder)]                                # ... and asked for, once
+    meeting_translation.save(str(folder), "fr", {"Hello team.": "Bonjour l'équipe.", "Fine, thanks.": "Bien, merci."})
+    page._on_translation_saved(str(folder))                              # the session: it is there
+    text = nv.transcript.toPlainText()
+    assert "Bien, merci." in text and "Fine, thanks." not in text and "You" in text      # the speakers stay
+    assert session.asked == [str(folder)]
+    nv.tr_switch.buttons()[0].click()
+    assert "Hello team." in nv.transcript.toPlainText()
+    nv.stack_index(0)
+    assert nv.tr_switch.isHidden()
+    page.open_notes(str(plain))                                          # another meeting: as spoken, no switch
+    QApplication.processEvents()
+    nv.stack_index(1)
+    assert nv.tr_switch.isHidden() and not nv.shows_translation()
+
+
 def test_settings_apply_through_set_setting(shell, meetings_root):
     win, app = shell("pro")
     page = _open(win)
@@ -532,7 +653,21 @@ def test_settings_apply_through_set_setting(shell, meetings_root):
     assert rail.opt_local.radio.isChecked()
     app.cfg["whisper_model"] = "small"
     page.on_setting_changed("whisper_model")
-    assert rail.speech.line.text().startswith("Whisper Small")          # Automatic follows Dictation's model
+    assert rail.speech.line.text().startswith("Best accuracy")          # Pro, Automatic: not Dictation's model
+    app.cfg["privacy_mode"] = True
+    page.on_setting_changed("privacy_mode")
+    assert rail.speech.line.text().startswith("Whisper Small")          # Privacy mode: Dictation's, on this computer
+    app.cfg["privacy_mode"] = False
+    page.on_setting_changed("privacy_mode")
+    # Notes written by > Gusan Cloud names the model that writes notes for the AI writer picked in Settings
+    # (founder 2026-11-14: "if it's Anthropic then it shouldn't say Mistral Small")
+    assert rail.opt_cloud.model_label.text() == "GPT-4.1"
+    app.cfg["cloud_writer_model"] = "claude"
+    page.on_setting_changed("cloud_writer_model")
+    assert rail.opt_cloud.model_label.text() == "Claude Sonnet 5.5"
+    app.cfg["cloud_writer_model"] = "mistral"
+    page.on_setting_changed("cloud_writer_model")
+    assert rail.opt_cloud.model_label.text() == "Mistral Small"
 
 
 def test_free_users_keep_notes_on_this_computer(shell, meetings_root):
@@ -877,10 +1012,11 @@ def test_a_notes_rewrite_stays_on_the_notes(shell, meetings_root):
     page.show_list()
     page.list_view.meetings.rows[0].click()
     assert page.current_view() == "notes"
-    # A just-recorded meeting's notes being written: the live view, as before.
+    # A just-recorded meeting's notes being written: its own page too, with the banner (never the live view).
     session._rewrite_only = False
+    page.show_list()
     page.open_notes(str(folder))
-    assert page.current_view() == "live"
+    assert page.current_view() == "notes" and page.notes_view.banner.accessibleName() == "Writing notes…"
 
 
 class FakeDownloads(QObject):
