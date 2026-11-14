@@ -1,0 +1,59 @@
+name: Android (debug APK)
+
+on:
+  push:
+    paths: ['mobile/android/**', 'notes_prompt.py', 'meeting_titles.py', '.github/workflows/android.yml']
+  pull_request:
+    paths: ['mobile/android/**', 'notes_prompt.py', 'meeting_titles.py', '.github/workflows/android.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile/android
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # The notes prompt is written by the desktop's notes_prompt.py; the copy the app ships must be current.
+      - name: Check the notes prompt is the desktop's
+        run: python3 scripts/export_notes_prompt.py --check
+
+      - name: Test the shared logic
+        run: ./gradlew :core:test --console=plain
+
+      - name: Build the debug APK
+        run: ./gradlew :app:assembleDebug --console=plain
+
+      - name: Lint
+        run: ./gradlew :app:lintDebug --console=plain
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Gusan-Android-debug
+          path: mobile/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-lint-report
+          path: mobile/android/app/build/reports/lint-results-debug.html
+          if-no-files-found: ignore
+          retention-days: 14

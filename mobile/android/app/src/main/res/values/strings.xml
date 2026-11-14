@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Gusan</string>
+    <string name="keyboard_name">Gusan</string>
+    <string name="keyboard_subtype">English</string>
+    <string name="channel_recording">Meeting recording</string>
+    <string name="channel_recording_about">Shown while Gusan records a meeting or writes its notes.</string>
+    <string name="channel_notes">Meeting notes ready</string>
+    <string name="channel_notes_about">Tells you when a meeting\'s notes are written.</string>
+</resources>
