@@ -48,7 +48,7 @@ class KeyboardView(context: Context, private var theme: KeyboardTheme) : View(co
     private val density = resources.displayMetrics.density
     private var placed: List<Placed> = emptyList()
     private val pressed = HashMap<Int, Placed>()        // pointer id -> the key under that finger
-    private val handler = Handler(Looper.getMainLooper())
+    private val timers = Handler(Looper.getMainLooper())
     private var repeating: Runnable? = null
     private var longPress: Runnable? = null
     private var longPressed = false
@@ -221,8 +221,8 @@ class KeyboardView(context: Context, private var theme: KeyboardTheme) : View(co
     }
 
     private fun stopTimers() {
-        repeating?.let(handler::removeCallbacks)
-        longPress?.let(handler::removeCallbacks)
+        repeating?.let { timers.removeCallbacks(it) }
+        longPress?.let { timers.removeCallbacks(it) }
         repeating = null
         longPress = null
     }
@@ -247,12 +247,12 @@ class KeyboardView(context: Context, private var theme: KeyboardTheme) : View(co
                     override fun run() {
                         if (pressed[pointer] === p) {
                             listener?.onKey(p.key)
-                            handler.postDelayed(this, 55)
+                            timers.postDelayed(this, 55)
                         }
                     }
                 }
                 repeating = again
-                handler.postDelayed(again, 400)
+                timers.postDelayed(again, 400)
             }
             Key.Kind.SWITCH_KEYBOARD, Key.Kind.SPACE -> {
                 val hold = Runnable {
@@ -262,7 +262,7 @@ class KeyboardView(context: Context, private var theme: KeyboardTheme) : View(co
                     }
                 }
                 longPress = hold
-                handler.postDelayed(hold, 500)
+                timers.postDelayed(hold, 500)
             }
             else -> Unit
         }
