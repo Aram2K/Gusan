@@ -28,6 +28,22 @@ KINDS = {
 }
 
 NOTES = (
+    ("2.1.8", (
+        ("better", "Captions keep up with the call",
+         "Words show the moment they are said. Translations come a phrase at a time."),
+        ("new", "The conversation in your caption language",
+         "Switch the transcript between Original and that language, in the call and after."),
+        ("better", "One engine for a meeting",
+         "Transcript, captions and Live Assistant use the one you picked. Pro: Best accuracy."),
+        ("better", "Back to your meetings after Stop",
+         "The list comes back at once while the notes are written."),
+        ("fixed", "No more Pasted with nothing pasted",
+         "With nowhere to type, a Smart Action is copied and shown in a small card."),
+        ("better", "Notes by the AI writer you picked",
+         "Meeting notes on Gusan Cloud follow the writer chosen in Settings."),
+        ("fixed", "Claude with your own key",
+         "Works again, now with Claude Sonnet 5.5, Opus 5.5 and Haiku 5.5."),
+    )),
     ("2.1.7", (
         ("better", "Captions you can read",
          "Words come one after another at reading pace, never in a burst."),
