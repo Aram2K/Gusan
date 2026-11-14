@@ -526,3 +526,66 @@ def test_keyboard_reaches_the_sidebar(shell):
     assert item.property("focusVisible") is True
     QTest.keyClick(item, Qt.Key_Space)
     assert win.current_route() == "dictation"
+
+
+# ── pages built ahead of their first open (founder 2026-11-14: "why is it taking time to go to those pages") ──
+def _prebuild(monkeypatch, start=20, step=10, busy=30):
+    from ui import shell as shell_mod
+    monkeypatch.setattr(shell_mod, "prebuild_enabled", lambda: True)
+    monkeypatch.setattr(shell_mod, "PREBUILD_START_MS", start)
+    monkeypatch.setattr(shell_mod, "PREBUILD_STEP_MS", step)
+    monkeypatch.setattr(shell_mod, "PREBUILD_BUSY_MS", busy)
+    return shell_mod
+
+
+def _until(cond, ms=8000):
+    waited = 0
+    while not cond() and waited < ms:
+        QTest.qWait(20)
+        waited += 20
+    return cond()
+
+
+def test_the_tiles_pages_are_built_ahead_of_their_first_open(shell, monkeypatch):
+    shell_mod = _prebuild(monkeypatch)
+    win, _app = shell("pro")
+    win.open("home")
+    assert set(win.pages()) == {"home"}                     # nothing is built before the window shows
+    win.show()
+    assert _until(lambda: all(r in win.pages() for r in shell_mod.PREBUILD))
+    assert win.current_route() == "home"                    # built hidden: nobody is moved anywhere
+    assert "settings" not in win.pages()                    # (only the pages of Home's tiles)
+    built = win.page("meetings")
+    assert win.open("meetings") is built                    # the first open shows the page that was built
+    assert win.current_route() == "meetings"
+
+
+def test_a_page_the_person_opened_first_is_not_built_twice(shell, monkeypatch):
+    shell_mod = _prebuild(monkeypatch, start=150)
+    win, _app = shell("pro")
+    win.show()
+    mine = win.open("dictation")                            # before the first page was built ahead
+    assert _until(lambda: all(r in win.pages() for r in shell_mod.PREBUILD))
+    assert win.page("dictation") is mine and win.current_route() == "dictation"
+
+
+def test_nothing_is_built_while_a_take_is_recorded(shell, monkeypatch):
+    shell_mod = _prebuild(monkeypatch)
+    win, app = shell("pro")
+    app.is_rec = True                                       # a dictation is being recorded
+    win.open("home")
+    win.show()
+    QTest.qWait(200)
+    assert set(win.pages()) == {"home"}
+    app.is_rec = False
+    assert _until(lambda: all(r in win.pages() for r in shell_mod.PREBUILD))
+
+
+def test_under_the_test_suites_pages_are_only_built_when_opened(shell):
+    from ui import shell as shell_mod
+    assert shell_mod.prebuild_enabled() is False            # (Qt's offscreen platform)
+    win, _app = shell("pro")
+    win.open("home")
+    win.show()
+    QTest.qWait(120)
+    assert set(win.pages()) == {"home"}

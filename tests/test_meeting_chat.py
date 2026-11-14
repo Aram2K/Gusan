@@ -371,6 +371,16 @@ class TestEngine(unittest.TestCase):
         self.assertEqual((c.engine_id, c.kind, c.problem), ("managed", "cloud", ""))
         self.assertEqual(c.label, "Gusan Cloud \u00b7 Mistral Small")
 
+    def test_the_footer_names_the_model_that_answers_for_the_writer_picked(self):
+        """2026-11-14: the footer said "Mistral Small" with OpenAI or Gemini picked in Settings, while that engine
+        answered (the chat's chain is Mistral Small -> OpenAI -> Gemini; a pick with no step in it changes nothing)."""
+        want = {"": "Mistral Small", "mistral": "Mistral Small", "openai": "GPT-5.4 mini",
+                "gemini": "Gemini 2.5 Flash", "claude": "Mistral Small", "deepseek": "Mistral Small"}
+        for pick, model in want.items():
+            c = mc.pick_engine({"action_model": "managed", "cloud_writer_model": pick}, True, True,
+                               downloaded=lambda m: False, signed_in=True)
+            self.assertEqual((c.kind, c.label), ("cloud", "Gusan Cloud \u00b7 " + model), pick)
+
     def test_a_pro_user_who_picked_a_local_model_keeps_it(self):
         c = self.pick("pro", {"action_model": "qwen_3b"}, downloaded=("qwen_3b",))
         self.assertEqual((c.engine_id, c.kind), ("qwen_3b", "local"))

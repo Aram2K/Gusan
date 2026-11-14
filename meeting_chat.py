@@ -643,9 +643,17 @@ def route_engine(pref, cfg, has_token):
     return engine
 
 
-def _choice(engine, kind, problem=""):
-    return EngineChoice(engine_id=engine or "", kind=kind, label=meeting_session.engine_label(engine) if engine else "",
-                        problem=problem)
+def _choice(engine, kind, problem="", cfg=None):
+    """``cfg``: Gusan Cloud is named by the model that answers the chat for the AI writer picked in Settings
+    (the footer said "Mistral Small" with OpenAI or Gemini picked, while that engine answered)."""
+    label = meeting_session.engine_label(engine) if engine else ""
+    if engine == actions.API_MANAGED_ID and cfg is not None:
+        try:
+            import engine_choice
+            label = "Gusan Cloud \u00b7 " + engine_choice.cloud_chat_model(cfg)
+        except Exception:
+            pass
+    return EngineChoice(engine_id=engine or "", kind=kind, label=label, problem=problem)
 
 
 def choose(engine, cfg, has_token, downloaded=None, signed_in=None):
@@ -670,7 +678,7 @@ def choose(engine, cfg, has_token, downloaded=None, signed_in=None):
     ukind = actions.ACTION_MODELS.get(usable, {}).get("kind")
     if ukind == "local_llm":
         return _choice(usable, "local", "" if on_disk(usable) else "needs_download")
-    return _choice(usable, "cloud" if ukind == "managed" else "own_key")
+    return _choice(usable, "cloud" if ukind == "managed" else "own_key", cfg=cfg)
 
 
 def pick_engine(cfg, pro, has_token, override=None, downloaded=None, signed_in=None):

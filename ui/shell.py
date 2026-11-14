@@ -6,6 +6,9 @@
 
 Pages are built the first time they open, from a factory given to
 register_page(), else the module ui/pages/<route>.py (its create(main_app)).
+A few seconds after the window first shows, the pages of Home's tiles are built
+quietly one at a time (PREBUILD), so their first open is as quick as the next
+ones (founder 2026-11-14: "why is it taking time to go to those pages").
 A page that fails to build (or has no module) shows an error card with Try
 again and Copy details; the rest of the window keeps working. See
 ui/pages/__init__.py for the optional page hooks (on_open, on_setting_changed,
@@ -25,9 +28,10 @@ kept out (a known gap).
 """
 
 import logging
+import os
 import traceback
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QMainWindow, QScrollArea, QSizePolicy,
                                QStackedWidget, QVBoxLayout, QWidget)
@@ -45,6 +49,17 @@ ROUTES = ("home", "dictation", "smart_actions", "meetings", "live_assistant", "a
 # Pages that moved: the old route opens its new place. The Dictionary is a
 # section of Settings (ui/pages/settings.py), not a page of its own.
 ROUTE_ALIASES = {"dictionary": ("settings", {"section": "dictionary"})}
+# Built ahead of their first open, in the order of Home's tiles (a page takes 0.4-1 s to build: that was the wait
+# on the first click after every start).
+PREBUILD = ("dictation", "smart_actions", "meetings", "live_assistant", "audio_to_text")
+PREBUILD_START_MS = 2500        # after the window first shows: the start itself stays as quick as it was
+PREBUILD_STEP_MS = 700          # between two pages, so the window answers in between
+PREBUILD_BUSY_MS = 3000         # a take is being recorded: look again later (the pill must not stutter)
+
+
+def prebuild_enabled():
+    """Off under the test suites (Qt's offscreen platform) and with GUSAN_NO_PREBUILD set."""
+    return not os.environ.get("GUSAN_NO_PREBUILD") and not os.environ.get("QT_QPA_PLATFORM", "").startswith("offscreen")
 
 TITLES = {
     "home": "Welcome",
@@ -411,6 +426,34 @@ class MainWindow(QMainWindow):
             settle_on_screen(self)
         except Exception:
             logger.debug("fit on screen failed", exc_info=True)
+        if not getattr(self, "_prebuild_started", False) and prebuild_enabled():
+            self._prebuild_started = True
+            QTimer.singleShot(PREBUILD_START_MS, self._prebuild_next)
+
+    # ── pages built ahead of their first open ──
+    def _prebuild_busy(self):
+        """A dictation or Smart Action is being recorded: building a page now would freeze the pill for a moment."""
+        app = self.app
+        try:
+            if getattr(app, "is_rec", False) is True:
+                return True
+            return getattr(getattr(app, "recorder", None), "recording", False) is True
+        except Exception:
+            return False
+
+    def _prebuild_next(self):
+        """Build the next page of PREBUILD nobody opened yet (hidden, like a first open would build it) and come
+        back for the one after. Never while a take is recorded, never once the app quits."""
+        if getattr(self.app, "_quitting", False) is True:
+            return
+        route = next((r for r in PREBUILD if r in ROUTES and r not in self._pages), None)
+        if route is None:
+            return
+        if self._prebuild_busy():
+            QTimer.singleShot(PREBUILD_BUSY_MS, self._prebuild_next)
+            return
+        self._build(route)
+        QTimer.singleShot(PREBUILD_STEP_MS, self._prebuild_next)
 
     def closeEvent(self, event):
         # The app lives in the tray: closing the window only hides it - but

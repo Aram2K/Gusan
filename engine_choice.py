@@ -548,6 +548,17 @@ def cloud_notes_model(cfg):
     return CLOUD_NOTES_MODELS.get(cloud_writer_family(cfg), CLOUD_NOTES_DEFAULT)
 
 
+# The model that answers a question about a meeting ("Ask about this meeting") on Gusan Cloud for the writer
+# picked: that request runs Mistral Small unless the pick is another engine of its chain (smart-action: Mistral
+# Small -> OpenAI -> Gemini Flash, the pick first; it has no Claude or DeepSeek step).
+CLOUD_CHAT_MODELS = {"openai": CLOUD_ANSWER_MODELS["openai"][0], "gemini": "Gemini 2.5 Flash"}
+
+
+def cloud_chat_model(cfg):
+    """The model that answers the meeting chat on Gusan Cloud, for the writer picked in Settings."""
+    return CLOUD_CHAT_MODELS.get(cloud_writer_family(cfg), CLOUD_WRITER_MODEL)
+
+
 def cloud_smart_line(cfg):
     """The Gusan Cloud line of the Smart Actions writer card: the model that answers, for the pick."""
     model = cloud_answer_model(cfg)
