@@ -18,7 +18,7 @@ With Xcode and its iOS platform installed:
 
 ```sh
 brew install xcodegen
-cd ios
+cd mobile/ios
 xcodegen generate
 open Gusan.xcodeproj
 # No development team is needed for Simulator builds.

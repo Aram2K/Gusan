@@ -43,6 +43,9 @@ cd mobile/android
 
 Without an Android SDK (`ANDROID_HOME` unset and no `local.properties`) only `:core` is part of the build.
 
+`core/src/main/resources/gusan/prompts.json` is a copy of the iPhone app's
+`mobile/ios/GusanKit/Sources/GusanKit/Resources/prompts.json`; CI fails when the two differ.
+
 The [Android workflow](../../.github/workflows/android.yml) runs the tests, builds the debug APK and
 uploads it as the `Gusan-Android-debug` artifact.
 

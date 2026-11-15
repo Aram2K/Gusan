@@ -1,6 +1,6 @@
 # Gusan on iPhone — product brief (owner-approved direction, 2026-11-08)
 
-Owner: Aram (Aram2K). Repos: Aram2K/Gusan (desktop Python app + `ios/` SwiftUI app, keyboard extension, GusanKit package, `supabase/functions/*` edge functions), Aram2K/aibuben (website). Backend: Supabase project `hftcelxzfoubheqeoool` (edge functions `smart-action`, `transcribe-proxy`, `agent-action`). Speech: Gladia via `transcribe-proxy`. Agent: H Company Agents API (key is server-side only, secret name `H_company_computer_agents`), mobile-only scope. Web search: Linkup for Smart mode only, never for Agent mode.
+Owner: Aram (Aram2K). Repos: Aram2K/Gusan (desktop Python app + `mobile/ios/` SwiftUI app, keyboard extension, GusanKit package, `supabase/functions/*` edge functions), Aram2K/aibuben (website). Backend: Supabase project `hftcelxzfoubheqeoool` (edge functions `smart-action`, `transcribe-proxy`, `agent-action`). Speech: Gladia via `transcribe-proxy`. Agent: H Company Agents API (key is server-side only, secret name `H_company_computer_agents`), mobile-only scope. Web search: Linkup for Smart mode only, never for Agent mode.
 
 ## Owner's words (verbatim, keep these)
 - "I want to see if it's possible to have the keyboard, just the thing on top of it, not a separate keyboard … I would prefer to have the Gusan on top of any keyboard I use"
@@ -64,7 +64,7 @@ H Agents API has **Vaults** (providers `internal` and `onepassword`): items hold
 - Memory limit for keyboard extensions (~ 60–70 MB), startup time; free Apple ID limits (no push notifications entitlement? verify), App Groups for app↔keyboard data.
 
 ## Existing code to read first
-`ios/Gusan/*.swift`, `ios/GusanKeyboard/*.swift`, `ios/GusanKit/Sources/GusanKit/**`, `ios/DESIGN.md`, `supabase/functions/agent-action/index.ts`, `supabase/functions/smart-action`, `supabase/functions/transcribe-proxy`, `supabase/migrations/202611070001_agent_tasks.sql`, `202611070002_agent_task_phases.sql`. Open PRs (not merged): #13 voice redesign, #14 Gladia, #15 Linkup, #17 voice, #18 H backend, #19 iOS agent, #20 ReplayKit, #21 desktop screen chat. Branch `devin/1794056309-ios-keyboard`.
+`mobile/ios/Gusan/*.swift`, `mobile/ios/GusanKeyboard/*.swift`, `mobile/ios/GusanKit/Sources/GusanKit/**`, `mobile/ios/DESIGN.md`, `supabase/functions/agent-action/index.ts`, `supabase/functions/smart-action`, `supabase/functions/transcribe-proxy`, `supabase/migrations/202611070001_agent_tasks.sql`, `202611070002_agent_task_phases.sql`. Open PRs (not merged): #13 voice redesign, #14 Gladia, #15 Linkup, #17 voice, #18 H backend, #19 iOS agent, #20 ReplayKit, #21 desktop screen chat. Branch `devin/1794056309-ios-keyboard`.
 
 ## Brand
 Logo: the owner-picked "Pearl & Champagne" mic on the glassy Armenian flag; do not replace. Keep iOS-native feel (SF Pro, SF Symbols-like icons, system colors), not generic "AI app" gradients.

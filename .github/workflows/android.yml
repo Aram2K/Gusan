@@ -34,6 +34,10 @@ jobs:
       - name: Check the notes prompt is the desktop's
         run: python3 scripts/export_notes_prompt.py --check
 
+      # Both phone apps send the desktop's Smart Action prompts; the iPhone copy is checked against the desktop.
+      - name: Check the Smart Action prompts are the iPhone app's
+        run: cmp core/src/main/resources/gusan/prompts.json ../ios/GusanKit/Sources/GusanKit/Resources/prompts.json
+
       - name: Test the shared logic
         run: ./gradlew :core:test --console=plain
 

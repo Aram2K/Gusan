@@ -1,6 +1,6 @@
 # Gusan for iPhone: design spec
 
-This spec covers the containing app (`ios/Gusan`) and the keyboard extension (`ios/GusanKeyboard`).
+This spec covers the containing app (`mobile/ios/Gusan`) and the keyboard extension (`mobile/ios/GusanKeyboard`).
 The build is reviewed against it. Every screen and state below must exist and look like this.
 Platform: iOS 16+, iPhone first, portrait and landscape. Follows Apple's Human Interface Guidelines.
 
@@ -222,13 +222,13 @@ DEBUG builds support `--gusan-debug-voice` on the containing app. This explicitl
 ### 7.4 Idle audio and sideload-only return
 The idle window defaults to two minutes. Recording installs an input tap and starts the engine; Stop or Cancel pauses the engine and removes the tap. The audio session remains active until Stop session or timeout. This reserves the mic and uses some battery, but does not intentionally capture idle audio. Verify the orange indicator and background survival on a physical device: an active audio session alone does not guarantee that iOS will keep the app running. A suspended or terminated app requires guided activation again.
 
-Only `ios/scripts/build_unsigned_ipa.sh` enables `GUSAN_SIDELOAD`. Under that compilation condition, the experimental automatic return uses the private `LSApplicationWorkspace.openApplicationWithBundleID:` selector. Ordinary builds omit the private implementation and settings toggle; do not enable this flag for App Store or TestFlight. If automatic return is unavailable, the activation sheet explains how to return manually.
+Only `mobile/ios/scripts/build_unsigned_ipa.sh` enables `GUSAN_SIDELOAD`. Under that compilation condition, the experimental automatic return uses the private `LSApplicationWorkspace.openApplicationWithBundleID:` selector. Ordinary builds omit the private implementation and settings toggle; do not enable this flag for App Store or TestFlight. If automatic return is unavailable, the activation sheet explains how to return manually.
 
 ## 8. Agent actions (future)
 A future long-running job may call a server-side computer-use agent from H Company. Keep its credential only in Supabase as `H_company_computer_agents`, never on the phone or in a client request. The server owns agent execution and authorization. Stream progress events through the same job interface and return a card-only result that the user reviews and explicitly inserts. Do not add an on-device agent or automatic agent-result insertion.
 
 ## 9. Gusan Screen (live screen context)
-The user lets Gusan see the iPhone screen through a ReplayKit **broadcast upload extension** (`ios/GusanScreen`, bundle `com.aram2k.gusan.screen`), started from the app's **Gusan Screen** page (`RPSystemBroadcastPickerView`) or from Control Center's screen recording control. The extension never uploads anything: it holds a second or two of downscaled frames in memory and gives one to the keyboard only when the keyboard asks.
+The user lets Gusan see the iPhone screen through a ReplayKit **broadcast upload extension** (`mobile/ios/GusanScreen`, bundle `com.aram2k.gusan.screen`), started from the app's **Gusan Screen** page (`RPSystemBroadcastPickerView`) or from Control Center's screen recording control. The extension never uploads anything: it holds a second or two of downscaled frames in memory and gives one to the keyboard only when the keyboard asks.
 
 ### 9.1 App page (Home › Gusan Screen, Keyboard › Screen)
 - Hero with the `eye` glyph in Gusan blue, one-line value ("say 'reply to this' or 'what does this say?' from the keyboard").

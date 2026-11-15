@@ -125,7 +125,7 @@ Releases are built by GitHub Actions when a version tag is pushed. The steps, an
 
 The default idle window is two minutes. Capture pauses and the input tap is removed between dictations, while the active audio session reserves the microphone and uses some battery. iOS may suspend or terminate the app before the window ends; subsequent recording then needs guided activation. Orange-indicator behaviour and background survival still need physical-device verification.
 
-`ios/scripts/build_unsigned_ipa.sh` enables `GUSAN_SIDELOAD` for experimental automatic return via the private `LSApplicationWorkspace.openApplicationWithBundleID:` selector. This is **sideload-only**, never App Store or TestFlight. Ordinary builds compile out that implementation and its settings toggle; manual return guidance remains available.
+`mobile/ios/scripts/build_unsigned_ipa.sh` enables `GUSAN_SIDELOAD` for experimental automatic return via the private `LSApplicationWorkspace.openApplicationWithBundleID:` selector. This is **sideload-only**, never App Store or TestFlight. Ordinary builds compile out that implementation and its settings toggle; manual return guidance remains available.
 
 ## License
 

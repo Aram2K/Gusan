@@ -559,8 +559,8 @@ Home (mode, readiness checklist, Gusan Screen switch, "Record from anywhere" set
 Each ticket: title · files touched · acceptance test on the owner's iPhone (or where noted). Branch names `devin/<ts>-<slug>`; one PR per ticket or small group.
 
 **P0 — spikes**
-- **P0‑1 S1 ready‑window keep‑alive.** `ios/Gusan/VoiceSession.swift` (debug flag to keep/pause the engine; heartbeat to App Group). Accept: heartbeats continue at 30 s / 5 min / 15 min with the screen locked; battery delta after 1 h noted.
-- **P0‑2 S4+S5 intent spike.** New `ios/GusanWidgets` target (`StartListeningIntent: AudioRecordingIntent & LiveActivityIntent`, `ControlWidget`, minimal activity), `ios/project.yml`, `build_unsigned_ipa.sh`. Accept: from Control Center / Action button / Back Tap on the sideloaded build, recording starts in the background, the island shows the activity, HUD behaviour noted; the activity's button starts recording (S5).
+- **P0‑1 S1 ready‑window keep‑alive.** `mobile/ios/Gusan/VoiceSession.swift` (debug flag to keep/pause the engine; heartbeat to App Group). Accept: heartbeats continue at 30 s / 5 min / 15 min with the screen locked; battery delta after 1 h noted.
+- **P0‑2 S4+S5 intent spike.** New `mobile/ios/GusanWidgets` target (`StartListeningIntent: AudioRecordingIntent & LiveActivityIntent`, `ControlWidget`, minimal activity), `mobile/ios/project.yml`, `build_unsigned_ipa.sh`. Accept: from Control Center / Action button / Back Tap on the sideloaded build, recording starts in the background, the island shows the activity, HUD behaviour noted; the activity's button starts recording (S5).
 - **P0‑3 S9 H vault mid‑session.** Script in `supabase/scripts/spike_s9.ts` (never committed with a key). Accept: a visual session bound to an empty vault fills a login on a test page after the item is added mid‑session; `fill_secret_at` absent in text mode confirmed.
 - **P0‑4 S8 log hygiene.** Canary requests to `smart-action`/`agent-action`; read edge logs via Management API. Accept: no `Authorization`, no query strings, no bodies in `edge_logs`.
 - **P0‑5 S10 AutoFill form.** Throwaway screen with `UITextField` vs SwiftUI `SecureField`. Accept: key icon appears; Face ID; both fields filled.
@@ -574,7 +574,7 @@ Each ticket: title · files touched · acceptance test on the owner's iPhone (or
 - **P1‑6 Server one‑liners.** `agent-action/index.ts` (`stepText` strips `search/hash`; Bearer check before body read; image cap 2 × 1 MiB), `tests/test_agent_action.py`. Accept: tests.
 
 **P2 — record from anywhere (after S4)**
-- **P2‑1 `GusanWidgets` extension.** `ios/GusanWidgets/{GusanSessionActivity.swift, StartListeningIntent.swift, StopIntent.swift, CopyResultIntent.swift, GusanControls.swift}`, `project.yml`, `Gusan/Info.plist` (`NSSupportsLiveActivities`), `build_unsigned_ipa.sh`. Accept: Control Center control starts listening; island compact/expanded/lock‑screen render; Stop ends recording.
+- **P2‑1 `GusanWidgets` extension.** `mobile/ios/GusanWidgets/{GusanSessionActivity.swift, StartListeningIntent.swift, StopIntent.swift, CopyResultIntent.swift, GusanControls.swift}`, `project.yml`, `Gusan/Info.plist` (`NSSupportsLiveActivities`), `build_unsigned_ipa.sh`. Accept: Control Center control starts listening; island compact/expanded/lock‑screen render; Stop ends recording.
 - **P2‑2 VoiceSession ↔ activity.** `Gusan/VoiceSession.swift` (activity lifecycle, ready window 15 min/1 h/∞, chime), `GusanKit/Voice/VoiceMachine.swift` (readiness), `GusanKit/Voice/VoiceProtocol.swift`. Accept: island shows listening → done; result copied to clipboard when no field; keyboard mic instant while ready.
 - **P2‑3 Keyboard decision tree + copy.** `GusanKeyboard/VoiceKey.swift` (`KeyboardVoice.tap`), Home "Record from anywhere" card (`Gusan/HomeView.swift`). Accept: first‑time hint shown once; activation hop only when not ready.
 

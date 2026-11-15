@@ -258,11 +258,11 @@ No value columns, no username, no H item ids in clear (store `sha256(h_vault_id)
 - `supabase/migrations/202611070001_agent_tasks.sql`, `202611070002_agent_task_phases.sql`: RLS, `agent_task_runs` service-role-only, `begin_agent_task`.
 - `supabase/functions/smart-action/index.ts`: `onlyDataImages`, `scrub`, `logSafe`, final `console.log`.
 - `supabase/functions/transcribe-proxy/index.ts`: `stt_fail`/`stt_ok` logging, size caps.
-- `ios/GusanKit/Sources/GusanKit/SessionBackend.swift`: `KeychainSessionBackend` (access class, access group), `FileSessionBackend`, `NamedSessionPasteboard` (expiry only with `lifetime`).
-- `ios/GusanKit/Sources/GusanKit/SessionStore.swift`: `usePasteboard()`, `writeShared`, `writeRefreshed`, voice pasteboard 600 s.
-- `ios/GusanKit/Sources/GusanKit/AuthClient.swift`: publishable key, refresh/clear behaviour.
-- `ios/Gusan/AgentCenter.swift`: notification categories (`.authenticationRequired`), notification body.
-- `ios/GusanKeyboard/AgentKeyboard.swift`: Confirm/Cancel slots, `confirmArmDelay`.
-- `ios/GusanScreen/SampleHandler.swift`, `ios/GusanKit/Sources/GusanKit/Screen/ScreenChannel.swift`: lifetimes, memory logging.
+- `mobile/ios/GusanKit/Sources/GusanKit/SessionBackend.swift`: `KeychainSessionBackend` (access class, access group), `FileSessionBackend`, `NamedSessionPasteboard` (expiry only with `lifetime`).
+- `mobile/ios/GusanKit/Sources/GusanKit/SessionStore.swift`: `usePasteboard()`, `writeShared`, `writeRefreshed`, voice pasteboard 600 s.
+- `mobile/ios/GusanKit/Sources/GusanKit/AuthClient.swift`: publishable key, refresh/clear behaviour.
+- `mobile/ios/Gusan/AgentCenter.swift`: notification categories (`.authenticationRequired`), notification body.
+- `mobile/ios/GusanKeyboard/AgentKeyboard.swift`: Confirm/Cancel slots, `confirmArmDelay`.
+- `mobile/ios/GusanScreen/SampleHandler.swift`, `mobile/ios/GusanKit/Sources/GusanKit/Screen/ScreenChannel.swift`: lifetimes, memory logging.
 - H docs: vaults/overview, vaults/create-item, vaults/reveal-item, browser/configuration, browser/profiles, sessions/create, custom-tools, webhooks/overview, plans-and-limits.
 - Apple docs: appintents/audiorecordingintent, appintents/liveactivityintent, appintents/appintent/supportedmodes, activitykit/displaying-live-data-with-live-activities, activitykit/activity/request(attributes:content:pushType:), widgetkit/creating-controls-to-perform-actions-across-the-system, security/password-autofill, eventkit/accessing-the-event-store, bundleresources/entitlements/aps-environment, uikit/uitextdocumentproxy.
