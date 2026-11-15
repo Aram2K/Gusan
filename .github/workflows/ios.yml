@@ -1,0 +1,62 @@
+name: iOS (unsigned IPA)
+
+on:
+  push:
+    branches: [main]
+    paths: ['ios/**', '.github/workflows/ios.yml']
+  pull_request:
+    paths: ['ios/**', '.github/workflows/ios.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select newest installed Xcode
+        shell: bash
+        run: |
+          XCODE=$(python3 - <<'PY'
+          import glob
+          import plistlib
+          def version(path):
+              with open(path + '/Contents/Info.plist', 'rb') as file:
+                  return tuple(int(part) for part in plistlib.load(file)['CFBundleShortVersionString'].split('.'))
+          print(max(glob.glob('/Applications/Xcode_*.app'), key=version))
+          PY
+          )
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Test GusanKit
+        working-directory: ios/GusanKit
+        run: swift test
+      - name: Check desktop prompt parity
+        run: python3 ios/scripts/tests/check_prompt_parity.py
+      - name: Build for Simulator
+        working-directory: ios
+        run: |
+          xcodegen generate
+          xcodebuild -project Gusan.xcodeproj -scheme Gusan -destination 'generic/platform=iOS Simulator' build
+          xcodebuild -project Gusan.xcodeproj -scheme GusanKeyboardPreview -destination 'generic/platform=iOS Simulator' build
+      - name: Test keyboard sizing
+        working-directory: ios
+        run: |
+          DEVICE=$(xcrun simctl list devices available --json | python3 -c 'import json,sys; print(next(d["udid"] for devices in json.load(sys.stdin)["devices"].values() for d in devices if d["name"].startswith("iPhone")))')
+          xcodebuild -project Gusan.xcodeproj -scheme GusanKeyboardTests -destination "platform=iOS Simulator,id=$DEVICE" -parallel-testing-enabled NO test
+      - name: Package unsigned IPA
+        run: bash ios/scripts/build_unsigned_ipa.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Gusan-iOS-unsigned
+          path: ios/build/Gusan-iOS-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30

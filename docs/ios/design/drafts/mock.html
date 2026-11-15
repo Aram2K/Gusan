@@ -1,0 +1,281 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Gusan iOS — plan and mockups v1</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--blue:#2563eb;--blue2:#1d4ed8;--ink:#0f172a;--mute:#64748b;--line:#e5e7eb;--bg:#f6f7fb;--card:#fff;--ok:#16a34a;--warn:#d97706}
+*{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",Inter,Segoe UI,Roboto,sans-serif;color:var(--ink);background:var(--bg);line-height:1.45}
+.wrap{max-width:1180px;margin:0 auto;padding:28px 20px 60px}
+h1{font-size:28px;margin:0 0 4px}h2{font-size:20px;margin:40px 0 6px;padding-top:8px;border-top:1px solid var(--line)}h3{font-size:15px;margin:18px 0 6px}
+p{margin:6px 0;max-width:820px}.sub{color:var(--mute)}
+.row{display:flex;flex-wrap:wrap;gap:22px;align-items:flex-start}
+.shot{width:300px}.shot .cap{font-size:12.5px;margin-top:8px;color:var(--mute)}.shot .cap b{color:var(--ink);display:block;font-size:13px}
+.phone{width:300px;height:620px;border-radius:44px;background:#000;padding:8px;box-shadow:0 10px 30px rgba(0,0,0,.18);position:relative}
+.scr{width:100%;height:100%;border-radius:36px;overflow:hidden;background:#fff;position:relative;display:flex;flex-direction:column}
+.island{position:absolute;top:10px;left:50%;transform:translateX(-50%);width:84px;height:24px;border-radius:14px;background:#000;z-index:5}
+.status{height:38px;display:flex;justify-content:space-between;align-items:flex-end;padding:0 24px 2px;font-size:11px;font-weight:600}
+.status .back{color:var(--blue);font-weight:500}
+/* host app (chat) */
+.host{flex:1;display:flex;flex-direction:column;background:#efeae2}
+.chatbar{background:#f7f7f7;border-bottom:1px solid #ddd;padding:6px 10px;font-size:12px;font-weight:600;display:flex;gap:8px;align-items:center}
+.av{width:22px;height:22px;border-radius:50%;background:#c7d2fe}
+.msgs{flex:1;padding:10px;display:flex;flex-direction:column;gap:6px;font-size:11.5px}
+.m{max-width:78%;padding:6px 8px;border-radius:10px;background:#fff;box-shadow:0 1px 0 rgba(0,0,0,.06)}.m.me{align-self:flex-end;background:#d9fdd3}
+.field{background:#f7f7f7;border-top:1px solid #ddd;padding:6px 8px;display:flex;gap:6px;align-items:center}
+.field .in{flex:1;background:#fff;border:1px solid #ddd;border-radius:14px;padding:5px 9px;font-size:11.5px;min-height:26px;color:#999}
+.field .in.txt{color:#111}.caret{display:inline-block;width:1.5px;height:12px;background:var(--blue);vertical-align:-2px;margin-left:1px}
+.sel{background:#b4d5fe}
+/* gusan bar */
+.bar{background:rgba(236,239,246,.96);backdrop-filter:blur(10px);border-top:1px solid #d7dbe6;padding:8px 10px 10px;display:flex;flex-direction:column;gap:7px;min-height:86px;justify-content:center}
+.bar.k{min-height:86px}
+.brow{display:flex;align-items:center;gap:8px}
+.pill{display:flex;align-items:center;gap:5px;background:#fff;border:1px solid #d7dbe6;border-radius:999px;padding:4px 8px 4px 4px;font-size:11px;font-weight:600}
+.logo{width:20px;height:20px;border-radius:50%;background:conic-gradient(from 180deg,#D90012 0 33%,#0033A0 0 66%,#F2A800 0);position:relative}
+.logo:after{content:"";position:absolute;left:7px;top:4px;width:6px;height:9px;border-radius:3px;background:#fff;box-shadow:0 0 0 1px rgba(0,0,0,.08)}
+.pill.agent{background:#111827;color:#fff;border-color:#111827}
+.rnd{width:34px;height:34px;border-radius:50%;background:#fff;border:1px solid #d7dbe6;display:flex;align-items:center;justify-content:center;font-size:14px}
+.mic{width:46px;height:46px;border-radius:50%;background:linear-gradient(180deg,#3b82f6,var(--blue2));box-shadow:0 4px 12px rgba(37,99,235,.35);display:flex;align-items:center;justify-content:center;margin:0 auto}
+.mic svg{width:20px;height:20px}
+.rnd.on{background:#dbeafe;border-color:#93c5fd;color:var(--blue2)}
+.sp{flex:1}
+.wave{flex:1;height:30px;display:flex;align-items:center;gap:2.5px}.wave i{display:block;width:3px;border-radius:2px;background:var(--blue);height:var(--h)}
+.st{font-size:11.5px;font-weight:600;color:var(--blue2)}.st small{font-weight:500;color:var(--mute)}
+.btn{border-radius:999px;padding:6px 12px;font-size:11.5px;font-weight:600;background:var(--blue);color:#fff;border:0}
+.btn.ghost{background:#fff;color:var(--ink);border:1px solid #d7dbe6}.btn.dark{background:#111827}
+.card{background:#fff;border:1px solid #d7dbe6;border-radius:12px;padding:8px 10px;font-size:11.5px}
+.card b{display:block;font-size:11.5px;margin-bottom:2px}.card .k{color:var(--mute)}
+.prog{height:4px;border-radius:2px;background:#dbe3f0;overflow:hidden}.prog i{display:block;height:100%;width:40%;background:var(--blue)}
+.dots i{display:inline-block;width:5px;height:5px;border-radius:50%;background:var(--blue);margin-right:3px;opacity:.5}.dots i:nth-child(2){opacity:.8}.dots i:nth-child(3){opacity:1}
+/* app screens */
+.app{flex:1;display:flex;flex-direction:column;background:#f2f2f7}
+.nav{padding:8px 16px 6px;font-size:20px;font-weight:700;display:flex;align-items:center;gap:8px}.nav .sm{font-size:12px;color:var(--mute);font-weight:500;margin-left:auto}
+.body{flex:1;padding:4px 14px;display:flex;flex-direction:column;gap:10px;overflow:hidden}
+.seg{display:flex;background:#e3e4ea;border-radius:10px;padding:2px}.seg span{flex:1;text-align:center;font-size:12px;padding:6px;border-radius:8px;color:#444}.seg span.on{background:#fff;font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1);color:#000}
+.cell{background:#fff;border-radius:12px;padding:10px 12px;font-size:12.5px;display:flex;gap:10px;align-items:center}
+.cell .t{flex:1}.cell .t small{display:block;color:var(--mute);font-size:11px}.cell .ok{color:var(--ok);font-weight:700}.cell .chev{color:#c7c7cc}
+.cell .ic{width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:13px}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block}.dot.run{background:var(--blue);box-shadow:0 0 0 3px #dbeafe}.dot.ok{background:var(--ok)}.dot.wait{background:var(--warn)}
+.tabs{height:62px;background:#f9f9f9;border-top:1px solid #ddd;display:flex;justify-content:space-around;align-items:flex-start;padding-top:8px;font-size:9.5px;color:#8e8e93}
+.tabs div{display:flex;flex-direction:column;align-items:center;gap:3px;width:60px}.tabs div.on{color:var(--blue)}.tabs i{width:20px;height:20px;border-radius:6px;background:currentColor;opacity:.85;display:block}
+.big{background:#fff;border-radius:14px;padding:12px;font-size:12px}.big b{display:block;font-size:13px}.big .k{color:var(--mute)}
+.toggle{width:40px;height:24px;border-radius:12px;background:#34c759;position:relative;flex:none}.toggle:after{content:"";position:absolute;right:2px;top:2px;width:20px;height:20px;border-radius:50%;background:#fff}.toggle.off{background:#d1d1d6}.toggle.off:after{right:auto;left:2px}
+.chat{flex:1;display:flex;flex-direction:column;gap:6px;font-size:11.5px;padding:0 2px}
+.b{max-width:85%;padding:7px 9px;border-radius:12px;background:#fff}.b.me{align-self:flex-end;background:var(--blue);color:#fff}.b.sys{background:transparent;color:var(--mute);font-size:10.5px;padding:0 4px}
+.cin{background:#fff;border-radius:18px;padding:7px 12px;font-size:12px;color:#999;border:1px solid #ddd;display:flex;justify-content:space-between}
+/* app hop screen */
+.hop{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:linear-gradient(180deg,#eef3ff,#fff)}
+.hop .wave{height:60px;flex:none}.hop .wave i{width:5px}
+.hop h4{margin:0;font-size:20px}.hop p{font-size:12.5px;color:var(--mute);text-align:center;margin:0 30px}
+/* notif */
+.notif{position:absolute;top:50px;left:12px;right:12px;background:rgba(255,255,255,.95);border-radius:16px;padding:9px 12px;font-size:11.5px;box-shadow:0 6px 20px rgba(0,0,0,.18);z-index:6;display:flex;gap:8px}
+.notif .logo{width:26px;height:26px;flex:none}.notif .logo:after{left:9px;top:5px;width:8px;height:12px}
+.lock{flex:1;background:linear-gradient(180deg,#1e293b,#0f172a);color:#fff;display:flex;flex-direction:column;align-items:center;padding-top:70px;font-size:12px}.lock .time{font-size:54px;font-weight:200}
+/* tables */
+table{border-collapse:collapse;width:100%;font-size:13.5px;max-width:980px}th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--mute);font-weight:600;font-size:12.5px}
+.tag{display:inline-block;font-size:11px;font-weight:600;border-radius:6px;padding:2px 7px;background:#e0e7ff;color:#3730a3}.tag.y{background:#fef3c7;color:#92400e}.tag.g{background:#dcfce7;color:#166534}.tag.r{background:#fee2e2;color:#991b1b}
+.flow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:13px;margin:8px 0}.flow span{background:#fff;border:1px solid var(--line);border-radius:8px;padding:6px 10px}.flow em{color:var(--mute);font-style:normal}
+.note{background:#fff;border:1px solid var(--line);border-left:4px solid var(--blue);border-radius:8px;padding:10px 14px;max-width:820px;font-size:13.5px}
+ol,ul{max-width:820px}li{margin:3px 0}
+</style></head><body><div class="wrap">
+<h1>Gusan on iPhone — plan and mockups, v1</h1>
+<p class="sub">Speak, and it's done. One bar above your keyboard, two modes (Smart, Agent), and an app that only has what the bar needs.</p>
+
+<h2>1. The one iOS rule that shapes everything</h2>
+<p>iOS does not let any app draw on top of another app's keyboard or screen. The only things that can live inside other apps are: a <b>custom keyboard</b>, the <b>Share sheet</b>, and <b>Shortcuts triggers</b> (Back Tap, Action button). So "Gusan on top of my own keyboard" is impossible as a layer.</p>
+<div class="note"><b>Proposal: the Gusan bar.</b> Gusan becomes a short keyboard (about half the height of the normal one) with only the Gusan controls, no letter keys. You keep typing on your own keyboard. One tap on the globe key switches to the Gusan bar; the globe on the bar switches back. Result: it feels like a bar that appears when you want it, and it's the only way to put text directly at your cursor.<br><br><b>Second way in, no keyboard needed:</b> double-tap the back of the phone (or the Action button). Gusan takes a screenshot, listens, does the task, and the answer is copied to the clipboard with a notification. If the Gusan bar is open later, it inserts the answer for you.</div>
+
+<h2>2. The Gusan bar: every state</h2>
+<p class="sub">Shown inside a chat app. The bar is the only Gusan UI you see while working. Blue accent, liquid glass, no red.</p>
+<div class="row">
+
+<div class="shot"><div class="phone"><div class="island"></div><div class="scr">
+<div class="status"><span>9:41</span><span>●●● ▲ ▮</span></div>
+<div class="host"><div class="chatbar"><div class="av"></div>Anna</div>
+<div class="msgs"><div class="m">Hey! Are you free for a call tomorrow at 3? We need to finalize the budget.</div><div class="m me">Let me check</div></div>
+<div class="field"><div class="in">Message<span class="caret"></span></div></div></div>
+<div class="bar k"><div class="brow"><div class="pill"><div class="logo"></div>Smart ▾</div><div class="sp"></div>
+<div class="mic"><svg viewBox="0 0 24 24" fill="#fff"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0" stroke="#fff" stroke-width="2" fill="none"/><path d="M12 17v4" stroke="#fff" stroke-width="2"/></svg></div>
+<div class="sp"></div><div class="rnd" title="Screen context">▣</div><div class="rnd"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="#334155" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/></svg></div></div></div>
+</div></div><div class="cap"><b>K1 · Idle</b>Mode chip (Smart/Agent), the mic, screen-context button, globe to go back to your keyboard. Nothing else.</div></div>
+
+<div class="shot"><div class="phone"><div class="island"></div><div class="scr">
+<div class="status"><span>9:41</span><span>●●● ▲ ▮</span></div>
+<div class="host"><div class="chatbar"><div class="av"></div>Anna</div>
+<div class="msgs"><div class="m">Hey! Are you free for a call tomorrow at 3? We need to finalize the budget.</div><div class="m me">Let me check</div></div>
+<div class="field"><div class="in">Message<span class="caret"></span></div></div></div>
+<div class="bar k"><div class="brow"><div class="st">Listening… <small>· Screen ✓</small></div><div class="sp"></div><div class="rnd on">▣</div></div>
+<div class="brow"><div class="wave"><i style="--h:8px"></i><i style="--h:16px"></i><i style="--h:26px"></i><i style="--h:14px"></i><i style="--h:22px"></i><i style="--h:30px"></i><i style="--h:12px"></i><i style="--h:20px"></i><i style="--h:28px"></i><i style="--h:10px"></i><i style="--h:18px"></i><i style="--h:24px"></i><i style="--h:8px"></i><i style="--h:16px"></i><i style="--h:26px"></i><i style="--h:14px"></i><i style="--h:22px"></i><i style="--h:30px"></i><i style="--h:12px"></i><i style="--h:20px"></i><i style="--h:9px"></i><i style="--h:17px"></i></div><button class="btn">Stop</button></div></div>
+</div></div><div class="cap"><b>K2 · Listening</b>Tap the mic: a short chime, then the waveform. With screen context on, a frame was taken when you started and one is taken at Stop.</div></div>
+
+<div class="shot"><div class="phone"><div class="island"></div><div class="scr">
+<div class="status"><span>9:41</span><span>●●● ▲ ▮</span></div>
+<div class="host"><div class="chatbar"><div class="av"></div>Anna</div>
+<div class="msgs"><div class="m">Hey! Are you free for a call tomorrow at 3? We need to finalize the budget.</div><div class="m me">Let me check</div></div>
+<div class="field"><div class="in">Message<span class="caret"></span></div></div></div>
+<div class="bar k"><div class="brow"><div class="st">Writing your reply <span class="dots"><i></i><i></i><i></i></span></div><div class="sp"></div><button class="btn ghost">Cancel</button></div>
+<div class="brow"><div class="st"><small>You said: "reply that 3 works, and ask her to send the numbers before"</small></div></div></div>
+</div></div><div class="cap"><b>K3 · Thinking</b>Second chime at Stop. Your words are shown so you know it heard you. Usually 2–4 s.</div></div>
+
+<div class="shot"><div class="phone"><div class="island"></div><div class="scr">
+<div class="status"><span>9:41</span><span>●●● ▲ ▮</span></div>
+<div class="host"><div class="chatbar"><div class="av"></div>Anna</div>
+<div class="msgs"><div class="m">Hey! Are you free for a call tomorrow at 3? We need to finalize the budget.</div><div class="m me">Let me check</div></div>
+<div class="field"><div class="in txt">3 works for me! Could you send over the latest numbers before the call so we can go straight to decisions?<span class="caret"></span></div></div></div>
+<div class="bar k"><div class="brow"><div class="st" style="color:var(--ok)">Inserted</div><button class="btn ghost">Undo</button><div class="sp"></div>
+<div class="mic" style="width:38px;height:38px;margin:0"><svg viewBox="0 0 24 24" fill="#fff" style="width:16px;height:16px"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0" stroke="#fff" stroke-width="2" fill="none"/><path d="M12 17v4" stroke="#fff" stroke-width="2"/></svg></div><div class="rnd"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="#334155" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/></svg></div></div></div>
+</div></div><div class="cap"><b>K4 · Done</b>The text is at your cursor. Undo for 30 s. If text was selected, exactly that selection is replaced. Never a Copy button in this flow.</div></div>
+
+<div class="shot"><div class="phone"><div class="island"></div><div class="scr">
+<div class="status"><span>9:41</span><span>●●● ▲ ▮</span></div>
+<div class="host"><div class="chatbar"><div class="av"></div>Travel</div>
+<div class="msgs"><div class="m">Can you book me on the Friday flight to Paris?</div></div>
+<div class="field"><div class="in">Message<span class="caret"></span></div></div></div>
+<div class="bar k"><div class="brow"><div class="pill agent"><div class="logo"></div>Agent</div><div class="st">Finding flights Yerevan → Paris <small>· step 2 of 5</small></div><div class="sp"></div><button class="btn ghost">Stop</button></div>
+<div class="prog"><i></i></div><div class="st"><small>Comparing Air France and Wizz for Fri 14 Nov…  ·  You can leave, I'll notify you.</small></div></div>
+</div></div><div class="cap"><b>K5 · Agent working</b>Agent mode: a computer session is running for you. Progress line, Stop. Leave and come back any time; a notification tells you when it's done.</div></div>
+
+<div class="shot"><div class="phone"><div class="island"></div><div class="scr">
+<div class="status"><span>9:41</span><span>●●● ▲ ▮</span></div>
+<div class="host"><div class="chatbar"><div class="av"></div>Travel</div>
+<div class="msgs"><div class="m">Can you book me on the Friday flight to Paris?</div></div>
+<div class="field"><div class="in">Message<span class="caret"></span></div></div></div>
+<div class="bar" style="min-height:110px"><div class="card"><b>Ready to book — needs your OK</b><span class="k">Air France AF1061 · Fri 14 Nov, 07:10 · 1 adult · €128 · airfrance.com</span></div>
+<div class="brow"><button class="btn ghost">Cancel</button><div class="sp"></div><button class="btn ghost">Details</button><button class="btn dark">Confirm</button></div></div>
+</div></div><div class="cap"><b>K6 · Confirm</b>Anything that buys, sends or submits stops here. Confirm is never where Cancel was. Expires after 15 min.</div></div>
+
+<div class="shot"><div class="phone"><div class="island"></div><div class="scr">
+<div class="status"><span>9:41</span><span>●●● ▲ ▮</span></div>
+<div class="host"><div class="chatbar"><div class="av"></div>Travel</div>
+<div class="msgs"><div class="m">Can you book me on the Friday flight to Paris?</div></div>
+<div class="field"><div class="in">Message<span class="caret"></span></div></div></div>
+<div class="bar" style="min-height:110px"><div class="card"><b>The agent needs your airfrance.com login</b><span class="k">Saved in your Vault as "Air France". It's used once, in this session only, and never stored by the agent.</span></div>
+<div class="brow"><button class="btn ghost">Cancel</button><div class="sp"></div><button class="btn ghost">Type it in app</button><button class="btn dark">Use saved login</button></div></div>
+</div></div><div class="cap"><b>K7 · Needs a login</b>The agent pauses. You approve from the bar (Face ID) or type it in the app. Secrets live in the Vault.</div></div>
+
+<div class="shot"><div class="phone"><div class="island"></div><div class="scr">
+<div class="status"><span class="back">‹ WhatsApp</span><span>9:41</span><span>▮</span></div>
+<div class="hop"><div class="logo" style="width:52px;height:52px"></div>
+<div class="wave"><i style="--h:14px"></i><i style="--h:30px"></i><i style="--h:50px"></i><i style="--h:26px"></i><i style="--h:40px"></i><i style="--h:58px"></i><i style="--h:22px"></i><i style="--h:36px"></i><i style="--h:52px"></i><i style="--h:18px"></i><i style="--h:34px"></i><i style="--h:46px"></i></div>
+<h4>Listening…</h4><p>Keep talking. Tap <b>‹ WhatsApp</b> at the top left to go back; Gusan keeps listening.</p><button class="btn ghost">Stop</button></div>
+</div></div><div class="cap"><b>K0 · First tap only</b>iPhone keyboards can't use the mic, so Gusan opens once per session, for a moment. One screen, one instruction. Later taps record right in the bar.</div></div>
+
+<div class="shot"><div class="phone"><div class="island"></div><div class="scr">
+<div class="status"><span>9:41</span><span>●●● ▲ ▮</span></div>
+<div class="notif"><div class="logo"></div><div><b>Gusan</b> · now<br>Reply ready and copied. Paste it, or open the Gusan bar to insert it.</div></div>
+<div class="host"><div class="chatbar"><div class="av"></div>Gmail · Inbox</div>
+<div class="msgs"><div class="m" style="max-width:100%"><b>Marc Dupont</b> · Partnership proposal<br>Hi Aram, following our call, here is the draft agreement. Could you confirm the revenue split by Friday?…</div><div class="m" style="max-width:100%"><b>Apple</b> · Your receipt</div></div></div>
+<div class="bar k" style="opacity:.35"><div class="brow"><div class="pill"><div class="logo"></div>Smart ▾</div><div class="sp"></div><div class="mic"></div><div class="sp"></div><div class="rnd">▣</div><div class="rnd"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="#334155" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/></svg></div></div></div>
+</div></div><div class="cap"><b>B1 · Back Tap, no keyboard</b>Double-tap the back of the phone anywhere: screenshot + listen + do. The result is copied and announced; the bar inserts it when you open it.</div></div>
+</div>
+
+<h2>3. The app: four screens</h2>
+<p class="sub">Everything that isn't needed by the bar is gone: no preset actions, no typing keyboard, no "How to use" tab. Setup is a checklist on Home until it's complete.</p>
+<div class="row">
+
+<div class="shot"><div class="phone"><div class="island"></div><div class="scr">
+<div class="status"><span>9:41</span><span>●●● ▲ ▮</span></div>
+<div class="app"><div class="nav"><div class="logo" style="width:26px;height:26px"></div>Gusan<span class="sm">Pro</span></div>
+<div class="body">
+<div class="seg"><span class="on">Smart</span><span>Agent</span></div>
+<div class="big"><b>Ready in every app</b><span class="k">Keyboard added ✓ · Full Access ✓ · Microphone ✓</span></div>
+<div class="cell"><div class="ic" style="background:#dbeafe">▣</div><div class="t">Screen context<small>Off · lets the bar see what's on screen when you ask</small></div><div class="toggle off"></div></div>
+<div class="cell"><div class="ic" style="background:#fef3c7">◎</div><div class="t">Back Tap shortcut<small>Not set up · 1 minute</small></div><span class="chev">›</span></div>
+<div class="big"><b>Last result · 2 min ago</b><span class="k">"3 works for me! Could you send over the latest numbers…"</span><div style="margin-top:6px;display:flex;gap:6px"><button class="btn ghost">Copy</button><button class="btn ghost">Open session</button></div></div>
+</div>
+<div class="tabs"><div class="on"><i></i>Home</div><div><i></i>Sessions</div><div><i></i>Vault</div><div><i></i>Settings</div></div></div>
+</div></div><div class="cap"><b>A1 · Home</b>Mode, setup status, screen context switch, Back Tap setup, last result. That's it.</div></div>
+
+<div class="shot"><div class="phone"><div class="island"></div><div class="scr">
+<div class="status"><span>9:41</span><span>●●● ▲ ▮</span></div>
+<div class="app"><div class="nav">Sessions<span class="sm">Agent</span></div>
+<div class="body">
+<div class="cell"><span class="dot run"></span><div class="t">Book Yerevan → Paris, Fri 14 Nov<small>Running · step 3 of 5 · needs your OK soon</small></div><span class="chev">›</span></div>
+<div class="cell"><span class="dot wait"></span><div class="t">Cancel the Bolt subscription<small>Waiting for your confirmation · 12 min left</small></div><span class="chev">›</span></div>
+<div class="cell"><span class="dot ok"></span><div class="t">Sony XM6 — best price in the US<small>Done · $379.99 at Best Buy · 2 sources</small></div><span class="chev">›</span></div>
+<div class="cell"><span class="dot ok"></span><div class="t">Reply to Marc about the revenue split<small>Done · inserted in Gmail · yesterday</small></div><span class="chev">›</span></div>
+<div class="cell" style="opacity:.6"><span class="dot" style="background:#aaa"></span><div class="t">Find a dentist near Komitas<small>Stopped by you · Tue</small></div><span class="chev">›</span></div>
+</div>
+<div class="tabs"><div><i></i>Home</div><div class="on"><i></i>Sessions</div><div><i></i>Vault</div><div><i></i>Settings</div></div></div>
+</div></div><div class="cap"><b>A2 · Sessions</b>Every agent session: running, waiting, done. Smart results appear here too, so nothing is lost.</div></div>
+
+<div class="shot"><div class="phone"><div class="island"></div><div class="scr">
+<div class="status"><span class="back">‹ Sessions</span><span>9:41</span><span>▮</span></div>
+<div class="app"><div class="nav" style="font-size:15px">Book Yerevan → Paris<span class="sm"><span class="dot run"></span> running</span></div>
+<div class="body"><div class="chat">
+<div class="b me">Book me on the Friday morning flight to Paris, economy, under 150 euro.</div>
+<div class="b sys">Screenshot from WhatsApp attached · 09:41</div>
+<div class="b">Searching airfrance.com and wizzair.com for Fri 14 Nov…</div>
+<div class="b">Found 2 options. Cheapest: Air France AF1061, 07:10, €128. Wizz is €96 but lands at Beauvais at 23:50.</div>
+<div class="b me">Take Air France.</div>
+<div class="b" style="border:1px solid #d7dbe6"><b>Ready to book — needs your OK</b><br><span style="color:var(--mute)">AF1061 · Fri 14 Nov 07:10 · €128</span><div style="margin-top:6px;display:flex;gap:6px"><button class="btn ghost">Cancel</button><button class="btn dark">Confirm</button></div></div>
+</div>
+<div class="cin">Message the agent…<span>mic</span></div>
+<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--mute);padding:2px 4px"><span>Memory: your passport name, seat preference</span><span style="color:#dc2626">Stop session</span></div>
+</div></div>
+</div></div><div class="cap"><b>A3 · Session chat</b>Talk to the running agent, confirm, continue later, or stop it. The same session can be continued from the bar.</div></div>
+
+<div class="shot"><div class="phone"><div class="island"></div><div class="scr">
+<div class="status"><span>9:41</span><span>●●● ▲ ▮</span></div>
+<div class="app"><div class="nav">Vault<span class="sm">Face ID</span></div>
+<div class="body">
+<div class="big" style="font-size:11.5px;color:var(--mute)">Logins the agent may use, only after you approve each time. Stored encrypted; the agent gets them for one session and never keeps them.</div>
+<div class="cell"><div class="ic" style="background:#e0e7ff">AF</div><div class="t">Air France<small>aram@…com · used today</small></div><span class="chev">›</span></div>
+<div class="cell"><div class="ic" style="background:#fee2e2">B</div><div class="t">Booking.com<small>aram@…com</small></div><span class="chev">›</span></div>
+<div class="cell"><div class="ic" style="background:#dcfce7">G</div><div class="t">Google<small>Sign in with Google · requires you each time</small></div><span class="chev">›</span></div>
+<div class="cell" style="color:var(--blue);font-weight:600"><div class="ic" style="background:#dbeafe">+</div><div class="t">Add a login</div></div>
+<div class="cell"><div class="t">Always ask before using a login<small>Recommended</small></div><div class="toggle"></div></div>
+</div>
+<div class="tabs"><div><i></i>Home</div><div><i></i>Sessions</div><div class="on"><i></i>Vault</div><div><i></i>Settings</div></div></div>
+</div></div><div class="cap"><b>A4 · Vault</b>Secrets for the agent. Locked with Face ID. Payment cards are not supported in v1.</div></div>
+
+<div class="shot"><div class="phone"><div class="island"></div><div class="scr">
+<div class="status"><span>9:41</span><span>●●● ▲ ▮</span></div>
+<div class="app"><div class="nav">Settings</div>
+<div class="body">
+<div class="cell"><div class="ic" style="background:#dbeafe">A</div><div class="t">Aram Atamian<small>Gusan Pro · aramatamian15@gmail.com</small></div><span class="chev">›</span></div>
+<div class="cell"><div class="t">Language I speak<small>Automatic</small></div><span class="chev">›</span></div>
+<div class="cell"><div class="t">Sounds<small>Chime at start and stop</small></div><div class="toggle"></div></div>
+<div class="cell"><div class="t">Privacy Mode<small>No web, no screen, no agents</small></div><div class="toggle off"></div></div>
+<div class="cell"><div class="t">Notifications<small>When a session finishes or needs you</small></div><div class="toggle"></div></div>
+<div class="cell"><div class="t">Keyboard setup<small>Add Gusan · Full Access · Back Tap</small></div><span class="chev">›</span></div>
+<div class="cell"><div class="t">Advanced<small>Diagnostics · storage fallback · idle time</small></div><span class="chev">›</span></div>
+</div>
+<div class="tabs"><div><i></i>Home</div><div><i></i>Sessions</div><div><i></i>Vault</div><div class="on"><i></i>Settings</div></div></div>
+</div></div><div class="cap"><b>A5 · Settings</b>Seven rows. Diagnostics and the Sideloadly workarounds move under Advanced.</div></div>
+
+<div class="shot"><div class="phone"><div class="island"></div><div class="scr">
+<div class="status"><span>9:41</span><span>●●● ▲ ▮</span></div>
+<div class="app"><div class="nav"><div class="logo" style="width:26px;height:26px"></div>Welcome</div>
+<div class="body">
+<div class="big"><b>Speak, and it's done.</b><span class="k">Gusan lives in your keyboard. Say what you want; it writes it where your cursor is.</span></div>
+<div class="cell"><span class="ok" style="color:var(--ok);font-weight:700">✓</span><div class="t">1 · Sign in with Google</div></div>
+<div class="cell"><span style="font-weight:700;color:var(--blue)">2</span><div class="t">Add the Gusan keyboard<small>Settings › Keyboards · then Allow Full Access</small></div><button class="btn">Open Settings</button></div>
+<div class="cell" style="opacity:.55"><span style="font-weight:700">3</span><div class="t">Allow the microphone</div></div>
+<div class="cell" style="opacity:.55"><span style="font-weight:700">4</span><div class="t">Try it: hold the globe key on any keyboard, pick Gusan, tap the mic</div></div>
+</div></div>
+</div></div><div class="cap"><b>A0 · First run</b>One checklist, four steps, then straight to Home. Replaces the current multi-page onboarding and How to use.</div></div>
+</div>
+
+<h2>4. How the two modes work</h2>
+<h3>Smart (default)</h3>
+<div class="flow"><span>Tap mic</span><em>→</em><span>chime, listen</span><em>→</em><span>Stop (chime)</span><em>→</em><span>Gusan Cloud: transcribe + understand</span><em>→</em><span>context: selected text, the field, screen frame, web if needed</span><em>→</em><span>insert at cursor · Undo</span></div>
+<p>Examples: "reply that 3 works and ask for the numbers", "make this more formal", "translate this to Armenian", "what does this error mean?" (with screen), "write a short bio from my LinkedIn" (web). No preset buttons: your words are the action.</p>
+<h3>Agent (H Company computer sessions)</h3>
+<div class="flow"><span>Switch chip to Agent</span><em>→</em><span>say the task (+ screen)</span><em>→</em><span>a computer session starts</span><em>→</em><span>progress in the bar and in Sessions</span><em>→</em><span>Confirm before anything irreversible</span><em>→</em><span>login requests via Vault</span><em>→</em><span>result: insert, or kept in Sessions</span></div>
+<p>The session stays alive so you can say "now also book the return" from the bar or the chat. You can stop it any time. Memory per user: your preferences and past sessions, stored in Gusan Cloud, never on H.</p>
+
+<h2>5. Build order</h2>
+<table><tr><th>Phase</th><th>What you get on your iPhone</th><th>Reuses</th><th>Done when</th></tr>
+<tr><td><span class="tag">1 · The bar</span></td><td>Gusan bar replaces the full keyboard. Smart by default. Mic → speak → Stop → text at cursor, chimes, Undo. First-tap screen (K0). Simplified app: Home, Settings, first run. New logo.</td><td>PR #13 voice code, fixed as diagnosed (match by content, keep pending results)</td><td>You dictate a reply in WhatsApp and a rewrite in Notes with zero copy-paste</td></tr>
+<tr><td><span class="tag">2 · Screen + Back Tap</span></td><td>Screen-context button in the bar (frame at start and at Stop). Back Tap: screenshot + listen + do, result copied and announced.</td><td>PR #20 ReplayKit extension, re-pointed to the bar</td><td>"Reply to this" in Gmail works from a screenshot of the mail</td></tr>
+<tr><td><span class="tag">3 · Agent</span></td><td>Agent mode in the bar: progress, Confirm, Stop. Sessions tab with chat, continue, stop, memory. Notifications.</td><td>PR #18 backend (live), PR #19 cards</td><td>You book a test form and cancel a second one, from the bar</td></tr>
+<tr><td><span class="tag">4 · Vault</span></td><td>Vault tab, Face ID, "needs a login" card (K7), one-session credential hand-off.</td><td>Supabase Vault encryption, new agent-action step</td><td>Agent signs in to a test site with a Vault login after your approval</td></tr></table>
+<p class="sub" style="margin-top:8px">Each phase: one builder, the critic reviews, I check, you test on your iPhone, then the next phase starts. No phase begins until you've approved the one before on your phone.</p>
+
+<h2>6. Things only you can decide</h2>
+<ol>
+<li><b>Bar instead of full keyboard.</b> You switch to Gusan with the globe key and back the same way. OK, or do you still want letter keys as an option?</li>
+<li><b>Screen context default.</b> Off until you turn it on (it shows iOS's red recording indicator while on), or on by default?</li>
+<li><b>Agent logins.</b> Vault with Face ID and approve-every-time, as mocked? Payment cards stay out of v1.</li>
+<li><b>Back Tap.</b> Include in phase 2, or later?</li>
+</ol>
+<p class="sub">Known limits that stay: the first mic tap per session opens Gusan for a moment (iOS rule); the agent's cloud browser starts with no logins; a free Apple ID means builds expire after 7 days and notifications arrive only when the app checks, not instantly.</p>
+</div></body></html>

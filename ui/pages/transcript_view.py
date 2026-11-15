@@ -316,7 +316,7 @@ def when_text(created, now=None):
         dt = created
     else:
         try:
-            dt = datetime.datetime.fromisoformat(str(created or ""))
+            dt = datetime.datetime.fromisoformat(str(created or "").replace("Z", "+00:00"))
         except ValueError:
             return ""
     if dt.tzinfo is not None:

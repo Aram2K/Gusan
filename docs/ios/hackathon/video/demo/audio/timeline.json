@@ -1,0 +1,159 @@
+{
+ "OLD_DUR": 64.5,
+ "NEW_DUR": 96.2,
+ "seg": [
+  {
+   "id": "00",
+   "old": 0.0,
+   "new": 0.0,
+   "oldLen": 3.6,
+   "newLen": 5.8,
+   "voiceAt": 0.35,
+   "dur": 4.95
+  },
+  {
+   "id": "01",
+   "old": 3.6,
+   "new": 5.8,
+   "oldLen": 2.6,
+   "newLen": 6.2,
+   "voiceAt": 6.15,
+   "dur": 5.36
+  },
+  {
+   "id": "02",
+   "old": 6.2,
+   "new": 12.0,
+   "oldLen": 6.0,
+   "newLen": 6.1,
+   "voiceAt": 12.35,
+   "dur": 5.29
+  },
+  {
+   "id": "03",
+   "old": 12.2,
+   "new": 18.1,
+   "oldLen": 1.6,
+   "newLen": 3.7,
+   "voiceAt": 18.45,
+   "dur": 2.88
+  },
+  {
+   "id": "04",
+   "old": 13.8,
+   "new": 21.8,
+   "oldLen": 3.0,
+   "newLen": 7.6,
+   "voiceAt": 22.15,
+   "dur": 6.74
+  },
+  {
+   "id": "05",
+   "old": 16.8,
+   "new": 29.4,
+   "oldLen": 10.8,
+   "newLen": 10.8,
+   "voiceAt": 29.75,
+   "dur": 6.08
+  },
+  {
+   "id": "06",
+   "old": 27.6,
+   "new": 40.2,
+   "oldLen": 5.4,
+   "newLen": 5.6,
+   "voiceAt": 40.55,
+   "dur": 4.78
+  },
+  {
+   "id": "07",
+   "old": 33.0,
+   "new": 45.8,
+   "oldLen": 3.4,
+   "newLen": 6.7,
+   "voiceAt": 46.15,
+   "dur": 5.83
+  },
+  {
+   "id": "08",
+   "old": 36.4,
+   "new": 52.5,
+   "oldLen": 3.2,
+   "newLen": 4.7,
+   "voiceAt": 52.85,
+   "dur": 3.81
+  },
+  {
+   "id": "09",
+   "old": 39.6,
+   "new": 57.2,
+   "oldLen": 3.0,
+   "newLen": 6.0,
+   "voiceAt": 57.55,
+   "dur": 5.12
+  },
+  {
+   "id": "10",
+   "old": 42.6,
+   "new": 63.2,
+   "oldLen": 1.8,
+   "newLen": 6.2,
+   "voiceAt": 63.55,
+   "dur": 5.34
+  },
+  {
+   "id": "11",
+   "old": 44.4,
+   "new": 69.4,
+   "oldLen": 4.2,
+   "newLen": 4.2,
+   "voiceAt": 69.75,
+   "dur": 2.27
+  },
+  {
+   "id": "12",
+   "old": 48.6,
+   "new": 73.6,
+   "oldLen": 2.0,
+   "newLen": 4.7,
+   "voiceAt": 73.95,
+   "dur": 3.82
+  },
+  {
+   "id": "13",
+   "old": 50.6,
+   "new": 78.3,
+   "oldLen": 2.0,
+   "newLen": 2.4,
+   "voiceAt": 78.65,
+   "dur": 1.54
+  },
+  {
+   "id": "14",
+   "old": 52.6,
+   "new": 80.7,
+   "oldLen": 5.2,
+   "newLen": 5.2,
+   "voiceAt": 81.05,
+   "dur": 2.87
+  },
+  {
+   "id": "15",
+   "old": 57.8,
+   "new": 85.9,
+   "oldLen": 3.4,
+   "newLen": 3.7,
+   "voiceAt": 86.25,
+   "dur": 2.86
+  },
+  {
+   "id": "16",
+   "old": 61.2,
+   "new": 89.6,
+   "oldLen": 3.3,
+   "newLen": 6.6,
+   "voiceAt": 89.95,
+   "dur": 5.02
+  }
+ ]
+}

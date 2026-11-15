@@ -1,0 +1,169 @@
+import SwiftUI
+import AuthenticationServices
+import GusanKit
+
+enum AppTab: Hashable { case home, sessions, vault, settings }
+
+@MainActor
+final class AppModel: NSObject, ObservableObject, ASWebAuthenticationPresentationContextProviding {
+    let store = SessionStore()
+    lazy var auth = AuthClient(store: store)
+    lazy var settings = SettingsStore(group: store.resolution.chosen)
+    @Published var session: Session?
+    @Published private(set) var restoringSession = true
+    @Published var isPro = false
+    @Published var loadingPlan = false
+    @Published var planError: String?
+    @Published var authError: String?
+    @Published var authBusy = false
+    @Published var usingGoogle = false
+    @Published var diagnostics: SessionDiagnostics?
+    @Published var selectedTab: AppTab = .home
+    @Published var openSessionID: UUID?
+    @Published var showingScreenBroadcast = false
+    @Published var showingSignIn = false
+    @Published var fromKeyboard = false
+    private var webSession: ASWebAuthenticationSession?
+    private var pkce: PKCE?
+    private var updating = false
+    private let impactGenerator = UIImpactFeedbackGenerator(style: .light)
+    private let notificationGenerator = UINotificationFeedbackGenerator()
+
+    override init() {
+        super.init()
+        impactGenerator.prepare(); notificationGenerator.prepare()
+        #if DEBUG
+        let args = ProcessInfo.processInfo.arguments
+        UserDefaults(suiteName: store.resolution.chosen)?.set(args.contains("--gusan-debug-voice"), forKey: "debugVoicePreview")
+        UserDefaults(suiteName: store.resolution.chosen)?.set(args.contains("--gusan-debug-actions"), forKey: "debugActionPreview")
+        if args.contains("--gusan-pasteboard-only"), args.contains("--gusan-debug-session") {
+            store.write(Session(accessToken: "gusan-debug-no-network", expiresAt: .distantFuture, refreshToken: "gusan-debug-no-network", userID: "debug", email: "alex@example.invalid"))
+        }
+        #endif
+        session = store.read(); diagnostics = store.diagnostics()
+        loadingPlan = session != nil
+        #if DEBUG
+        if let index = args.firstIndex(of: "--gusan-keyboard-agent-demo"), args.indices.contains(index + 1) { UIPasteboard(name: UIPasteboard.Name("gusan.debug.agentDemo"), create: true)?.string = args[index + 1] }
+        if let index = args.firstIndex(of: "--gusan-open-task"), args.indices.contains(index + 1) { selectedTab = .sessions; openSessionID = UUID(uuidString: args[index + 1]) }
+        #endif
+    }
+    var keyboardAdded: Bool { diagnostics?.peer != nil }
+    var fullAccess: Bool? { diagnostics?.peer?.fullAccess }
+    var keyboardHasSession: Bool { diagnostics?.peer?.stores.contains { $0.hasSession && $0.readable } == true }
+    var sessionState: SessionState { store.sessionState(fullAccess: fullAccess) }
+    var ready: Bool { keyboardHasSession && sessionState.canRunActions }
+    var keyboardCheck: String { diagnostics?.peer.map { "Last checked " + $0.timestamp.formatted(date: .omitted, time: .shortened) } ?? "Open the Gusan keyboard to check setup." }
+    func refreshDiagnostics() { diagnostics = store.diagnostics() }
+    func update() async {
+        guard !updating else { return }; updating = true
+        defer { updating = false; restoringSession = false; if loadingPlan { loadingPlan = false }; refreshDiagnostics() }
+        let stored = store.read()
+        if session != stored { session = stored }
+        if planError != nil { planError = nil }
+        guard session != nil else { isPro = false; return }
+        #if DEBUG
+        if session?.accessToken == "gusan-debug-no-network" { isPro = ProcessInfo.processInfo.arguments.contains("--gusan-debug-pro"); return }
+        #endif
+        loadingPlan = true
+        do {
+            let restored = try await auth.refresh()
+            if session != restored { session = restored }
+            if restoringSession { restoringSession = false }
+            if let session {
+                let entitled = try await auth.entitlement(accessToken: session.accessToken).isPro
+                if isPro != entitled { isPro = entitled }
+            }
+        } catch GusanError.unauthorized { session = store.read(); isPro = false }
+        catch { planError = friendly(error) }
+    }
+    func signIn(email: String, password: String) async {
+        usingGoogle = false; authBusy = true; authError = nil
+        defer { authBusy = false }
+        do { session = try await auth.signIn(email: email.trimmingCharacters(in: .whitespacesAndNewlines), password: password); feedback(.success); await update() }
+        catch { authError = friendly(error); feedback(.error) }
+    }
+    func signOut() async {
+        cancelGoogle(); authBusy = true
+        #if DEBUG
+        if session?.accessToken == "gusan-debug-no-network" { store.clear() }
+        else { await auth.signOut() }
+        #else
+        await auth.signOut()
+        #endif
+        SmartHistory(group: store.resolution.chosen).clear()
+        AgentSessionStore(defaults: UserDefaults(suiteName: store.resolution.chosen) ?? .standard).clear()
+        openSessionID = nil
+        session = store.read(); isPro = false; planError = nil; authError = nil; authBusy = false; refreshDiagnostics()
+    }
+    func google() {
+        guard !authBusy else { return }
+        usingGoogle = true; authError = nil; authBusy = true
+        do {
+            let proof = try PKCE.generate(); pkce = proof
+            let flow = ASWebAuthenticationSession(url: AuthClient.authorizeURL(pkce: proof), callbackURLScheme: "gusan") { [weak self] url, error in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.webSession = nil
+                    if let url { self.handleURL(url) }
+                    else {
+                        self.pkce = nil; self.authBusy = false
+                        if (error as? ASWebAuthenticationSessionError)?.code != .canceledLogin { self.authError = "Couldn't sign in with Google. Try again, or use email." }
+                    }
+                }
+            }
+            flow.presentationContextProvider = self; webSession = flow
+            if !flow.start() { webSession = nil; pkce = nil; authBusy = false; authError = "Couldn't open Google sign-in. Try again, or use email." }
+        } catch { authBusy = false; pkce = nil; authError = "Couldn't start sign-in. Please try again." }
+    }
+    func cancelGoogle() { webSession?.cancel(); webSession = nil; pkce = nil; authBusy = false }
+    func handleURL(_ url: URL) {
+        guard url.scheme == "gusan" else { return }
+        switch url.host {
+        case "task":
+            openSessionID = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "id" }?.value.flatMap(UUID.init)
+            selectedTab = .sessions
+        case "session":
+            openSessionID = url.pathComponents.last.flatMap(UUID.init)
+            selectedTab = .sessions
+        case "signin":
+            session = store.read(); refreshDiagnostics()
+            cancelGoogle(); authError = nil; fromKeyboard = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.contains { $0.name == "from" && $0.value == "keyboard" } == true
+            showingSignIn = true
+        case "onboarding":
+            cancelGoogle(); showingSignIn = false; selectedTab = .home
+            UserDefaults.standard.set(false, forKey: "gusan.setup.dismissed")
+        case "keyboard-settings":
+            showingSignIn = false; selectedTab = .settings
+        case "screen":
+            showingSignIn = false; showingScreenBroadcast = true
+        case "open-settings":
+            UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!)
+        case "auth-callback":
+            guard let proof = pkce else { return }
+            pkce = nil
+            let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            guard let code = items.first(where: { $0.name == "code" })?.value else {
+                authBusy = false; authError = "Google sign-in didn't finish. Please try again, or use email."; return
+            }
+            Task {
+                defer { authBusy = false }
+                do { session = try await auth.exchange(code: code, pkce: proof); feedback(.success); await update() }
+                catch { authError = friendly(error); feedback(.error) }
+            }
+        default: break
+        }
+    }
+    func impact() { if settings.haptics { impactGenerator.impactOccurred(); impactGenerator.prepare() } }
+    private func feedback(_ type: UINotificationFeedbackGenerator.FeedbackType) { if settings.haptics { notificationGenerator.notificationOccurred(type); notificationGenerator.prepare() } }
+    private func friendly(_ error: Error) -> String {
+        switch error as? GusanError {
+        case .network: return "You're offline. Check your connection and try again."
+        case .timeout: return "That took too long. Please try again."
+        case .signInFailed(let message): return message
+        default: return "Something went wrong. Please try again."
+        }
+    }
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows).first(where: \.isKeyWindow) ?? ASPresentationAnchor()
+    }
+}

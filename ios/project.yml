@@ -1,0 +1,177 @@
+name: Gusan
+options:
+  deploymentTarget:
+    iOS: "16.0"
+packages:
+  GusanKit:
+    path: GusanKit
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: 0.1.0
+    CURRENT_PROJECT_VERSION: 1
+    CODE_SIGN_IDENTITY[sdk=iphonesimulator*]: "-"
+    CODE_SIGN_STYLE: Automatic
+targets:
+  Gusan:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources: [Gusan, GusanKeyboard/AgentKeyboard.swift, GusanKeyboard/KeyboardTheme.swift, GusanActivity/RecordingActivityAttributes.swift, GusanActivity/AgentActivityAttributes.swift, GusanActivity/VoiceIntents.swift, GusanActivity/AgentActivityIntents.swift]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aram2k.gusan
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1,2"
+    info:
+      path: Gusan/Info.plist
+      properties:
+        CFBundleDisplayName: Gusan
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        GusanAppGroup: group.com.aram2k.gusan
+        NSFaceIDUsageDescription: Gusan uses Face ID to protect saved logins and approve each use by an agent.
+        NSMicrophoneUsageDescription: Gusan records your voice only while you dictate, to transcribe it with Gusan Cloud.
+        NSCalendarsFullAccessUsageDescription: Gusan reads your calendar to help Smart and Agent answer scheduling questions without changing events.
+        UIBackgroundModes: [audio, fetch]
+        BGTaskSchedulerPermittedIdentifiers: [com.aram2k.gusan.agent-refresh, com.aram2k.gusan.calendar-refresh]
+        UILaunchScreen: {}
+        NSSupportsLiveActivities: true
+        CFBundleURLTypes:
+          - CFBundleURLSchemes: [gusan]
+    entitlements:
+      path: Gusan/Gusan.entitlements
+      properties:
+        com.apple.security.application-groups: [group.com.aram2k.gusan]
+    dependencies:
+      - package: GusanKit
+      - target: GusanKeyboard
+        embed: true
+      - target: GusanScreen
+        embed: true
+      - target: GusanActivity
+        embed: true
+  GusanKeyboard:
+    type: app-extension
+    platform: iOS
+    sources: [GusanKeyboard]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aram2k.gusan.keyboard
+        TARGETED_DEVICE_FAMILY: "1,2"
+        APPLICATION_EXTENSION_API_ONLY: YES
+    info:
+      path: GusanKeyboard/Info.plist
+      properties:
+        CFBundleDisplayName: Gusan
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        GusanAppGroup: group.com.aram2k.gusan
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.keyboard-service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).KeyboardViewController
+          NSExtensionAttributes:
+            RequestsOpenAccess: true
+            PrimaryLanguage: en-US
+            IsASCIICapable: true
+    entitlements:
+      path: GusanKeyboard/GusanKeyboard.entitlements
+      properties:
+        com.apple.security.application-groups: [group.com.aram2k.gusan]
+    dependencies:
+      - package: GusanKit
+  # Simulator-only host for screenshots and manual checks of the keyboard; never embedded in the app.
+  GusanKeyboardPreview:
+    type: application
+    platform: iOS
+    sources:
+      - path: GusanKeyboard
+        excludes: ["Info.plist", "*.entitlements"]
+      - GusanKeyboardPreview
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aram2k.gusan.keyboardpreview
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        TARGETED_DEVICE_FAMILY: "1"
+        SUPPORTED_PLATFORMS: iphonesimulator
+    info:
+      path: GusanKeyboardPreview/Info.plist
+      properties:
+        CFBundleDisplayName: Gusan Keyboard Preview
+        UILaunchScreen: {}
+        GusanAppGroup: group.com.aram2k.gusan
+    dependencies:
+      - package: GusanKit
+  GusanKeyboardTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources: [GusanKeyboardTests]
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        SUPPORTED_PLATFORMS: iphonesimulator
+    dependencies:
+      - target: GusanKeyboardPreview
+  GusanScreen:
+    type: app-extension
+    platform: iOS
+    sources: [GusanScreen]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aram2k.gusan.screen
+        TARGETED_DEVICE_FAMILY: "1,2"
+        APPLICATION_EXTENSION_API_ONLY: YES
+    info:
+      path: GusanScreen/Info.plist
+      properties:
+        CFBundleDisplayName: Gusan Screen
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        GusanAppGroup: group.com.aram2k.gusan
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.broadcast-services-upload
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).SampleHandler
+          NSExtensionAttributes:
+            RPBroadcastProcessMode: RPBroadcastProcessModeSampleBuffer
+    entitlements:
+      path: GusanScreen/GusanScreen.entitlements
+      properties:
+        com.apple.security.application-groups: [group.com.aram2k.gusan]
+    dependencies:
+      - package: GusanKit
+  # Live Activities (recording glow, Agent progress) and the Control Center control.
+  GusanActivity:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources: [GusanActivity]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aram2k.gusan.activity
+        TARGETED_DEVICE_FAMILY: "1,2"
+        APPLICATION_EXTENSION_API_ONLY: YES
+    info:
+      path: GusanActivity/Info.plist
+      properties:
+        CFBundleDisplayName: Gusan
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+schemes:
+  GusanKeyboardPreview:
+    build:
+      targets:
+        GusanKeyboardPreview: all
+  Gusan:
+    build:
+      targets:
+        Gusan: all
+  GusanKeyboardTests:
+    build:
+      targets:
+        GusanKeyboardPreview: all
+        GusanKeyboardTests: [test]
+    test:
+      targets: [GusanKeyboardTests]

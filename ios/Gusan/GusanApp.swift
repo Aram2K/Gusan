@@ -1,0 +1,58 @@
+import SwiftUI
+import GusanKit
+
+@main
+struct GusanApp: App {
+    @StateObject private var model: AppModel
+    @StateObject private var voice: VoiceSession
+    @StateObject private var agent: AgentCenter
+    @StateObject private var connections: CalendarConnections
+    @Environment(\.scenePhase) private var scenePhase
+    init() {
+        Theme.configureTabBar()
+        let model = AppModel()
+        let agent = AgentCenter(model: model)
+        agent.configureLiveActivities()
+        _model = StateObject(wrappedValue: model); _agent = StateObject(wrappedValue: agent)
+        // Created here, not lazily by SwiftUI, so a background launch for an App Intent can record before any UI exists.
+        let voice = VoiceSession()
+        voice.agentHandoff = { intent, context in try await agent.start(intent, context: context) }
+        _voice = StateObject(wrappedValue: voice)
+        VoiceIntentBridge.handler = { [weak voice] command in
+            guard let voice else { throw VoiceIntentError.appUnavailable }
+            try await voice.perform(command)
+        }
+        AgentCenter.registerBackgroundRefresh(agent)
+        let connections = CalendarConnections(group: model.store.resolution.chosen, client: CalendarClient(auth: model.auth), signedIn: model.session != nil)
+        _connections = StateObject(wrappedValue: connections)
+        CalendarConnections.registerBackgroundRefresh(connections)
+    }
+    @State private var voiceSignInRequested = false
+    var body: some Scene {
+        WindowGroup {
+            Group {
+                if voice.keyboardActivation {
+                    VoiceListeningView(voice: voice, onSignIn: {
+                        voice.closePresentation()
+                        model.handleURL(URL(string: "gusan://signin")!)
+                    })
+                } else { AppRootView() }
+            }.environmentObject(model).environmentObject(voice).environmentObject(agent).environmentObject(connections).tint(Theme.accent)
+                .background(KeyboardDismissal())
+                .onAppear { voice.agentHandoff = { intent, context in try await agent.start(intent, context: context) } }
+                .onChange(of: scenePhase) { agent.setActive($0 == .active); connections.sceneChanged($0) }
+                #if DEBUG
+                .overlay(alignment: .bottom) { AgentCardPreview() }
+                #endif
+                .onOpenURL { if $0.host == "voice" { voice.handleURL($0) } else if $0.host == "calendar" { connections.handleGoogleCallback($0) } else { model.handleURL($0) } }
+                .sheet(isPresented: $model.showingScreenBroadcast) { ScreenBroadcastSheet() }
+                .sheet(isPresented: Binding(get: { voice.presented && !voice.keyboardActivation }, set: { voice.presented = $0 }), onDismiss: {
+                    if voiceSignInRequested {
+                        voiceSignInRequested = false
+                        model.handleURL(URL(string: "gusan://signin")!)
+                    }
+                }) { VoiceListeningView(voice: voice, onSignIn: { voiceSignInRequested = true; voice.closePresentation() }).tint(Theme.accent) }
+                .onChange(of: model.session) { if $0 == nil { voice.stop() }; agent.sessionChanged(); connections.sessionChanged(signedIn: $0 != nil) }
+        }
+    }
+}

@@ -199,7 +199,7 @@ def _utc_now():
 
 def _parse_iso(value):
     try:
-        dt = datetime.fromisoformat(str(value))
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except (TypeError, ValueError):
         return None
     return dt if dt.tzinfo is not None else None
