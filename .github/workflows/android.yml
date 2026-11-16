@@ -42,6 +42,8 @@ jobs:
         run: ./gradlew :core:test --console=plain
 
       - name: Build the debug APK
+        env:
+          GUSAN_GOOGLE_WEB_CLIENT_ID: ${{ vars.GUSAN_GOOGLE_WEB_CLIENT_ID }}
         run: ./gradlew :app:assembleDebug --console=plain
 
       - name: Lint

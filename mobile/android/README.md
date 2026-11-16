@@ -14,7 +14,10 @@ account as Gusan on the desktop and the iPhone and uses the same Gusan Cloud fun
   Action items, Open questions, Discussion). The notes prompt is the desktop's, word for word.
   A long recording is sent in pieces of up to 7 minutes, cut at a quiet moment; if something fails
   half-way, **Try again** carries on from the piece it stopped at.
-- **Sessions.** What Gusan wrote from the keyboard, kept on the phone; tap to copy.
+- **Dictations.** What Gusan wrote from the keyboard, kept on the phone; tap to copy. Home shows the
+  words written and the time saved this week.
+- **First run.** One screen per thing Gusan needs, saying why before Android asks; permission dialogs
+  open by themselves and finished steps move on by themselves.
 - **Account.** Email and password, Google, create an account, reset a password.
 
 Voice and meeting notes use Gusan Cloud, so they need Gusan Pro (the server decides; the app shows what
@@ -57,8 +60,21 @@ uploads it as the `Gusan-Android-debug` artifact.
    The Home page has a button for each step and shows what is still missing.
 4. Allow the microphone.
 
-Google sign-in needs `gusan://auth-callback` in the Supabase Auth redirect allow-list (the iPhone app
-uses the same address).
+### Google sign-in
+
+Without setup, "Continue with Google" opens Google's page in an in-app browser tab and comes back to
+`gusan://auth-callback` (that address must be in the Supabase Auth redirect allow-list, as for the
+iPhone app).
+
+For the phone's own Google account sheet (no browser at all):
+
+1. In the Google Cloud project behind Supabase's Google provider, create an **Android** OAuth client:
+   package `com.aram2k.gusan`, SHA-1 `07:1A:DC:28:C7:61:58:63:F2:E6:5E:D3:E9:EE:1E:D7:0E:B3:40:D7`
+   (the debug key in `app/debug.keystore`, used by every debug build including CI's).
+2. Give the build the **Web** client ID that Supabase's Google provider uses: `gusanGoogleWebClientId=...`
+   in `gradle.properties`, or the `GUSAN_GOOGLE_WEB_CLIENT_ID` variable (in CI, a repository variable).
+
+A release build needs its own signing key (never committed) and its SHA-1 added to the Android client.
 
 ## Privacy
 
