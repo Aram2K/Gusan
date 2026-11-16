@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -47,7 +48,9 @@ class TestPlan(unittest.TestCase):
 
             def imports(path):
                 return links.get(os.path.basename(path), set())
-            with mock.patch.object(tb, "_imports", imports):
+            # (the links are mocked; pefile itself comes with PyInstaller, which the Linux test job has not got)
+            with mock.patch.object(tb, "_imports", imports), \
+                    mock.patch.dict(sys.modules, {"pefile": types.ModuleType("pefile")}):
                 broken = tb.still_needed(tmp, tb.plan(tmp))
                 self.assertEqual(broken, [("_internal/PySide6/Qt6Multimedia.dll", "qt6pdf.dll")])
                 if sys.platform == "win32":
