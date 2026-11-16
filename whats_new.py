@@ -28,6 +28,16 @@ KINDS = {
 }
 
 NOTES = (
+    ("2.1.10", (
+        ("better", "Quicker everywhere",
+         "Pages and cloud requests open sooner, and Gusan holds much less memory."),
+        ("better", "Recordings take about half the space",
+         "A finished meeting's mic and call recordings are stored compressed, with no sound lost."),
+        ("better", "A smaller download",
+         "Parts Gusan never used are left out, and updates clean up the old files."),
+        ("fixed", "No pause when you change a setting",
+         "Saving a setting no longer freezes Gusan for a second or two."),
+    )),
     ("2.1.9", (
         ("better", "Pages open at once",
          "The first click on a page after Gusan starts is as quick as the next ones."),
