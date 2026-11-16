@@ -57,11 +57,40 @@ class MeetingService : Service() {
         when (intent?.action) {
             ACTION_START -> startRecording()
             ACTION_STOP -> stopRecording()
+            ACTION_PAUSE -> pause()
+            ACTION_RESUME -> resume()
+            ACTION_DISCARD -> discardRecording()
             ACTION_PROCESS -> intent.getStringExtra(EXTRA_ID)?.let(::process)
             ACTION_CANCEL -> intent.getStringExtra(EXTRA_ID)?.let { jobs[it]?.cancel() }
         }
         stopIfIdle()
         return START_NOT_STICKY
+    }
+
+    private var paused = false
+    private var elapsedBeforeMs = 0L       // recorded time before the current stretch (pauses left out)
+    private var segmentStartMs = 0L
+
+    private fun elapsedMs(now: Long = System.currentTimeMillis()) = elapsedBeforeMs + if (paused) 0 else now - segmentStartMs
+
+    private fun publish(level: Float = 0f) {
+        val id = recordingId ?: return
+        graph.meetings.recording.value = LiveRecording(id, startedAtMs, level, paused, elapsedBeforeMs, segmentStartMs)
+    }
+
+    private fun startMic(): Boolean {
+        val stream = output ?: return false
+        return recorder.start(
+            this,
+            onBlock = { block, length, level ->
+                stream.write(block, 0, length)
+                scope.launch {
+                    publish(level)
+                    if (elapsedMs() > MAX_RECORDING_MS) stopRecording()
+                }
+            },
+            onError = { scope.launch { stopRecording() } },
+        )
     }
 
     private fun startRecording() {
@@ -71,6 +100,10 @@ class MeetingService : Service() {
         val id = UUID.randomUUID().toString()
         val title = "Meeting, " + SimpleDateFormat("d MMM, HH:mm", Locale.getDefault()).format(Date(now))
         val meeting = Meeting(id, title, now, language = graph.settings.language, status = Meeting.Status.RECORDING)
+        startedAtMs = now
+        segmentStartMs = now
+        elapsedBeforeMs = 0
+        paused = false
         try {
             foreground(recordingNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         } catch (e: Exception) {
@@ -78,41 +111,64 @@ class MeetingService : Service() {
             return
         }
         repo.store.save(meeting)
-        val stream = BufferedOutputStream(FileOutputStream(repo.store.audioFile(id)), 64 * 1024)
-        val started = recorder.start(
-            this,
-            onBlock = { block, length, level ->
-                stream.write(block, 0, length)
-                repo.recording.value = LiveRecording(id, now, level)
-                if (System.currentTimeMillis() - now > MAX_RECORDING_MS) scope.launch { stopRecording() }
-            },
-            onError = { scope.launch { stopRecording() } },
-        )
-        if (!started) {
-            stream.close()
+        output = BufferedOutputStream(FileOutputStream(repo.store.audioFile(id)), 64 * 1024)
+        recordingId = id
+        if (!startMic()) {
+            runCatching { output?.close() }
+            output = null
+            recordingId = null
             repo.store.delete(id)
             stopForegroundNow()
             return
         }
-        output = stream
-        recordingId = id
-        startedAtMs = now
-        repo.recording.value = LiveRecording(id, now)
+        publish()
         wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "gusan:meeting").apply { acquire(MAX_RECORDING_MS + 60_000) }
         scope.launch { repo.reload() }
     }
 
-    private fun stopRecording() {
-        val id = recordingId ?: return
+    /** Pausing turns the microphone off: nothing is heard until Resume. */
+    private fun pause() {
+        if (recordingId == null || paused) return
+        recorder.stop()
+        elapsedBeforeMs += System.currentTimeMillis() - segmentStartMs
+        paused = true
+        publish()
+        notifications().notify(NOTIFICATION_ID, recordingNotification())
+    }
+
+    private fun resume() {
+        if (recordingId == null || !paused) return
+        paused = false
+        segmentStartMs = System.currentTimeMillis()
+        if (!startMic()) { stopRecording(); return }
+        publish()
+        notifications().notify(NOTIFICATION_ID, recordingNotification())
+    }
+
+    private fun finishMic(): String? {
+        val id = recordingId ?: return null
         recordingId = null
         recorder.stop()
         runCatching { output?.close() }
         output = null
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
+        paused = false
+        graph.meetings.recording.value = null
+        return id
+    }
+
+    private fun discardRecording() {
+        val id = finishMic() ?: return
         val repo = graph.meetings
-        repo.recording.value = null
+        repo.store.delete(id)
+        scope.launch { repo.reload() }
+    }
+
+    private fun stopRecording() {
+        val id = finishMic() ?: return
+        val repo = graph.meetings
         val seconds = repo.store.audioFile(id).length() / Audio.BYTES_PER_SECOND
         repo.store.load(id)?.let { repo.store.save(it.copy(status = Meeting.Status.RECORDED, durationMs = seconds * 1000)) }
         if (seconds < 2) {
@@ -200,22 +256,32 @@ class MeetingService : Service() {
         return PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     }
 
+    private fun serviceIntent(action: String, code: Int) = PendingIntent.getService(
+        this, code, Intent(this, MeetingService::class.java).setAction(action), PendingIntent.FLAG_IMMUTABLE,
+    )
+
     private fun recordingNotification(): Notification {
         channels()
-        val stop = PendingIntent.getService(
-            this, 1, Intent(this, MeetingService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE,
-        )
-        return NotificationCompat.Builder(this, CHANNEL_RECORDING)
+        val builder = NotificationCompat.Builder(this, CHANNEL_RECORDING)
             .setSmallIcon(R.drawable.ic_mic)
-            .setContentTitle("Recording a meeting")
-            .setContentText("Gusan is listening. Tap to open.")
             .setOngoing(true)
-            .setUsesChronometer(true)
-            .setWhen(if (startedAtMs > 0) startedAtMs else System.currentTimeMillis())
+            .setOnlyAlertOnce(true)
             .setContentIntent(open(recordingId))
-            .addAction(R.drawable.ic_stop, "Stop and write notes", stop)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .build()
+        if (paused) {
+            builder.setContentTitle("Recording paused")
+                .setContentText("The microphone is off. Resume when you're ready.")
+                .setUsesChronometer(false)
+                .setShowWhen(false)
+                .addAction(R.drawable.ic_mic, "Resume", serviceIntent(ACTION_RESUME, 2))
+        } else {
+            builder.setContentTitle("Recording")
+                .setContentText("Gusan is listening to your meeting")
+                .setUsesChronometer(true)
+                .setWhen(System.currentTimeMillis() - elapsedMs())
+                .addAction(R.drawable.ic_pause, "Pause", serviceIntent(ACTION_PAUSE, 3))
+        }
+        return builder.addAction(R.drawable.ic_stop, "Stop", serviceIntent(ACTION_STOP, 1)).build()
     }
 
     private fun workNotification(text: String, done: Int, total: Int): Notification {
@@ -253,6 +319,9 @@ class MeetingService : Service() {
         private const val ACTION_STOP = "com.aram2k.gusan.meeting.STOP"
         private const val ACTION_PROCESS = "com.aram2k.gusan.meeting.PROCESS"
         private const val ACTION_CANCEL = "com.aram2k.gusan.meeting.CANCEL"
+        private const val ACTION_PAUSE = "com.aram2k.gusan.meeting.PAUSE"
+        private const val ACTION_RESUME = "com.aram2k.gusan.meeting.RESUME"
+        private const val ACTION_DISCARD = "com.aram2k.gusan.meeting.DISCARD"
         private const val EXTRA_ID = "id"
         private const val CHANNEL_RECORDING = "recording"
         private const val CHANNEL_NOTES = "notes"
@@ -265,6 +334,9 @@ class MeetingService : Service() {
         /** Call with the app on screen and the microphone allowed. */
         fun startRecording(context: Context) = context.startForegroundService(intent(context, ACTION_START))
         fun stopRecording(context: Context) { context.startService(intent(context, ACTION_STOP)) }
+        fun pause(context: Context) { context.startService(intent(context, ACTION_PAUSE)) }
+        fun resume(context: Context) { context.startService(intent(context, ACTION_RESUME)) }
+        fun discard(context: Context) { context.startService(intent(context, ACTION_DISCARD)) }
         fun process(context: Context, id: String) = context.startForegroundService(intent(context, ACTION_PROCESS, id))
         fun cancel(context: Context, id: String) { context.startService(intent(context, ACTION_CANCEL, id)) }
     }

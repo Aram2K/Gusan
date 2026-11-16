@@ -103,14 +103,12 @@ class KeyboardView(context: Context, private var theme: KeyboardTheme) : View(co
         canvas.drawColor(theme.background)
         val gapX = dp(3f)
         val gapY = dp(5f)
-        val radius = dp(6f)
+        val radius = dp(8f)
         for (p in placed) {
             val r = RectF(p.bounds.left + gapX, p.bounds.top + gapY, p.bounds.right - gapX, p.bounds.bottom - gapY)
             val down = pressed.values.any { it === p }
             val special = p.key.kind != Key.Kind.CHAR && p.key.kind != Key.Kind.SPACE
             val accent = p.key.kind == Key.Kind.RETURN
-            fill.color = theme.shadow
-            canvas.drawRoundRect(r.left, r.top + dp(1f), r.right, r.bottom + dp(1f), radius, radius, fill)
             fill.color = when {
                 accent -> if (down) blend(theme.accent, 0xFF000000.toInt(), 0.2f) else theme.accent
                 p.key.kind == Key.Kind.SHIFT && shift.on -> theme.key

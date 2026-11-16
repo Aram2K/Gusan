@@ -92,6 +92,16 @@ class GusanImeService : InputMethodService(), KeyboardView.Listener, StripView.L
         return root
     }
 
+    // Show the keys also when a hardware keyboard is plugged in (an emulator on a laptop, a tablet's
+    // keyboard cover): Gusan's mic is on the strip, and without the keys there is no strip.
+    override fun onEvaluateInputViewShown(): Boolean {
+        super.onEvaluateInputViewShown()
+        return true
+    }
+
+    // Never the full-screen editing mode Android uses in landscape: the app stays visible above the keys.
+    override fun onEvaluateFullscreenMode(): Boolean = false
+
     override fun onStartInputView(info: EditorInfo, restarting: Boolean) {
         super.onStartInputView(info, restarting)
         val kind = info.inputType and InputType.TYPE_MASK_CLASS

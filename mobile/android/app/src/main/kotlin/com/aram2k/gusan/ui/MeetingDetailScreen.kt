@@ -1,20 +1,20 @@
 package com.aram2k.gusan.ui
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
-import android.content.Intent
-import android.widget.Toast
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -24,16 +24,19 @@ import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -45,7 +48,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -60,16 +63,7 @@ import com.aram2k.gusan.core.NotesMarkdown
 import com.aram2k.gusan.core.Span
 import com.aram2k.gusan.graph
 import com.aram2k.gusan.meetings.MeetingService
-
-fun copyText(context: Context, text: String) {
-    (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("Gusan", text))
-    Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
-}
-
-fun shareText(context: Context, subject: String, text: String) {
-    val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_SUBJECT, subject).putExtra(Intent.EXTRA_TEXT, text)
-    context.startActivity(Intent.createChooser(send, null))
-}
+import com.aram2k.gusan.meetings.Work
 
 @Composable
 fun MeetingDetailScreen(id: String, onBack: () -> Unit) {
@@ -77,80 +71,88 @@ fun MeetingDetailScreen(id: String, onBack: () -> Unit) {
     val graph = context.graph
     val meetings by graph.meetings.meetings.collectAsStateWithLifecycle()
     val workMap by graph.meetings.work.collectAsStateWithLifecycle()
-    val recording by graph.meetings.recording.collectAsStateWithLifecycle()
     val meeting = meetings.firstOrNull { it.id == id }
-    val work = workMap[id]
     var tab by rememberSaveable { mutableIntStateOf(0) }
+    var menu by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf(false) }
 
-    if (meeting == null) {
-        Column(Modifier.fillMaxSize().padding(20.dp)) {
-            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
-            Text("This meeting is no longer on this phone.", style = MaterialTheme.typography.bodyLarge)
-        }
-        return
-    }
-    val isRecording = recording?.id == id
-    val shown = if (tab == 0) meeting.notes else meeting.transcript
-    val shareable = if (tab == 0) NotesMarkdown.plain(meeting.notes) else meeting.transcript
-
-    Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+    Column(Modifier.fillMaxSize().statusBarsPadding()) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
             Spacer(Modifier.weight(1f))
-            IconButton(onClick = { copyText(context, shareable) }, enabled = shown.isNotBlank()) {
-                Icon(Icons.Filled.ContentCopy, contentDescription = "Copy")
+            if (meeting != null) {
+                val text = if (tab == 0) NotesMarkdown.plain(meeting.notes) else meeting.transcript
+                IconButton(onClick = { shareText(context, meeting.title, meeting.title + "\n\n" + text) }, enabled = text.isNotBlank()) {
+                    Icon(Icons.Filled.Share, contentDescription = "Share")
+                }
+                Box {
+                    IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "More") }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(
+                            text = { Text(if (tab == 0) "Copy notes" else "Copy transcript") },
+                            leadingIcon = { Icon(Icons.Filled.ContentCopy, null) },
+                            enabled = text.isNotBlank(),
+                            onClick = { menu = false; copyText(context, text) },
+                        )
+                        DropdownMenuItem(text = { Text("Rename") }, leadingIcon = { Icon(Icons.Filled.Edit, null) }, onClick = { menu = false; renaming = true })
+                        DropdownMenuItem(
+                            text = { Text("Delete", color = MaterialTheme.colorScheme.error) },
+                            leadingIcon = { Icon(Icons.Filled.Delete, null, tint = MaterialTheme.colorScheme.error) },
+                            onClick = { menu = false; deleting = true },
+                        )
+                    }
+                }
             }
-            IconButton(onClick = { shareText(context, meeting.title, meeting.title + "\n\n" + shareable) }, enabled = shown.isNotBlank()) {
-                Icon(Icons.Filled.Share, contentDescription = "Share")
-            }
-            IconButton(onClick = { deleting = true }, enabled = !isRecording) { Icon(Icons.Filled.Delete, contentDescription = "Delete") }
         }
-        Column(Modifier.padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(meeting.title, Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                IconButton(onClick = { renaming = true }) { Icon(Icons.Filled.Edit, contentDescription = "Rename") }
-            }
+        if (meeting == null) {
+            Text("This meeting is no longer on this phone.", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.padding(24.dp))
+            return@Column
+        }
+        Column(Modifier.padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(meeting.title, style = MaterialTheme.typography.headlineMedium)
             Text(
                 android.text.format.DateFormat.getMediumDateFormat(context).format(meeting.createdAtMs) + ", " +
                     android.text.format.DateFormat.getTimeFormat(context).format(meeting.createdAtMs) + " · " + clock(meeting.durationMs / 1000),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            StatusArea(meeting, work, isRecording, context)
         }
-        TabRow(selectedTabIndex = tab, containerColor = Color.Transparent, modifier = Modifier.padding(top = 8.dp)) {
-            Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Notes") })
-            Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Transcript") })
+        Progress(meeting, workMap[id])
+        if (meeting.notes.isNotBlank() || meeting.transcript.isNotBlank()) {
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp)) {
+                listOf("Notes", "Transcript").forEachIndexed { i, label ->
+                    SegmentedButton(selected = tab == i, onClick = { tab = i }, shape = SegmentedButtonDefaults.itemShape(i, 2), icon = {}) { Text(label) }
+                }
+            }
         }
         SelectionContainer(Modifier.weight(1f)) {
             Column(
-                Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 16.dp),
+                Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).navigationBarsPadding().padding(bottom = 24.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 when {
-                    shown.isBlank() -> Text(
-                        if (tab == 0) "The notes will show here once they are written." else "The transcript will show here once it is written.",
+                    tab == 0 && meeting.notes.isNotBlank() -> Notes(meeting.notes)
+                    tab == 1 && meeting.transcript.isNotBlank() -> meeting.transcript.split("\n\n").forEach {
+                        Text(it, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.padding(bottom = 8.dp))
+                    }
+                    tab == 0 && meeting.transcript.isNotBlank() -> Text(
+                        "The notes appear here once they're written.",
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    tab == 0 -> Notes(meeting.notes)
-                    else -> meeting.transcript.split("\n\n").forEach { Text(it, style = MaterialTheme.typography.bodyLarge) }
                 }
             }
         }
     }
 
-    if (renaming) {
+    if (renaming && meeting != null) {
         var name by remember { mutableStateOf(meeting.title) }
         AlertDialog(
             onDismissRequest = { renaming = false },
-            title = { Text("Rename meeting") },
-            text = { OutlinedTextField(value = name, onValueChange = { name = it }, singleLine = true) },
-            confirmButton = {
-                TextButton(onClick = { graph.meetings.rename(id, name); renaming = false }, enabled = name.isNotBlank()) { Text("Save") }
-            },
+            title = { Text("Rename") },
+            text = { OutlinedTextField(value = name, onValueChange = { name = it }, singleLine = true, shape = RoundedCornerShape(12.dp)) },
+            confirmButton = { TextButton(onClick = { graph.meetings.rename(id, name); renaming = false }, enabled = name.isNotBlank()) { Text("Save") } },
             dismissButton = { TextButton(onClick = { renaming = false }) { Text("Cancel") } },
         )
     }
@@ -158,7 +160,7 @@ fun MeetingDetailScreen(id: String, onBack: () -> Unit) {
         AlertDialog(
             onDismissRequest = { deleting = false },
             title = { Text("Delete this meeting?") },
-            text = { Text("The recording, the transcript and the notes are removed from this phone. This can't be undone.") },
+            text = { Text("The recording, transcript and notes are removed from this phone. This can't be undone.") },
             confirmButton = {
                 TextButton(onClick = {
                     deleting = false
@@ -172,30 +174,42 @@ fun MeetingDetailScreen(id: String, onBack: () -> Unit) {
     }
 }
 
+/** Where the transcript and notes are, and the next step when they aren't there. */
 @Composable
-private fun StatusArea(meeting: Meeting, work: com.aram2k.gusan.meetings.Work?, isRecording: Boolean, context: Context) {
-    when {
-        isRecording -> OutlinedButton(onClick = { MeetingService.stopRecording(context) }) { Text("Stop and write notes") }
-        work != null || meeting.busy -> {
-            Text(statusText(meeting, work), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
-            if (work != null && work.total > 1) {
-                LinearProgressIndicator(progress = { work.done / work.total.toFloat() }, modifier = Modifier.fillMaxWidth())
-            } else {
-                LinearProgressIndicator(Modifier.fillMaxWidth())
-            }
-            TextButton(onClick = { MeetingService.cancel(context, meeting.id) }) { Text("Stop for now") }
-        }
-        meeting.status != Meeting.Status.DONE -> {
-            if (meeting.error.isNotEmpty()) {
-                Text(meeting.error, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                OutlinedButton(onClick = { MeetingService.process(context, meeting.id) }) {
-                    Text(if (meeting.status == Meeting.Status.FAILED) "Try again" else "Write the notes")
+private fun Progress(meeting: Meeting, work: Work?) {
+    val context = LocalContext.current
+    val busy = work != null || meeting.busy
+    if (meeting.status == Meeting.Status.DONE && !busy) return
+    Panel(Modifier.padding(start = 20.dp, end = 20.dp, top = 16.dp)) {
+        when {
+            busy -> {
+                Text(statusText(meeting, work) + "…", style = MaterialTheme.typography.titleMedium)
+                if (work != null && work.total > 1) {
+                    LinearProgressIndicator(progress = { work.done / work.total.toFloat() }, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(4.dp)))
+                } else {
+                    LinearProgressIndicator(Modifier.fillMaxWidth().clip(RoundedCornerShape(4.dp)))
                 }
-                if (meeting.error.contains("Pro")) {
-                    Spacer(Modifier.width(8.dp))
-                    TextButton(onClick = { openPricing(context) }) { Text("See plans") }
+                Text(
+                    "You can leave the app. We'll let you know when the notes are ready.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                TextButton(onClick = { MeetingService.cancel(context, meeting.id) }) { Text("Stop for now") }
+            }
+            meeting.status == Meeting.Status.RECORDING -> Text("Recording…", style = MaterialTheme.typography.titleMedium)
+            else -> {
+                if (meeting.error.isNotEmpty()) Text(meeting.error, style = MaterialTheme.typography.bodyLarge)
+                else Text("This recording has no notes yet.", style = MaterialTheme.typography.bodyLarge)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    BigButton(
+                        if (meeting.status == Meeting.Status.FAILED) "Try again" else "Write the notes",
+                        modifier = Modifier.weight(1f),
+                        onClick = { MeetingService.process(context, meeting.id) },
+                    )
+                    if (meeting.error.contains("Pro")) {
+                        Spacer(Modifier.width(8.dp))
+                        TextButton(onClick = { openPricing(context) }) { Text("Get Pro") }
+                    }
                 }
             }
         }
@@ -203,9 +217,7 @@ private fun StatusArea(meeting: Meeting, work: com.aram2k.gusan.meetings.Work?, 
 }
 
 private fun styled(spans: List<Span>): AnnotatedString = buildAnnotatedString {
-    spans.forEach { span ->
-        if (span.bold) withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(span.text) } else append(span.text)
-    }
+    spans.forEach { span -> if (span.bold) withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) { append(span.text) } else append(span.text) }
 }
 
 @Composable
@@ -215,17 +227,17 @@ private fun Notes(markdown: String) {
             is NoteBlock.Heading -> Text(
                 styled(block.text),
                 style = if (block.level <= 2) MaterialTheme.typography.titleLarge else MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(top = if (block.level <= 2) 12.dp else 6.dp),
+                color = if (block.level <= 2) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(top = if (block.level <= 2) 16.dp else 8.dp),
             )
             is NoteBlock.Paragraph -> Text(styled(block.text), style = MaterialTheme.typography.bodyLarge)
             is NoteBlock.Bullet -> Row(Modifier.padding(start = if (block.indent > 0) 24.dp else 0.dp)) {
                 when (block.checked) {
-                    null -> Text("•", Modifier.width(20.dp), style = MaterialTheme.typography.bodyLarge)
+                    null -> Box(Modifier.padding(top = 10.dp, end = 12.dp).size(6.dp).clip(RoundedCornerShape(3.dp)).background(MaterialTheme.colorScheme.onSurfaceVariant))
                     else -> Icon(
                         if (block.checked == true) Icons.Filled.CheckBox else Icons.Filled.CheckBoxOutlineBlank,
                         contentDescription = if (block.checked == true) "Done" else "To do",
-                        modifier = Modifier.padding(end = 8.dp, top = 2.dp).size(20.dp),
+                        modifier = Modifier.padding(end = 10.dp, top = 2.dp).size(20.dp),
                         tint = MaterialTheme.colorScheme.primary,
                     )
                 }

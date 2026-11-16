@@ -36,6 +36,11 @@ class Settings(context: Context) {
         get() = prefs.getBoolean("save_history", true)
         set(value) = prefs.edit().putBoolean("save_history", value).apply()
 
+    /** The first-run setup has been shown to the end (or skipped). */
+    var onboardingDone: Boolean
+        get() = prefs.getBoolean("onboarding_done", false)
+        set(value) = prefs.edit().putBoolean("onboarding_done", value).apply()
+
     /** What the server last said about the plan, so the screens don't flicker while it is asked again. */
     var knownPro: Boolean
         get() = prefs.getBoolean("known_pro", false)

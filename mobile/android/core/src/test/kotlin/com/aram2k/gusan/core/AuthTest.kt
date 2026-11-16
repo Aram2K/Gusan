@@ -48,6 +48,19 @@ class AuthTest {
         assertEquals("Couldn't create the account. Try again.", message("oops"))
     }
 
+    @Test fun googleOnThePhoneSignsInWithItsIdToken() {
+        val storage = MemorySessionStorage()
+        val transport = FakeTransport { json(200, ok) }
+        AuthClient(storage, transport).signInWithIdToken("google.jwt", "raw-nonce")
+        val request = transport.requests.single()
+        assertEquals(Backend.BASE_URL + "/auth/v1/token?grant_type=id_token", request.url)
+        assertEquals("google", request.json()["provider"]!!.jsonPrimitive.content)
+        assertEquals("raw-nonce", request.json()["nonce"]!!.jsonPrimitive.content)
+        assertEquals("a.b.c", storage.read()!!.accessToken)
+        // SHA-256("abc")
+        assertEquals("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", AuthClient.hashNonce("abc"))
+    }
+
     @Test fun aFreshSessionIsNotRenewed() {
         val storage = MemorySessionStorage(Session("a", 10_000, "r"))
         val transport = FakeTransport { error("no request expected") }

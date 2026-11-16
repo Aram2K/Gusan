@@ -96,7 +96,7 @@ class AuthClient(
     private fun signIn(grant: String, body: JsonObject): Session {
         val response = post("/auth/v1/token?grant_type=$grant", body)
         if (response.status != 200) {
-            val message = if (grant == "password") signInMessage(response.body) else "Google sign-in failed. Try again."
+            val message = if (grant == "password") signInMessage(response.body) else "Google sign-in didn't work. Try again."
             throw GusanException(GusanException.Kind.SIGN_IN_FAILED, message)
         }
         return decodeSession(response.body, null, now()).also(storage::write)
@@ -124,6 +124,10 @@ class AuthClient(
     fun sendPasswordReset(email: String) {
         post("/auth/v1/recover", buildJsonObject { put("email", email.trim()) })
     }
+
+    /** Signs in with the ID token Google gave the phone's own account picker. nonce: the raw value whose hash Google was given. */
+    fun signInWithIdToken(idToken: String, nonce: String): Session =
+        signIn("id_token", buildJsonObject { put("provider", "google"); put("id_token", idToken); put("nonce", nonce) })
 
     fun exchange(code: String, pkce: Pkce): Session =
         signIn("pkce", buildJsonObject { put("auth_code", code); put("code_verifier", pkce.verifier) })
@@ -164,6 +168,10 @@ class AuthClient(
     }
 
     companion object {
+        /** The SHA-256 of a nonce, as lowercase hex: what Google is given, while Gusan Cloud gets the nonce itself. */
+        fun hashNonce(nonce: String): String =
+            MessageDigest.getInstance("SHA-256").digest(nonce.toByteArray()).joinToString("") { "%02x".format(it) }
+
         fun authorizeUrl(pkce: Pkce): String =
             Backend.BASE_URL + "/auth/v1/authorize?provider=google" +
                 "&redirect_to=" + URLEncoder.encode(Backend.AUTH_REDIRECT, "UTF-8") +

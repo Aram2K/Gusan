@@ -70,6 +70,9 @@ class AccountRepository(
         }
     }
 
+    /** Google, from the phone's own account sheet. */
+    suspend fun signInWithGoogleToken(idToken: String, nonce: String): String? = attempt { auth.signInWithIdToken(idToken, nonce) }
+
     suspend fun finishGoogleSignIn(code: String): String? {
         val verifier = settings.pendingPkce ?: return "Google sign-in was interrupted. Try again."
         settings.pendingPkce = null
@@ -83,7 +86,7 @@ class AccountRepository(
         return AuthClient.authorizeUrl(pkce)
     }
 
-    private suspend fun attempt(block: () -> Unit): String? {
+    internal suspend fun attempt(block: () -> Unit): String? {
         val problem = withContext(Dispatchers.IO) {
             try {
                 block(); null

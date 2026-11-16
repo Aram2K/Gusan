@@ -10,7 +10,17 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /** The meeting being recorded right now. */
-data class LiveRecording(val id: String, val startedAtMs: Long, val level: Float = 0f)
+data class LiveRecording(
+    val id: String,
+    val startedAtMs: Long,
+    val level: Float = 0f,
+    val paused: Boolean = false,
+    val elapsedBeforeMs: Long = 0,
+    val segmentStartMs: Long = startedAtMs,
+) {
+    /** Recorded time, pauses left out. */
+    fun elapsedMs(now: Long): Long = elapsedBeforeMs + if (paused) 0 else (now - segmentStartMs).coerceAtLeast(0)
+}
 
 /** How far a meeting's transcript is: done of total pieces (total 0 while the notes are written). */
 data class Work(val id: String, val done: Int, val total: Int)

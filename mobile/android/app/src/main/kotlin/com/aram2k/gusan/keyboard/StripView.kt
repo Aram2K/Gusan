@@ -52,7 +52,7 @@ class StripView(context: Context, private val theme: KeyboardTheme) : LinearLayo
         ellipsize = TextUtils.TruncateAt.END
         gravity = Gravity.CENTER_VERTICAL
     }
-    private val wave = WaveView(context, theme.accent)
+    private val wave = WaveView(context, theme.recording)
     private val action = TextView(context).apply {
         setTextColor(theme.accent)
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
@@ -65,16 +65,15 @@ class StripView(context: Context, private val theme: KeyboardTheme) : LinearLayo
     private val cancel = ImageView(context).apply {
         setImageResource(R.drawable.ic_close)
         imageTintList = ColorStateList.valueOf(theme.text)
-        background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(theme.special) }
+        background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(theme.chip) }
         setPadding(dp(8), dp(8), dp(8), dp(8))
         contentDescription = "Cancel"
         setOnClickListener { listener?.onCancel() }
     }
     private val mic = ImageView(context).apply {
         setImageResource(R.drawable.ic_mic)
-        imageTintList = ColorStateList.valueOf(0xFFFFFFFF.toInt())
-        background = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(theme.brandRed, theme.brandBlue))
-            .apply { shape = GradientDrawable.OVAL }
+        imageTintList = ColorStateList.valueOf(theme.onAccent)
+        background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(theme.accent) }
         setPadding(dp(7), dp(7), dp(7), dp(7))
         setOnClickListener { listener?.onMic() }
     }
@@ -125,6 +124,10 @@ class StripView(context: Context, private val theme: KeyboardTheme) : LinearLayo
         action.text = button
         show(action, button.isNotEmpty())
         mic.contentDescription = if (state is VoiceState.Listening) "Finish and send" else "Speak to Gusan"
+        // While listening the mic turns red: the one place a person looks to know Gusan hears them.
+        (mic.background as GradientDrawable).setColor(if (state is VoiceState.Listening) theme.recording else theme.accent)
+        mic.setImageResource(if (state is VoiceState.Listening) R.drawable.ic_check else R.drawable.ic_mic)
+        mic.imageTintList = ColorStateList.valueOf(if (state is VoiceState.Listening) 0xFFFFFFFF.toInt() else theme.onAccent)
     }
 
     fun pushLevel(level: Float) = wave.push(level)
@@ -134,6 +137,8 @@ class StripView(context: Context, private val theme: KeyboardTheme) : LinearLayo
         private val levels = FloatArray(BARS)
         private var count = 0
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color; strokeCap = Paint.Cap.ROUND }
+
+        fun setColor(color: Int) { paint.color = color; invalidate() }
 
         fun clear() { levels.fill(0f); count = 0; invalidate() }
 

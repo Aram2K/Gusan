@@ -6,30 +6,17 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.GraphicEq
-import androidx.compose.material.icons.filled.History
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.Icon
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.lifecycle.lifecycleScope
-import androidx.navigation.NavGraph.Companion.findStartDestination
-import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
-import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.aram2k.gusan.graph
 import kotlinx.coroutines.launch
@@ -43,9 +30,12 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         handle(intent)
         graph.account.refresh()
+        val firstRun = !graph.settings.onboardingDone
         setContent {
             GusanTheme {
-                GusanRoot(meetingToOpen.value) { meetingToOpen.value = null }
+                Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+                    GusanNav(firstRun, meetingToOpen.value) { meetingToOpen.value = null }
+                }
             }
         }
     }
@@ -67,13 +57,11 @@ class MainActivity : ComponentActivity() {
         intent.data = null
         val code = link.getQueryParameter("code")
         if (code.isNullOrEmpty()) {
-            // Closing the Google page comes back with no code: nothing to say. A refusal is said.
             link.getQueryParameter("error_description")?.let { Toast.makeText(this, it, Toast.LENGTH_LONG).show() }
             return
         }
         lifecycleScope.launch {
-            val problem = graph.account.finishGoogleSignIn(code)
-            Toast.makeText(this@MainActivity, problem ?: "You're signed in", Toast.LENGTH_LONG).show()
+            graph.account.finishGoogleSignIn(code)?.let { Toast.makeText(this@MainActivity, it, Toast.LENGTH_LONG).show() }
         }
     }
 
@@ -83,65 +71,40 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private class Tab(val route: String, val label: String, val icon: ImageVector)
-
-private val tabs = listOf(
-    Tab("home", "Home", Icons.Filled.Home),
-    Tab("meetings", "Meetings", Icons.Filled.GraphicEq),
-    Tab("sessions", "Sessions", Icons.Filled.History),
-    Tab("settings", "Settings", Icons.Filled.Settings),
-)
-
-private fun NavHostController.toTab(route: String) = navigate(route) {
-    popUpTo(graph.findStartDestination().id) { saveState = true }
-    launchSingleTop = true
-    restoreState = true
-}
-
 @Composable
-private fun GusanRoot(meetingToOpen: String?, onOpened: () -> Unit) {
+private fun GusanNav(firstRun: Boolean, meetingToOpen: String?, onOpened: () -> Unit) {
     val nav = rememberNavController()
-    val entry by nav.currentBackStackEntryAsState()
-    val route = entry?.destination?.route
-
     LaunchedEffect(meetingToOpen) {
         if (meetingToOpen != null) {
-            nav.toTab("meetings")
             nav.navigate("meeting/$meetingToOpen") { launchSingleTop = true }
             onOpened()
         }
     }
-
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
-        bottomBar = {
-            if (tabs.any { it.route == route }) {
-                NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
-                    tabs.forEach { tab ->
-                        NavigationBarItem(
-                            selected = route == tab.route,
-                            onClick = { nav.toTab(tab.route) },
-                            icon = { Icon(tab.icon, contentDescription = null) },
-                            label = { Text(tab.label) },
-                        )
-                    }
-                }
-            }
-        },
-    ) { padding ->
-        NavHost(nav, startDestination = "home", modifier = Modifier.padding(padding)) {
-            composable("home") {
-                HomeScreen(onSignIn = { nav.navigate("signin") }, onMeetings = { nav.toTab("meetings") })
-            }
-            composable("meetings") {
-                MeetingsScreen(onOpen = { nav.navigate("meeting/$it") }, onSignIn = { nav.navigate("signin") })
-            }
-            composable("meeting/{id}") { back ->
-                MeetingDetailScreen(back.arguments?.getString("id").orEmpty(), onBack = { nav.popBackStack() })
-            }
-            composable("sessions") { SessionsScreen() }
-            composable("settings") { SettingsScreen(onSignIn = { nav.navigate("signin") }) }
-            composable("signin") { SignInScreen(onDone = { nav.popBackStack() }) }
+    NavHost(nav, startDestination = if (firstRun) "welcome" else "home") {
+        composable("welcome") {
+            Onboarding(firstRun = true) { nav.navigate("home") { popUpTo("welcome") { inclusive = true } } }
         }
+        composable("setup") { Onboarding(firstRun = false) { nav.popBackStack() } }
+        composable("home") {
+            HomeScreen(
+                onSettings = { nav.navigate("settings") },
+                onSetup = { nav.navigate("setup") },
+                onSignIn = { nav.navigate("signin") },
+                onMeeting = { nav.navigate("meeting/$it") },
+                onRecording = { nav.navigate("recording") { launchSingleTop = true } },
+            )
+        }
+        composable("recording") {
+            RecordingScreen(
+                onMinimize = { nav.popBackStack() },
+                onStopped = { id ->
+                    nav.popBackStack()
+                    if (id != null) nav.navigate("meeting/$id")
+                },
+            )
+        }
+        composable("meeting/{id}") { back -> MeetingDetailScreen(back.arguments?.getString("id").orEmpty(), onBack = { nav.popBackStack() }) }
+        composable("settings") { SettingsScreen(onBack = { nav.popBackStack() }, onSignIn = { nav.navigate("signin") }) }
+        composable("signin") { SignInScreen(onDone = { nav.popBackStack() }) }
     }
 }

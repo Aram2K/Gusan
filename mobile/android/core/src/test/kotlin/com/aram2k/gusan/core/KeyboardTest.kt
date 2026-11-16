@@ -82,6 +82,21 @@ class KeyboardTest {
         assertTrue(history.list().isEmpty())
     }
 
+    @Test fun statsCountThisWeeksWordsAndTheTimeSaved() {
+        val day = 24 * 60 * 60 * 1000L
+        val now = 100 * day
+        val long = (1..400).joinToString(" ") { "word" }
+        val entries = listOf(
+            SmartEntry("a", now - day, "email anna about the demo", long),
+            SmartEntry("b", now - 8 * day, "old", "one two three"),
+        )
+        val stats = SmartStats.of(entries, now)
+        assertEquals(400, stats.wordsThisWeek)
+        assertEquals(403, stats.wordsTotal)
+        assertEquals(10, stats.minutesSavedThisWeek)     // 400 / 40 typed, minus 5 words spoken
+        assertEquals(SmartStats(0, 0, 0), SmartStats.of(emptyList(), now))
+    }
+
     @Test fun notesMarkdownBecomesBlocks() {
         val blocks = NotesMarkdown.parse(
             "## Summary\nThe team met\nand **agreed**.\n\n## Action items\n- [ ] Send the deck (Owner: Ani)\n- [x] Book a room\n" +
