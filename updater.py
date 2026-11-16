@@ -576,11 +576,27 @@ def verified_sha256(path):
     return _verified.get(_path_key(path), "")
 
 
+# Where updates before 2.0 downloaded the installer: %TEMP% itself, under this fixed name, never removed
+# (2026-11-16: a 91 MB file from May still there).
+LEGACY_INSTALLER_NAMES = ("TranscribeApp-Setup.exe", "TranscribeApp-Windows-Setup.exe")
+
+
+def prune_legacy(temp_dir=None):
+    """Remove the installer an old update left in %TEMP% (LEGACY_INSTALLER_NAMES). Never raises."""
+    temp_dir = temp_dir or tempfile.gettempdir()
+    for name in LEGACY_INSTALLER_NAMES:
+        path = os.path.join(temp_dir, name)
+        if os.path.isfile(path):
+            _remove(path)
+
+
 def prune_cache(keep=None, root=None):
     """Remove kept installers except release ``keep`` (None: all of them) -
     e.g. once that release is installed. The install logs (the ``logs`` folder:
     prune_logs) are not installers and stay. Never raises."""
     import shutil
+    if root is None:
+        prune_legacy()
     root = root or cache_root()
     try:
         names = os.listdir(root)

@@ -557,7 +557,12 @@ class TestNamesExistingInstallsDependOn(unittest.TestCase):
         self.assertIn("Tasks: startup", reg)
 
     def test_install_delete_list_is_whole(self):
-        self.assertEqual(len(_section(self.text, "InstallDelete")), 4)
+        entries = _section(self.text, "InstallDelete")
+        self.assertEqual(len(entries), 5)
+        # An update removes the old program bundle first: copied on top of it, files a new version no longer has
+        # stayed forever (2026-11-16: 160 MB of earlier versions' libraries in one install). Never the user's data.
+        self.assertIn('Type: filesandordirs; Name: "{app}\_internal"', entries)
+        self.assertFalse([e for e in entries if "userappdata" in e or "localappdata" in e or e.endswith('"{app}"')])
 
     def test_upgrade_logic_and_the_analytics_page_are_still_there(self):
         routines = _routines(_code(self.text))

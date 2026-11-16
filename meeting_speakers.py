@@ -887,9 +887,10 @@ def _call_sound_path(folder, entry):
     if not entry.get("audio"):
         return None
     part = Path(folder) / str(entry.get("audio"))
-    path = meeting_store.track_path(part, "system") if entry.get("kind") == "sources" else part
+    if entry.get("kind") == "sources":
+        return meeting_store.track_file(part, "system")          # (.wav, or .flac once it was compressed)
     try:
-        return path if path.is_file() and path.stat().st_size > 44 else None
+        return part if part.is_file() and part.stat().st_size > 44 else None
     except OSError:
         return None
 

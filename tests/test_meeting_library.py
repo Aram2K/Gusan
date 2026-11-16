@@ -105,6 +105,40 @@ class TestMeetingStore(unittest.TestCase):
         self.assertEqual(items[0]["timestamp"], "2026-03-01 09:00:00")
         self.assertEqual(items[0]["title"], "Untitled Meeting")
 
+    def test_a_folder_nothing_changed_in_is_not_read_again_and_any_change_is_seen(self):
+        """2026-11-16 speed audit: every list (Home after each dictation, the Meetings page) read every folder again
+        - 2 s for 300 meetings. A folder's entry is kept until a file in it changes."""
+        import time as _time
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self._make(tmp, "20260101_090000", {"title": "Old"}, transcript="hi", notes="## Summary\n- first")
+            gone = self._make(tmp, "20260102_090000", {"title": "Going"}, transcript="x")
+            with patch.object(ms.storage, "path_for", return_value=Path(tmp)):
+                first = ms.list_meetings(preview=True)
+                reads = []
+                real = ms.load_meta
+                with patch.object(ms, "load_meta", lambda f: reads.append(str(f)) or real(f)):
+                    again = ms.list_meetings(preview=True)
+                    self.assertEqual(reads, [])                          # nothing changed: nothing read
+                    self.assertEqual(again, first)
+                    again[0]["title"] = "changed by a caller"            # (a copy: the kept entry stays)
+                    self.assertEqual(ms.list_meetings(preview=True)[0]["title"], "Going")
+                    _time.sleep(0.02)
+                    (d / "notes.md").write_text("## Summary\n- a new first point", encoding="utf-8")
+                    (d / "meta.json").write_text(json.dumps({"title": "Renamed"}), encoding="utf-8")
+                    (d / "audio_part1.wav").write_bytes(b"RIFF")
+                    items = {m["id"]: m for m in ms.list_meetings(preview=True)}
+                    self.assertEqual(reads, [str(d)])                    # only the folder that changed
+                old = items["20260101_090000"]
+                self.assertEqual((old["title"], len(old["audio_parts"])), ("Renamed", 1))
+                self.assertIn("new first point", old["preview"])
+                import shutil
+                shutil.rmtree(gone)
+                self.assertEqual([m["id"] for m in ms.list_meetings()], ["20260101_090000"])
+                (d / ms.DISCARDED_CHUNKS).write_text("", encoding="utf-8")
+                (d / "chunks.jsonl").write_text("{}", encoding="utf-8")
+                self.assertEqual([m["id"] for m in ms.list_meetings()], ["20260101_090000"])
+                self.assertNotIn("preview", ms.list_meetings(preview=False)[0])
+
     def test_audio_parts_order_and_next(self):
         with tempfile.TemporaryDirectory() as tmp:
             d = self._make(tmp, "m", {}, parts=0)
@@ -713,6 +747,77 @@ def _wav_of(path, seconds):
         w.setframerate(1)
         w.writeframes(b"\0\0" * int(seconds))
     return path
+
+
+@unittest.skipUnless(_real_numpy(), "needs real numpy")
+class TestTracksStoredCompressed(unittest.TestCase):
+    """2026-11-16 size audit: a mic + call meeting kept three uncompressed recordings (~330 MB an hour), the two
+    tracks more than half of it. A finished meeting's tracks become FLAC - lossless, checked sample for sample - and
+    every reader takes either."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.folder = Path(self._tmp.name) / "20260101_090000"
+        self.folder.mkdir()
+        rng = np.random.default_rng(3)
+        t = np.arange(16000 * 20) / 16000.0
+        self.mic = (np.sin(2 * np.pi * 220 * t) * 8000 + rng.normal(0, 300, t.size)).astype(np.int16)
+        self.system = (self.mic // 2).astype(np.int16)
+        part = self.folder / "audio_part1.wav"
+        ax.write_wav_int16(part, self.mic)
+        ax.write_wav_int16(ms.track_path(part, "mic"), self.mic)
+        ax.write_wav_int16(ms.track_path(part, "system"), self.system)
+        self.part = part
+
+    def test_the_tracks_become_flac_with_exactly_the_same_samples(self):
+        before = ms.track_path(self.part, "mic").stat().st_size * 2
+        saved = ms.compress_tracks(self.folder)
+        self.assertGreater(saved, 0)
+        self.assertLess(before - saved, before)
+        names = sorted(p.name for p in self.folder.iterdir())
+        self.assertEqual(names, ["audio_part1.wav", "audio_part1_mic.flac", "audio_part1_system.flac"])
+        (part, mic, system), = ms.audio_tracks(self.folder)
+        self.assertEqual((mic.suffix, system.suffix), (".flac", ".flac"))
+        got, rate = ax.read_wav_int16(mic)
+        self.assertEqual(rate, 16000)
+        self.assertTrue(np.array_equal(got, self.mic))
+        self.assertTrue(np.array_equal(ax.read_wav_int16(system)[0], self.system))
+        # a reader that listed the .wav before it was compressed reads its .flac
+        self.assertTrue(np.array_equal(ax.read_wav_int16(ms.track_path(self.part, "mic"))[0], self.mic))
+        self.assertEqual(ms.compress_tracks(self.folder), 0)          # nothing left to do
+        self.assertEqual(ms.audio_parts(self.folder), [self.part])         # (the mix stays the recording's part)
+
+    def test_the_speaker_pass_reads_compressed_tracks(self):
+        import meeting_speakers
+        ms.compress_tracks(self.folder)
+        (part, mic, system), = ms.audio_tracks(self.folder)
+        loaded = meeting_speakers.Part.from_files(part, mic, system)
+        self.assertTrue(loaded.has_tracks)
+        audio, m, sy = loaded.load()
+        self.assertTrue(np.array_equal(m, self.mic) and np.array_equal(sy, self.system))
+        path = meeting_speakers._call_sound_path(self.folder, {"audio": "audio_part1.wav", "kind": "sources"})
+        self.assertEqual(path.name, "audio_part1_system.flac")
+
+    def test_a_track_that_does_not_come_back_the_same_stays_a_wav(self):
+        with patch.object(ax, "read_flac_int16", lambda p: (self.mic[:-1], 16000)):
+            self.assertEqual(ms.compress_tracks(self.folder), 0)
+        names = sorted(p.name for p in self.folder.iterdir())
+        self.assertEqual(names, ["audio_part1.wav", "audio_part1_mic.wav", "audio_part1_system.wav"])
+        with patch.object(ax, "write_flac_int16", side_effect=OSError("disk full")):
+            self.assertEqual(ms.compress_tracks(self.folder), 0)
+        self.assertEqual(len(list(self.folder.iterdir())), 3)              # no half-written file left
+
+    def test_only_meetings_nothing_changed_in_for_hours_and_never_one_in_use(self):
+        import time as _time
+        with patch.object(ms, "meetings_dir", lambda: Path(self._tmp.name)):
+            now = _time.time()
+            self.assertEqual(ms.tracks_to_compress(now=now), [])                          # just recorded
+            later = now + ms.TRACKS_SETTLE_S + 60
+            self.assertEqual(ms.tracks_to_compress(now=later), [self.folder])
+            self.assertEqual(ms.tracks_to_compress(skip=[str(self.folder)], now=later), [])   # being recorded
+            ms.compress_tracks(self.folder)
+            self.assertEqual(ms.tracks_to_compress(now=later), [])                          # nothing left
 
 
 class TestRecordingCutShort(unittest.TestCase):

@@ -285,6 +285,11 @@ jobs:
             --exclude-module llvmlite `
             --exclude-module matplotlib `
             --exclude-module IPython `
+            --exclude-module pytest `
+            --exclude-module _pytest `
+            --exclude-module pluggy `
+            --exclude-module iniconfig `
+            --exclude-module pygments `
             main.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $vi = (Get-Item dist\TranscribeApp\TranscribeApp.exe).VersionInfo
@@ -298,6 +303,12 @@ jobs:
           if (-not (Test-Path $mm)) { throw "No Qt multimedia plugin in the build ($mm): meetings can't play their recording." }
           Write-Host "Multimedia plugin: $mm"
           # multimedia-check:end
+          # trim:begin
+          # Parts of the bundle Gusan never uses (Qt Quick / QML, Qt PDF, Qt's own FFmpeg, translations): about 28 MB
+          # of the installer. It fails the build, removing nothing, if a file that stays still links to one of them.
+          python installer/trim_bundle.py dist\TranscribeApp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # trim:end
 
       - name: Zip output folder (portable build)
         shell: pwsh
@@ -438,6 +449,11 @@ jobs:
             --exclude-module llvmlite \
             --exclude-module matplotlib \
             --exclude-module IPython \
+            --exclude-module pytest \
+            --exclude-module _pytest \
+            --exclude-module pluggy \
+            --exclude-module iniconfig \
+            --exclude-module pygments \
             main.py
 
       - name: Patch Info.plist (name, version, usage strings)
@@ -498,10 +514,12 @@ jobs:
       - name: Package as DMG
         run: |
           set -euo pipefail
+          # ULFO (LZFSE: opens on macOS 10.11 and later - Qt 6 needs 11 anyway) is smaller than UDZO's zlib
+          # (2026-11-16 size audit) and as quick to open.
           hdiutil create \
             -volname "Gusan" \
             -srcfolder dist/TranscribeApp.app \
-            -ov -format UDZO \
+            -ov -format ULFO \
             TranscribeApp-Mac.dmg
           cp TranscribeApp-Mac.dmg Gusan-Mac.dmg
           hash="$(shasum -a 256 TranscribeApp-Mac.dmg | awk '{print $1}')"

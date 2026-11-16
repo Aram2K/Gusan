@@ -66,7 +66,14 @@ def read_wav_float32(path):
 
 
 def read_wav_int16(path):
-    """(int16 samples, rate). Stereo files are downmixed."""
+    """(int16 samples, rate). Stereo files are downmixed. A .flac file (a meeting's mic / call track once it was
+    stored losslessly: meeting_store.compress_tracks) is decoded to the same samples; a .wav that was compressed
+    meanwhile is read from its .flac."""
+    path = Path(path)
+    if path.suffix.lower() == ".flac":
+        return read_flac_int16(path)
+    if not path.exists() and path.with_suffix(".flac").exists():
+        return read_flac_int16(path.with_suffix(".flac"))
     with wave.open(str(path), "rb") as w:
         rate = w.getframerate()
         ch = w.getnchannels()
@@ -77,6 +84,53 @@ def read_wav_int16(path):
     data = np.frombuffer(frames, dtype=np.int16)
     if ch > 1:
         data = data.reshape(-1, ch).mean(axis=1).astype(np.int16)
+    return data, rate
+
+
+def write_flac_int16(path, samples_int16, rate=RATE):
+    """Lossless FLAC (PyAV's own encoder) from int16 mono samples. Returns the path."""
+    import av
+    data = np.ascontiguousarray(np.asarray(samples_int16, dtype=np.int16).reshape(-1))
+    path = Path(path)
+    with av.open(str(path), "w", format="flac") as out:
+        stream = out.add_stream("flac", rate=int(rate))
+        stream.layout = "mono"
+        stream.format = "s16"
+        step = int(rate) * 10
+        for start in range(0, len(data), step):
+            frame = av.AudioFrame.from_ndarray(data[start:start + step].reshape(1, -1), format="s16", layout="mono")
+            frame.sample_rate = int(rate)
+            frame.pts = start
+            frame.time_base = Fraction(1, int(rate))
+            for packet in stream.encode(frame):
+                out.mux(packet)
+        for packet in stream.encode(None):
+            out.mux(packet)
+    return path
+
+
+def read_flac_int16(path):
+    """(int16 mono samples, rate) of a FLAC file (PyAV), downmixed when it has more than one channel."""
+    import av
+    chunks, rate = [], RATE
+    with av.open(str(path)) as f:
+        stream = f.streams.audio[0]
+        rate = int(stream.rate or RATE)
+        for frame in f.decode(stream):
+            arr = frame.to_ndarray()
+            channels = len(frame.layout.channels) or 1
+            if arr.dtype.kind == "f":
+                arr = np.clip(arr, -1.0, 1.0) * 32767.0
+            elif arr.dtype.itemsize > 2:
+                arr = arr >> (8 * (arr.dtype.itemsize - 2))            # 24 / 32-bit: the top 16 bits
+            if frame.format.is_planar:
+                arr = arr.reshape(channels, -1)
+                arr = arr.mean(axis=0) if channels > 1 else arr[0]
+            else:
+                arr = arr.reshape(-1, channels)
+                arr = arr.mean(axis=1) if channels > 1 else arr[:, 0]
+            chunks.append(np.asarray(arr).astype(np.int16))
+    data = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.int16)
     return data, rate
 
 

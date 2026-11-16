@@ -2410,7 +2410,30 @@ class MeetingsList(QWidget):
     FIRST_ROWS = 12
     SLICE_S = 0.03
 
+    def _render_key(self, items, searching):
+        """What the rows show depends on: the meetings, the one being recorded and its phase, a search, the day
+        (the Today / Yesterday sections)."""
+        s = self.page.session()
+        active, phase = None, "idle"
+        if s is not None:
+            try:
+                active = s.active_dir()
+            except Exception:
+                active = None
+            phase = getattr(s, "phase", "idle")
+        return (list(items), active, phase, bool(searching), datetime.now().date())
+
     def _render(self, items, searching=False):
+        # The same meetings, the same day, the same recording state: the rows already show it (2026-11-16 speed
+        # audit: every visit to the page and every change of the recording's state rebuilt every row - about 10 ms
+        # a row on the window's thread).
+        key = self._render_key(items, searching)
+        if (key == getattr(self, "_rendered", None) and getattr(self, "_row_state", None) is None
+                and all(not self.deleter.is_gone(r.meeting.get("dir")) for r in self.rows)):
+            self.no_match.setVisible(bool(searching and not items and self._all))
+            self._sync_select_ui()
+            return
+        self._rendered = key
         focused = next((r.meeting.get("dir") for r in self.rows if r.hasFocus()), None)
         timer = getattr(self, "_row_timer", None)
         if timer is None:
@@ -2620,6 +2643,7 @@ class MeetingsList(QWidget):
 
     def _on_removed(self, folder):
         """A folder is in the trash: its row leaves, one at a time, with no rebuild of the list."""
+        self._rendered = None                   # (the rows no longer match a list: an Undo must build them again)
         self._all = [m for m in self._all if m.get("dir") != folder]
         self._shown = [m for m in self._shown if m.get("dir") != folder]
         try:

@@ -350,7 +350,7 @@ class TestWhisperLoadFrees(unittest.TestCase):
 class TestOpenBlas(unittest.TestCase):
     def test_openblas_threads_are_capped_before_numpy_is_imported(self):
         src = Path(main.__file__).read_text(encoding="utf-8")
-        self.assertLess(src.index('os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")'),
+        self.assertLess(src.index('os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")'),
                         src.index("import numpy"))
 
 

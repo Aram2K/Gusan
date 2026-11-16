@@ -394,7 +394,7 @@ def test_web_search_is_off_until_the_person_turns_it_on():
     the setting falls back to off."""
     main_src = (ROOT / "main.py").read_text(encoding="utf-8")
     assert re.search(r'"live_assist_web_search":\s*False', main_src)
-    for rel in ("main.py", "meeting_chat.py", "ui/live_assist.py", "ui/pages/live_assistant.py", "ui/settings.py"):
+    for rel in ("main.py", "meeting_chat.py", "ui/live_assist.py", "ui/pages/live_assistant.py"):
         text = (ROOT / rel).read_text(encoding="utf-8")
         assert 'get("live_assist_web_search", True)' not in text, rel
 

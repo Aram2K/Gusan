@@ -121,6 +121,12 @@ Type: files; Name: "{autoprograms}\{#MyOldAppName}\{#MyOldAppName}.lnk"
 Type: files; Name: "{autoprograms}\{#MyOldAppName}\Uninstall {#MyOldAppName}.lnk"
 Type: dirifempty; Name: "{autoprograms}\{#MyOldAppName}"
 Type: files; Name: "{autodesktop}\{#MyOldAppName}.lnk"
+; Every update replaces the program's own files: the old bundle goes first. Copied on top of it, files a new
+; version no longer has stayed forever (2026-11-16: 160 MB of earlier versions' libraries in one install - three
+; generations of the audio library's DLLs, whose names change with each version). Only the bundle PyInstaller
+; makes: the user's data lives elsewhere (%APPDATA%\Transcribe; the GPU pack in %LOCALAPPDATA%\Transcribe), and
+; TranscribeApp.exe is replaced anyway.
+Type: filesandordirs; Name: "{app}\_internal"
 ; Deliberately NOT the Startup-folder shortcut that installers before 1.9.4
 ; made ({userstartup}\Transcribe.lnk): the app moves it to the Run value on
 ; its first launch and keeps Task Manager's on/off switch with it

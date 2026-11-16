@@ -52,8 +52,10 @@ ROUTE_ALIASES = {"dictionary": ("settings", {"section": "dictionary"})}
 # Built ahead of their first open, in the order of Home's tiles (a page takes 0.4-1 s to build: that was the wait
 # on the first click after every start).
 PREBUILD = ("dictation", "smart_actions", "meetings", "live_assistant", "audio_to_text")
-PREBUILD_START_MS = 2500        # after the window first shows: the start itself stays as quick as it was
-PREBUILD_STEP_MS = 700          # between two pages, so the window answers in between
+PREBUILD_START_MS = 8000        # after the window first shows: once the start's own work is done (the speech model
+                                # loads at 2.5 s, the update check and the sign-in run then - 2026-11-16 audit: built
+                                # at 2.5 s, the pages added stutters to the busiest seconds of the start)
+PREBUILD_STEP_MS = 1200         # between two pages, so the window answers in between
 PREBUILD_BUSY_MS = 3000         # a take is being recorded: look again later (the pill must not stutter)
 
 

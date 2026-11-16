@@ -60,9 +60,7 @@ class TestWheelGuardBehaviour(unittest.TestCase):
         import ui.wheelguard as wg
 
         self.app = _ensure_app()
-        # Fresh guard per test so install()'s idempotence can't leak state.
-        wg._guard = None
-        self.guard = wg.install(self.app)
+        self.assertTrue(wg.install(self.app))          # (idempotent: the classes themselves are guarded)
 
         self.area = QScrollArea()
         inner = QWidget()
@@ -77,9 +75,6 @@ class TestWheelGuardBehaviour(unittest.TestCase):
         self.area.show()
 
     def tearDown(self):
-        import ui.wheelguard as wg
-        self.app.removeEventFilter(self.guard)
-        wg._guard = None
         self.area.close()
 
     def _wheel(self, widget, dy=-120):
@@ -115,13 +110,29 @@ class TestWheelGuardBehaviour(unittest.TestCase):
         self.assertEqual(spin.value(), 10)
 
     def test_normal_widgets_are_untouched(self):
-        # A plain scrollable widget must still receive its wheel events.
-        from PySide6.QtWidgets import QApplication, QTextEdit
-        edit = QTextEdit(self.area.widget())
-        ev = self._wheel(edit)
-        QApplication.sendEvent(edit, ev)
-        self.assertFalse(self.guard.eventFilter(edit, ev),
-                         "guard must not filter non-value widgets")
+        # A plain scrollable widget keeps its own wheel handling (only the three value widgets are guarded).
+        from PySide6.QtWidgets import QComboBox, QTextEdit
+        import ui.wheelguard as wg
+        self.assertIsNot(QTextEdit.wheelEvent, wg._leave_it_to_the_page)
+        self.assertIs(QComboBox.wheelEvent, wg._leave_it_to_the_page)
+
+    def test_subclasses_and_sliders_are_guarded_and_nothing_is_filtered_app_wide(self):
+        """2026-11-16 speed audit: an application-wide filter put every event of every widget through Python."""
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QApplication, QComboBox, QSlider
+
+        class Mine(QComboBox):
+            pass
+        mine = Mine(self.area.widget())
+        mine.addItems(["a", "b", "c"])
+        QApplication.sendEvent(mine, self._wheel(mine))
+        self.assertEqual(mine.currentIndex(), 0)
+        slider = QSlider(Qt.Horizontal, self.area.widget())
+        slider.setValue(5)
+        QApplication.sendEvent(slider, self._wheel(slider))
+        self.assertEqual(slider.value(), 5)
+        import ui.wheelguard as wg
+        self.assertFalse(hasattr(wg, "_guard") and wg._guard is not None)
 
     def test_keyboard_still_changes_the_value(self):
         # Blocking the wheel must not block deliberate keyboard changes.

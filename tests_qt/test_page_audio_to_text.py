@@ -216,7 +216,9 @@ def test_your_files_newest_first_with_one_emoji_by_type(build, store):
     now = _now()
     _save(store, "podcast_ep12.mp3", 47 * 60, now - datetime.timedelta(days=1, hours=2))
     _save(store, "lecture_week3.mp4", 52 * 60, now - datetime.timedelta(days=1))
-    _save(store, "board_call.mp3", 100 * 60, now - datetime.timedelta(minutes=5))
+    # (never before midnight: a run in the first minutes of a day saw "Yesterday")
+    _save(store, "board_call.mp3", 100 * 60, max(now - datetime.timedelta(minutes=5),
+                                                 now.replace(hour=0, minute=0, second=0, microsecond=0)))
     page, _ = build()
     rows = page.files.rows
     assert [r.title() for r in rows] == ["board_call.mp3", "lecture_week3.mp4", "podcast_ep12.mp3"]

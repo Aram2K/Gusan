@@ -31,6 +31,7 @@ Meta is only ever changed through ``update_meta`` (read, merge, atomic
 write), so keys written by one step survive every other step.
 """
 import json
+import logging
 import os
 import re
 import shutil
@@ -43,6 +44,8 @@ from pathlib import Path
 
 import meeting_titles
 import storage
+
+logger = logging.getLogger("transcribe")
 
 _PART_RE = re.compile(r"^audio_part(\d+)\.wav$", re.I)
 # A session the user aborted & discarded: its live chunks, kept on disk under
@@ -461,20 +464,102 @@ def track_path(part_path, kind):
     return p.with_name(f"{p.stem}_{kind}{p.suffix}")
 
 
+def track_file(part_path, kind):
+    """The saved track of a part (track_path's .wav, or its .flac once it was compressed: compress_tracks), or None
+    when there is none (or it is empty)."""
+    wav = track_path(part_path, kind)
+    for t in (wav.with_suffix(".flac"), wav):
+        try:
+            if t.is_file() and t.stat().st_size > 44:
+                return t
+        except OSError:
+            continue
+    return None
+
+
 def audio_tracks(folder):
     """[(part path, mic track path or None, system track path or None)] for each
     recording part, in order. A track counts only when its file is non-empty."""
     out = []
     for part in audio_parts(folder):
-        paths = []
-        for kind in TRACK_KINDS:
-            t = track_path(part, kind)
-            try:
-                paths.append(t if t.is_file() and t.stat().st_size > 44 else None)
-            except OSError:
-                paths.append(None)
+        paths = [track_file(part, kind) for kind in TRACK_KINDS]
         out.append((part, paths[0], paths[1]))
     return out
+
+
+# The two tracks of a finished meeting are stored losslessly compressed (FLAC: 2026-11-16 size audit - a mic +
+# call meeting kept three uncompressed recordings, about 330 MB an hour; the tracks are more than half of it). The
+# mix (audio_partN.wav) stays a WAV: the player, export and transcription read it. A track is converted only when
+# the FLAC decodes back to exactly the same samples; until then, and if anything fails, the WAV stays.
+TRACKS_SETTLE_S = 6 * 3600          # a meeting nothing changed in for this long (its speaker pass is long done)
+
+
+def compress_track(wav):
+    """One track WAV -> FLAC beside it, checked sample for sample, then the WAV is removed. Returns the bytes
+    saved (0 when it was not converted). Never raises."""
+    import audio_export
+    wav = Path(wav)
+    flac = wav.with_suffix(".flac")
+    tmp = wav.with_name(".%s.flac.tmp" % wav.stem)
+    try:
+        samples, rate = audio_export.read_wav_int16(wav)
+        audio_export.write_flac_int16(tmp, samples, rate)
+        back, back_rate = audio_export.read_flac_int16(tmp)
+        if back_rate != rate or back.shape != samples.shape or not (back == samples).all():
+            raise ValueError("the FLAC does not decode to the same samples")
+        before, after = wav.stat().st_size, tmp.stat().st_size
+        if after >= before:
+            raise ValueError("no smaller")
+        os.replace(tmp, flac)
+        try:
+            wav.unlink()
+        except OSError:
+            flac.unlink()                    # (the WAV is held open: keep it, never two copies)
+            return 0
+        return before - after
+    except Exception as e:
+        logger.info("A recording track was left as it is (%s): %s", wav.name, type(e).__name__)
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+        return 0
+
+
+def compress_tracks(folder):
+    """Compress a meeting's mic / call tracks (compress_track). Returns the bytes saved."""
+    saved = 0
+    for part in audio_parts(folder):
+        for kind in TRACK_KINDS:
+            wav = track_path(part, kind)
+            if wav.is_file() and not wav.with_suffix(".flac").exists():
+                saved += compress_track(wav)
+    return saved
+
+
+def tracks_to_compress(skip=(), now=None, settle_s=TRACKS_SETTLE_S):
+    """Meeting folders that still have WAV tracks and nothing changed in for ``settle_s`` (``skip``: folders in
+    use - the one being recorded, a speaker pass)."""
+    now = time.time() if now is None else now
+    skip = {os.path.normcase(os.path.abspath(str(s))) for s in skip if s}
+    out = []
+    try:
+        folders = [p for p in meetings_dir().iterdir() if p.is_dir() and not p.name.startswith(".")]
+    except OSError:
+        return out
+    for folder in folders:
+        if os.path.normcase(os.path.abspath(str(folder))) in skip:
+            continue
+        try:
+            files = list(os.scandir(folder))
+            newest = max((e.stat().st_mtime for e in files if e.is_file()), default=0)
+            has_wav_track = any(e.name.lower().endswith(("_mic.wav", "_system.wav")) for e in files)
+        except OSError:
+            continue
+        if has_wav_track and now - newest >= settle_s:
+            out.append(folder)
+    return sorted(out)
 
 
 # transcript.txt is replaced atomically by Identify speakers; the old text is
@@ -618,13 +703,49 @@ def notes_preview(folder, limit=meeting_titles.PREVIEW_CHARS):
     return summary_preview(head, limit)
 
 
+# One meeting folder's list entry, kept until anything in the folder changes (2026-11-16 speed audit: every list -
+# Home after each dictation, the Meetings page - read every folder again: about 5 file checks, 2 reads and a
+# listing each, 2 s for 300 meetings). The key is the folder's own listing: each file's name, size and time.
+_ENTRIES = {}
+_ENTRIES_LOCK = threading.Lock()
+
+
+def _folder_listing(folder):
+    """(key, names of its files) from one listing of a meeting folder, or (None, None) when it can't be read."""
+    files = []
+    try:
+        with os.scandir(folder) as it:
+            for e in it:
+                try:
+                    if e.is_file():
+                        st = e.stat()
+                        files.append((e.name, st.st_size, st.st_mtime_ns))
+                    elif e.name == DISCARDED_CHUNKS:
+                        files.append((e.name, 0, 0))
+                except OSError:
+                    continue
+    except OSError:
+        return None, None
+    files.sort()
+    return tuple(files), {f[0] for f in files}
+
+
+def _copy_entry(entry):
+    out = dict(entry)
+    for k in ("audio_parts", "attendees_list", "notices"):
+        if isinstance(out.get(k), list):
+            out[k] = list(out[k])
+    return out
+
+
 def list_meetings(preview=False):
     """Newest first. Every folder that holds any of a meeting is listed -
     including one with only its recording or live chunks (transcription or
     notes failed, or the app closed mid-meeting), so a saved recording is
     always reachable. Empty and discarded folders are skipped.
     ``preview`` adds each meeting's first notes line as "preview" (a list's second line, and the name of a
-    meeting nobody named: meeting_titles.display_title); it reads a little of every notes file."""
+    meeting nobody named: meeting_titles.display_title); it reads a little of every notes file. A folder nothing
+    changed in since the last list is not read again."""
     root = meetings_dir()
     out = []
     try:
@@ -632,57 +753,84 @@ def list_meetings(preview=False):
         folders = [p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")]
     except Exception:
         return out
+    seen = set()
     for folder in sorted(folders, key=lambda p: p.name, reverse=True):
-        meta = load_meta(folder)
-        has_transcript = (folder / "transcript.txt").is_file()
-        has_notes = (folder / "notes.md").is_file()
-        parts = audio_parts(folder)
-        has_chunks = ((folder / "chunks.jsonl").is_file()
-                      and not (folder / DISCARDED_CHUNKS).exists())
-        # Live chunks alone don't make a meeting: that is the one being
-        # recorded right now, or a session discarded before 1.9.1 (no marker
-        # then) - both must stay out of History. With meta.json (written when
-        # processing starts) they are a meeting whose transcription failed.
-        # meta.json alone (nothing was captured) is no meeting either.
-        if not (has_transcript or has_notes or parts or (meta and has_chunks)):
+        key, names = _folder_listing(folder)
+        if key is None:
             continue
-        attendees = str(meta.get("attendees") or "")
-        people = meta.get("attendees_list")
-        if not (isinstance(people, list) and all(isinstance(p, str) for p in people)):
-            people = split_attendees(attendees)
-        notices = meta.get("notices")
-        out.append({
-            "dir": str(folder),
-            "id": folder.name,
-            "title": str(meta.get("title") or "Untitled Meeting").strip(),
-            "attendees": attendees,
-            "timestamp": str(meta.get("timestamp") or _folder_timestamp(folder.name)),
-            # No meta.json (it's written when processing starts): the
-            # recording's own length beats a "0 s" card.
-            "duration_sec": _int(meta.get("duration_sec")) or _wav_seconds(parts),
-            "has_transcript": has_transcript,
-            "has_notes": has_notes,
-            "audio_parts": [str(p) for p in parts],
-            # Gusan 2.0 fields. The folder name is the real start; "timestamp"
-            # is rewritten on every processing run.
-            "started": str(meta.get("started") or _folder_timestamp(folder.name)),
-            "attendees_list": list(people),
-            "language": str(meta.get("language") or ""),
-            "notes_engine": str(meta.get("notes_engine") or ""),
-            "notes_engine_label": str(meta.get("notes_engine_label") or ""),
-            "notices": [str(n) for n in notices] if isinstance(notices, list) else [],
-            "notes_error": str(meta.get("notes_error") or ""),
-            # Meetings from before 2.0 were all seen in the old window.
-            "seen": meta.get("seen") is not False,
-            "source": str(meta.get("source") or ""),
-            "calendar_event_id": str(meta.get("calendar_event_id") or ""),
-            # who named it (meeting_titles.SOURCE_*) and whether a try at naming it came back empty
-            "title_source": str(meta.get("title_source") or ""),
-            "title_tried": bool(meta.get("title_tried")),
-        })
-        if preview:
-            out[-1]["preview"] = notes_preview(folder) if has_notes else ""
+        cache_key = str(folder)
+        seen.add(cache_key)
+        with _ENTRIES_LOCK:
+            hit = _ENTRIES.get(cache_key)
+        if hit is not None and hit[0] == key and (hit[2] or not preview):
+            if hit[1] is not None:
+                entry = _copy_entry(hit[1])
+                if not preview:
+                    entry.pop("preview", None)
+                out.append(entry)
+            continue
+        entry = _read_entry(folder, names, preview)
+        with _ENTRIES_LOCK:
+            _ENTRIES[cache_key] = (key, entry, bool(preview))
+        if entry is not None:
+            out.append(_copy_entry(entry))
+    with _ENTRIES_LOCK:
+        for k in [k for k in _ENTRIES if k not in seen and os.path.dirname(k) == str(root)]:
+            del _ENTRIES[k]                   # a folder that went (deleted, moved to the trash)
     return out
+
+
+def _read_entry(folder, names, preview):
+    """One meeting folder's list entry (list_meetings), or None when it holds no meeting. ``names``: its files."""
+    meta = load_meta(folder) if META_FILE in names else {}
+    has_transcript = "transcript.txt" in names
+    has_notes = "notes.md" in names
+    parts = [folder / n for _i, n in sorted((int(m.group(1)), n) for n in names for m in [_PART_RE.match(n)] if m)]
+    has_chunks = "chunks.jsonl" in names and DISCARDED_CHUNKS not in names
+    # Live chunks alone don't make a meeting: that is the one being
+    # recorded right now, or a session discarded before 1.9.1 (no marker
+    # then) - both must stay out of History. With meta.json (written when
+    # processing starts) they are a meeting whose transcription failed.
+    # meta.json alone (nothing was captured) is no meeting either.
+    if not (has_transcript or has_notes or parts or (meta and has_chunks)):
+        return None
+    attendees = str(meta.get("attendees") or "")
+    people = meta.get("attendees_list")
+    if not (isinstance(people, list) and all(isinstance(p, str) for p in people)):
+        people = split_attendees(attendees)
+    notices = meta.get("notices")
+    entry = {
+        "dir": str(folder),
+        "id": folder.name,
+        "title": str(meta.get("title") or "Untitled Meeting").strip(),
+        "attendees": attendees,
+        "timestamp": str(meta.get("timestamp") or _folder_timestamp(folder.name)),
+        # No meta.json (it's written when processing starts): the
+        # recording's own length beats a "0 s" card.
+        "duration_sec": _int(meta.get("duration_sec")) or _wav_seconds(parts),
+        "has_transcript": has_transcript,
+        "has_notes": has_notes,
+        "audio_parts": [str(p) for p in parts],
+        # Gusan 2.0 fields. The folder name is the real start; "timestamp"
+        # is rewritten on every processing run.
+        "started": str(meta.get("started") or _folder_timestamp(folder.name)),
+        "attendees_list": list(people),
+        "language": str(meta.get("language") or ""),
+        "notes_engine": str(meta.get("notes_engine") or ""),
+        "notes_engine_label": str(meta.get("notes_engine_label") or ""),
+        "notices": [str(n) for n in notices] if isinstance(notices, list) else [],
+        "notes_error": str(meta.get("notes_error") or ""),
+        # Meetings from before 2.0 were all seen in the old window.
+        "seen": meta.get("seen") is not False,
+        "source": str(meta.get("source") or ""),
+        "calendar_event_id": str(meta.get("calendar_event_id") or ""),
+        # who named it (meeting_titles.SOURCE_*) and whether a try at naming it came back empty
+        "title_source": str(meta.get("title_source") or ""),
+        "title_tried": bool(meta.get("title_tried")),
+    }
+    if preview:
+        entry["preview"] = notes_preview(folder) if has_notes else ""
+    return entry
 
 
 def meeting_status(m, active_dir=None, active_state=None):

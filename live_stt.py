@@ -74,9 +74,10 @@ class LiveUnavailable(Exception):
 
 
 def _ssl_context():
+    """The certificates, loaded once for the app (net.py: loading them took about a second a session)."""
     try:
-        import certifi
-        return ssl.create_default_context(cafile=certifi.where())
+        import net
+        return net.socket_context()
     except Exception:
         return ssl.create_default_context()
 

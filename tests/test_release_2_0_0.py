@@ -412,8 +412,12 @@ class TestInstaller(unittest.TestCase):
     def test_install_delete_never_touches_data_or_the_migrated_startup_shortcut(self):
         # The app moves an old {userstartup}\Transcribe.lnk to the Run value on its
         # first launch, keeping Task Manager's switch (autostart.LEGACY_SHORTCUT).
+        # In the program's folder only its bundle (_internal) is removed before an update copies the new one
+        # (2026-11-16: old versions' libraries piled up) - never the folder itself, the user's data, the startup.
         for e in _entries(self.text, "InstallDelete"):
             name = _expand(e["Name"], self.defines)
+            if name == "{app}\_internal":
+                continue
             for root in ("{userstartup}", "{commonstartup}", "{app}", "{userappdata}", "{localappdata}"):
                 self.assertFalse(name.startswith(root), name)
 

@@ -34,6 +34,9 @@ def api_key_secret_name(key_id):
 MEETINGS_DIR_NAME = "meetings"
 
 
+_MADE = set()          # data folders already made this run (mkdir on every call cost 2-6 ms each - 2026-11-16 audit)
+
+
 def app_data_dir():
     override = os.environ.get("TRANSCRIBE_APP_DATA_DIR")
     if override:
@@ -47,8 +50,11 @@ def app_data_dir():
         root = os.environ.get("XDG_CONFIG_HOME")
         base = Path(root) / APP_DIR_NAME if root else Path.home() / ".config" / APP_DIR_NAME
 
+    if base in _MADE:
+        return base
     try:
         base.mkdir(parents=True, exist_ok=True)
+        _MADE.add(base)
         return base
     except OSError:
         return Path.cwd()

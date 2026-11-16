@@ -4,8 +4,10 @@ import os
 # numpy's bundled OpenBLAS reserves ~32 MB per thread the moment numpy is
 # imported (24 threads = ~750 MB of commit, almost all untouched); the app's
 # heavy maths runs in CTranslate2 / llama.cpp, not numpy. Before any import
-# of numpy, or it has no effect.
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
+# of numpy, or it has no effect. One thread (2026-11-16 speed audit: 4 kept
+# about 100 MB reserved and 3 threads idle); the speaker pass, its own process,
+# asks for 4 (diarization_proc).
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 import gc
 import sys
 if __name__ == "__main__" and sys.argv[1:2] == ["--diarize-worker"]:
@@ -134,8 +136,41 @@ SINGLE_INSTANCE_PORT = 47823   # localhost-only IPC for "open on second launch"
 
 # ── Config ────────────────────────────────────────────────────────────────────
 LOG_PATH = str(storage.path_for("transcribe.log"))
+LOG_MAX_BYTES = 2 * 1024 * 1024        # then transcribe.log.1 takes over (one kept): it never grows without end
+LOG_BACKUPS = 1
+
+
+def _log_handler():
+    """The app's log file, rotated at LOG_MAX_BYTES (a plain append grew without end - 2026-11-16 audit). When
+    Windows won't let the file be renamed (another program has it open), it keeps appending and tries again a
+    minute later - a log line is never lost to a rotation."""
+    try:
+        import time as _time
+        from logging.handlers import RotatingFileHandler
+
+        class _Rotating(RotatingFileHandler):
+            _retry_at = 0.0
+
+            def shouldRollover(self, record):
+                if _time.monotonic() < self._retry_at:
+                    return False
+                return super().shouldRollover(record)
+
+            def doRollover(self):
+                try:
+                    super().doRollover()
+                except OSError:
+                    self._retry_at = _time.monotonic() + 60
+                    if self.stream is None:
+                        self.stream = self._open()
+
+        return _Rotating(LOG_PATH, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUPS, encoding="utf-8", delay=True)
+    except Exception:
+        return logging.FileHandler(LOG_PATH, encoding="utf-8", delay=True)
+
+
 logging.basicConfig(
-    filename=LOG_PATH,
+    handlers=[_log_handler()],
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
 )
@@ -945,8 +980,11 @@ def _materialize_hf_snapshot_links(model_dir):
     """Replace HF snapshot symlinks with real files when possible.
 
     Some Windows installs leave a snapshot that resolves through symlinks which
-    CTranslate2 then fails to open as model.bin. Copying the blob into the
-    snapshot makes the local model usable without deleting the whole cache.
+    CTranslate2 then fails to open as model.bin. A real file in the snapshot makes
+    the local model usable without deleting the whole cache - a HARD LINK to the
+    blob, so the model is on the disk once (a copy kept it twice: 138 MB for the
+    base model, about 1.5 GB for a large one - 2026-11-16 audit); a copy only when
+    a link can't be made (another drive, a file system without links).
     """
     try:
         model_dir = Path(model_dir)
@@ -964,7 +1002,12 @@ def _materialize_hf_snapshot_links(model_dir):
                 if not target.exists() or not target.is_file():
                     continue
                 tmp = item.with_name(f".{item.name}.materializing")
-                shutil.copy2(target, tmp)
+                if tmp.exists():
+                    tmp.unlink()
+                try:
+                    os.link(target, tmp)
+                except OSError:
+                    shutil.copy2(target, tmp)
                 item.unlink()
                 os.replace(tmp, item)
                 changed = True
@@ -3493,12 +3536,13 @@ class AudioRecorder:
             elif lang_setting == "auto" and self._session_lang is not None:
                 lang_arg = self._session_lang
             else:
+                # transcribe() finds the language before it returns (the info); its text was decoded here
+                # too only to be thrown away - about 1.9 s a take on the base model (2026-11-16 speed audit).
                 sample = audio[:sr * 8]
-                segs_detect, detect_info = model.transcribe(
+                _segs_detect, detect_info = model.transcribe(
                     sample, language=None, beam_size=1,
                     vad_filter=False, without_timestamps=True
                 )
-                list(segs_detect)
                 lang_arg = detect_info.language
                 if mix:
                     # Only the languages the user mixes can win - Armenian is
@@ -4128,18 +4172,34 @@ def make_icon(color="#3b82f6", size=64):
     return logo.render(size)
 
 
+_QICONS = {}
+
+
 def make_qicon(color="#3b82f6", app_icon=False):
     """The logo as a QIcon carrying every size it is shown at, each drawn at that size (never a
     small one stretched - that was the pixelated Dock icon). ``app_icon`` on a Mac: on Apple's
-    icon grid, so it sits at the size of the other apps in the Dock."""
+    icon grid, so it sits at the size of the other apps in the Dock.
+
+    Drawn ONCE and kept (2026-11-16 speed audit): the nine sizes up to 1024 px took 1-2 s, at every
+    start twice and - through update_tray_icon - at every settings save, the window frozen meanwhile.
+    The picture never changes (``color`` is not used). The 512 and 1024 px sizes are only drawn for
+    the Mac's Dock: Windows shows a window or tray icon at 256 px at most."""
     import logo
-    margin = logo.MAC_MARGIN if (app_icon and sys.platform == "darwin") else 0.0
+    mac = sys.platform == "darwin"
+    margin = logo.MAC_MARGIN if (app_icon and mac) else 0.0
+    key = (margin, mac)
+    icon = _QICONS.get(key)
+    if icon is not None:
+        return icon
     icon = QIcon()
     for size in logo.ICON_SIZES:
+        if size > 256 and not mac:
+            continue
         img = logo.render(size, margin)
         data = img.tobytes("raw", "RGBA")
         qimg = QImage(data, size, size, QImage.Format_RGBA8888).copy()     # own the pixels
         icon.addPixmap(QPixmap.fromImage(qimg))
+    _QICONS[key] = icon
     return icon
 
 
@@ -4186,6 +4246,11 @@ PENDING_NOTES_MAX_TRIES = 240
 TITLE_PASS_DELAY_MS = 60_000
 TITLE_PASS_RETRY_MS = 120_000
 TITLE_PASS_MAX_TRIES = 30
+# A finished meeting's mic and call tracks are stored losslessly compressed (meeting_store.compress_tracks: about
+# half their size), quietly, a few minutes after startup and every few hours, only while nothing records,
+# converts or labels speakers.
+TRACKS_PASS_DELAY_MS = 180_000
+TRACKS_PASS_EVERY_MS = 4 * 3600 * 1000
 # Real-time dictation (live_stt.py, Gladia live): how long Stop waits for Gladia's last sentence (Gladia: finals
 # ~0.3 s after the speech ends) before the pieces' text is used instead.
 LIVE_STOP_S = 2.5
@@ -4494,6 +4559,7 @@ class AppController(QObject):
         self._pending_notes_queue = []
         QTimer.singleShot(PENDING_NOTES_DELAY_MS, self._write_pending_notes)
         QTimer.singleShot(TITLE_PASS_DELAY_MS, self._name_old_meetings)
+        QTimer.singleShot(TRACKS_PASS_DELAY_MS, self._compress_old_tracks)
 
         # Setup System Tray
         self._setup_tray()
@@ -6654,9 +6720,9 @@ class AppController(QObject):
             logger.warning("Saving settings failed", exc_info=True)
 
     def save_config(self):
+        # (No tray icon redraw: the picture never changes, and drawing it froze the window 1-2 s a save.)
         save_config(self.cfg)
         self._track_setting_changes()
-        self.update_tray_icon()
 
     # ── Hotkeys ──────────────────────────────────────────────────────────────
     # The dictation hotkey can be either a keyboard combo ("alt+r") or a mouse
@@ -7696,6 +7762,7 @@ class AppController(QObject):
         sel_job = getattr(self, "_take_selection", None) if oneshot else None
         sel_kind = None
         sources = []                     # the web pages a Smart Action used (title + address), when it searched
+        action_event = None              # the Smart Action's usage event, recorded after the paste
         # What THIS take transcribes with (a Smart Action may use its own;
         # a cloud pick stays on this computer once Privacy mode is on, as
         # AudioRecorder._backend decides).
@@ -7885,17 +7952,12 @@ class AppController(QObject):
                     # "<answer>" first: something to read (a card, never pasted); else the changed text.
                     sel_kind, output_text = smart_prompt.split_selection_result(output_text)
                 sources = list((web_info or {}).get("sources") or [])
-                telemetry.track(
-                    "action_completed",
-                    {
-                        "action": action_mode,
-                        "model": action_model,
-                        "language": lang,
-                        "output_length_bucket": _bucket_count(len(output_text)),
-                    },
-                    self.cfg,
-                    APP_VERSION,
-                )
+                action_event = {                         # (recorded after the paste: see below)
+                    "action": action_mode,
+                    "model": action_model,
+                    "language": lang,
+                    "output_length_bucket": _bucket_count(len(output_text)),
+                }
             except actions.ActionError as e:
                 telemetry.track(
                     "action_failed",
@@ -7910,6 +7972,22 @@ class AppController(QObject):
         if job != self._job_seq:
             return
 
+        # The result first - pasted, or copied and shown - then what only keeps a record of it (the history,
+        # the usage events: 35-180 ms of disk writes that ran before the paste - 2026-11-16 speed audit).
+        self._wait_keys_released()
+        if action_mode == actions.ACTION_SMART_SELECTION:
+            AppController._deliver_selection_result(self, sel_kind, output_text, pill_kind, sources)
+        elif action_mode != actions.ACTION_TRANSCRIBE_ONLY:
+            # A Smart Action's Markdown: real lists / bold / headings where
+            # the app takes HTML, nice plain text everywhere else ("Email pasted") - or, with nowhere to
+            # type, copied and shown in the card.
+            AppController._deliver_smart_result(self, output_text, pill_kind, sources)
+        else:
+            pasted = self._paste_via_clipboard(output_text)   # the exact words, untouched
+            self.overlay.call_soon(self.overlay.show_done, pasted)
+
+        if action_event is not None:
+            telemetry.track("action_completed", action_event, self.cfg, APP_VERSION)
         if self.cfg.get("save_history", True) and not self.cfg.get("privacy_mode", False):
             # A Smart Action keeps what was said and which action ran, so Home
             # and Smart Actions can show "said -> pasted".
@@ -7937,18 +8015,6 @@ class AppController(QObject):
             self.cfg,
             APP_VERSION,
         )
-
-        self._wait_keys_released()
-        if action_mode == actions.ACTION_SMART_SELECTION:
-            AppController._deliver_selection_result(self, sel_kind, output_text, pill_kind, sources)
-        elif action_mode != actions.ACTION_TRANSCRIBE_ONLY:
-            # A Smart Action's Markdown: real lists / bold / headings where
-            # the app takes HTML, nice plain text everywhere else ("Email pasted") - or, with nowhere to
-            # type, copied and shown in the card.
-            AppController._deliver_smart_result(self, output_text, pill_kind, sources)
-        else:
-            pasted = self._paste_via_clipboard(output_text)   # the exact words, untouched
-            self.overlay.call_soon(self.overlay.show_done, pasted)
 
         # A pending update: one quiet notice a run (not after every dictation),
         # shown after the "done" pill - the next dictation never waits for it.
@@ -8499,6 +8565,50 @@ class AppController(QObject):
                 self._run_on_gui(self._old_meetings_named)
         threading.Thread(target=work, daemon=True, name="gusan-title-pass").start()
 
+    def _tracks_pass_busy(self):
+        """The quiet compression of old recording tracks gives way to anything the person is doing, and to a
+        speaker pass (it reads the tracks)."""
+        if self._title_pass_busy():
+            return True
+        s = getattr(self, "meeting_session", None)
+        try:
+            return bool(s is not None and callable(getattr(s, "speakers_state", None)) and s.speakers_state())
+        except Exception:
+            return True
+
+    def _compress_old_tracks(self):
+        """GUI thread, a few minutes after startup and then every few hours: compress the mic / call tracks of
+        meetings nothing changed in for hours, one file at a time on a worker, stopping when something starts."""
+        if getattr(self, "_quitting", False):
+            return
+        QTimer.singleShot(TRACKS_PASS_EVERY_MS, self._compress_old_tracks)
+        if getattr(self, "_tracks_pass_running", False) or self._tracks_pass_busy():
+            return
+        s = getattr(self, "meeting_session", None)
+        skip = []
+        try:
+            if s is not None and callable(getattr(s, "active_dir", None)) and s.active_dir():
+                skip.append(s.active_dir())
+        except Exception:
+            pass
+        self._tracks_pass_running = True
+
+        def work():
+            saved = 0
+            try:
+                import meeting_store
+                for folder in meeting_store.tracks_to_compress(skip=skip):
+                    if self._tracks_pass_busy():
+                        break
+                    saved += meeting_store.compress_tracks(folder)
+            except Exception:
+                logger.debug("Compressing old recording tracks failed", exc_info=True)
+            finally:
+                self._tracks_pass_running = False
+            if saved:
+                logger.info("Old recording tracks stored compressed: %.0f MB freed", saved / 1e6)
+        threading.Thread(target=work, daemon=True, name="gusan-tracks-pass").start()
+
     def _old_meetings_named(self):
         """GUI thread: some old meetings have names now - the Meetings list and Past sessions read the library again."""
         mw = getattr(self, "main_win", None)
@@ -8969,6 +9079,14 @@ def main():
         gpu_accel.finish_pending_remove()
     except Exception:
         pass
+
+    # The trusted certificates, loaded once on a worker (net.py): every HTTPS request loaded them again before,
+    # about a second each (Smart Actions, cloud dictation, caption translations, the live stream).
+    try:
+        import net
+        net.prewarm()
+    except Exception:
+        logger.debug("TLS warm-up skipped", exc_info=True)
 
     # 2. Standard Qt Setup (GusanApplication: a Quit from the platform -
     # Cmd+Q on a Mac - goes through AppController.quit_app)

@@ -202,6 +202,7 @@ def _in_child(audio, args, threads, wait, finish=None, low_priority=True, extra_
         env = dict(os.environ)
         env[ENV_IN_PROCESS] = "1"
         env[ENV_THREADS] = str(threads)
+        env["OPENBLAS_NUM_THREADS"] = "4"        # (the app itself runs numpy on one thread: main.py)
         kw = {}
         if os.name == "nt":
             # no console window; below-normal priority unless the job must not be starved

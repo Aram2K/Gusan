@@ -122,6 +122,11 @@ Write-Host "Building .exe..." -ForegroundColor Cyan
     --exclude-module "llvmlite" `
     --exclude-module "matplotlib" `
     --exclude-module "IPython" `
+    --exclude-module "pytest" `
+    --exclude-module "_pytest" `
+    --exclude-module "pluggy" `
+    --exclude-module "iniconfig" `
+    --exclude-module "pygments" `
     main.py
 
 if ($LASTEXITCODE -eq 0) {
@@ -139,6 +144,12 @@ if ($LASTEXITCODE -eq 0) {
     if (-not (Test-Path $mm)) { throw "No Qt multimedia plugin in the build ($mm): meetings can't play their recording." }
     Write-Host "Multimedia plugin: $mm"
     # multimedia-check:end
+    # trim:begin
+    # Parts of the bundle Gusan never uses (Qt Quick / QML, Qt PDF, Qt's own FFmpeg, translations): about 28 MB
+    # of the installer. It fails the build, removing nothing, if a file that stays still links to one of them.
+    & $py installer/trim_bundle.py dist\TranscribeApp
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # trim:end
     Write-Host ""
     Write-Host "The installer: installer\player\build.ps1 (its intro video player), then" -ForegroundColor Yellow
     Write-Host "               ISCC.exe /DMyAppVersion=$appVersion installer\installer.iss" -ForegroundColor Yellow
