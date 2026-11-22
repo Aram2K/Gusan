@@ -110,8 +110,7 @@ class EmojiTile(QLabel):
         self.setAlignment(Qt.AlignCenter)
         self.setFont(emoji_font(emoji_px))
         self.setAccessibleName(accessible)
-        self.setStyleSheet("background: %s; border: none; border-radius: %dpx;"
-                           % (theme.qss_color(bg), radius))
+        theme.sheet(self, "background: @%s; border: none; border-radius: %dpx;" % (bg, radius))
 
     def set_emoji(self, ch, accessible):
         self.setText(ch)
@@ -157,21 +156,56 @@ def sep_label(parent=None, px=12.5):
 
 
 def menu_qss():
-    """QMenu look from the tokens (the v2 stylesheet has no menu rules)."""
+    """QMenu look from the tokens of the active look (make_menu sets it with theme.sheet: it follows a switch)."""
     t = theme.qss_color
-    return ("QMenu { background: #ffffff; border: 1px solid %s; border-radius: 8px; padding: 4px; }"
+    return ("QMenu { background: %s; border: 1px solid %s; border-radius: 8px; padding: 4px; }"
             "QMenu::item { color: %s; padding: 7px 26px 7px 12px; border-radius: 6px; }"
             "QMenu::item:selected { background: %s; color: %s; }"
             "QMenu::item:disabled { color: %s; }"
             "QMenu::separator { height: 1px; background: %s; margin: 4px 6px; }"
-            % (t("line2"), t("text"), t("blue-sub"), t("blue-tx"), t("faint"), t("line")))
+            % (t("popup"), t("line2"), t("text"), t("blue-sub"), t("blue-tx"), t("faint"), t("line")))
 
 
 def make_menu(parent):
     m = QMenu(parent)
-    m.setStyleSheet(menu_qss())
+    theme.sheet(m, menu_qss)
     m.setFont(theme.font(13.5))
     return m
+
+
+def recolor_document(doc, tokens):
+    """After a switch: every run of ``doc`` written in one of ``tokens``' colours of the other look gets that
+    token's colour in the active one - in place (no new layout, the reader keeps the place)."""
+    other = "light" if theme.is_dark() else "dark"
+    moves = {}
+    for tok in tokens:
+        moves.setdefault(theme.qcolor(tok, other).rgba(), theme.qcolor(tok))
+    if not moves:
+        return 0
+    edits = []
+    block = doc.begin()
+    while block.isValid():
+        it = block.begin()
+        while not it.atEnd():
+            frag = it.fragment()
+            if frag.isValid():
+                new = moves.get(frag.charFormat().foreground().color().rgba())
+                if new is not None:
+                    edits.append((frag.position(), frag.length(), new))
+            it += 1
+        block = block.next()
+    if not edits:
+        return 0
+    cur = QTextCursor(doc)
+    cur.beginEditBlock()
+    for pos, length, colour in edits:
+        cur.setPosition(pos)
+        cur.setPosition(pos + length, QTextCursor.KeepAnchor)
+        fmt = QTextCharFormat()
+        fmt.setForeground(colour)
+        cur.mergeCharFormat(fmt)
+    cur.endEditBlock()
+    return len(edits)
 
 
 # ── soft shadows painted by a parent (no QGraphicsEffect on big cards) ────────
@@ -185,9 +219,21 @@ class SoftShadow:
     as in the mockup."""
 
     def __init__(self, level="card", radius=14):
-        self.blur, self.dy, self.colour = theme.SHADOWS[level]
+        self.level = level
         self.radius = radius
         self._cache = {}
+
+    @property
+    def blur(self):
+        return theme.SHADOWS[self.level][0]
+
+    @property
+    def dy(self):
+        return theme.SHADOWS[self.level][1]
+
+    @property
+    def colour(self):
+        return theme.SHADOWS[self.level][2]
 
     def margins(self):
         """How far the shadow reaches outside the card: (left, top, right, bottom)."""
@@ -200,7 +246,8 @@ class SoftShadow:
         return r + b, r + b + d, max(1, r + b - d)
 
     def _image(self, dpr):
-        key = round(float(dpr or 1.0), 2)
+        scale = round(float(dpr or 1.0), 2)
+        key = (scale, self.blur, self.dy, self.colour)
         pm = self._cache.get(key)
         if pm is not None:
             return pm
@@ -208,8 +255,8 @@ class SoftShadow:
         kx, kt, kb = self._slices()
         cw, ch = 2 * kx + 2, kt + kb + 2
         w, h = left + cw + right, top + ch + bottom
-        img = QImage(int(math.ceil(w * key)), int(math.ceil(h * key)), QImage.Format_ARGB32_Premultiplied)
-        img.setDevicePixelRatio(key)
+        img = QImage(int(math.ceil(w * scale)), int(math.ceil(h * scale)), QImage.Format_ARGB32_Premultiplied)
+        img.setDevicePixelRatio(scale)
         img.fill(Qt.transparent)
         shape = QPainterPath()
         shape.addRoundedRect(QRectF(left, top, cw, ch), self.radius, self.radius)
@@ -223,7 +270,7 @@ class SoftShadow:
         p.setRenderHint(QPainter.Antialiasing, True)
         scene.render(p, QRectF(0, 0, w, h), QRectF(0, 0, w, h))
         p.setCompositionMode(QPainter.CompositionMode_Clear)     # outside the card only
-        p.fillPath(shape, QColor(0, 0, 0))
+        p.fillPath(shape, theme.qcolor("shade"))                  # (any colour: Clear only uses its shape)
         p.end()
         pm = QPixmap.fromImage(img)
         self._cache[key] = pm
@@ -472,13 +519,11 @@ class BackLink(QPushButton):
         self.setFixedHeight(18)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         theme.focus_ring(self)
-        t = theme.qss_color
-        self.setStyleSheet(
-            "QPushButton { background: transparent; border: 1px solid transparent; border-radius: 4px;"
-            " color: %s; padding: 0px 2px 0px 0px; text-align: left; }"
-            "QPushButton:hover { color: %s; }"
-            "QPushButton[focusVisible=\"true\"] { border: 2px solid %s; }"
-            % (t("muted"), t("text2"), t("blue-l")))
+        theme.sheet(self,
+                    "QPushButton { background: transparent; border: 1px solid transparent; border-radius: 4px;"
+                    " color: @muted; padding: 0px 2px 0px 0px; text-align: left; }"
+                    "QPushButton:hover { color: @text2; }"
+                    "QPushButton[focusVisible=\"true\"] { border: 2px solid @blue-l; }")
 
 
 class _MetaItem(QWidget):
@@ -513,9 +558,12 @@ class _Fade(QWidget):
     def paintEvent(self, _e):
         p = QPainter(self)
         g = QLinearGradient(0, 0, 0, self.height())
-        g.setColorAt(0.0, QColor(255, 255, 255, 0))
-        g.setColorAt(0.85, QColor(255, 255, 255, 255))
-        g.setColorAt(1.0, QColor(255, 255, 255, 255))
+        paper = theme.qcolor("surface")                          # into the paper's own colour
+        clear = QColor(paper)
+        clear.setAlpha(0)
+        g.setColorAt(0.0, clear)
+        g.setColorAt(0.85, paper)
+        g.setColorAt(1.0, paper)
         p.fillRect(self.rect(), g)
         p.end()
 
@@ -683,6 +731,18 @@ class TranscriptView(QWidget):
         self.shadows = ShadowPainter(self)
         self.shadows.add(self.paper, SoftShadow("card", radius=14))
         self._set_actions_enabled(False)
+        theme.on_change(self, self._on_theme)
+
+    def _on_theme(self):
+        """The look changed: the words already laid out are recoloured in place; the turns still to come get the
+        new colours too."""
+        recolor_document(self.browser.document(), ("muted", "text") + SPEAKER_TONES)
+        lay = getattr(self, "_layout", None)
+        if lay:
+            lay["f_ts"].setForeground(theme.qcolor("muted"))
+            lay["f_tx"].setForeground(theme.qcolor("text"))
+            for i, tone in enumerate(SPEAKER_TONES):
+                lay["f_spk"][i].setForeground(theme.qcolor(tone))
 
     def paintEvent(self, _e):
         p = QPainter(self)

@@ -679,7 +679,7 @@ class AudioPlayer(QWidget):
     # ── look ──
     def _set_button(self, playing, loading=False):
         b = self.play_btn
-        b.setIcon(icons.icon("pause" if playing else "play", 18, "#ffffff", sw=2.4))
+        b.setIcon(icons.icon("pause" if playing else "play", 18, "on-accent", sw=2.4))
         text = PAUSE_TEXT if playing else PLAY_TEXT
         if b.accessibleName() != text:
             b.setAccessibleName(text)

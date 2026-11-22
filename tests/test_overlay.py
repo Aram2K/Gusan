@@ -278,12 +278,28 @@ class TestOverlay(unittest.TestCase):
         self.assertEqual(self.hud._pick_theme(), "light")
         self.hud._bd_luma = 0.1
         self.assertEqual(self.hud._pick_theme(), "dark")
-        # No snapshot (macOS, transparency effects off): the system theme.
+        # No snapshot (macOS, transparency effects off): Gusan's own look (light or dark).
         self.hud._bd_luma = None
         with mock.patch.object(self.ov, "_system_prefers_light", return_value=True):
             self.assertEqual(self.hud._pick_theme(), "light")
         with mock.patch.object(self.ov, "_system_prefers_light", return_value=False):
             self.assertEqual(self.hud._pick_theme(), "dark")
+
+    def test_with_no_sample_auto_wears_the_apps_look_and_turns_with_it(self):
+        from ui import theme
+        self.hud._bd_luma = None
+        try:
+            theme.switch("dark")
+            self.assertEqual(self.hud._pick_theme(), "dark")
+            theme.switch("light")
+            self.assertEqual(self.hud._pick_theme(), "light")
+            self.cfg["overlay_theme"] = "dark"                     # a pin stays a pin
+            self.assertEqual(self.hud._pick_theme(), "dark")
+            self.cfg["overlay_theme"] = "auto"
+            self.hud._bd_luma = 0.1                                # a sample still wins: dark backdrop
+            self.assertEqual(self.hud._pick_theme(), "dark")
+        finally:
+            theme.switch("light")
 
     def test_pinned_theme_wins_over_the_backdrop(self):
         self.cfg["overlay_theme"] = "dark"

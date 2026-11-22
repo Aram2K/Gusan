@@ -231,7 +231,7 @@ class TestMigration(unittest.TestCase):
     def test_an_early_2_0_config_gets_alt_s(self):
         c = self._load({"config_schema_version": 2, "smart_actions_hotkey": ""})
         self.assertEqual(c["smart_actions_hotkey"], main.hotkeys.SMART_ACTIONS_DEFAULT)
-        self.assertEqual(c["config_schema_version"], 3)
+        self.assertEqual(c["config_schema_version"], main.CONFIG_SCHEMA_VERSION)
 
     def test_a_1_9_config_gets_alt_s(self):
         self.assertEqual(self._load({"language": "en"})["smart_actions_hotkey"], main.hotkeys.SMART_ACTIONS_DEFAULT)

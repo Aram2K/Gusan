@@ -1,9 +1,9 @@
 """Windows global shortcuts that never reach the app in front.
 
-The shortcuts (Alt+R dictation, Alt+S Smart Actions, Alt+E Live Assistant) were a keyboard hook that let the keys
-through (keyboard.add_hotkey(suppress=False)): in a text box - Gusan's own, a browser's - Alt+S also typed an "s"
-(the founder, 2026-11-08). Here they are registered with Windows itself (RegisterHotKey): the system takes the
-combination, so the app in front never sees it (no letter typed, no Alt menu).
+The shortcuts (Alt+R dictation, Alt+S Smart Actions, Alt+E Live Assistant, Alt+M a meeting) were a keyboard hook
+that let the keys through (keyboard.add_hotkey(suppress=False)): in a text box - Gusan's own, a browser's - Alt+S
+also typed an "s" (the founder, 2026-11-08). Here they are registered with Windows itself (RegisterHotKey): the
+system takes the combination, so the app in front never sees it (no letter typed, no Alt menu).
 
 RegisterHotKey binds a shortcut to the thread that registers it, and that thread must run a message loop to receive
 WM_HOTKEY: one daemon thread owns every registration and its loop; register() / unregister() hand it the work and

@@ -5,7 +5,7 @@ import time
 
 import pytest
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtWidgets import QAbstractButton, QApplication, QComboBox, QLineEdit, QPlainTextEdit
+from PySide6.QtWidgets import QAbstractButton, QApplication, QComboBox, QLineEdit, QPlainTextEdit, QWidget
 
 import hardware
 from tests_qt.conftest import make_stub_app
@@ -332,10 +332,15 @@ def test_general_controls_apply_at_once(env):
     page = _settings(win)
     page.t_notify.click()
     assert ("set_settings", {"notify_when_ready": False}) in app.calls
-    # 2.0.0 is light only: no App look row (app_theme is kept in the config).
-    assert page.row_look is None and page.seg_look.isHidden()
+    # Appearance: Match system / Light / Dark, first in General, written to app_theme at once.
     from PySide6.QtWidgets import QLabel
-    assert not [lb for lb in page.findChildren(QLabel) if lb.text() == "App look" and lb.isVisibleTo(page)]
+    assert page.row_look is not None and not page.seg_look.isHidden()
+    assert [b.text() for b in page.seg_look.buttons()] == ["Match system", "Light", "Dark"]
+    assert all(not b.icon().isNull() for b in page.seg_look.buttons())
+    assert [lb for lb in page.findChildren(QLabel) if lb.text() == "Appearance"]
+    assert page.seg_look.index() == 0                                  # "system" is the default
+    page.seg_look.buttons()[2].click()
+    assert ("set_settings", {"app_theme": "dark"}) in app.calls
     page.t_login.click()
     assert ("set_settings", {"launch_at_login": False}) in app.calls
 
@@ -343,8 +348,9 @@ def test_general_controls_apply_at_once(env):
 def test_shortcut_rows_show_keys_and_open_their_pages(env):
     win, app = env.build("free")
     page = _settings(win)
-    dictate, smart, live = page.shortcut_rows                   # Dictate, Smart Actions, Live Assistant
-    assert [r.name for r in page.shortcut_rows] == ["Dictate", "Smart Actions", "Live Assistant"]
+    dictate, smart, meeting, live = page.shortcut_rows          # Dictate, Smart Actions, Record a meeting, Live Assistant
+    assert [r.name for r in page.shortcut_rows] == ["Dictate", "Smart Actions", "Record a meeting", "Live Assistant"]
+    assert "Alt + M" in meeting.keys.accessibleName()           # main.DEFAULT when the key is missing
     assert "Alt + R" in dictate.keys.accessibleName()
     assert "Ctrl + Alt + A" in live.keys.accessibleName()
     assert smart.keys.accessibleName() == "Change the Smart Actions shortcut (Alt + S)"
@@ -423,7 +429,7 @@ def _runs_on(card, source):
 
 
 def test_speech_card_reflects_the_shared_downloads(env):
-    from ui.components.model_combo import MARK_DOWNLOAD, MARK_ROLE
+    from ui.components.model_combo import MARK_DOWNLOAD, MARK_DOWNLOADED, MARK_ROLE
     win, app = env.build("free")
     page = _settings(win)
     card = page.speech_card
@@ -433,7 +439,8 @@ def test_speech_card_reflects_the_shared_downloads(env):
     assert page.hw_trail.text() == "This computer: i7-1260P · 16 GB"
     base = card.combo.findData("base")
     assert card.combo.itemData(base, MARK_ROLE) == MARK_DOWNLOAD       # not on this computer
-    assert not card.combo.itemData(card.combo.findData("small"), MARK_ROLE)
+    # on this computer: a check where the download icon would be (the chips line up)
+    assert card.combo.itemData(card.combo.findData("small"), MARK_ROLE) == MARK_DOWNLOADED
     env.answers.append("go")
     _pick(card, "base")
     assert env.asked[-1]["title"] == "Download Whisper Base?"
@@ -934,8 +941,9 @@ def test_free_account(env, monkeypatch):
     assert acct.plan_name.text() == "Free"
     assert [r.accessibleName() for r in acct.feature_rows] == [
         "Meetings with AI notes", "Live Assistant", "Unlimited Smart Actions", "Gusan Cloud"]
-    assert acct.usage_text.text() == "Unlimited"
-    assert acct.tries_bar is None
+    # no Usage card (the founder, 2026-11-21: Smart Actions are unlimited, nothing to count)
+    assert not hasattr(acct, "usage_card") and not hasattr(acct, "usage_text")
+    assert all(c.accessibleName() != "Usage" for c in acct.findChildren(QWidget))
     assert "manage" not in acct.buttons
     acct.buttons["upgrade"].click()
     assert ("_pro_upsell", None) in app.calls
@@ -952,7 +960,7 @@ def test_pro_account(env):
     assert acct.plan_sub.text() == "Annual · renews 4 Oct 2027"
     assert "upgrade" not in acct.buttons                            # calm Pro: no Upgrade
     assert all(r.check is not None for r in acct.feature_rows)
-    assert acct.usage_text.text() == "Unlimited"
+    assert all(c.accessibleName() != "Usage" for c in acct.findChildren(QWidget))
     acct.buttons["manage"].click()
     assert ("open_billing",) in app.calls
 

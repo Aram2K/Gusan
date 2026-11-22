@@ -64,7 +64,7 @@ Integration notes for Wave 4
 10. Theme asks (ui/theme.py is not edited here): a 32 px small QComboBox (the
    stylesheet's is 34 px and reserves 72 px for padding + chevron, so the
    Language select needs 202 px instead of the mockup's 172); a token for the
-   drop-zone fill rgba(219,234,254,0.40); radius-14 white cards; QMenu rules
+   drop-zone fill ("drop-fill" at 0.40); radius-14 white cards; QMenu rules
    (make_menu builds them from tokens); the h2 display face reads lighter than
    the mockup's Outfit 600 until Outfit is bundled.
 11. Accuracy (cfg file_model) comes from engine_choice: file_choices fills the
@@ -80,7 +80,7 @@ import logging
 import os
 
 from PySide6.QtCore import QRect, QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QPainter, QPen
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QProgressBar,
                                QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget)
 
@@ -135,7 +135,7 @@ LIST_STEP = 50                      # rows shown, then "Show more"
 
 # The drop zone's own values from the mockup: blue-l at 45 % (dashed edge), blue-100 at 40 % (fill).
 _DROP_EDGE_ALPHA = 0.45
-_DROP_FILL = (219, 234, 254)
+_DROP_FILL = "drop-fill"            # theme token (#dbeafe in the light look)
 _DROP_FILL_ALPHA = 0.40
 
 
@@ -342,7 +342,7 @@ class DropZone(QFrame):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
-        fill = QColor(*_DROP_FILL)
+        fill = theme.qcolor(_DROP_FILL)
         fill.setAlphaF(0.85 if self._active else _DROP_FILL_ALPHA)
         edge = theme.qcolor("blue-l")
         edge.setAlphaF(1.0 if self._active else _DROP_EDGE_ALPHA)
@@ -429,7 +429,7 @@ class JobCard(WhiteCard):
         meta.setSpacing(6)
         self.ready = label("Ready", "label", self)
         self.ready.setFont(theme.font(12.5, 600))
-        self.ready.setStyleSheet("color: %s;" % theme.qss_color("ok-tx"))
+        theme.sheet(self.ready, "color: @ok-tx;")
         # Shrinkable (they end in '…'), so a narrow window never pushes the rail off-screen.
         self.stage = ElidedLabel("", "body", self, min_width=12)
         self.stage.setFont(theme.font(12.5, 600))

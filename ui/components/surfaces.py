@@ -91,4 +91,4 @@ class IconTile(QLabel):
         self.setAlignment(Qt.AlignCenter)
         self.setPixmap(icons.pixmap(icon, icon_size, color))
         if bg != "blue-sub" or radius != 12:
-            self.setStyleSheet("background: %s; border-radius: %dpx;" % (theme.qss_color(bg), radius))
+            theme.sheet(self, lambda: "background: %s; border-radius: %dpx;" % (theme.qss_color(bg), radius))

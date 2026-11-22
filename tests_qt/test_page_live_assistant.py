@@ -429,8 +429,11 @@ def test_switches_apply_at_once(build):
     page.screen_toggle.click()
     assert ("set_setting", "live_assist_auto_answer", False) in app.calls
     assert ("set_setting", "live_assist_screen_auto", False) in app.calls
-    page.look.buttons()[1].click()
+    assert [b.text() for b in page.look.buttons()] == ["Auto", "Light", "Dark"]     # Auto: the app's own look
+    page.look.buttons()[2].click()
     assert ("set_setting", "live_assist_theme", "dark") in app.calls
+    page.look.buttons()[0].click()
+    assert ("set_setting", "live_assist_theme", "system") in app.calls
 
 
 def test_a_refused_change_shows_the_old_value(build):
@@ -623,7 +626,7 @@ def test_the_page_follows_the_card(build):
     page.on_open()
     # The card announces before it writes cfg: the page uses the value it got.
     card.settings_changed.emit("live_assist_theme", "dark")
-    assert page.look.index() == 1
+    assert page.look.index() == 2                       # Auto / Light / Dark
     card.settings_changed.emit("live_assist_auto_answer", False)
     assert not page.auto_toggle.isChecked()
     card.settings_changed.emit("live_assist_screen_auto", False)
@@ -665,9 +668,9 @@ def test_a_new_card_replaces_the_old_one(build):
     app.live_assist = new
     page.on_open()
     old.settings_changed.emit("live_assist_theme", "dark")
-    assert page.look.index() == 0
+    assert page.look.index() == 1                       # still Light (the page was built with "light")
     new.settings_changed.emit("live_assist_theme", "dark")
-    assert page.look.index() == 1
+    assert page.look.index() == 2
 
 
 # ── About my calls ──

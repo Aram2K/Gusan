@@ -10,13 +10,13 @@ from ui.components import icons
 SIZES = {"s": (30, 13, 16), "m": (36, 13.5, 16), "l": (44, 15, 18), "xl": (52, 16, 18)}
 # kind -> (font weight, icon colour)
 KINDS = {
-    "primary": (600, "#ffffff"),
+    "primary": (600, "on-accent"),
     "secondary": (500, "text2"),
     "ghost": (500, "text2"),
     "link": (600, "blue-tx"),
-    "pro": (700, "#ffffff"),
-    "danger": (600, "#ffffff"),
-    "dark": (600, "#ffffff"),
+    "pro": (700, "on-accent"),
+    "danger": (600, "on-accent"),
+    "dark": (600, "inv-fg"),
 }
 
 

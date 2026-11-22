@@ -575,31 +575,62 @@ def page_for(qapp, monkeypatch):
     QApplication.processEvents()
 
 
+# The rail's Card look: Auto (the app's own look, "system") / Light / Dark.
+AUTO, LIGHT, DARK = 0, 1, 2
+
+
 def test_the_page_shows_the_card_look_it_was_given(page_for):
+    assert [b.text() for b in page_for("system")[0].look.buttons()] == ["Auto", "Light", "Dark"]
     page, app = page_for("dark")
-    assert page.look.index() == 1 and page.picture.card_look() == "dark"
+    assert page.look.index() == DARK and page.picture.card_look() == "dark"
     page, app = page_for("light")
-    assert page.look.index() == 0 and page.picture.card_look() == "light"
-    page, app = page_for("odd")                                    # a value nobody knows: the light card, as the real one
-    assert page.picture.card_look() == "light"
+    assert page.look.index() == LIGHT and page.picture.card_look() == "light"
+    page, app = page_for("system")
+    assert page.look.index() == AUTO and page.picture.card_look() == "light"      # the app is light here
+    page, app = page_for("odd")                                    # a value nobody knows: Auto, as the real card
+    assert page.look.index() == AUTO and page.picture.card_look() == "light"
 
 
 def test_pressing_card_look_changes_the_picture_at_once(page_for):
     page, app = page_for("light")
-    page.look.buttons()[1].click()
+    page.look.buttons()[DARK].click()
     assert app.cfg["live_assist_theme"] == "dark" and page.picture.card_look() == "dark"
-    page.look.buttons()[0].click()
+    page.look.buttons()[LIGHT].click()
+    assert app.cfg["live_assist_theme"] == "light" and page.picture.card_look() == "light"
+    page.look.buttons()[AUTO].click()
+    assert app.cfg["live_assist_theme"] == "system" and page.picture.card_look() == "light"
+
+
+def test_auto_wears_the_apps_look_and_turns_with_it_live(page_for):
+    """Auto: the picture's card (and the slide it sits on) is dark while Gusan is dark - switched with every
+    window open, no restart; a pinned look stays as it is."""
+    from ui import theme
+    page, app = page_for("system")
+    w = page.picture
+    w.resize(560, w.heightForWidth(560))
+    try:
+        light_img = w.grab().toImage()
+        theme.switch("dark")
+        QApplication.processEvents()
+        assert page.picture.card_look() == "dark"
+        dark_img = w.grab().toImage()
+        r = w.card_rect()
+        assert _mean_lightness(dark_img, r) < _mean_lightness(light_img, r) - 40      # the card itself turned
+        pinned, _app = page_for("light")
+        assert pinned.picture.card_look() == "light"                                  # a pin stays a pin
+    finally:
+        theme.switch("light")
     assert page.picture.card_look() == "light"
 
 
 def test_a_refused_card_look_leaves_the_picture_as_it_was(page_for):
     page, app = page_for("light", refuse=True)
-    page.look.buttons()[1].click()
-    assert page.look.index() == 0 and page.picture.card_look() == "light"
+    page.look.buttons()[DARK].click()
+    assert page.look.index() == LIGHT and page.picture.card_look() == "light"
 
 
 def test_the_look_chosen_on_the_card_reaches_the_picture(page_for):
     page, app = page_for("light")
     app.cfg["live_assist_theme"] = "dark"                          # the card's own button wrote it
     page.on_setting_changed("live_assist_theme")
-    assert page.look.index() == 1 and page.picture.card_look() == "dark"
+    assert page.look.index() == DARK and page.picture.card_look() == "dark"

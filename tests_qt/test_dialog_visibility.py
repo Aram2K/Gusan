@@ -1,4 +1,4 @@
-"""Every pop-up the app shows must be READABLE - on a Windows in light mode and in dark mode.
+"""Every pop-up the app shows must be READABLE - in the light look and in the dark one.
 
 The bug this guards (the founder's, 2026-10): opening a meeting and choosing Delete showed a system
 message box whose panel was the OS's dark grey while its words and buttons had the app's navy text
@@ -6,7 +6,8 @@ message box whose panel was the OS's dark grey while its words and buttons had t
 everything a stylesheet does not paint, and a dialog or a menu opened from a page is a child window of
 the main window, so it inherits that stylesheet's text colour but not a background. The fix is in
 ui/theme.py ("One light look"), the question card is ui/components/mini_prompt.py, and this file is
-the net that keeps it that way.
+the net that keeps it that way. Since 2.2 the app has a dark look too (it follows the OS by default):
+the same net measures every surface in both looks.
 
 How it measures. Each surface is built through the real code path that makes it (the page's delete,
 rename, the consent, the privacy question, the sheets, the tray, the menus...), shown, and painted into
@@ -21,12 +22,13 @@ palette, so it fails on exactly what a person would fail to read.
 Both colour schemes. Qt 6.8 cannot be told "dark" on the offscreen platform (QStyleHints.setColorScheme
 is a no-op there: colorScheme() stays Unknown and the palette does not change), so the ``scheme``
 fixture (conftest) gives the application the palette Qt's Windows theme hands over on a dark Windows
-BEFORE main()'s own start-up call (theme.install_light_scheme) - the order a real start has - and every
-test runs once with each. test_the_old_box_is_caught is the proof that the net works: the old code
+BEFORE main()'s own start-up call (theme.install_scheme) - the order a real start has - and every
+test runs once with each: the app (app_theme "system") is then light, then dark. test_the_old_box_is_caught is the proof that the net works: the old code
 path (a QMessageBox under the main window's text colour, no fix) measures about 1:1 here.
 
-Also: the app is the same light picture in both schemes (pixel for pixel), and no live code may ask
-for a QMessageBox / QInputDialog again (tests/test_no_system_dialogs.py).
+Also: a look pinned in Settings is the same picture whatever the OS says (pixel for pixel), "system"
+follows the OS - also when it flips while the app runs - and no live code may ask for a QMessageBox /
+QInputDialog again (tests/test_no_system_dialogs.py).
 
 Review additions: the Live Assistant card has a dark look of its own and what it opens is its child (its
 file picker was white-on-white until it got the app's sheet); the card asks from a worker thread without
@@ -46,7 +48,7 @@ from PySide6.QtWidgets import (QAbstractButton, QApplication, QCheckBox, QComboB
                                QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton,
                                QStyle, QStyleOptionButton, QTextEdit, QToolTip, QVBoxLayout, QWidget)
 
-from tests_qt.conftest import make_stub_app, os_dark_palette, os_light_palette
+from tests_qt.conftest import make_stub_app, os_dark_palette, os_light_palette, set_os_scheme
 from tests_qt.test_live_card import card as live_card, glass_ok  # noqa: F401 (fixtures: the Live Assistant card)
 
 SCALE = 3
@@ -56,9 +58,10 @@ BAR_BRAND = 3.0            # white on the brand's purple (the PRO pill and the P
 # Colours of the approved design that are below 4.5:1 on some of its backgrounds. They are the tokens' own,
 # identical in a light and a dark OS, and not what this net is for - listed so they stay visible (the app's
 # designer can darken them) and so nothing WORSE hides behind them: text colour -> (lowest ratio allowed, why).
+# (Muted words are not here any more: the token is #58677d, >= 4.5:1 straight on the window's gradient and as an
+# unpicked option on a segmented control's grey track - measured like any other words.)
 KNOWN_DESIGN = {
-    "#64748b": (4.1, "muted text: 4.76:1 on white, 4.15-4.4:1 on the window's blue-grey gradient"),
-    "#94a3b8": (2.3, "faint text: a struck-through old price"),
+    "#94a3b8": (2.2, "faint text: a struck-through old price, the '+' between two keycaps (2.26:1)"),
     "#a855f7": (3.5, "the brand purple as the 'GUSAN PRO' eyebrow or a tick on the Pro window (3.6:1)"),
 }
 SHOTS = os.environ.get("GUSAN_AUDIT_SHOTS", "")          # a folder: save what was measured
@@ -79,11 +82,14 @@ def contrast(a, b):
 
 
 def render(widget):
-    """The widget painted at SCALE x device pixels onto white."""
+    """The widget painted at SCALE x device pixels onto the look's backdrop (white in the light look; the
+    window's own colour in the dark one - a part of a page measured alone is see-through, and the window
+    under it is what a person sees)."""
+    from ui import theme
     w, h = max(1, widget.width()), max(1, widget.height())
     img = QImage(w * SCALE, h * SCALE, QImage.Format_ARGB32_Premultiplied)
     img.setDevicePixelRatio(SCALE)
-    img.fill(QColor("#ffffff"))
+    img.fill(theme.qcolor("window-b") if theme.is_dark() else QColor("#ffffff"))
     widget.render(img)
     return img
 
@@ -213,7 +219,7 @@ def measure(widget, pieces=None, name="surface"):
 
 def _scheme_now():
     from ui import theme
-    return "dark" if theme.os_is_dark() else "light"
+    return theme.scheme()
 
 
 def _need(text_colour, need):
@@ -228,7 +234,7 @@ def readable(widget, where, pieces=None, minimum=1):
     assert len(rows) >= minimum, "%s: nothing to measure (%d pieces)" % (where, len(rows))
     bad = ["%s: %s on %s is %.2f:1 (needs %.1f)" % (n, t.name(), b.name(), r, _need(t, need))
            for n, b, t, r, need in rows if r < _need(t, need)]
-    assert not bad, "%s is hard to read (%s OS):\n  " % (where, _scheme_now()) + "\n  ".join(bad)
+    assert not bad, "%s is hard to read (%s look):\n  " % (where, _scheme_now()) + "\n  ".join(bad)
     return rows
 
 
@@ -318,7 +324,7 @@ def test_the_old_box_is_caught(qapp, made):
     """The original failure, rebuilt: a window with ONLY a text colour in its stylesheet and a
     QMessageBox opened from it, on a dark OS whose palette nobody replaced. The net must call it unreadable."""
     from ui import theme
-    qapp.setPalette(os_dark_palette())                    # a dark Windows; no theme.install_light_scheme
+    qapp.setPalette(os_dark_palette())                    # a dark Windows; no theme.install_scheme
     try:
         main = QMainWindow()
         main.setStyleSheet("QWidget { color: #1e293b; }")           # the old window's sheet: text colour only
@@ -339,8 +345,7 @@ def test_the_old_box_is_caught(qapp, made):
         assert max(r for _n, _b, _t, r, _need in rows) < 2.5, rows        # every word of it
         assert all(r < need for _n, _b, _t, r, need in rows)
     finally:
-        qapp.setPalette(os_light_palette())
-        theme.install_light_scheme(qapp)
+        set_os_scheme(qapp, "light")
 
 
 def test_the_old_box_under_the_apps_own_sheet_is_readable_now(qapp, scheme, window, made):
@@ -433,8 +438,8 @@ def _painted_pieces(root):
 
 
 def test_home_coming_up_is_readable_in_every_state_on_a_light_and_a_dark_windows(qapp, scheme, window, monkeypatch):
-    """The section's rows are painted text and QSS buttons: on a dark Windows nothing may turn dark-on-dark,
-    and the card stays the app's light glass."""
+    """The section's rows are painted text and QSS buttons: in either look nothing may turn dark-on-dark,
+    and the card is the look's glass (light glass in the light look, dark glass in the dark one)."""
     from PySide6.QtCore import QPoint
     from tests_qt.test_home_upcoming import FakeCalendar, five, local
     from ui.pages import home_upcoming
@@ -466,11 +471,12 @@ def test_home_coming_up_is_readable_in_every_state_on_a_light_and_a_dark_windows
     names = " ".join(n for n, *_ in rows)
     for word in ("Weekly product sync", "in 25 min", "Join", "Record", "See all", "Paused in Privacy mode."):
         assert word in names, word
-    # The card is light glass, the same picture in both schemes (the sample is between the title and Join).
+    # The card is the look's glass (the sample is between the title and Join).
     img = render(page)
     row = sec.rows[1]
     x = row.mapTo(page, QPoint(row.join_button.x() - 24, row.height() // 2))
-    assert _lum(img.pixelColor(x.x() * SCALE, x.y() * SCALE)) > 0.8
+    lum = _lum(img.pixelColor(x.x() * SCALE, x.y() * SCALE))
+    assert (lum < 0.05) if scheme == "dark" else (lum > 0.8), lum
     cal._status = ""
     cal.rows = []
     cal.changed.emit([])
@@ -880,6 +886,55 @@ def test_the_pro_window(qapp, scheme, made, feature):
     readable(dlg, "the Pro window", pieces=pieces, minimum=4)
 
 
+@pytest.mark.parametrize("scale", [1.0, 1.5])
+def test_the_plan_toggle_words_never_meet_the_badge(qapp, scheme, made, scale):
+    """Yearly / -38% / Monthly / Lifetime at 100% and 150%: each word is drawn whole (it was cut to "Month") and
+    ends clear of the -38% badge (it ran under it) - in the face the window's sheet gives it, picked or not."""
+    from PySide6.QtGui import QFont, QFontMetricsF
+    from ui.pro_dialog import ProDialog
+    from ui.styles import STYLESHEET
+    app = make_stub_app("free")
+    app.save_config = lambda: None
+    app.style_content = STYLESHEET
+    dlg = ProDialog(main_app=app, feature=None)
+    made.append(dlg)
+    _show(dlg)
+    t = dlg.toggle
+    for pos in (0, 1):
+        t.set_position(pos)
+        img = QImage(int(t.width() * scale), int(t.height() * scale), QImage.Format_ARGB32_Premultiplied)
+        img.setDevicePixelRatio(scale)
+        from ui import theme
+        img.fill(theme.qcolor("window-b") if theme.is_dark() else QColor("#ffffff"))
+        t.render(img)
+        arr = np.frombuffer(img.convertToFormat(QImage.Format_RGB32).constBits(), dtype=np.uint8)
+        arr = arr.reshape(img.height(), img.width(), 4)[:, :, :3].astype(np.int32)
+
+        def ink(x0, x1, y0, y1):
+            """Columns in [x0, x1) (device px) holding a pixel far from that strip's commonest colour."""
+            strip = arr[y0:y1, x0:x1]
+            flat = strip.reshape(-1, 3)
+            vals, counts = np.unique(flat, axis=0, return_counts=True)
+            bg = vals[counts.argmax()]
+            far = np.abs(strip - bg).sum(axis=2) > 120
+            return [x0 + i for i in np.nonzero(far.any(axis=0))[0]]
+        for i, text in enumerate(t._labels):
+            word, badge = t.layout_of(i)
+            y0, y1 = int((t.height() / 2 - 8) * scale), int((t.height() / 2 + 8) * scale)
+            seg_l = int((t.PAD + i * t._seg_w() + 6) * scale)          # (clear of the thumb's round ends)
+            right = (int(badge.left() * scale) - 1 if badge is not None
+                     else int((t.PAD + (i + 1) * t._seg_w() - 6) * scale))
+            cols = ink(seg_l, right, y0, y1)
+            assert cols, "%s: no word drawn" % text
+            fm = QFontMetricsF(t._f(13, QFont.Medium), t)
+            drawn = (cols[-1] - cols[0] + 1) / scale
+            assert drawn >= 0.85 * fm.horizontalAdvance(text), "%s is cut: %.1f px of %.1f" % (
+                text, drawn, fm.horizontalAdvance(text))
+            if badge is not None:
+                clear = [c for c in cols if c >= int((badge.left() - 3) * scale)]
+                assert not clear, "%s touches the %s badge at %d%% (position %d)" % (text, t._badge, scale * 100, pos)
+
+
 def test_the_feedback_window(qapp, scheme, window, made):
     from ui.pages import settings as S
     page = window.open("settings")
@@ -1029,9 +1084,11 @@ def test_a_card_opens_in_the_middle_of_a_screen_when_the_window_is_not_on_screen
         window.setWindowState(Qt.WindowNoState)
 
 
-# ═══════════════════════════ the app is the same light picture in both schemes ═══════════════════════════
-def test_nothing_the_app_paints_depends_on_the_os(qapp, made):
-    """A dark Windows must change nothing the app draws: the pictures are identical, pixel for pixel."""
+# ═══════════════════════════ a pinned look ignores the OS; "system" follows it ═══════════════════════════
+def test_a_pinned_look_does_not_depend_on_the_os(qapp, made):
+    """With Settings > Appearance on Light (or Dark), a dark (or light) Windows changes nothing the app draws:
+    the pictures are identical, pixel for pixel. On "Match system" the OS decides: the pictures differ, and
+    the dark one is dark."""
     from ui import theme
     from ui.components import mini_prompt as mp
 
@@ -1068,46 +1125,67 @@ def test_nothing_the_app_paints_depends_on_the_os(qapp, made):
         win.deleteLater()
         return out
 
-    qapp.setPalette(os_light_palette())
-    theme.install_light_scheme(qapp)
-    light = pictures()
-    qapp.setPalette(os_dark_palette())
-    theme.install_light_scheme(qapp)
-    dark = pictures()
-    qapp.setPalette(os_light_palette())
-    theme.install_light_scheme(qapp)
-    assert set(light) == set(dark)
-    for key in light:
-        assert light[key].size() == dark[key].size(), key
-        assert light[key] == dark[key], "%s looks different on a dark Windows" % key
+    try:
+        for pin in ("light", "dark"):
+            set_os_scheme(qapp, "light", pin)
+            on_light_os = pictures()
+            set_os_scheme(qapp, "dark", pin)
+            on_dark_os = pictures()
+            assert set(on_light_os) == set(on_dark_os)
+            for key in on_light_os:
+                assert on_light_os[key].size() == on_dark_os[key].size(), key
+                assert on_light_os[key] == on_dark_os[key], "%s (pinned %s) changes with the OS" % (key, pin)
+        set_os_scheme(qapp, "light", "system")
+        light = pictures()
+        set_os_scheme(qapp, "dark", "system")
+        dark = pictures()
+        for key in light:
+            assert light[key] != dark[key], "%s does not follow a dark OS" % key
+        img = dark["window"]
+        assert _lum(img.pixelColor(img.width() // 2, img.height() - 4)) < 0.03    # the dark window, never white
+    finally:
+        set_os_scheme(qapp, "light")
 
 
-def test_the_app_keeps_its_palette_when_windows_switches_to_dark_while_it_runs(qapp):
+def test_the_app_follows_windows_when_it_switches_to_dark_while_it_runs(qapp):
     from ui import theme
-    qapp.setPalette(os_light_palette())
-    theme.install_light_scheme(qapp)
-    assert theme._is_light(qapp.palette())
-    qapp.setPalette(os_dark_palette())                    # what Qt does when the OS flips
-    assert not theme._is_light(qapp.palette())
-    theme._reassert_light()                               # the colorSchemeChanged hook
-    assert theme._is_light(qapp.palette())
-    assert theme.os_is_dark() is True                     # the tray menu still hears the OS
-    qapp.setPalette(os_light_palette())
-    theme.install_light_scheme(qapp)
+    try:
+        set_os_scheme(qapp, "light")
+        assert theme._is_light(qapp.palette()) and theme.scheme() == "light"
+        qapp.setPalette(os_dark_palette())                # what Qt does when the OS flips
+        assert not theme._is_ours(qapp.palette())
+        theme.follow_os()                                 # the colorSchemeChanged hook
+        assert theme.scheme() == "dark" and theme._matches(qapp.palette(), "dark")
+        assert theme.os_is_dark() is True                 # the tray menu still hears the OS
+        qapp.setPalette(os_light_palette())               # and back
+        theme.follow_os()
+        assert theme.scheme() == "light" and theme._is_light(qapp.palette())
+        # pinned to Light: the OS flipping changes nothing but the OS's own palette, which is put back
+        theme.set_preference("light")
+        qapp.setPalette(os_dark_palette())
+        theme.follow_os()
+        assert theme.scheme() == "light" and theme._is_light(qapp.palette())
+    finally:
+        set_os_scheme(qapp, "light")
     assert theme.os_is_dark() is False
 
 
 def test_the_palette_is_complete_and_the_style_is_fusion(qapp, scheme):
     from ui import theme
     assert qapp.style().objectName().lower() == "fusion"
+    assert theme.scheme() == scheme
     pal = qapp.palette()
-    light = theme.light_palette()
+    light = theme.palette(scheme)
     for group in (QPalette.Active, QPalette.Inactive, QPalette.Disabled):
         for role in (QPalette.Window, QPalette.WindowText, QPalette.Base, QPalette.Text, QPalette.Button,
                      QPalette.ButtonText, QPalette.Highlight, QPalette.HighlightedText, QPalette.PlaceholderText,
                      QPalette.ToolTipBase, QPalette.ToolTipText, QPalette.Link):
             assert pal.color(group, role) == light.color(group, role), (group, role)
-    assert pal.color(QPalette.Window).lightness() > 200 and pal.color(QPalette.WindowText).lightness() < 80
+    if scheme == "dark":
+        assert pal.color(QPalette.Window).lightness() < 40 and pal.color(QPalette.WindowText).lightness() > 200
+        assert pal.color(QPalette.Window) != QColor("#000000")                    # never pure black
+    else:
+        assert pal.color(QPalette.Window).lightness() > 200 and pal.color(QPalette.WindowText).lightness() < 80
     assert contrast(pal.color(QPalette.Active, QPalette.PlaceholderText), pal.color(QPalette.Base)) >= BAR
     assert contrast(pal.color(QPalette.Active, QPalette.WindowText), pal.color(QPalette.Window)) >= 12
 
@@ -1149,8 +1227,7 @@ def test_the_update_row_is_readable_in_every_stage(qapp, scheme, made):
         assert rows, name
 
 
-def test_the_update_row_looks_the_same_on_a_dark_windows(qapp):
-    from ui import theme
+def test_the_update_row_looks_the_same_on_a_dark_windows_when_light_is_pinned(qapp):
     made = []
 
     def pictures():
@@ -1179,15 +1256,12 @@ def test_the_update_row_looks_the_same_on_a_dark_windows(qapp):
         return out
 
     try:
-        qapp.setPalette(os_light_palette())
-        theme.install_light_scheme(qapp)
+        set_os_scheme(qapp, "light", "light")
         light = pictures()
-        qapp.setPalette(os_dark_palette())
-        theme.install_light_scheme(qapp)
+        set_os_scheme(qapp, "dark", "light")
         dark = pictures()
     finally:
-        qapp.setPalette(os_light_palette())
-        theme.install_light_scheme(qapp)
+        set_os_scheme(qapp, "light")
         for w in made:
             w.deleteLater()
     assert set(light) == set(dark)

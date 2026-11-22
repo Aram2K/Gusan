@@ -934,25 +934,37 @@ def test_copy_and_the_words_never_say_limit(build, meetings_root):
 
 # ── looks ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-def test_the_card_stays_light_on_a_dark_os(build, meetings_root, scheme, ai):
+def test_the_card_wears_the_apps_look_on_a_light_and_a_dark_os(build, meetings_root, scheme, ai):
+    """The app follows the OS (app_theme "system"): light glass, a white box and dark words on a light Windows;
+    the dark look's glass, its dark box and light words on a dark one - never one half of each."""
+    from ui import theme
+    assert theme.scheme() == scheme
     f = make_meeting(meetings_root, chat=[{"role": "user", "text": "What were the decisions?"},
                                           {"role": "assistant", "text": "**Two** decisions.", "status": "done"}])
     win, page, card, *_ = build("pro", f)
-    img = card.grab().toImage()
+    img = win.grab().toImage()                                          # (the glass is see-through: measured where it
+    at = card.mapTo(win, QPoint(0, 0))                                  # really is, over the window)
     def lum(x, y):
-        c = img.pixelColor(x, y)
+        c = img.pixelColor(at.x() + x, at.y() + y)
         return (c.red() + c.green() + c.blue()) / 3.0
-    assert lum(card.width() // 2, 6) > 200                             # the card's own glass
+    light = scheme == "light"
+    glass = lum(card.width() // 2, 6)                                  # the card's own glass
+    assert glass > 200 if light else glass < 60
     box = card.input.geometry()
     row = sorted(lum(x, box.center().y()) for x in range(box.left() + 6, box.right() - 6))
-    assert row[len(row) // 2] > 230                                    # the box is white (most of a row of it: one
-                                                                       # pixel can sit on a letter of the placeholder)
-    assert card.input.palette().color(QPalette.Base).lightness() > 200
-    assert card.input.palette().color(QPalette.Text).lightness() < 100
+    mid = row[len(row) // 2]                                            # most of a row of the box (one pixel can sit
+    want = theme.qcolor("input")                                        # on a letter of the placeholder)
+    assert abs(mid - (want.red() + want.green() + want.blue()) / 3.0) < 6
+    base, text = card.input.palette().color(QPalette.Base), card.input.palette().color(QPalette.Text)
+    assert (base.lightness() > 200 and text.lightness() < 100) if light else (base.lightness() < 40 and text.lightness() > 190)
     user_label = card._rows[0].findChild(QLabel)
-    assert user_label.palette().color(QPalette.WindowText).lightness() < 120
+    words = user_label.palette().color(QPalette.WindowText).lightness()
+    assert words < 120 if light else words > 190
     for lb in (answer_rows(card)[0].body, card.foot):
-        assert lb.palette().color(QPalette.WindowText).lightness() < 190
+        words = lb.palette().color(QPalette.WindowText).lightness()
+        assert words < 190 if light else words > 150
+    body = answer_rows(card)[0].body.text()
+    assert theme.qss_color("text") in body                              # the answer's words in this look's colour
 
 
 # ── the two layouts ─────────────────────────────────────────────────────────────────────────────────────────────

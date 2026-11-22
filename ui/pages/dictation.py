@@ -77,7 +77,7 @@ from ui.components import (Button, Card, Divider, IconButton, Keycaps, PageHeade
                            Toggle, icons, label, mini_prompt, row_actions)
 from ui.components.controls import keycap_labels
 from ui.components.hotkey_capture import HotkeyCaptureButton
-from ui.components.model_combo import MARK_DOWNLOAD, PlainNameCombo, combo as _rail_combo
+from ui.components.model_combo import MARK_DOWNLOAD, MARK_DOWNLOADED, PlainNameCombo, combo as _rail_combo
 from ui.pages import home as H
 
 # The shortcut's two ways (cfg hotkey_mode): its plain line under the switch.
@@ -138,7 +138,12 @@ def _ink(theme_name, alpha):
 
 
 def bar_theme(cfg):
-    return "dark" if str(cfg.get("overlay_theme") or "auto") == "dark" else "light"
+    """The preview's glass: "light" / "dark" as pinned; "auto" adapts to what is behind the bar, and the
+    preview's backdrop is the app's own practice box - so it is the app's look."""
+    pref = str(cfg.get("overlay_theme") or "auto")
+    if pref in ("light", "dark"):
+        return pref
+    return "dark" if theme.is_dark() else "light"
 
 
 def _ask_save_path(parent, fmt):
@@ -254,7 +259,7 @@ class PracticeBox(QWidget):
         self.title = H.text_label("Try it here", 12, 700, "muted", parent=self)
         head.addWidget(self.title, 0, Qt.AlignVCenter)
         head.addStretch(1)
-        self.rec_dot = H.Dot("#E9152D", 7, self)
+        self.rec_dot = H.Dot("rec", 7, self)
         head.addWidget(self.rec_dot, 0, Qt.AlignVCenter)
         self.rec_label = H.text_label("Listening", 12, 600, "red-tx", parent=self)
         head.addWidget(self.rec_label, 0, Qt.AlignVCenter)
@@ -293,14 +298,14 @@ class PracticeBox(QWidget):
         i = self.INSET
         box = QRectF(i, i, self.width() - 2 * i, self.height() - 2 * i)
         if self.active():
-            glow = theme.qcolor("rgba(59,130,246,0.12)")
+            glow = theme.qcolor("focus-glow")
             p.setPen(QPen(glow, 2 * i))
             p.setBrush(Qt.NoBrush)
             p.drawRoundedRect(box, 12, 12)
             p.setPen(QPen(theme.qcolor("blue-l"), 1.5))
         else:
             p.setPen(QPen(theme.qcolor("line2"), 1))
-        p.setBrush(theme.qcolor("white"))
+        p.setBrush(theme.qcolor("input"))
         p.drawRoundedRect(box.adjusted(0.75, 0.75, -0.75, -0.75), 12, 12)
         p.end()
 
@@ -355,7 +360,7 @@ class BarLookOption(QAbstractButton):
         r = QRectF(0.75, 0.75, self.width() - 1.5, self.height() - 1.5)
         focus = self.hasFocus() and self.property("focusVisible")
         p.setPen(QPen(theme.qcolor("blue-l" if (on or focus) else "line"), 2 if focus else (1.5 if on else 1)))
-        p.setBrush(theme.qcolor("white"))
+        p.setBrush(theme.qcolor("surface"))
         p.drawRoundedRect(r, 10, 10)
         back = QRectF(5, 5, self.width() - 10, 34)
         p.setPen(Qt.NoPen)
@@ -433,7 +438,7 @@ class LangTag(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setPen(QPen(theme.qcolor("line"), 1))
-        p.setBrush(theme.qcolor("rgba(255,255,255,0.7)"))
+        p.setBrush(theme.qcolor("frost-70"))
         p.drawRoundedRect(QRectF(0.5, 0.5, self.width() - 1, self.height() - 1), 6, 6)
         p.setFont(theme.font(10.5, 700, letter_spacing=0.4))
         p.setPen(theme.qcolor("muted"))
@@ -744,6 +749,7 @@ class DictationPage(QWidget):
         smart.addStretch(1)
         card.add(smart)
         self.bar_preview = BarPreview(bar_theme(H.cfg_of(self.app)), card)
+        theme.on_change(self.bar_preview, lambda: self.bar_preview.set_look(bar_theme(H.cfg_of(self.app))))
         card.attach(self.practice, self.bar_preview)
         return card
 
@@ -845,9 +851,8 @@ class DictationPage(QWidget):
         # While it waits, "Press keys…" sits where the keycaps were, as an empty
         # dashed key slot - not a second blue link beside Cancel.
         self.shortcut.prompt_label.setFixedHeight(24)
-        self.shortcut.prompt_label.setStyleSheet(
-            "QLabel { color: %s; background: %s; border: 1px dashed %s; border-radius: 6px; padding: 0px 8px; }"
-            % (theme.qss_color("blue-tx"), theme.qss_color("blue-sub"), theme.qss_color("blue-l")))
+        theme.sheet(self.shortcut.prompt_label, "QLabel { color: @blue-tx; background: @blue-sub; border: 1px dashed @blue-l; "
+                    "border-radius: 6px; padding: 0px 8px; }")
         self.row_shortcut = rail.add_row(SettingRow("Shortcut", self.shortcut))
 
         self.language = QComboBox()
@@ -927,7 +932,8 @@ class DictationPage(QWidget):
         chev.setContentsMargins(4, 0, 0, 0)
         # It goes to Settings, so it says where (the founder, 2026-11-09: "More options" is for a link that opens
         # more here, like the Live Assistant's) - the same words as Smart Actions' link.
-        more = Button("Speech & AI settings", "link", "s", trail=chev)
+        # "&&": a button's lone "&" is a shortcut-key mark to Qt (it showed "Speech _AI settings").
+        more = Button("Speech && AI settings", "link", "s", trail=chev)
         more.setFont(theme.font(13, 600))
         more.setFixedHeight(22)
         more.setAccessibleName("Open Speech & AI settings")
@@ -1125,7 +1131,7 @@ class DictationPage(QWidget):
         if self._syncing:
             return
         if self._apply("overlay_theme", key):
-            self.bar_preview.set_look("dark" if key == "dark" else "light")
+            self.bar_preview.set_look(bar_theme({"overlay_theme": key}))
 
     # ── Model (the dictation speech model) ──
     def _model_rows(self):
@@ -1184,9 +1190,12 @@ class DictationPage(QWidget):
                 continue
             value = str(box.itemData(i) or "")
             mark, note = "", ""
-            if hardware.is_speech_id(value) and self._model_state(value) in ("missing", "failed"):
+            state = self._model_state(value) if hardware.is_speech_id(value) else None
+            if state in ("missing", "failed"):
                 mark = MARK_DOWNLOAD
                 note = getattr(hardware.info(value), "size", "") or ""
+            elif state == "ready":
+                mark = MARK_DOWNLOADED
             box.set_choice_mark(i, mark, note)
 
     def _on_model(self, _i):

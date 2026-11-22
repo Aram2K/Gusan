@@ -1257,7 +1257,7 @@ import tests_qt.conftest as qt_conftest
 from tests_qt.conftest import make_stub_app
 app_q = QApplication.instance() or QApplication([])
 from ui import theme
-theme.install_light_scheme(app_q)
+theme.install_scheme(app_q, "light")
 theme.load_fonts()
 from ui.pages import home, home_upcoming
 BASE = datetime(2026, 10, 7, 10, 0)                         # the clock is pinned (no real date, no clock change in it)

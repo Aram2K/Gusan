@@ -1,8 +1,10 @@
 """The main window's left navigation (232 px), as in the mockups.
 
 Logo + "Gusan", the six pages (no PRO tags: Pro features open the Pro
-window when a Free user uses them), then the account at the bottom, and
-Settings last. The account area by plan:
+window when a Free user uses them), then "Invite friends" (the gift, with
+three small progress dots - or a glowing READY pill when a free month is
+ready: set_invite), the account at the bottom, and Settings last. The
+account area by plan:
 
 * Free: a small card - the first name, the FREE pill and one quiet violet
   "Upgrade to Pro".
@@ -14,7 +16,8 @@ Settings last. The account area by plan:
 The labels live in account_actions (GUEST_NAME, SIGN_IN_UP, SIGN_IN_UP_A11Y,
 UPGRADE).
 
-Signals: navigate(route), upgrade() (Free), sign_in() (guest), account().
+Signals: navigate(route) (the invite entry navigates to "invite"), upgrade() (Free), sign_in() (guest),
+account().
 """
 
 from PySide6.QtCore import QRectF, QSize, Qt, Signal
@@ -132,10 +135,50 @@ class NavItem(QPushButton):
         theme.elevate(self, "item" if on else None)
 
 
+class InviteNavItem(NavItem):
+    """"Invite friends", just above the account card: the gift, and on the right the program's progress - three
+    dots (filled = a friend who counts, a ring = one on the way) or a glowing READY pill when a month is ready
+    (ui/components/celebrate.py). Nothing on the right until the first answer is known."""
+
+    def __init__(self, parent=None):
+        super().__init__("invite", "gift", "Invite friends", False, parent)
+        from ui.components.celebrate import InviteDots, ReadyPill
+        lay = self.layout()
+        self.dots = InviteDots(self)
+        self.ready_pill = ReadyPill(self)
+        for w in (self.dots, self.ready_pill):
+            w.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            w.hide()
+            lay.addWidget(w, 0, Qt.AlignVCenter)
+        self._invite = (0, 0, False, False)
+
+    def invite_state(self):
+        """(counted, progress, ready, known)."""
+        return self._invite
+
+    def set_invite(self, counted=0, progress=0, ready=False, known=True):
+        state = (int(counted or 0), int(progress or 0), bool(ready), bool(known))
+        if state == self._invite:
+            return
+        self._invite = state
+        self.dots.set_state(state[0], state[1], animate=self.isVisible())
+        self.dots.setVisible(known and not ready)
+        self.ready_pill.setVisible(bool(ready))
+        # The pill carries its own 6 px of glow: the row's right edge gives it back.
+        self.layout().setContentsMargins(10, 0, 2 if ready else 8, 0)
+        if ready:
+            what = "your free month is ready"
+        elif known:
+            what = "%d of 3 friends" % state[0]
+        else:
+            what = ""
+        self.setAccessibleName("Invite friends" + (", " + what if what else ""))
+
+
 class _AccountRow(QPushButton):
     """The clickable avatar + name (+ tier pill) line; opens Account & plan."""
 
-    def __init__(self, name, tier, avatar_size, height, pill_size, parent=None):
+    def __init__(self, name, tier, avatar_size, height, pill_size, parent=None, badge=""):
         super().__init__(parent)
         self.setProperty("gusan", "accountRow")
         self.setProperty("active", False)
@@ -158,7 +201,8 @@ class _AccountRow(QPushButton):
         self.name_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         lay.addWidget(self.name_label, 1, Qt.AlignVCenter)
         if tier == "pro":
-            self.badge = ProTag(pill_size, parent=self)
+            # Pro from invites only: "PRO · 14 DAYS" (account_actions.invite_badge), else the plain PRO pill.
+            self.badge = ProTag(pill_size, text=badge or "PRO", parent=self)
         elif tier == "free":
             self.badge = FreeBadge(pill_size, parent=self)
         else:
@@ -216,6 +260,12 @@ class Sidebar(QFrame):
             self.items[route] = it
         root.addStretch(1)
 
+        # Not in ``items`` (the pages): its own entry, right above the account card.
+        self.invite_item = InviteNavItem(self)
+        self.invite_item.clicked.connect(lambda _=False: self.navigate.emit("invite"))
+        root.addWidget(self.invite_item)
+        root.addSpacing(11)                 # the mockup's 8 px spacer + the 3 px gap on its far side
+
         self._acct_slot = QWidget(self)
         self._acct_lay = QVBoxLayout(self._acct_slot)
         self._acct_lay.setContentsMargins(0, 0, 0, 0)
@@ -241,15 +291,17 @@ class Sidebar(QFrame):
     def tier(self):
         return self._tier
 
-    def set_account(self, tier, name):
+    def set_account(self, tier, name, badge=""):
         """tier: 'pro' | 'free' | 'guest'. Rebuilds the account area. A guest
         is always "User": a name handed in for one (a profile the session still
-        holds) is ignored here too, so no caller can put a person on the card."""
+        holds) is ignored here too, so no caller can put a person on the card.
+        ``badge``: the Pro pill's words when Pro comes from invites ("Pro · 14 days")."""
         tier = tier if tier in ("pro", "free") else "guest"
         name = GUEST_NAME if tier == "guest" else ((name or "").strip() or "Account")
-        if (tier, name) == (self._tier, getattr(self, "_name", None)):
+        badge = badge if tier == "pro" else ""
+        if (tier, name, badge) == (self._tier, getattr(self, "_name", None), getattr(self, "_badge", "")):
             return
-        self._tier, self._name = tier, name
+        self._tier, self._name, self._badge = tier, name, badge
         while self._acct_lay.count():
             w = self._acct_lay.takeAt(0).widget()
             if w is not None:
@@ -258,7 +310,7 @@ class Sidebar(QFrame):
         self.upgrade_button = None
         self.sign_in_button = None
         if tier == "pro":
-            self.account_row = _AccountRow(name, tier, 30, 44, "m", self._acct_slot)
+            self.account_row = _AccountRow(name, tier, 30, 44, "m", self._acct_slot, badge=badge)
             self.account_row.clicked.connect(lambda _=False: self.account.emit())
             self._acct_lay.addWidget(self.account_row)
         else:
@@ -300,10 +352,16 @@ class Sidebar(QFrame):
         self.account_row.set_active(self._active_route == "account" and tier == "pro")
 
     # ── selection ──
+    def set_invite(self, counted=0, progress=0, ready=False, known=True, visible=True):
+        """The invite entry's progress (ui/invite_hub.InviteHub.sidebar_state)."""
+        self.invite_item.set_invite(counted, progress, ready, known)
+        self.invite_item.setVisible(bool(visible))
+
     def set_active(self, route):
         self._active_route = route
         for r, it in self.items.items():
             it.set_active(r == route)
+        self.invite_item.set_active(route == "invite")
         if self.account_row is not None:
             self.account_row.set_active(route == "account" and self._tier == "pro")
 

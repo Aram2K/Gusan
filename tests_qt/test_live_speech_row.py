@@ -199,7 +199,7 @@ def test_a_model_not_on_this_computer_wears_the_download_icon(build):
     app.downloads = app_dl
     page.speech.refresh()
     box = page.speech.combo
-    assert box.choice_mark(box.findData("base")) == ""
+    assert box.choice_mark(box.findData("base")) == "downloaded"          # on this computer: the check
     assert box.choice_mark(box.findData("large-v3")) == "download"
     assert box.choice_mark(box.findData("cloud")) == ""
 

@@ -6,8 +6,9 @@ app starts: the logo pops in, soft rings travel out of it the way a voice does,
 and five small bars breathe under the name. No sentences, no percentages: the
 start has no real progress to show, so the card only says "Gusan is opening".
 
-It follows the app's one light look from FIXED tokens and a QPainter - no
-widgets, no palette, no style - so a dark Windows cannot change it. It sits on
+It wears the app's look - light or dark, as the app_theme setting and the computer say (pick_look:
+config.json read directly, then the OS's scheme) - from FIXED tokens and a QPainter: no
+widgets, no palette, no style, so nothing else of the OS can change it. It sits on
 the primary screen (where the app's window opens) and needs nothing from DPI
 handling beyond Qt's own per-monitor scaling. Never in the way: no taskbar
 button, no focus, clicks fall through it, and after TOPMOST_S it leaves the
@@ -18,6 +19,7 @@ for that step down, after TOPMOST_S), so the card process starts fast. The drawi
 which is what the tests and the preview sheet render.
 """
 import math
+import os
 import sys
 import time
 
@@ -28,15 +30,40 @@ from PySide6.QtGui import (QColor, QFont, QGuiApplication, QImage, QLinearGradie
 from app_info import APP_NAME, resource_path
 from startup_splash import FADE, FADE_S, QUIT
 
-# ── The light look: ui/theme.py TOKENS, value for value (a test keeps them equal) ──
-INK = (15, 23, 42)                  # TOKENS["ink"]
-MUTED = (100, 116, 139)             # TOKENS["muted"]
-BLUE = (37, 99, 235)                # TOKENS["blue"]
-BLUE_L = (59, 130, 246)             # TOKENS["blue-l"]
-GLASS_TOP = (255, 255, 255, 245)    # the glass plate: TOKENS glass-a / glass-b, denser (nothing blurred behind it)
-GLASS_BOTTOM = (241, 245, 249, 238)
-HAIRLINE = (15, 23, 42, 38)         # the dictation pill's light-glass hairline
-EDGE = (230, 90)                    # ...and its inner highlight: white alpha at the top, at the bottom
+# ── The two looks: ui/theme.py LIGHT / DARK tokens, value for value (a test keeps them equal) ──
+# (No ui.theme import here: this process must start fast and never loads the app's modules.)
+LOOKS = {
+    "light": {
+        "ink": (15, 23, 42),                    # TOKENS["ink"]: the name
+        "muted": (88, 103, 125),                # TOKENS["muted"]
+        "blue": (37, 99, 235),                  # TOKENS["blue"]: the bars
+        "blue_l": (59, 130, 246),               # TOKENS["blue-l"]: the glow and the rings
+        "glass_top": (255, 255, 255, 245),      # the glass plate: TOKENS glass-a / glass-b, denser (nothing blurred behind it)
+        "glass_bottom": (241, 245, 249, 238),
+        "hairline": (15, 23, 42, 38),           # the dictation pill's light-glass hairline
+        "edge": (255, 255, 255, 230, 90),       # ...and its inner highlight: white, alpha at the top, at the bottom
+        "shade": (15, 23, 42),                  # the shadow and the logo's lift
+    },
+    "dark": {
+        "ink": (232, 237, 244),                 # DARK["ink"]
+        "muted": (141, 151, 168),               # DARK["muted"]
+        "blue": (37, 99, 235),                  # DARK["blue"]
+        "blue_l": (96, 165, 250),               # DARK["blue-l"]
+        "glass_top": (30, 36, 46, 248),         # the dark surface (DARK["surface"] #1b212a), lifted at the top
+        "glass_bottom": (24, 29, 37, 244),
+        "hairline": (148, 163, 184, 46),        # DARK["glass-line"], a touch stronger: the edge on a dark desktop
+        "edge": (255, 255, 255, 34, 6),         # a faint light rim (a bright one reads as fog on dark glass)
+        "shade": (0, 0, 0),
+    },
+}
+INK = LOOKS["light"]["ink"]
+MUTED = LOOKS["light"]["muted"]
+BLUE = LOOKS["light"]["blue"]
+BLUE_L = LOOKS["light"]["blue_l"]
+GLASS_TOP = LOOKS["light"]["glass_top"]
+GLASS_BOTTOM = LOOKS["light"]["glass_bottom"]
+HAIRLINE = LOOKS["light"]["hairline"]
+EDGE = LOOKS["light"]["edge"][3:]
 
 # ── Shape, in logical pixels ──────────────────────────────────────────────────
 WIN = 360                           # the window: the card and room for its shadow
@@ -90,6 +117,68 @@ def _color(rgb, alpha=None):
     return QColor(rgb[0], rgb[1], rgb[2], a)
 
 
+# ── Which look ────────────────────────────────────────────────────────────────
+DATA_DIR_NAME = "Transcribe"        # storage.APP_DIR_NAME: the data folder keeps its 1.x name
+
+
+def _data_dir(env=None, platform=None):
+    """The app's data folder (storage.app_data_dir's answer, without importing it or making the folder)."""
+    env = os.environ if env is None else env
+    platform = sys.platform if platform is None else platform
+    override = env.get("TRANSCRIBE_APP_DATA_DIR")
+    if override:
+        return override
+    name = DATA_DIR_NAME
+    if platform == "win32":
+        root = env.get("APPDATA") or env.get("LOCALAPPDATA")
+        return os.path.join(root, name) if root else os.path.join(os.path.expanduser("~"), "AppData", "Roaming", name)
+    if platform == "darwin":
+        return os.path.join(os.path.expanduser("~"), "Library", "Application Support", name)
+    root = env.get("XDG_CONFIG_HOME")
+    return os.path.join(root, name) if root else os.path.join(os.path.expanduser("~"), ".config", name)
+
+
+def config_theme(path=None, **kw):
+    """The app_theme setting ("system" | "light" | "dark") from config.json; "system" when it can't be read."""
+    try:
+        import json
+        with open(path or os.path.join(_data_dir(**kw), "config.json"), encoding="utf-8") as f:
+            value = str(json.load(f).get("app_theme") or "system").strip().lower()
+        return value if value in ("system", "light", "dark") else "system"
+    except Exception:
+        return "system"
+
+
+def os_is_dark(platform=None):
+    """The computer's scheme: what Qt says (it reads Windows' and macOS's own setting), else Windows'
+    registry (AppsUseLightTheme = 0). False when nobody knows."""
+    try:
+        scheme = QGuiApplication.styleHints().colorScheme()
+        if scheme == Qt.ColorScheme.Dark:
+            return True
+        if scheme == Qt.ColorScheme.Light:
+            return False
+    except Exception:
+        pass
+    if (sys.platform if platform is None else platform) == "win32":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+                return int(winreg.QueryValueEx(k, "AppsUseLightTheme")[0]) == 0
+        except Exception:
+            pass
+    return False
+
+
+def pick_look(pref=None, os_dark=None):
+    """"light" or "dark": the app's own setting when it pins one, else the computer's (ui/theme.py resolve)."""
+    pref = config_theme() if pref is None else pref
+    if pref in ("light", "dark"):
+        return pref
+    return "dark" if (os_is_dark() if os_dark is None else os_dark) else "light"
+
+
 class SplashArt:
     """The card's drawing. ``paint`` is a pure function of the time since the card
     appeared and of how far its way out has gone; the glass layer and the logo are
@@ -102,10 +191,13 @@ class SplashArt:
     FIRST_RING_S = 0.45
     STILL_IN_S = 0.18               # the card that does not move: its fade in, after which the picture never changes
 
-    def __init__(self, motion=True):
+    def __init__(self, motion=True, look="light"):
         # motion=False: Windows' "Animation effects" is off (Settings > Accessibility > Visual
         # effects, which the dictation pill honours too) - the same card, standing still.
+        # look: "light" or "dark" (pick_look).
         self.motion = bool(motion)
+        self.look = "dark" if look == "dark" else "light"
+        self.c = LOOKS[self.look]
         self._dpr = None
         self._static = None
         self._logo = None
@@ -117,7 +209,7 @@ class SplashArt:
         if self._dpr == dpr and self._static is not None:
             return
         self._dpr = dpr
-        self._static = self._glass(dpr)
+        self._static = self._glass(dpr, self.c)
         side = int(math.ceil(LOGO_D * dpr))
         logo = QImage(resource_path("assets", "icon_512.png"))
         if not logo.isNull():
@@ -140,9 +232,11 @@ class SplashArt:
         q.end()
 
     @staticmethod
-    def _glass(dpr):
+    def _glass(dpr, c=None):
         """The shadow, the plate, its hairline and its inner highlight: one
         device-pixel image, drawn once."""
+        c = c or LOOKS["light"]
+        shade = c["shade"]
         side = int(math.ceil(WIN * dpr))
         img = QImage(side, side, QImage.Format_ARGB32_Premultiplied)
         img.setDevicePixelRatio(dpr)
@@ -152,25 +246,26 @@ class SplashArt:
         card = QRectF(*CARD)
         q.setPen(Qt.NoPen)
         for i in range(SHADOW_LAYERS, 0, -1):                 # stacked outlines: a soft, even falloff
-            q.setBrush(QColor(INK[0], INK[1], INK[2], SHADOW_A))
+            q.setBrush(_color(shade + (SHADOW_A if c is LOOKS["light"] else 2 * SHADOW_A,)))
             q.drawRoundedRect(card.adjusted(-i, -i + SHADOW_DY, i, i + SHADOW_DY), RADIUS + i, RADIUS + i)
         path = QPainterPath()
         path.addRoundedRect(card, RADIUS, RADIUS)
         q.setCompositionMode(QPainter.CompositionMode_Clear)      # no shadow under the plate: its colours are the tokens'
-        q.fillPath(path, Qt.black)
+        q.fillPath(path, _color(shade))
         q.setCompositionMode(QPainter.CompositionMode_SourceOver)
         body = QLinearGradient(card.topLeft(), card.bottomLeft())
-        body.setColorAt(0.0, _color(GLASS_TOP))
-        body.setColorAt(1.0, _color(GLASS_BOTTOM))
+        body.setColorAt(0.0, _color(c["glass_top"]))
+        body.setColorAt(1.0, _color(c["glass_bottom"]))
         q.fillPath(path, body)
         q.setBrush(Qt.NoBrush)
-        q.setPen(QPen(_color(HAIRLINE), 1.0))
+        q.setPen(QPen(_color(c["hairline"]), 1.0))
         hair = QPainterPath()
         hair.addRoundedRect(card.adjusted(0.5, 0.5, -0.5, -0.5), RADIUS - 0.5, RADIUS - 0.5)
         q.drawPath(hair)
         edge = QLinearGradient(card.topLeft(), card.bottomLeft())
-        edge.setColorAt(0.0, QColor(255, 255, 255, EDGE[0]))
-        edge.setColorAt(1.0, QColor(255, 255, 255, EDGE[1]))
+        rim = c["edge"]
+        edge.setColorAt(0.0, _color(rim[:3] + (rim[3],)))
+        edge.setColorAt(1.0, _color(rim[:3] + (rim[4],)))
         q.setPen(QPen(edge, 1.0))
         inner = QPainterPath()
         inner.addRoundedRect(card.adjusted(1.5, 1.5, -1.5, -1.5), RADIUS - 1.5, RADIUS - 1.5)
@@ -208,7 +303,7 @@ class SplashArt:
 
     def _draw_name(self, p, top):
         p.setFont(self._font)
-        p.setPen(_color(INK))
+        p.setPen(_color(self.c["ink"]))
         p.drawText(QRectF(0.0, top, WIN, 40.0), Qt.AlignCenter, APP_NAME)
 
     def _content(self, p, t, shown):
@@ -218,9 +313,10 @@ class SplashArt:
         # a soft blue glow behind the logo, breathing with it
         glow_in = 1.0 if still else clamp((t - 0.20) / 0.40)
         glow = QRadialGradient(QPointF(cx, LOGO_CY), 104.0)
-        glow.setColorAt(0.0, _color(BLUE_L, (0.10 + 0.08 * breath) * glow_in))
-        glow.setColorAt(0.55, _color(BLUE_L, (0.04 + 0.03 * breath) * glow_in))
-        glow.setColorAt(1.0, _color(BLUE_L, 0.0))
+        blue_l = self.c["blue_l"]
+        glow.setColorAt(0.0, _color(blue_l, (0.10 + 0.08 * breath) * glow_in))
+        glow.setColorAt(0.55, _color(blue_l, (0.04 + 0.03 * breath) * glow_in))
+        glow.setColorAt(1.0, _color(blue_l, 0.0))
         p.setPen(Qt.NoPen)
         p.setBrush(glow)
         p.drawEllipse(QPointF(cx, LOGO_CY), 104.0, 104.0)
@@ -235,9 +331,9 @@ class SplashArt:
             r = RING_FROM + (RING_TO - RING_FROM) * ease_out_quad(age)
             a = 0.30 * (1.0 - age) ** 1.4 * ease_out_cubic(clamp(age / 0.18))     # born from nothing, not in one frame
             ring = QRadialGradient(QPointF(cx, LOGO_CY), r)
-            ring.setColorAt(max(0.0, (r - 20.0) / r), _color(BLUE_L, 0.0))
-            ring.setColorAt(max(0.0, (r - 3.0) / r), _color(BLUE_L, a))
-            ring.setColorAt(1.0, _color(BLUE_L, 0.0))
+            ring.setColorAt(max(0.0, (r - 20.0) / r), _color(blue_l, 0.0))
+            ring.setColorAt(max(0.0, (r - 3.0) / r), _color(blue_l, a))
+            ring.setColorAt(1.0, _color(blue_l, 0.0))
             p.setBrush(ring)
             p.drawEllipse(QPointF(cx, LOGO_CY), r, r)
         # the logo: a pop, then a slow breath; a soft shadow under it
@@ -247,9 +343,11 @@ class SplashArt:
             p.save()
             p.setOpacity(p.opacity() * clamp(logo_in * 2.5))
             lift = QRadialGradient(QPointF(cx, LOGO_CY + 7.0), LOGO_D * 0.62 * s)
-            lift.setColorAt(0.0, _color(INK, 0.20))
-            lift.setColorAt(0.70, _color(INK, 0.10))
-            lift.setColorAt(1.0, _color(INK, 0.0))
+            shade = self.c["shade"]
+            k = 1.0 if self.look == "light" else 1.8          # a black lift, deeper on the dark plate
+            lift.setColorAt(0.0, _color(shade, 0.20 * k))
+            lift.setColorAt(0.70, _color(shade, 0.10 * k))
+            lift.setColorAt(1.0, _color(shade, 0.0))
             p.setPen(Qt.NoPen)
             p.setBrush(lift)
             p.drawEllipse(QPointF(cx, LOGO_CY + 7.0), LOGO_D * 0.62 * s, LOGO_D * 0.62 * s)
@@ -275,7 +373,7 @@ class SplashArt:
             x0 = cx - (5 * width + 4 * gap) / 2.0
             for i in range(5):
                 h = 7.0 + 12.0 * (STILL_BARS[i] if still else 0.5 + 0.5 * math.sin(2.0 * math.pi * t / 1.15 - i * 0.85))
-                p.setBrush(_color(BLUE, 0.92 - 0.10 * abs(i - 2)))
+                p.setBrush(_color(self.c["blue"], 0.92 - 0.10 * abs(i - 2)))
                 p.drawRoundedRect(QRectF(x0 + i * (width + gap), BARS_CY - h / 2.0, width, h), width / 2.0, width / 2.0)
             p.restore()
 
@@ -409,7 +507,7 @@ def run(life, show_at=None, motion=True):
     to stop; ``show_at`` is the earliest wall-clock time to appear (a launch that
     ends at once shows nothing); ``motion`` False draws the card without movement."""
     app = QGuiApplication([sys.argv[0] if sys.argv else "gusan-splash"])
-    win = SplashWindow(SplashArt(motion))
+    win = SplashWindow(SplashArt(motion, pick_look()))
     timer = QTimer()
     timer.setTimerType(Qt.PreciseTimer)
     timer.setInterval(FRAME_MS)

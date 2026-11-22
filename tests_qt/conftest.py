@@ -48,7 +48,7 @@ def qapp():
     from PySide6.QtWidgets import QApplication
     app = QApplication.instance() or QApplication([])
     from ui import theme
-    theme.install_light_scheme(app)           # what main() does first: one light look, whatever the OS is set to
+    theme.install_scheme(app, "system")       # what main() does first: the look the setting and the OS say
     theme.load_fonts()
     yield app
 
@@ -58,7 +58,7 @@ def os_dark_palette():
     (window #2b2b2b, white text, #333333 buttons). QStyleHints.setColorScheme() is a no-op on the
     offscreen platform in Qt 6.8 (colorScheme() stays Unknown, the palette does not change), so a
     dark OS is simulated by giving the application this palette BEFORE main()'s own call
-    (theme.install_light_scheme) - which must then make the app light all the same."""
+    (theme.install_scheme) - which then reads the OS as dark from it."""
     from PySide6.QtGui import QColor, QPalette
     pal = QPalette()
     for group in (QPalette.Active, QPalette.Inactive, QPalette.Disabled):
@@ -81,16 +81,21 @@ def os_light_palette():
     return QStyleFactory.create("fusion").standardPalette()
 
 
+def set_os_scheme(qapp, name, pref="system"):
+    """The OS is in ``name`` mode ("light" / "dark") and the app starts with app_theme ``pref``: the OS's
+    palette goes in first, then the app's own start-up call (theme.install_scheme) - the order of main()."""
+    from ui import theme
+    qapp.setPalette(os_dark_palette() if name == "dark" else os_light_palette())
+    theme.install_scheme(qapp, pref)
+
+
 @pytest.fixture(params=["light", "dark"])
 def scheme(request, qapp):
-    """Runs the test twice: the OS is in light mode, then in dark mode. The OS's palette goes in first,
-    then the app's own start-up call (theme.install_light_scheme) - exactly the order of main()."""
-    from ui import theme
-    qapp.setPalette(os_dark_palette() if request.param == "dark" else os_light_palette())
-    theme.install_light_scheme(qapp)
+    """Runs the test twice: the OS is in light mode, then in dark mode - and the app (app_theme "system",
+    the default) follows it."""
+    set_os_scheme(qapp, request.param)
     yield request.param
-    qapp.setPalette(os_light_palette())
-    theme.install_light_scheme(qapp)
+    set_os_scheme(qapp, "light")
 
 
 def make_stub_app(tier="free", name="Aram Adamyan", email="aram@aibuben.xyz"):
@@ -180,6 +185,26 @@ def _never_ask_the_website_for_the_model_list(monkeypatch):
     except Exception:
         return
     monkeypatch.setattr(speech_hy, "fetch_manifest", lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
+def _never_reach_the_invite_server(monkeypatch):
+    """Invite friends (invites.py, ui/invite_hub.py): no test ever reaches the real invite function, and no window's
+    invite hub asks for "me" by itself a few seconds after it is made - a test that gave its stand-in account a
+    token (test_account_card, test_page_settings_account) otherwise sent a request from a hub that outlived it,
+    into the next test's fake server. A test that wants the server installs its own fake (tests_qt/test_invite_ui.py)."""
+    if not _real_qt():
+        return
+    try:
+        import invites
+        from ui import invite_hub
+    except Exception:
+        return
+
+    def offline(*_a, **_k):
+        raise ConnectionError("tests never reach the invite server")
+    monkeypatch.setattr(invites, "_post", offline)
+    monkeypatch.setattr(invite_hub, "REFRESH_AFTER_SIGN_IN_MS", 10 ** 9)
 
 
 def pytest_sessionfinish(session, exitstatus):

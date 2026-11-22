@@ -44,7 +44,7 @@ from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from ui import hy_model, privacy_prompt
 from ui.components import Button, SettingRow, label, mini_prompt
-from ui.components.model_combo import MARK_DOWNLOAD, PlainNameCombo, combo as _rail_combo
+from ui.components.model_combo import MARK_DOWNLOAD, MARK_DOWNLOADED, PlainNameCombo, combo as _rail_combo
 
 logger = logging.getLogger("transcribe")
 
@@ -303,9 +303,12 @@ class LiveSpeechRow(QWidget):
                 continue
             value = str(box.itemData(i) or "")
             mark, note = "", ""
-            if value and is_model(value) and self._state(value) in ("missing", "failed"):
+            state = self._state(value) if value and is_model(value) else None
+            if state in ("missing", "failed"):
                 mark = MARK_DOWNLOAD
                 note = getattr(info(value), "size", "") or ""
+            elif state == "ready":
+                mark = MARK_DOWNLOADED
             box.set_choice_mark(i, mark, note)
 
     # ── what is in force ──

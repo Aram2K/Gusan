@@ -10,12 +10,17 @@ from PySide6.QtWidgets import QApplication, QComboBox, QWidget
 
 def test_tokens_and_colours(qapp):
     from ui import theme
+    assert theme.scheme() == "light"                                    # the session runs in the light look
+    assert set(theme.LIGHT) == set(theme.DARK)                          # every token has a dark value
     assert theme.TOKENS["blue"] == "#2563eb"
+    assert theme.TOKENS["muted"] == "#58677d"                           # >= 4.5:1 on the window and a grey track
     assert theme.TOKENS["pro-l"] == "#a855f7"
     assert theme.qss_color("blue-sub") == "rgba(59, 130, 246, 20)"
     assert theme.qss_color("#ffffff") == "#ffffff"
     c = theme.qcolor("glass-line")
     assert (c.red(), c.green(), c.blue(), c.alpha()) == (203, 213, 225, 140)
+    assert theme.qss_color("surface", "dark") == "#1b212a" and theme.qss_color("ink", "dark") == "#e8edf4"
+    assert theme.fill("QLabel { color: @muted; background: @nope; }") == "QLabel { color: #58677d; background: @nope; }"
 
 
 def test_stylesheet_and_apply(qapp):

@@ -43,7 +43,7 @@ import logging
 import sys
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
-from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QSizePolicy, QWidget
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from ui import theme
 from ui.components.buttons import Button
@@ -269,3 +269,65 @@ class HotkeyCaptureButton(QWidget):
         if self._capturing:
             self.cancel_capture()
         super().hideEvent(ev)
+
+
+class ShortcutField(QWidget):
+    """A settings rail's shortcut control: HotkeyCaptureButton (keyboard only by default) with the rail's small
+    Change link, and a one-line problem under it (``set_error``). ``keys`` / ``change`` / ``prompt`` /
+    ``none_label`` are the capture's own parts. The Live Assistant's and the Meetings' "Shortcut" rows."""
+
+    def __init__(self, hotkey="", parent=None, accessible_name="Shortcut", allow_mouse=False):
+        super().__init__(parent)
+        from ui.components.surfaces import label
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(4)
+        self.capture = HotkeyCaptureButton(hotkey, parent=self, accessible_name=accessible_name,
+                                           allow_mouse=allow_mouse)
+        self.capture.layout().setSpacing(8)             # the mockup's gap before Change
+        self.capture.button.setFont(theme.font(12.5, 600))       # the rail's small link: 12.5 px, 24 px tall
+        self.capture.button.setFixedHeight(24)
+        outer.addWidget(self.capture, 0, Qt.AlignRight)
+        self.keys = self.capture.keys
+        self.change = self.capture.button
+        self.prompt = self.capture.prompt_label
+        self.none_label = self.capture.empty_label
+        self.error_label = label("", "error", self, wrap=True)
+        self.error_label.setFont(theme.font(12))
+        self.error_label.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        self.error_label.hide()
+        outer.addWidget(self.error_label)
+        self.capture.capturing_changed.connect(self._on_capturing)
+        self.capture.refused.connect(self.set_error)
+        self.capture.cancelled.connect(lambda: self.set_error(""))     # Esc: nothing changed, nothing to say
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self._sync_name()
+
+    def set_hotkey(self, hotkey):
+        self.capture.set_hotkey(hotkey or "")
+        self._sync_name()
+
+    def hotkey(self):
+        return self.capture.hotkey()
+
+    def is_capturing(self):
+        return self.capture.is_capturing()
+
+    def set_error(self, text):
+        """A short problem under the keys ("" hides it)."""
+        text = text or ""
+        self.error_label.setFixedWidth(max(170, self.capture.sizeHint().width()))
+        self.error_label.setText(text)
+        self.error_label.setVisible(bool(text))
+        self.updateGeometry()
+
+    def error(self):
+        return self.error_label.text() if self.error_label.isVisibleTo(self) else ""
+
+    def _on_capturing(self, on):
+        if on:
+            self.set_error("")
+
+    def _sync_name(self):
+        from ui.components.controls import keycap_labels
+        self.setAccessibleName("Shortcut " + (" + ".join(keycap_labels(self.capture.hotkey())) or "not set"))

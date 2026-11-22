@@ -140,6 +140,7 @@ def test_the_dictation_link_says_where_it_goes(qapp):
     win = MainWindow(make_stub_app("pro"))
     try:
         page = win.open("dictation")
-        assert page.more_options.text() == "Speech & AI settings"
+        assert page.more_options.text() == "Speech && AI settings"           # shows "Speech & AI settings"
+        assert page.more_options.accessibleName() == "Open Speech & AI settings"
     finally:
         win.deleteLater()

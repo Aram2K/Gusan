@@ -25,6 +25,7 @@ meeting is coming up; the account rows depend on the plan):
     ──
     aram@aibuben.xyz  ·  Free         (disabled; Free and Pro)  |  Guest  (guests: no name, no email)
     Upgrade to Pro…                   (purple, Free only)  |  Sign in / Sign up  (blue, guests)
+    [gift] Invite friends         •○○   (signed in: the invite's progress dots, or READY)
     ──
     Settings…
     Quit Gusan
@@ -78,11 +79,14 @@ toggle_dictation exists. The Live Assistant row opens the card for every plan
                             set_privacy_mode with notify=False, so the tray says it
     Upgrade to Pro…         _pro_upsell()
     Sign in / Sign up       show_auth_gate()   (guests; a super admin previewing Guest too)
+    Invite friends          show_main("invite")   (its dots / READY come from ui/invite_hub.py when a hub
+                            exists - the menu never makes one)
     Settings…               show_main("settings")
     Quit Gusan              quit_app()
-* Reads: app.cfg ("hotkey", "live_assist_hotkey", "privacy_mode"),
-  app._registered_assist_hotkey / app._assist_listener (the Live Assistant
-  hint shows only a hotkey that really registered), app.is_pro(),
+* Reads: app.cfg ("hotkey", "live_assist_hotkey", "meeting_hotkey", "privacy_mode"),
+  app._registered_assist_hotkey / app._assist_listener and
+  app._registered_meeting_hotkey / app._meeting_listener (the Live Assistant
+  and meeting hints show only a hotkey that really registered), app.is_pro(),
   app.current_tier(), app.auth (is_authenticated, user_email),
   app.calendar (available, is_connected, next_meeting()).
 * The old menu's "Manage subscription…", "Sign out" and "History Log" rows
@@ -99,7 +103,7 @@ import time
 from datetime import datetime, timezone
 
 from PySide6.QtCore import QObject, QRectF, QSize, Qt
-from PySide6.QtGui import QAction, QColor, QFontMetricsF, QLinearGradient, QPainter, QPainterPath, QPalette, QPen
+from PySide6.QtGui import QAction, QFontMetricsF, QLinearGradient, QPainter, QPainterPath, QPalette, QPen
 from PySide6.QtWidgets import QApplication, QMenu, QProxyStyle, QStyle, QStyleFactory, QStyleOptionMenuItem
 
 import account_actions
@@ -128,12 +132,13 @@ RECENT_STALE_S = 20
 PRO_SUFFIX = "  (Pro)"
 SEP = "  ·  "
 
-# The system menu colours the mockup draws (floating.py MENU), light and dark.
+# The system menu colours the mockup draws (floating.py MENU), light and dark: the tray menu follows the OS
+# (theme.os_is_dark), so these never come from the app's own token set (that can be the other look).
 COLORS = {
     "light": {"text": "#1a1a1a", "sub": "#5c5c5c", "dis": "#6b6b6b", "sep": "rgba(0,0,0,0.08)",
-              "hover": "rgba(0,0,0,0.05)", "upgrade": "pro-tx", "signin": "blue-tx"},
+              "hover": "rgba(0,0,0,0.05)", "upgrade": "#7e22ce", "signin": "#1d4ed8", "dot": "#a855f7"},
     "dark": {"text": "#ffffff", "sub": "#c2c2c2", "dis": "#9d9d9d", "sep": "rgba(255,255,255,0.09)",
-             "hover": "rgba(255,255,255,0.08)", "upgrade": "#d8b4fe", "signin": "#93c5fd"},
+             "hover": "rgba(255,255,255,0.08)", "upgrade": "#d8b4fe", "signin": "#93c5fd", "dot": "#c084fc"},
 }
 
 FEATURE_MEETING = "Meeting recording"
@@ -146,6 +151,8 @@ P_PRO = "gusanPro"              # PRO pill after the words
 P_BOLD = "gusanBold"
 P_ICON = "gusanIcon"            # lead glyph (icons.IC name)
 P_PREFIX = "gusanPrefix"        # "Next:" drawn in the muted colour
+P_DOTS = "gusanDots"            # Invite friends: "counted,progress" for the three dots, "ready" for READY, "" none
+INVITE_TRAIL_W = 44             # room the dots / READY take on the right
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -234,6 +241,11 @@ def _adv(font, text):
     return QFontMetricsF(font).horizontalAdvance(text)
 
 
+# The PRO pill (ui.components.ProTag's purple glass): the brand's, the same on a light and a dark menu.
+_PRO_PILL = {"from": "rgba(168,85,247,0.92)", "to": "rgba(126,34,206,0.92)", "edge": "rgba(255,255,255,0.59)",
+             "text": "#ffffff"}
+
+
 def pro_pill_width():
     return math.ceil(_adv(_fonts()["pill"], "PRO")) + 2 * PILL_PAD
 
@@ -244,14 +256,58 @@ def paint_pro_pill(p, x, cy):
     w = pro_pill_width()
     rect = QRectF(x, cy - PILL_H / 2.0, w, PILL_H)
     grad = QLinearGradient(rect.topLeft(), rect.topRight())
-    grad.setColorAt(0.0, _qc("rgba(168,85,247,0.92)"))
-    grad.setColorAt(1.0, _qc("rgba(126,34,206,0.92)"))
-    p.setPen(QPen(_qc("rgba(255,255,255,0.59)"), 1))
+    grad.setColorAt(0.0, _qc(_PRO_PILL["from"]))
+    grad.setColorAt(1.0, _qc(_PRO_PILL["to"]))
+    p.setPen(QPen(_qc(_PRO_PILL["edge"]), 1))
     p.setBrush(grad)
     p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), PILL_H / 2.0, PILL_H / 2.0)
-    p.setPen(QColor("#ffffff"))
+    p.setPen(_qc(_PRO_PILL["text"]))
     p.setFont(f)
     p.drawText(rect, Qt.AlignCenter, "PRO")
+    return w
+
+
+def paint_invite_trail(p, dots, right, cy, colours):
+    """Invite friends' right side: three dots (filled = counts, a ring = on the way) or the READY pill, ending at
+    ``right``. Returns the width it took. ``colours`` is the menu's look (COLORS: it follows the OS, not the app);
+    READY wears the PRO pill's brand purple."""
+    if dots == "ready":
+        f = _fonts()["pill"]
+        w = math.ceil(_adv(f, "READY")) + 2 * PILL_PAD
+        rect = QRectF(right - w, cy - PILL_H / 2.0, w, PILL_H)
+        grad = QLinearGradient(rect.topLeft(), rect.topRight())
+        grad.setColorAt(0.0, _qc(_PRO_PILL["from"]))
+        grad.setColorAt(1.0, _qc(_PRO_PILL["to"]))
+        p.setPen(Qt.NoPen)
+        p.setBrush(grad)
+        p.drawRoundedRect(rect, PILL_H / 2.0, PILL_H / 2.0)
+        p.setPen(_qc(_PRO_PILL["text"]))
+        p.setFont(f)
+        p.drawText(rect, Qt.AlignCenter, "READY")
+        return w
+    try:
+        counted, progress = (int(x) for x in str(dots).split(",")[:2])
+    except ValueError:
+        return 0
+    size, gap = 7.0, 4.0
+    w = 3 * size + 2 * gap
+    x0 = right - w
+    for i in range(3):
+        rect = QRectF(x0 + i * (size + gap), cy - size / 2.0, size, size)
+        if i < counted:
+            p.setPen(Qt.NoPen)
+            p.setBrush(_qc(colours["dot"]))
+            p.drawEllipse(rect)
+        elif i < counted + progress:
+            p.setPen(QPen(_qc(colours["dot"]), 2))
+            p.setBrush(Qt.NoBrush)
+            p.drawEllipse(rect.adjusted(1, 1, -1, -1))
+        else:
+            p.setPen(Qt.NoPen)
+            p.setBrush(_qc(colours["dis"]))
+            p.setOpacity(0.45)
+            p.drawEllipse(rect)
+            p.setOpacity(1.0)
     return w
 
 
@@ -348,6 +404,8 @@ class MenuLook(QProxyStyle):
         w = TEXT_X + _adv(font, _painted(text, pro)) + RIGHT_PAD
         if pro:
             w += 10 + pro_pill_width()
+        if kind == "invite" and _prop(a, P_DOTS, ""):
+            w += 20 + INVITE_TRAIL_W
         hint = _prop(a, P_HINT, "")
         if hint:
             w += 20 + _adv(f["hint"], hint)
@@ -412,6 +470,9 @@ class MenuLook(QProxyStyle):
             lead = icons.pixmap(name if name in icons.IC else "info", 15, _qc(c["sub"]))
         if lead is not None:
             p.drawPixmap(int(r.left() + 8 + 1.5), int(cy - 7.5), lead)
+
+        if kind == "invite" and _prop(a, P_DOTS, ""):
+            right -= paint_invite_trail(p, _prop(a, P_DOTS, ""), right, cy, c) + 12
 
         # right side: the shortcut / time, or the submenu chevron
         hint = _prop(a, P_HINT, "")
@@ -549,6 +610,7 @@ class TrayMenu(QObject):
         acct.setEnabled(False)
         self._add("upgrade", account_actions.UPGRADE + "…", self.upgrade, kind="upgrade", **{P_BOLD: True})
         self._add("signin", account_actions.SIGN_IN_UP, self.sign_in, kind="signin", **{P_BOLD: True})
+        self._add("invite", "Invite friends", self.open_invite, kind="invite", **{P_ICON: "gift"})
         self._sep("sep_account")
         self._add("settings", "Settings…", self.open_settings)
         self._add("quit", "Quit %s" % APP_NAME, self.quit_app)
@@ -620,11 +682,43 @@ class TrayMenu(QObject):
 
     # ── refresh helpers (the controller calls these) ──
     def refresh(self):
-        """Everything cheap: plan and account rows, hotkeys, privacy, Next."""
+        """Everything cheap: plan and account rows, hotkeys, privacy, Next, Invite friends."""
         self.refresh_account()
         self.refresh_hotkeys()
         self.refresh_privacy()
         self.refresh_next()
+        self.refresh_invite()
+
+    def refresh_invite(self, *_args):
+        """Invite friends (signed-in accounts): its dots or READY from the app's invite hub, when one exists
+        (never made here: no work for a tray that only opens)."""
+        a = self.actions["invite"]
+        tier, _email = self.account()
+        a.setVisible(tier != "guest")
+        trail = ""
+        try:
+            from ui import invite_hub
+            hub = invite_hub.existing(self.app)
+            if hub is not None:
+                st = hub.sidebar_state()
+                if st.get("ready"):
+                    trail = "ready"
+                elif st.get("known"):
+                    trail = "%d,%d" % (st.get("counted", 0), st.get("progress", 0))
+        except Exception:
+            logger.debug("tray: invite state unavailable", exc_info=True)
+        a.setProperty(P_DOTS, trail)
+        text = "Invite friends"
+        if trail == "ready":
+            a.setStatusTip("Your free month is ready")
+            if not self.custom:
+                text += SEP + "Ready"
+        elif trail:
+            a.setStatusTip("%s of 3 friends" % trail.split(",")[0])
+        else:
+            a.setStatusTip("")
+        a.setText(_esc(text))
+        self.menu.update()
 
     def refresh_account(self):
         tier, email = self.account()
@@ -647,6 +741,14 @@ class TrayMenu(QObject):
         else:
             hk = cfg.get("live_assist_hotkey", "")
         self._set_hint("assist", hotkey_hint(hk))
+        # The meeting shortcut (it starts the recording this row opens): shown only when it really registered.
+        if hasattr(self.app, "_registered_meeting_hotkey"):
+            mk = getattr(self.app, "_registered_meeting_hotkey", None) or ""
+            if not mk and getattr(self.app, "_meeting_listener", None) is not None:
+                mk = cfg.get("meeting_hotkey", "")             # macOS / Linux register through pynput
+        else:
+            mk = cfg.get("meeting_hotkey", "")
+        self._set_hint("meeting", hotkey_hint(mk))
 
     def refresh_privacy(self):
         a = self.actions["privacy"]
@@ -713,7 +815,7 @@ class TrayMenu(QObject):
         self.refresh_next()
 
     def on_setting_changed(self, key):
-        if key in ("hotkey", "live_assist_hotkey"):
+        if key in ("hotkey", "live_assist_hotkey", "meeting_hotkey"):
             self.refresh_hotkeys()
         elif key == "privacy_mode":
             self.refresh_privacy()
@@ -856,6 +958,9 @@ class TrayMenu(QObject):
 
     def upgrade(self):
         _call(self.app, "_pro_upsell")
+
+    def open_invite(self):
+        _call(self.app, "show_main", "invite")
 
     def sign_in(self):
         _call(self.app, "show_auth_gate")

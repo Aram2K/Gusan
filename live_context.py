@@ -387,7 +387,7 @@ def _hide_tip(key, mac, remote, supported, macos26):
                 "screen shares and recordings. Share a single window - your browser or "
                 "the document - to keep it out.")
     if sys.platform == "win32" and not supported:
-        return ("Hiding from screen shares needs Windows 10 (version 2004) or later. "
+        return ("Hiding from screen shares needs a newer version of Windows. "
                 "Assume it shows in a share.")
     return "Hiding from screen shares isn't available here. Assume it shows in a share."
 

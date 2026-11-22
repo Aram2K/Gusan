@@ -128,14 +128,14 @@ def paint(p, rect, letter, guest=False, value=None):
     p.setRenderHint(QPainter.SmoothPixmapTransform, True)
     if guest:
         g = QLinearGradient(r.topLeft(), r.bottomRight())
-        g.setColorAt(0, QColor("#e8eef6"))
-        g.setColorAt(1, QColor("#cbd5e1"))
+        g.setColorAt(0, theme.qcolor("guest-face-a"))
+        g.setColorAt(1, theme.qcolor("guest-face-b"))
         p.setPen(Qt.NoPen)
         p.setBrush(g)
         p.drawEllipse(r)
         isz = int(round(size * 0.58))
         p.drawPixmap(int(round(r.center().x() - isz / 2.0)), int(round(r.center().y() - isz / 2.0)),
-                     icons.pixmap("user", isz, "#475569", sw=1.9))
+                     icons.pixmap("user", isz, "guest-face-icon", sw=1.9))
         return
     value = normalize(value) if value is not None else choice()
     if value == PHOTO:
@@ -158,10 +158,10 @@ def paint(p, rect, letter, guest=False, value=None):
     p.drawEllipse(r)
     if picture:
         isz = max(8, int(round(size * 0.56)))
-        pm = icons.pixmap(picture, isz, "#ffffff", sw=2.0)
+        pm = icons.pixmap(picture, isz, "on-accent", sw=2.0)
         p.drawPixmap(int(round(r.center().x() - isz / 2.0)), int(round(r.center().y() - isz / 2.0)), pm)
         return
-    p.setPen(QColor("#ffffff"))
+    p.setPen(theme.qcolor("on-accent"))
     p.setFont(theme.font(max(6, int(size * 0.43)), 700))
     p.drawText(r, Qt.AlignCenter, (letter or "?")[:1].upper())
 

@@ -203,8 +203,12 @@ class TestCheckoutClient(unittest.TestCase):
 
 class TestServerSources(unittest.TestCase):
     def test_is_pro_does_not_grant_a_trial(self):
-        sql = (ROOT / "supabase/migrations/202610300001_gusan_pro_pricing.sql").read_text(encoding="utf-8")
-        start = sql.index("create or replace function public.is_pro()")
+        # The newest migration that redefines is_pro() is the live one.
+        marker = "create or replace function public.is_pro()"
+        newest = [p for p in sorted((ROOT / "supabase/migrations").glob("*.sql"))
+                  if marker in p.read_text(encoding="utf-8")][-1]
+        sql = newest.read_text(encoding="utf-8")
+        start = sql.index(marker)
         end = sql.index("revoke all on function public.is_pro()")
         body = sql[start:end]
         self.assertNotIn("trialing", body)
@@ -231,6 +235,32 @@ class TestServerSources(unittest.TestCase):
         self.assertIn("reserve_lifetime_spot", src)
         self.assertIn('mode: "payment"', src)
         self.assertIn('mode: "subscription"', src)
+
+    def test_promotion_codes_only_for_subscriptions(self):
+        # Event codes for monthly and yearly; the lifetime payment session never takes one.
+        src = (ROOT / "supabase/functions/create-checkout/index.ts").read_text(encoding="utf-8")
+        self.assertEqual(src.count("allow_promotion_codes"), 2)  # the header comment and the one setting
+        lifetime = src[src.index('mode: "payment"'):src.index('mode: "subscription"')]
+        subscription = src[src.index('mode: "subscription"'):]
+        self.assertNotIn("allow_promotion_codes", lifetime)
+        self.assertIn("allow_promotion_codes: true,", subscription)
+
+    def test_lifetime_only_when_paid_and_taken_back_on_refund_or_dispute(self):
+        src = (ROOT / "supabase/functions/stripe-webhook/index.ts").read_text(encoding="utf-8").replace("\r\n", "\n")
+        grant = src[src.index("async function grantLifetimeIfPaid"):]
+        self.assertIn('if (session.payment_status !== "paid") {', grant)
+        self.assertLess(grant.index('session.payment_status !== "paid"'), grant.index("await grantLifetime("))
+        for event in ("checkout.session.completed", "checkout.session.async_payment_succeeded",
+                      "checkout.session.async_payment_failed", "checkout.session.expired",
+                      "charge.refunded", "charge.dispute.created"):
+            self.assertIn(f'case "{event}"', src)
+        self.assertIn('case "checkout.session.expired":\n      case "checkout.session.async_payment_failed": {', src)
+        self.assertIn("if (charge.refunded) await revokeLifetime(", src)  # a full refund only
+        self.assertIn('supabase.rpc("revoke_lifetime_purchase"', src)
+        self.assertIn("stripe.checkout.sessions.list({ payment_intent: paymentIntent, limit: 1 })", src)
+        self.assertIn("p_payment_intent: paymentIntent,", src)
+        # The old grant-on-completed path without the payment check is gone.
+        self.assertNotIn("await grantLifetime(userId, session.id);", src)
 
     def test_webhook_handles_commitment_lifetime_and_old_prices(self):
         src = (ROOT / "supabase/functions/stripe-webhook/index.ts").read_text(encoding="utf-8")

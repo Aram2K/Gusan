@@ -18,7 +18,7 @@ import threading
 from collections import deque
 
 from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication, QIcon, QLinearGradient, QPainter
+from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication, QLinearGradient, QPainter
 from PySide6.QtWidgets import (QBoxLayout, QCheckBox, QComboBox, QFileDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout,
                                QLabel, QMenu, QPlainTextEdit, QProgressBar, QScrollArea,
                                QSizePolicy, QStackedWidget, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
@@ -30,11 +30,13 @@ from ui import privacy_prompt, theme
 from ui.components import clipboard as rich_clipboard
 from ui.components import (AudioPlayer, Button, Card, Chip, Divider, IconButton, Keycaps, PageHeader, ProTag,
                            Segmented, Toggle, icons, label, mini_prompt)
+from ui.components.page import ElidedTitle
 # The glyph kit moved to ui/components/glyphs.py so Home can draw it without this file; every name stays
 # importable from here (the Meetings page and the tests use them as ``views.<name>``).
 from ui.components.glyphs import (CALL_TONES, GoogleTile, _CACHE, _GLYPHS, _dpr, call_mark, call_name,  # noqa: F401
-                                  calendar_label, dot_label, dot_pixmap, glyph, google_label, google_pixmap, icon_label)
-from ui.pages import meeting_speakers_ui
+                                  calendar_label, dot_icon, dot_label, dot_pixmap, glyph, google_label, google_pixmap,
+                                  icon_label)
+from ui.pages import meeting_people_ui, meeting_speakers_ui
 
 logger = logging.getLogger("transcribe")
 
@@ -204,22 +206,24 @@ def write_latest(path, text, version):
 
 # ── the page's stylesheet (tokens only) ──────────────────────────────────────
 def page_qss():
+    """The Meetings page's own rules in the active look's colours (the page sets it with theme.sheet, so a
+    switch builds it again)."""
     c = theme.qss_color
     return f"""
 QFrame[gusan="whiteCard"][radius="20"] {{ border-radius: 20px; }}
 QFrame[gusan="whiteCard"][radius="16"] {{ border-radius: 16px; }}
 QFrame[gusan="soFar"] {{ background: {c('blue-sub')}; border: 1px solid {c('blue-line')}; border-radius: 16px; }}
-QFrame[gusan="banner"] {{ background: {c('amber-sub')}; border: 1px solid #fde68a; border-radius: 12px; }}
-QFrame[gusan="banner"][tone="red"] {{ background: {c('red-sub')}; border: 1px solid #fecaca; }}
+QFrame[gusan="banner"] {{ background: {c('amber-sub')}; border: 1px solid {c('amber-line')}; border-radius: 12px; }}
+QFrame[gusan="banner"][tone="red"] {{ background: {c('red-sub')}; border: 1px solid {c('red-line')}; }}
 QFrame[gusan="banner"][tone="blue"] {{ background: {c('blue-sub')}; border: 1px solid {c('blue-line')}; }}
 QFrame[gusan="banner"][tone="neutral"] {{ background: {c('bg2')}; border: 1px solid {c('line')}; }}
-QFrame[gusan="peopleField"] {{ background: #ffffff; border: 1px solid {c('line2')}; border-radius: 10px; }}
+QFrame[gusan="peopleField"] {{ background: {c('input')}; border: 1px solid {c('line2')}; border-radius: 10px; }}
 QFrame[gusan="peopleField"][focus="true"] {{ border: 1px solid {c('blue-l')}; }}
-QFrame[gusan="option"] {{ background: #ffffff; border: 1px solid {c('line')}; border-radius: 10px; }}
+QFrame[gusan="option"] {{ background: {c('surface')}; border: 1px solid {c('line')}; border-radius: 10px; }}
 QFrame[gusan="option"]:hover {{ border: 1px solid {c('line2')}; }}
 QFrame[gusan="upRow"] {{ background: transparent; border: 1px solid transparent; border-radius: 12px; }}
-QFrame[gusan="upRow"][next="true"] {{ background: #ffffff; border: 1px solid {c('line')}; }}
-QFrame[gusan="liveStrip"] {{ background: {c('red-sub')}; border: 1px solid #fecaca; border-radius: 12px; }}
+QFrame[gusan="upRow"][next="true"] {{ background: {c('surface')}; border: 1px solid {c('line')}; }}
+QFrame[gusan="liveStrip"] {{ background: {c('red-sub')}; border: 1px solid {c('red-line')}; border-radius: 12px; }}
 QFrame[gusan="liveStrip"][tone="blue"] {{ background: {c('blue-sub')}; border: 1px solid {c('blue-line')}; }}
 QLineEdit[gusan="bare"] {{ background: transparent; border: none; padding: 0px; }}
 QLineEdit[gusan="titleEdit"] {{
@@ -241,23 +245,23 @@ QLabel[gusan="moreChip"] {{
     background: {c('bg2')}; border: 1px solid {c('line')}; border-radius: 13px; color: {c('text2')};
     padding: 0px 8px;
 }}
-QToolButton[gusan="bell"] {{ background: #ffffff; border: 1px solid {c('line2')}; border-radius: 9px; }}
+QToolButton[gusan="bell"] {{ background: {c('surface')}; border: 1px solid {c('line2')}; border-radius: 9px; }}
 QToolButton[gusan="bell"]:checked {{ background: {c('blue-sub')}; border: 1px solid {c('blue-line')}; }}
 QToolButton[gusan="bell"]:hover {{ border: 1px solid {c('blue-l')}; }}
 QToolButton[gusan="bell"][focusVisible="true"] {{ border: 2px solid {c('blue-l')}; }}
 QPushButton[gusan="btn"][hero="true"] {{
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {c('blue-l')}, stop:1 {c('pro-l')});
-    border: 1px solid transparent; color: #ffffff; padding: 0px 22px;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {c('hero-a')}, stop:1 {c('hero-b')});
+    border: 1px solid transparent; color: {c('on-accent')}; padding: 0px 22px;
 }}
 QPushButton[gusan="btn"][hero="true"]:hover {{
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {c('blue')}, stop:1 {c('pro')});
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {c('hero-ha')}, stop:1 {c('hero-hb')});
 }}
-QPushButton[gusan="btn"][hero="true"][focusVisible="true"] {{ border: 2px solid #93c5fd; }}
+QPushButton[gusan="btn"][hero="true"][focusVisible="true"] {{ border: 2px solid {c('focus')}; }}
 QPushButton[gusan="btn"][kind="link"][tone="muted"] {{ color: {c('text2')}; }}
 QPushButton[gusan="btn"][kind="link"][tone="muted"]:hover {{ color: {c('ink')}; }}
 QPushButton[gusan="btn"][kind="secondary"][open="true"] {{ background: {c('bg2')}; border: 1px solid {c('blue-line')}; }}
 QMenu[gusan="menu"] {{
-    background: #ffffff; border: 1px solid {c('line')}; border-radius: 12px; padding: 6px;
+    background: {c('popup')}; border: 1px solid {c('line')}; border-radius: 12px; padding: 6px;
 }}
 QMenu[gusan="menu"]::item {{
     padding: 8px 14px 8px 10px; border-radius: 8px; color: {c('text')}; background: transparent;
@@ -356,7 +360,11 @@ def with_line_height(html, px):
 
 # ── faces ── (the glyph kit - glyph, dots, the Google G, call marks - is ui/components/glyphs.py)
 FACE_TONES = (("blue-sub", "blue-tx"), ("ok-sub", "ok-tx"), ("line", "text2"), ("pro-sub", "pro-tx"),
-              ("#fce7f3", "#be185d"), ("amber-sub", "amber-tx"))
+              ("pink-sub", "pink-tx"), ("amber-sub", "amber-tx"))
+
+
+# The user's own face: the sidebar avatar's blue gradient (its top colour; the bottom is the "blue" token).
+ME_GRADIENT_TOP = "#60a5fa"
 
 
 def face_tone(name):
@@ -400,16 +408,16 @@ class Faces(QWidget):
             outer = QRectF(x, 0, s, s)
             inner = outer.adjusted(2, 2, -2, -2)
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor("#ffffff"))
+            p.setBrush(theme.qcolor("surface"))           # the ring: the card under the faces
             p.drawEllipse(outer)
             first = name.strip().split()[0].lower() if name.strip() else ""
             if self._me and first == self._me:
                 g = QLinearGradient(inner.topLeft(), inner.bottomRight())
-                g.setColorAt(0, QColor("#60a5fa"))
+                g.setColorAt(0, QColor(ME_GRADIENT_TOP))       # the sidebar avatar's own gradient
                 g.setColorAt(1, theme.qcolor("blue"))
                 p.setBrush(g)
                 p.drawEllipse(inner)
-                fg = QColor("#ffffff")
+                fg = theme.qcolor("on-accent")
             else:
                 bg, fg_name = face_tone(name)
                 p.setBrush(theme.qcolor(bg))
@@ -604,7 +612,7 @@ class _Fade(QWidget):
     def paintEvent(self, _e):
         p = QPainter(self)
         g = QLinearGradient(0, 0, 0, self.height())
-        top = theme.qcolor("#fcfdfe")
+        top = theme.qcolor("glass-solid")
         g.setColorAt(0, top)
         end = QColor(top)
         end.setAlpha(0)
@@ -672,6 +680,7 @@ class TranscriptPane(Card):
         bar.rangeChanged.connect(self._on_range)
         bar.valueChanged.connect(lambda _v: self._apply_fade())
         self._follow = True
+        theme.on_change(self, self._recolour)
 
     def eventFilter(self, obj, ev):
         if obj is self.scroll.viewport() and ev.type() == QEvent.Resize:
@@ -850,6 +859,22 @@ class TranscriptPane(Card):
                 who_lb.setStyleSheet("color: %s;" % _alpha_qss("blue-tx" if who == "You" else "muted", 1.0))
 
 
+    def _recolour(self):
+        """The look changed: every line's colour again (each is set on the line, with the fade's alpha)."""
+        bar = self.scroll.verticalScrollBar()
+        follow = bar.value() >= bar.maximum() - 4
+        n = len(self._lines)
+        start = max(0, n - (self.FULL + len(self.FADE) + 2))
+        for i in range(0, start):
+            _row, who_lb, t, who = self._lines[i]
+            alpha = self.FADE[-1] if follow else 1.0
+            t.setProperty("faded", bool(follow))
+            t.setStyleSheet("color: %s;" % _alpha_qss("ink", alpha))
+            who_lb.setStyleSheet("color: %s;" % _alpha_qss("blue-tx" if who == "You" and not follow else "muted",
+                                                            alpha))
+        self._apply_fade()
+
+
 def _alpha_qss(token, alpha):
     c = theme.qcolor(token)
     return "rgba(%d, %d, %d, %d)" % (c.red(), c.green(), c.blue(), int(round(255 * alpha)))
@@ -930,7 +955,7 @@ class LiveView(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        self.header = PageHeader("Meeting", "", parent=self)
+        self.header = PageHeader("Meeting", "", parent=self, elide_title=True)     # (a long name ends in "…")
         root.addWidget(self.header)
         body = QVBoxLayout()
         body.setContentsMargins(32, 0, 32, 28)
@@ -1495,6 +1520,7 @@ class ActionItem(QWidget):
         lay.addWidget(self.due_label, 0, Qt.AlignVCenter)
         self.box.toggled.connect(self._on_toggle)
         self._render()
+        theme.on_change(self, self._render)
 
     def _owner_names(self):
         return [n.strip() for n in (self.owner or "").split(", ") if n.strip()]
@@ -1663,6 +1689,7 @@ class NotesView(QWidget):
         self._notion_settings.connect(self._save_notion_settings)
         self.folder = None
         self.data = {}
+        theme.on_change(self, self._on_theme)
         self._keep_view = None          # (tab, notes scroll, transcript scroll) a reload puts back
         self._bg = BgRunner(self)
         self._load_token = 0
@@ -1848,8 +1875,9 @@ class NotesView(QWidget):
         self.note_label.hide()
         top.addWidget(self.note_label, 1000, Qt.AlignVCenter)
         lay.addLayout(top)
-        self.title_label = label("", "title", w)
-        self.title_label.setTextFormat(Qt.PlainText)    # a calendar invite's title is text, never markup
+        # A long name (a calendar invite's) shows its beginning and ends in "…" - the whole name in the tooltip -
+        # instead of widening the page past the window (the toolbar's right end went with it).
+        self.title_label = ElidedTitle("", "title", w)      # (plain text: a calendar invite's title is never markup)
         self.title_label.setFixedHeight(34)
         lay.addWidget(self.title_label)
         self._meta = QHBoxLayout()
@@ -1898,7 +1926,7 @@ class NotesView(QWidget):
         self.export_btn.clicked.connect(self._show_export)
         bar.addWidget(self.export_btn)
         self.continue_btn = Button("Continue recording", "secondary", "m", parent=self, trail=ProTag("s"))
-        self.continue_btn.setIcon(QIcon(dot_pixmap("red", 8)))
+        self.continue_btn.setIcon(dot_icon("red", 8))
         self.continue_btn.setIconSize(QSize(8, 8))
         self.continue_btn.setAccessibleName("Continue recording, Pro feature")
         self.continue_btn.clicked.connect(self.continue_recording)
@@ -2009,6 +2037,12 @@ class NotesView(QWidget):
                 pass                              # the window went away meanwhile
         put()
         QTimer.singleShot(0, put)
+
+    def _on_theme(self):
+        """The look changed: the notes and the transcript carry their colours in rich text - drawn again, the
+        reader keeps the place."""
+        if self.data.get("folder"):
+            self.render_keeping_view()
 
     def render_keeping_view(self):
         """render() for a change that is not a new meeting (a banner came or went):
@@ -2121,8 +2155,9 @@ class NotesView(QWidget):
             # No notes: the saved transcript is still worth reading right here,
             # in readable paragraphs (D10).
             text2 = theme.qss_color("text2")
-            blocks = [("head", "Transcript")] + [("html", transcript_row_html(row, text2))
-                                                 for row in transcript_rows(d["transcript"])[:400]]
+            labels, shown = self.speaker_view()
+            blocks = [("head", "Transcript")] + [("html", transcript_row_html(row, text2, shown))
+                                                 for row in transcript_rows(d["transcript"], labels)[:400]]
         self.doc.render(notes, banner=banner, notices=notices, blocks=blocks,
                         written_by=written_by_row(meta.get("notes_engine_label")) if notes.strip() else None)
         for task in self.doc.tasks:
@@ -2162,20 +2197,28 @@ class NotesView(QWidget):
             return True
 
     def _render_people(self, people):
-        """The People card: everybody the meeting has, the user's own row ("You") last when the people do not already hold
-        them. A name read off the call's screen (meta ``attendees_screen``) has a quiet remove control."""
+        """The People card: the meeting's speakers - the voices its transcript tells apart, with how much each spoke and
+        a rename (meeting_people_ui) - then everybody the meeting has, the user's own row ("You") last when the people
+        do not already hold them (and the speakers do not show them). A name read off the call's screen (meta
+        ``attendees_screen``) has a quiet remove control."""
         clear_layout(self._people)
         me = self.page.me()
-        rows = [p for p in people if str(p).strip()]
-        if me and not any(p.split()[0].lower() == me.lower() for p in rows):
+        shown = meeting_people_ui.add_speakers(self, self._people)        # (the speakers, when there are any)
+        rows = [p for p in people if str(p).strip() and not meeting_people_ui.is_a_speaker(p, shown)]
+        if me and not shown.get("you") and not any(p.split()[0].lower() == me.lower() for p in rows):
             rows.append(me)
         from people_from_screen import first_key
         screen = {first_key(n) for n in ((self.data or {}).get("screen_people") or [])}
+        if rows and shown.get("any"):                    # both parts: each says what it is (one alone needs no word)
+            self._people.insertWidget(0, meeting_people_ui.section_title(meeting_people_ui.SECTION_SPEAKERS,
+                                                                         self.people_card))
+            self._people.addWidget(meeting_people_ui.section_title(meeting_people_ui.SECTION_ATTENDEES,
+                                                                   self.people_card))
         for name in rows:
             row = PersonRow(name, me=me, removable=first_key(name) in screen, parent=self.people_card)
             row.remove_requested.connect(self._remove_person)
             self._people.addWidget(row)
-        self.people_card.setVisible(bool(rows))
+        self.people_card.setVisible(bool(rows) or bool(shown.get("any")))
 
     def _remove_person(self, name):
         """The x on a person read off the screen: it leaves the meeting's people for good - the notes written again
@@ -2301,8 +2344,18 @@ class NotesView(QWidget):
         self._fill_translation()
 
     def _draw_transcript(self):
-        text = (self.data or {}).get("transcript") or ""
-        self.transcript.setHtml(transcript_html(text, self._tr["lines"] if self.shows_translation() else None))
+        self.transcript.setHtml(self.transcript_markup(self._tr["lines"] if self.shows_translation() else None))
+
+    def speaker_view(self):
+        """(labels, shown) of the meeting shown: its speakers' labels as transcript.txt writes them, and how the page
+        writes each ("You" is the user's first name with "(You)")."""
+        smap = meeting_people_ui.speaker_map_of(self.data)
+        return list(smap.raw_labels), smap.shown(self.page.me())
+
+    def transcript_markup(self, translated=None):
+        """The Transcript tab's rich text for the meeting shown (transcript_html with its speakers)."""
+        labels, shown = self.speaker_view()
+        return transcript_html((self.data or {}).get("transcript") or "", translated, labels, shown)
 
     def _fill_translation(self):
         """Shown in the caption language with paragraphs still as spoken (the transcript was rewritten with the
@@ -2311,7 +2364,7 @@ class NotesView(QWidget):
             return
         import meeting_translation
         text = (self.data or {}).get("transcript") or ""
-        if all(p in self._tr["lines"] for p in meeting_translation.paragraphs(text)):
+        if all(p in self._tr["lines"] for p in meeting_translation.paragraphs(text, self.speaker_view()[0])):
             return
         self._tr_asked = True
         try:
@@ -2384,7 +2437,7 @@ class NotesView(QWidget):
                 return
             if not path.lower().endswith(".docx"):
                 path += ".docx"
-            paras = word_paragraphs(d.get("notes") or "", d.get("transcript") or "")
+            paras = word_paragraphs(d.get("notes") or "", d.get("transcript") or "", self.speaker_view()[0])
             meta_line = self._meta_line()
 
             def work():
@@ -2703,45 +2756,51 @@ def read_meeting(folder):
     can_name_call = bool(meeting_speakers.refinable(folder)) if "Them:" in transcript else False
     # "title" is the stored one (the rename box, exports); render() shows the list's name for it.
     title = str(meta.get("title") or "Untitled Meeting")
+    import speaker_map
     return {"folder": str(folder), "meta": meta, "title": title,
             "notes": notes, "transcript": transcript, "my_notes": my_notes, "parts": parts,
             "people": list(people), "screen_people": meeting_store.screen_people(meta),
             "started": started, "duration_sec": duration,
             "recording_cut_short": cut_short, "can_name_call": can_name_call,
-            "transcript_file": meeting_store.has_transcript_file(folder)}      # (else only the live pieces are there)
+            "transcript_file": meeting_store.has_transcript_file(folder),    # (else only the live pieces are there)
+            "speaker_map": speaker_map.from_text(transcript, meta)}          # who spoke: ids, names, shares
 
 
 _SPK_RE = rich_text.SPEAKER_RE          # "Speaker 1: …", "You: …", "Anna: …"
 
 
-def transcript_rows(text):
+def transcript_rows(text, labels=None):
     """The saved transcript as readable paragraphs (D10), done when it is
     shown, so old meetings read well too: [(label, body, marker)]. A long line
     (a whole meeting is often one line) is packed by sentences up to ~550
     characters (rich_text.transcript_paragraphs); ``label`` is the speaker on
     the first paragraph of a turn ("" on the rest); ``marker`` is True for a
-    '— Resumed at 11:20 —' line."""
+    '— Resumed at 11:20 —' line. ``labels``: the meeting's speaker labels
+    (speaker_map - a renamed speaker's name is a label whatever it looks like)."""
     import meeting_translation
-    return meeting_translation.rows(text)       # (one reading of the transcript: its translation is kept by these rows)
+    return meeting_translation.rows(text, labels)   # (one reading of the transcript: its translation is kept by these rows)
 
 
-def transcript_row_html(row, label_color=None):
-    """One transcript_rows() row as rich text: the speaker bold, a marker in italics."""
+def transcript_row_html(row, label_color=None, shown=None):
+    """One transcript_rows() row as rich text: the speaker bold, a marker in italics. ``shown``: {label: how the
+    page writes it} ("You" -> "Aram (You)")."""
     label, body, marker = row
     if marker:
         return "<i>%s</i>" % html_mod.escape(body)
     if label:
         style = " style='color:%s'" % label_color if label_color else ""
+        label = (shown or {}).get(label) or label
         return "<b%s>%s</b>&nbsp; %s" % (style, html_mod.escape(label), html_mod.escape(body))
     return html_mod.escape(body)
 
 
-def transcript_html(text, translated=None):
+def transcript_html(text, translated=None, labels=None, shown=None):
     """The saved transcript: speaker names bold, readable paragraphs (D10). ``translated`` ({paragraph as spoken:
-    its translation}, meeting_translation): each paragraph in that language, as spoken where it has none."""
+    its translation}, meeting_translation): each paragraph in that language, as spoken where it has none.
+    ``labels`` / ``shown``: the meeting's speakers (transcript_rows, transcript_row_html)."""
     ink, muted, text2 = theme.qss_color("ink"), theme.qss_color("muted"), theme.qss_color("text2")
     rows = []
-    for row in transcript_rows(text):
+    for row in transcript_rows(text, labels):
         if translated and not row[2]:
             row = (row[0], translated.get(row[1]) or row[1], row[2])
         if row[2]:
@@ -2749,19 +2808,19 @@ def transcript_html(text, translated=None):
                         % (muted, html_mod.escape(row[1])))
         else:
             rows.append("<p style='margin:0 0 10px 0; line-height:23px; color:%s'>%s</p>"
-                        % (ink, transcript_row_html(row, text2)))
+                        % (ink, transcript_row_html(row, text2, shown)))
     if not rows:
         rows.append("<p style='color:%s'>No transcript for this meeting.</p>" % muted)
     return "<div>%s</div>" % "".join(rows)
 
 
-def word_paragraphs(notes, transcript=""):
+def word_paragraphs(notes, transcript="", labels=None):
     """The Word export's paragraphs (docx_export.build_docx): the notes as
     styled blocks (bold headings, • / ☐ items, **bold** runs), then
     "Transcript" and its readable paragraphs with the speaker in bold."""
     import docx_export
     paras = docx_export.notes_paragraphs(notes or "")
-    rows = transcript_rows(transcript)
+    rows = transcript_rows(transcript, labels)
     if rows:
         paras.append({"style": "heading", "text": "Transcript"})
         for label, body, marker in rows:

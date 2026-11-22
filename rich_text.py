@@ -1006,10 +1006,27 @@ def match_label(line):
     return None
 
 
-def split_speaker(line):
-    """'Speaker 1: Hello' -> ('Speaker 1', 'Hello'); ('', line) without a label."""
-    m = match_label((line or "").strip())
-    return (m.group(1), m.group(2)) if m else ("", (line or "").strip())
+def known_label(line, labels):
+    """The longest of ``labels`` (the speakers a meeting knows: speaker_map) that ``line`` starts with, followed by its
+    colon - "" when none. Any name is a label this way, whatever its case, script or length."""
+    best = ""
+    for lab in labels or ():
+        lab = str(lab or "")
+        n = len(lab)
+        if n > len(best) and line.startswith(lab) and line[n:n + 1] == ":" and (len(line) == n + 1 or line[n + 1].isspace()):
+            best = lab
+    return best
+
+
+def split_speaker(line, labels=None):
+    """'Speaker 1: Hello' -> ('Speaker 1', 'Hello'); ('', line) without a label. ``labels``: the meeting's own speaker
+    labels (speaker_map) - looked for first, so "anna-maria lópez: hi" is a label too; then the pattern."""
+    s = (line or "").strip()
+    lab = known_label(s, labels) if labels else ""
+    if lab:
+        return lab, s[len(lab) + 1:].strip()
+    m = match_label(s)
+    return (m.group(1), m.group(2)) if m else ("", s)
 
 
 def _sentences(text):
@@ -1065,11 +1082,12 @@ def _pack(text, max_chars):
     return [p.strip() for p in paras if p.strip()]
 
 
-def transcript_paragraphs(text, max_chars=550):
+def transcript_paragraphs(text, max_chars=550, labels=None):
     """A transcript as readable paragraphs: each line is packed by sentences
     up to ``max_chars``; a "Speaker N:" / "Name:" label stays on the first
     paragraph of its turn; "— marker —" lines and short lines stay as they
-    are (stripped). Blank lines are dropped."""
+    are (stripped). Blank lines are dropped. ``labels``: the meeting's own
+    speaker labels (split_speaker)."""
     max_chars = max(40, int(max_chars or 550))
     out = []
     for line in (text or "").splitlines():
@@ -1079,8 +1097,12 @@ def transcript_paragraphs(text, max_chars=550):
         if len(s) <= max_chars or is_marker(s):
             out.append(s)
             continue
-        m = match_label(s)
-        if m:
+        lab = known_label(s, labels) if labels else ""
+        m = None if lab else match_label(s)
+        if lab:
+            body = s[len(lab) + 1:].lstrip()
+            prefix = s[:len(s) - len(body)]
+        elif m:
             prefix, body = s[:m.start(2)], m.group(2)
         else:
             prefix, body = "", s

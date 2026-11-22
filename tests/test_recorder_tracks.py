@@ -761,24 +761,39 @@ class TestRecorderWithFakeStreams(unittest.TestCase):
         self.assertLess(len(mic_pcm), len(mic))               # the paused stretch is missing from both
         self.assertEqual(len(out.get_full_audio()), len(mic_pcm))
 
-    def test_a_microphone_that_dies_mid_meeting_ends_the_take_with_consistent_tracks(self):
-        """The mic is the loop's clock: when its reads start failing the take ends
-        with the device error - and the two tracks, the mix and the counters all
-        cover exactly the same samples (nothing half-written)."""
-        np = self.np
+    def test_a_microphone_that_dies_mid_meeting_no_longer_ends_the_take(self):
+        """Gusan 2.1.11 (audio_follow): the mic is the loop's clock, and when its reads
+        start failing the meeting goes on - the microphone keeps time with silence, the
+        call's sound is still recorded - and the two tracks, the mix and the counters
+        all cover exactly the same samples (nothing half-written). Before, the take
+        ended with the device error and the call was lost with it."""
+        np, rec = self.np, self.rec
         mic, call = self._call_meeting_signals()
 
         def hook(i):
             if i >= 90:                                   # ~5.8 s in: the headset is unplugged
                 raise OSError("Stream closed")
-        rec = self._run(mic, call, capture_mode="smart_meeting", mic_hook=hook)
-        self.assertTrue(rec._record_error.startswith("!audio"), rec._record_error)
+        loop = _FakeStream(call, np, per_call=FRAME, wasapi=True)
+        mic_stream = _FakeStream(mic, np, hook=hook)
+        rec.audio = _FakeAudio([loop, mic_stream])
+        rec._find_default_loopback_device = lambda: 5
+        rec.start_recording(capture_mode="smart_meeting")
+        # the call plays on to its end with the mic gone, then the meeting is stopped
+        self.assertTrue(_wait(lambda: loop.pos >= len(call), timeout=30))
+        rec.stop_requested = True
+        rec._record_thread.join(30)
+        self.assertFalse(rec._record_thread.is_alive())
+        rec.stop_recording()
+        self.assertEqual(rec._record_error, "")
         mic_pcm, sys_pcm = rec.get_full_audio_tracks()
         self.assertEqual(len(mic_pcm), len(sys_pcm))
         self.assertEqual(len(mic_pcm), rec._full_audio_len)
         self.assertEqual(len(rec.get_full_audio()), len(mic_pcm))
-        self.assertGreater(len(mic_pcm), 80 * FRAME)
-        self.assertLess(len(mic_pcm), 100 * FRAME)
+        self.assertGreater(len(mic_pcm), 130 * FRAME)          # past the 90 reads the mic lived
+        got_sys = rt.to_float32(sys_pcm)
+        got_mic = rt.to_float32(mic_pcm)
+        self.assertGreater(float(np.abs(got_sys[95 * FRAME:]).max()), 0.2)     # the call after the loss
+        self.assertEqual(float(np.abs(got_mic[95 * FRAME:]).max()), 0.0)       # the mic is silence there
 
     def test_a_second_stream_that_will_not_open_falls_back_to_the_call_alone(self):
         """Mic + system sound, but the microphone cannot be opened: the take goes on

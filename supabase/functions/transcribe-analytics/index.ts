@@ -79,6 +79,10 @@ const allowedEvents = new Set([
   'calendar_disconnected',
   'calendar_reminder_action',
   'calendar_meeting_started',
+  'invite_page_opened',
+  'invite_link_shared',
+  'invite_joined',
+  'invite_reward_claimed',
 ])
 
 const sensitiveKeys = new Set([

@@ -108,7 +108,7 @@ from ui import live_docs_ui, theme
 from ui.components import (Button, Card, Chip, IconButton, PageHeader, ProTag, Segmented,
                            SettingRow, SettingsRail, Toggle, icons, label, row_actions)
 from ui.components.controls import keycap_labels
-from ui.components.hotkey_capture import HotkeyCaptureButton
+from ui.components.hotkey_capture import HotkeyCaptureButton, ShortcutField  # noqa: F401
 from ui.pages import live_demo, meeting_delete
 import live_rules
 from ui.pages.live_documents import ContextCard
@@ -122,6 +122,7 @@ UPSELL = "Live Assistance"                  # the Pro window's feature name
 SHORTCUT_REFUSED = "Couldn't use %s."             # one line under the keys
 SHORTCUT_IS_DICTATION = "Dictation uses %s."
 SHORTCUT_IS_SMART = "%s runs Smart Actions. Pick another."
+SHORTCUT_IS_MEETING = "%s records a meeting. Pick another."
 PRO_USES_CLOUD = "Gusan Cloud answers while you have Pro."
 PRIVACY_KEEPS_LOCAL = "Privacy mode keeps answers on this computer."
 # The one word of the status badge. "unavailable" and "failed" cannot hide the
@@ -373,6 +374,7 @@ def _fallback_status(wanted):
 
 
 # ── hero pieces ─────────────────────────────────────────────────────────────
+# The brand's blue-to-violet button: the same in both looks.
 _HERO_QSS = """
 QPushButton {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3b82f6, stop:1 #8b5cf6);
@@ -412,9 +414,9 @@ class MidKeycaps(QWidget):
                 w.hide()
                 w.deleteLater()
         self.keys = keycap_labels(hotkey)
-        cap_qss = ("QLabel { background: #ffffff; color: %s; border: 1px solid %s; border-bottom: 3px solid %s; "
-                   "border-radius: 9px; padding: 0px 11px; }"
-                   % (theme.qss_color("ink"), theme.qss_color("line2"), theme.qss_color("line2")))
+        cap_qss = ("QLabel { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 @kbd-a, stop:1 @kbd-b); "
+                   "color: @ink; border: 1px solid @line2; border-bottom: 3px solid @line2; "
+                   "border-radius: 9px; padding: 0px 11px; }")
         for i, k in enumerate(self.keys):
             if i:
                 plus = QLabel("+", self)
@@ -425,7 +427,7 @@ class MidKeycaps(QWidget):
             cap = QLabel(k, self)
             cap.setAlignment(Qt.AlignCenter)
             cap.setFont(theme.font(16, 700, display=True))
-            cap.setStyleSheet(cap_qss)
+            theme.sheet(cap, cap_qss)
             cap.setFixedHeight(40)
             cap.setMinimumWidth(40)
             theme.elevate(cap, "card")
@@ -451,8 +453,10 @@ class HideChip(Chip):
         self._pic = QLabel(self)
         self.layout().insertWidget(0, self._pic)
         self.set_state("Hidden", "ok", "incognito", "Hidden on screen share", "")
+        theme.on_change(self, lambda: self.set_state(*self._state))
 
     def set_state(self, word, tone, icon, name, tip):
+        self._state = (word, tone, icon, name, tip)
         self.setText(word)
         if self.property("tone") != tone:
             self.setProperty("tone", tone)
@@ -496,9 +500,60 @@ STEP, BIG_STEP = 0.05, 0.20   # arrow keys / Page Up, Page Down
 REST_STATIC = 0.62          # where the line waits when it never moves by itself (animations off): the card is cut, both sides show
 SCALE_STEPS = 64            # the painter scale snaps down to 1/64: dragging the window edge rebuilds the cached images ~25 times, not every pixel
 
+# The rail's Card look: Auto wears Gusan's own look (light or dark, Settings > Appearance), the others pin one.
+CARD_LOOKS = (("system", "Auto"), ("light", "Light"), ("dark", "Dark"))
+CARD_LOOK_TIP = "Auto: the card is light or dark with Gusan. Light and Dark keep it so."
+
+
+def _look_index(name):
+    values = [v for v, _t in CARD_LOOKS]
+    return values.index(name) if name in values else 0
+
+
 ANSWER_HTML = live_demo.ANSWER_HTML          # the card's example answer (the card itself: ui/pages/live_demo.py)
+# The people on the call: avatar colours (an identity, the same in both looks).
 _FACES_YOU = (("#60a5fa", "#2563eb"),)
 _FACES_THEM = (("A", "#f472b6", "#db2777"), ("D", "#94a3b8", "#475569"), ("M", "#fbbf24", "#d97706"))
+
+# The picture's own colours per look of the app: the monitor, the slide on it (a picture of somebody's
+# screen - drawn dark in the dark look, so it does not glare out of the page), its banners, the line and
+# its handle, and the soft shadows.
+_PICTURE = {
+    "light": {
+        "shadow": "rgba(15,23,42,0.12)", "bezel": "#0f172a", "neck": ("#334155", "#475569"), "foot": "#475569",
+        "slide": "#ffffff", "slide_ink": "#0f172a",
+        "lines": ("#bfdbfe", "#e2e8f0", "#e2e8f0", "#e2e8f0"), "axis": "#cbd5e1",
+        "bars": ("#cbd5e1", "#93c5fd", "#60a5fa", "#2563eb"), "grid": "#f1f5f9", "row_label": "#e2e8f0",
+        "rows": ("#dbeafe", "#bfdbfe", "#e2e8f0", "#e2e8f0", "#ddd6fe"),
+        "banner": QColor(15, 23, 42, 204), "banner_ink": "#ffffff", "rec": "#ef4444",
+        "ring": "#eef2f8", "face_ink": "#ffffff",
+        "handle_shadow": "rgba(15,23,42,0.35)", "handle": "#ffffff", "handle_edge": QColor(15, 23, 42, 46),
+        "handle_ink": "#0f172a", "line_glow": QColor(255, 255, 255, 215), "line": "#0f172a",
+        "focus": QColor(37, 99, 235, 150), "card_shadow": "rgba(2,6,23,0.30)",
+    },
+    "dark": {
+        "shadow": "rgba(0,0,0,0.45)", "bezel": "#2a313c", "neck": ("#323b49", "#3d4757"), "foot": "#3d4757",
+        "slide": "#161b23", "slide_ink": "#e8edf4",
+        "lines": ("#1e3a5f", "#2a323e", "#2a323e", "#2a323e"), "axis": "#3a4453",
+        "bars": ("#3a4453", "#1e40af", "#2563eb", "#60a5fa"), "grid": "#1f2630", "row_label": "#2a323e",
+        "rows": ("#1c2b45", "#1e3a5f", "#2a323e", "#2a323e", "#2e2650"),
+        "banner": QColor(42, 49, 60, 235), "banner_ink": "#ffffff", "rec": "#ef4444",
+        "ring": "#121721", "face_ink": "#ffffff",
+        "handle_shadow": "rgba(0,0,0,0.55)", "handle": "#e8edf4", "handle_edge": QColor(0, 0, 0, 80),
+        "handle_ink": "#0f172a", "line_glow": QColor(0, 0, 0, 150), "line": "#e8edf4",
+        "focus": QColor(96, 165, 250, 170), "card_shadow": "rgba(0,0,0,0.45)",
+    },
+}
+
+
+def _pic():
+    """The picture's colours in the app's look now."""
+    return _PICTURE["dark" if theme.is_dark() else "light"]
+
+
+def _card_look_of(name):
+    """The card look a live_assist_theme value shows: its pin, or the app's ("system")."""
+    return name if name in ("light", "dark") else theme.scheme()
 
 
 _SHADOWS = {}
@@ -585,7 +640,8 @@ class ScreensPicture(QWidget):
         self._initial = "Y"
         self._owner = ""
         self._status = _fallback_status(True)
-        self._card_look = "light"    # the card's look, as the page's Card look says (light | dark)
+        self._card_look = "system"   # the page's Card look (system | light | dark); card_look() is what it shows
+        theme.on_change(self, self._on_app_look)
         self._split = STOP_YOU
         self._hover = False          # the pointer is over the glass
         self._dragging = False
@@ -622,9 +678,9 @@ class ScreensPicture(QWidget):
         self.update()
 
     def set_card_look(self, name):
-        """The card's look, "light" or "dark" (the page's Card look): the picture's card wears it too.
-        Anything else is the light one. The line stays where it is."""
-        name = name if name in live_demo.PALETTES else "light"
+        """The card's look as the page's Card look says: "system" (the app's own), "light" or "dark".
+        The picture's card wears it too; anything else is "system". The line stays where it is."""
+        name = name if name in ("system", "light", "dark") else "system"
         if name == self._card_look:
             return
         self._card_look = name
@@ -633,7 +689,14 @@ class ScreensPicture(QWidget):
         self.update()
 
     def card_look(self):
-        return self._card_look
+        """The look the picture's card shows now: "light" or "dark"."""
+        return _card_look_of(self._card_look)
+
+    def _on_app_look(self):
+        """The app turned light or dark: the monitor, the slide and a "system" card are drawn again."""
+        self._cache.clear()
+        self._cache_key = None
+        self.update()
 
     def owner_banner(self):
         return "%s’s screen" % self._owner if self._owner else "Shared screen"
@@ -934,7 +997,8 @@ class ScreensPicture(QWidget):
 
     def _ensure_cache(self, s, dpr):
         key = (round(s, 4), round(dpr, 3), getattr(self._status, "key", "on"),
-               STATUS_WORDS.get(getattr(self._status, "key", "on"), STATUS_WORD_DEFAULT), self._owner, self._initial)
+               STATUS_WORDS.get(getattr(self._status, "key", "on"), STATUS_WORD_DEFAULT), self._owner, self._initial,
+               theme.scheme(), self.card_look())
         if key == self._cache_key and self._cache:
             return
         self._cache_key = key
@@ -967,17 +1031,18 @@ class ScreensPicture(QWidget):
         p = QPainter(pm)
         p.setRenderHint(QPainter.Antialiasing, True)
         face = QRectF(0, 0, SCREEN_W, SCREEN_H)
-        _soft_shadow(p, face, 12, 8, 30, "rgba(15,23,42,0.12)")        # var(--shadow-lg), kept inside
+        c = _pic()
+        _soft_shadow(p, face, 12, 8, 30, c["shadow"])        # var(--shadow-lg), kept inside
         p.setPen(Qt.NoPen)
-        p.setBrush(theme.qcolor("ink"))
+        p.setBrush(QColor(c["bezel"]))
         p.drawRoundedRect(face, 12, 12)
         cx = SCREEN_W / 2.0
         neck = QRectF(cx - 17, SCREEN_H, 34, 10)
         g = QLinearGradient(neck.topLeft(), neck.bottomLeft())
-        g.setColorAt(0, QColor("#334155"))
-        g.setColorAt(1, QColor("#475569"))
+        g.setColorAt(0, QColor(c["neck"][0]))
+        g.setColorAt(1, QColor(c["neck"][1]))
         p.fillRect(neck, g)
-        p.setBrush(QColor("#475569"))
+        p.setBrush(QColor(c["foot"]))
         p.drawRoundedRect(QRectF(cx - 46, SCREEN_H + 10, 92, 5), 2.5, 2.5)
         p.end()
         return pm
@@ -994,7 +1059,7 @@ class ScreensPicture(QWidget):
         p.setClipPath(clip)
         p.scale(K, K)
         inner = QRectF(0, 0, INNER_W, INNER_H)
-        p.fillRect(inner, QColor("#ffffff"))
+        p.fillRect(inner, QColor(_pic()["slide"]))
         self._slide(p, inner)
         if you:
             self._banner(p, inner, "Sharing", dot=True, right=False)
@@ -1013,7 +1078,7 @@ class ScreensPicture(QWidget):
         r = QRectF(x, 0, 22, 22)
         if ring:
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor("#eef2f8"))
+            p.setBrush(QColor(_pic()["ring"]))
             p.drawEllipse(r.adjusted(-2, -2, 2, 2))
         g = QLinearGradient(r.topLeft(), r.bottomRight())
         g.setColorAt(0, QColor(a))
@@ -1021,7 +1086,7 @@ class ScreensPicture(QWidget):
         p.setPen(Qt.NoPen)
         p.setBrush(g)
         p.drawEllipse(r)
-        p.setPen(QColor("#ffffff"))
+        p.setPen(QColor(_pic()["face_ink"]))
         p.setFont(theme.font(10, 700))
         p.drawText(r, Qt.AlignCenter, letter)
 
@@ -1070,12 +1135,13 @@ class ScreensPicture(QWidget):
         p.setRenderHint(QPainter.Antialiasing, True)
         c = half
         base = QRectF(c - HANDLE_R, c - HANDLE_R, 2 * HANDLE_R, 2 * HANDLE_R)
-        _soft_shadow(p, base, HANDLE_R, 3, 12, "rgba(15,23,42,0.35)")
+        pc = _pic()
+        _soft_shadow(p, base, HANDLE_R, 3, 12, pc["handle_shadow"])
         r = QRectF(c - HANDLE_R * grow, c - HANDLE_R * grow, 2 * HANDLE_R * grow, 2 * HANDLE_R * grow)
-        p.setPen(QPen(QColor(15, 23, 42, 46), 1))
-        p.setBrush(QColor("#ffffff"))
+        p.setPen(QPen(pc["handle_edge"], 1))
+        p.setBrush(QColor(pc["handle"]))
         p.drawEllipse(r)
-        p.setPen(QPen(theme.qcolor("ink"), 2.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setPen(QPen(QColor(pc["handle_ink"]), 2.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         p.setBrush(Qt.NoBrush)
         for sign in (-1, 1):                        # "‹ ›"
             path = QPainterPath(QPointF(c + sign * 4.5, c - 5.5))
@@ -1091,9 +1157,10 @@ class ScreensPicture(QWidget):
         glass = QPainterPath()                  # at either end the line is the glass's edge, not a stripe on the bezel
         glass.addRoundedRect(inner, GLASS_R, GLASS_R)
         p.setClipPath(glass)
-        p.setPen(QPen(QColor(255, 255, 255, 215), 4.5, Qt.SolidLine, Qt.FlatCap))
+        pc = _pic()
+        p.setPen(QPen(pc["line_glow"], 4.5, Qt.SolidLine, Qt.FlatCap))
         p.drawLine(QPointF(x, inner.top()), QPointF(x, inner.bottom()))
-        p.setPen(QPen(theme.qcolor("ink"), 2, Qt.SolidLine, Qt.FlatCap))
+        p.setPen(QPen(QColor(pc["line"]), 2, Qt.SolidLine, Qt.FlatCap))
         p.drawLine(QPointF(x, inner.top()), QPointF(x, inner.bottom()))
         p.restore()
         hx = self._handle_x(inner, split)
@@ -1103,7 +1170,7 @@ class ScreensPicture(QWidget):
         if self._focus_ring:
             grow = 1.1 if self._handle_hot() else 1.0
             r = QRectF(hx - HANDLE_R * grow, cy - HANDLE_R * grow, 2 * HANDLE_R * grow, 2 * HANDLE_R * grow)
-            p.setPen(QPen(QColor(37, 99, 235, 150), 3))
+            p.setPen(QPen(pc["focus"], 3))
             p.setBrush(Qt.NoBrush)
             p.drawEllipse(r.adjusted(-3.5, -3.5, 3.5, 3.5))
 
@@ -1117,22 +1184,23 @@ class ScreensPicture(QWidget):
         """The shared slide (slide units). Its own words and the column chart keep to the left, clear of
         the card; the middle and right are a quiet roadmap the card floats over on your side."""
         ix, iy = inner.left(), inner.top()
-        p.setPen(theme.qcolor("ink"))
+        c = _pic()
+        p.setPen(QColor(c["slide_ink"]))
         p.setFont(theme.font(15, 700, display=True))
         p.drawText(QRectF(ix + 18, iy + 34, 92, 18), Qt.AlignVCenter | Qt.AlignLeft, "Q4 roadmap")
         p.setPen(Qt.NoPen)
         y = iy + 34 + 18 + 9
-        for frac, col in ((0.86, "#bfdbfe"), (0.64, "#e2e8f0"), (0.78, "#e2e8f0"), (0.52, "#e2e8f0")):
+        for frac, col in zip((0.86, 0.64, 0.78, 0.52), c["lines"]):
             p.setBrush(QColor(col))
             p.drawRoundedRect(QRectF(ix + 18, y, 88 * frac, 6), 3, 3)
             y += 6 + 9
         # the column chart, bottom left
         left, bottom = ix + 18, inner.bottom() - 20
         width = 4 + 4 * 14 + 3 * 7 + 4
-        p.setBrush(QColor("#cbd5e1"))
+        p.setBrush(QColor(c["axis"]))
         p.drawRect(QRectF(left, bottom - 2, width, 2))
         x = left + 4
-        for h, col in ((26, "#cbd5e1"), (40, "#93c5fd"), (56, "#60a5fa"), (74, "#2563eb")):
+        for h, col in zip((26, 40, 56, 74), c["bars"]):
             path = QPainterPath()
             r = QRectF(x, bottom - 2 - h, 14, h)
             path.addRoundedRect(r, 3, 3)
@@ -1142,14 +1210,14 @@ class ScreensPicture(QWidget):
             x += 14 + 7
         # the quiet part: a roadmap in pale bars (a label, then the weeks it runs), three columns
         gx, gy, gw = ix + 134, iy + 46, 226
-        p.setBrush(QColor("#f1f5f9"))
+        p.setBrush(QColor(c["grid"]))
         for i in range(1, 3):
             p.drawRect(QRectF(gx + gw * i / 3.0 - 0.5, gy - 8, 1, 132))
-        rows = ((0.00, 0.46, "#dbeafe"), (0.20, 0.78, "#bfdbfe"), (0.38, 0.62, "#e2e8f0"),
-                (0.12, 0.40, "#e2e8f0"), (0.54, 0.94, "#ddd6fe"))
+        rows = [(a, b, col) for (a, b), col in zip(((0.00, 0.46), (0.20, 0.78), (0.38, 0.62), (0.12, 0.40), (0.54, 0.94)),
+                                                   c["rows"])]
         for i, (a, b, col) in enumerate(rows):
             ry = gy + i * 26
-            p.setBrush(QColor("#e2e8f0"))
+            p.setBrush(QColor(c["row_label"]))
             p.drawRoundedRect(QRectF(gx, ry, 26, 5), 2.5, 2.5)
             p.setBrush(QColor(col))
             p.drawRoundedRect(QRectF(gx + 34 + a * (gw - 34), ry - 4, (b - a) * (gw - 34), 13), 6.5, 6.5)
@@ -1163,15 +1231,16 @@ class ScreensPicture(QWidget):
         w = 8 + (6 + 5 if dot else 0) + tw + 8
         x0 = inner.right() - CARD_MARGIN - w if right else inner.left() + CARD_MARGIN
         r = QRectF(x0, inner.top() + 6, w, 18)
+        c = _pic()
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(15, 23, 42, 204))
+        p.setBrush(c["banner"])
         p.drawRoundedRect(r, 9, 9)
         x = r.left() + 8
         if dot:
-            p.setBrush(QColor("#ef4444"))
+            p.setBrush(QColor(c["rec"]))
             p.drawEllipse(QRectF(x, r.center().y() - 3, 6, 6))
             x += 6 + 5
-        p.setPen(QColor("#ffffff"))
+        p.setPen(QColor(c["banner_ink"]))
         p.setFont(f)
         p.drawText(QRectF(x, r.top(), tw + 2, r.height()), Qt.AlignVCenter | Qt.AlignLeft, text)
 
@@ -1195,7 +1264,7 @@ class ScreensPicture(QWidget):
         inner = self._inner_rect()
         w, h = max(1, int(round(rect.width() * px_scale))), max(1, int(round(rect.height() * px_scale)))
         img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
-        img.fill(QColor("#ffffff"))
+        img.fill(QColor(_pic()["slide"]))
         q = QPainter(img)
         q.setRenderHint(QPainter.Antialiasing, True)
         q.scale(px_scale, px_scale)
@@ -1214,10 +1283,10 @@ class ScreensPicture(QWidget):
         p.save()
         p.scale(1.0 / K, 1.0 / K)               # the card is drawn in design units, not slide units
         p.translate(self._inner_rect().topLeft() * -1.0)   # the scene's origin is the glass's corner
-        _soft_shadow(p, rect, live_demo.RADIUS * live_demo.CARD_SCALE, 10, 24, "rgba(2,6,23,0.30)")
+        _soft_shadow(p, rect, live_demo.RADIUS * live_demo.CARD_SCALE, 10, 24, _pic()["card_shadow"])
         live_demo.paint_card(p, rect.left(), rect.top(), self.card_word(), getattr(st, "tone", "ok"),
                              getattr(st, "icon", "incognito"), live_demo.CARD_SCALE, self._backdrop(px_scale),
-                             self._card_look)
+                             self.card_look())
         p.restore()
 
 
@@ -1295,66 +1364,15 @@ def _as_rail_link(button):
 _COMBO_QSS = "QComboBox { padding: 0px 6px 0px 12px; }"
 
 
-class ShortcutControl(QWidget):
-    """The shared shortcut control (ui/components/hotkey_capture: keycaps +
+class ShortcutControl(ShortcutField):
+    """The shared shortcut control (ui/components/hotkey_capture.ShortcutField: keycaps +
     Change, "Press keys…" while capturing, Esc cancels) with a one-line
     problem under it. ``keys`` / ``change`` / ``prompt`` / ``none_label`` are
-    the capture's own parts."""
+    the capture's own parts. Keyboard only: main._setup_assist_hotkey registers keys."""
 
     def __init__(self, hotkey="", parent=None):
-        super().__init__(parent)
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(4)
-        # Keyboard only: the Live Assistant hotkey can't be a mouse button
-        # (main._setup_assist_hotkey registers keys).
-        self.capture = HotkeyCaptureButton(hotkey, parent=self, accessible_name="Live Assistant shortcut",
-                                           allow_mouse=False)
-        self.capture.layout().setSpacing(8)             # the mockup's gap before Change
-        _as_rail_link(self.capture.button)
-        outer.addWidget(self.capture, 0, Qt.AlignRight)
-        self.keys = self.capture.keys
-        self.change = self.capture.button
-        self.prompt = self.capture.prompt_label
-        self.none_label = self.capture.empty_label
-        self.error_label = label("", "error", self, wrap=True)
-        self.error_label.setFont(theme.font(12))
-        self.error_label.setAlignment(Qt.AlignRight | Qt.AlignTop)
-        self.error_label.hide()
-        outer.addWidget(self.error_label)
-        self.capture.capturing_changed.connect(self._on_capturing)
-        self.capture.refused.connect(self.set_error)
-        self.capture.cancelled.connect(lambda: self.set_error(""))     # Esc: nothing changed, nothing to say
-        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self._sync_name()
+        super().__init__(hotkey, parent=parent, accessible_name="Live Assistant shortcut", allow_mouse=False)
 
-    def set_hotkey(self, hotkey):
-        self.capture.set_hotkey(hotkey or "")
-        self._sync_name()
-
-    def hotkey(self):
-        return self.capture.hotkey()
-
-    def is_capturing(self):
-        return self.capture.is_capturing()
-
-    def set_error(self, text):
-        """A short problem under the keys ("" hides it)."""
-        text = text or ""
-        self.error_label.setFixedWidth(max(170, self.capture.sizeHint().width()))
-        self.error_label.setText(text)
-        self.error_label.setVisible(bool(text))
-        self.updateGeometry()
-
-    def error(self):
-        return self.error_label.text() if self.error_label.isVisibleTo(self) else ""
-
-    def _on_capturing(self, on):
-        if on:
-            self.set_error("")
-
-    def _sync_name(self):
-        self.setAccessibleName("Shortcut " + (" + ".join(keycap_labels(self.capture.hotkey())) or "not set"))
 
 class WriterOption(QFrame):
     """One "Answers written by" choice: radio, icon, name (+ PRO), the real
@@ -1362,24 +1380,23 @@ class WriterOption(QFrame):
     picks it."""
 
     _QSS = """
-    QFrame#writerOption { background: #ffffff; border: 1px solid %(line2)s; border-radius: 8px; }
+    QFrame#writerOption { background: @surface; border: 1px solid @line2; border-radius: 8px; }
     QRadioButton { spacing: 0px; }
-    QRadioButton::indicator { width: 14px; height: 14px; border-radius: 8px; border: 1px solid %(faint)s; background: #ffffff; }
-    QRadioButton::indicator:hover { border-color: %(blue_l)s; }
+    QRadioButton::indicator { width: 14px; height: 14px; border-radius: 8px; border: 1px solid @faint; background: @input; }
+    QRadioButton::indicator:hover { border-color: @blue-l; }
     QRadioButton::indicator:checked {
-        border: 1px solid %(blue)s;
+        border: 1px solid @blue;
         background: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5,
-                                    stop:0 #ffffff, stop:0.32 #ffffff, stop:0.40 %(blue)s, stop:1 %(blue)s);
+                                    stop:0 @on-accent, stop:0.32 @on-accent, stop:0.40 @blue, stop:1 @blue);
     }
-    QRadioButton[focusVisible="true"]::indicator { border: 2px solid %(blue_l)s; }
+    QRadioButton[focusVisible="true"]::indicator { border: 2px solid @blue-l; }
     """
 
     def __init__(self, icon, name, model, pro=False, aside=None, parent=None):
         super().__init__(parent)
         self.setObjectName("writerOption")
         self.setProperty("checked", False)
-        self.setStyleSheet(self._QSS % {"line2": theme.qss_color("line2"), "blue": theme.qss_color("blue"),
-                                        "faint": theme.qss_color("faint"), "blue_l": theme.qss_color("blue-l")})
+        theme.sheet(self, self._QSS)
         self.setFixedHeight(50)
         self.setCursor(Qt.PointingHandCursor)
         lay = QHBoxLayout(self)
@@ -1486,8 +1503,7 @@ class SessionRow(QFrame):
         super().__init__(parent)
         self.sess = dict(sess)
         self.setObjectName("laSession")
-        self.setStyleSheet("QFrame#laSession { background: transparent; border: none; border-top: 1px solid %s; }"
-                           % theme.qss_color("line"))
+        theme.sheet(self, "QFrame#laSession { background: transparent; border: none; border-top: 1px solid @line; }")
         self.setFixedHeight(50)
         self.setCursor(Qt.PointingHandCursor)
         lay = QHBoxLayout(self)
@@ -1799,8 +1815,9 @@ class LiveAssistantPage(QWidget):
         writers.setAccessibleName("Answers written by")
         self.writer_row = rail.add_row(SettingRow("Answers written by", writers, stacked=True))
 
-        theme_name = cfg.get("live_assist_theme", "light")
-        self.look = Segmented(["Light", "Dark"], 1 if theme_name == "dark" else 0, "Card look", size="s")
+        theme_name = cfg.get("live_assist_theme", "system")
+        self.look = Segmented([t for _v, t in CARD_LOOKS], _look_index(theme_name), "Card look", size="s")
+        self.look.setToolTip(_rich_tip(CARD_LOOK_TIP))
         self.look.changed.connect(self._on_look_changed)
         self.picture.set_card_look(theme_name)          # the picture's card wears the same look
         self.look_row = rail.add_row(SettingRow("Card look", self.look))
@@ -2023,8 +2040,8 @@ class LiveAssistantPage(QWidget):
         elif key == "live_assist_output_language":
             self._set_combo(self.answer_lang, val("en"))
         elif key == "live_assist_theme":
-            self.look.set_index(1 if val("light") == "dark" else 0)
-            self.picture.set_card_look(val("light"))
+            self.look.set_index(_look_index(val("system")))
+            self.picture.set_card_look(val("system"))
         elif key == "live_assist_opacity":
             try:
                 op = min(1.0, max(0.55, float(val(0.96))))
@@ -2193,7 +2210,7 @@ class LiveAssistantPage(QWidget):
             self._set_combo(cb, value)
 
     def _on_look_changed(self, idx):
-        name = "dark" if idx == 1 else "light"
+        name = CARD_LOOKS[idx][0] if 0 <= idx < len(CARD_LOOKS) else "system"
         if self._set("live_assist_theme", name):
             self.picture.set_card_look(name)
         else:
@@ -2212,6 +2229,9 @@ class LiveAssistantPage(QWidget):
             self.shortcut.set_error(SHORTCUT_IS_DICTATION % shown)
         elif _norm_hotkey(combo) and _norm_hotkey(combo) == _norm_hotkey(smart):
             self.shortcut.set_error(SHORTCUT_IS_SMART % shown)
+        elif _norm_hotkey(combo) and _norm_hotkey(combo) == _norm_hotkey(
+                cfg.get("meeting_hotkey", hotkeys.MEETING_DEFAULT)):        # main.DEFAULT when missing
+            self.shortcut.set_error(SHORTCUT_IS_MEETING % shown)
         else:
             self.shortcut.set_error(SHORTCUT_REFUSED % shown)
 

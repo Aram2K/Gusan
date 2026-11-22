@@ -89,7 +89,7 @@ import logging
 from datetime import datetime, timedelta
 
 from PySide6.QtCore import QEvent, QRectF, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen
+from PySide6.QtGui import QGuiApplication, QPainter, QPen
 from PySide6.QtWidgets import (QButtonGroup, QFrame, QGraphicsOpacityEffect, QGridLayout,
                                QHBoxLayout, QLabel, QRadioButton, QSizePolicy, QTextEdit, QVBoxLayout,
                                QWidget)
@@ -103,7 +103,7 @@ from ui.components.controls import Toggle
 from ui.components import clipboard, mini_prompt
 from ui.components.controls import keycap_labels
 from ui.components.hotkey_capture import HotkeyCaptureButton
-from ui.components.model_combo import MARK_DOWNLOAD, PlainNameCombo, combo as _rail_combo
+from ui.components.model_combo import MARK_DOWNLOAD, MARK_DOWNLOADED, PlainNameCombo, combo as _rail_combo
 from ui.pages import home as H
 
 logger = logging.getLogger("transcribe")
@@ -242,10 +242,10 @@ def _icon_label(name, size, color, parent=None, sw=1.7):
 
 
 def _frame(parent, name, css):
-    """A QFrame styled by its own rule (theme tokens only)."""
+    """A QFrame styled by its own rule (``css`` with @token colours: it follows the look)."""
     fr = QFrame(parent)
     fr.setObjectName(name)
-    fr.setStyleSheet("QFrame#%s { %s }" % (name, css))
+    theme.sheet(fr, "QFrame#%s { %s }" % (name, css))
     return fr
 
 
@@ -621,9 +621,7 @@ class ExampleCard(Card):
         said_row.addWidget(self.said_label, 1)
         self.add(said_row)
 
-        self.paper = _frame(self, "paper",
-                            "background: #ffffff; border: 1px solid %s; border-radius: 10px;"
-                            % theme.qss_color("line"))
+        self.paper = _frame(self, "paper", "background: @surface; border: 1px solid @line; border-radius: 10px;")
         pl = QVBoxLayout(self.paper)
         pl.setContentsMargins(10, 7, 10, 7)
         pl.setSpacing(2)
@@ -652,8 +650,12 @@ class ExampleCard(Card):
         if kind == "rich":
             lb = _text("", "label", 12.5, 400, self.paper, wrap=True)
             lb.setTextFormat(Qt.RichText)
-            lb.setText('<span style="font-weight:700; color:%s">%s</span>%s'
-                       % (theme.qss_color("ink"), spec[1], spec[2]))
+
+            def render(lb=lb, spec=spec):
+                lb.setText('<span style="font-weight:700; color:%s">%s</span>%s'
+                           % (theme.qss_color("ink"), spec[1], spec[2]))
+            render()
+            theme.on_change(lb, render)
             lb.setAccessibleName(spec[1] + spec[2])
             return lb
         if kind == "signoff":
@@ -709,8 +711,7 @@ class RecentRow(QFrame):
         self.item = item
         self.setObjectName("recentRow")
         if top_border:
-            self.setStyleSheet("QFrame#recentRow { border: none; border-top: 1px solid %s; }"
-                               % theme.qss_color("line"))
+            theme.sheet(self, "QFrame#recentRow { border: none; border-top: 1px solid @line; }")
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 8, 0, 8)
         lay.setSpacing(12)
@@ -836,20 +837,20 @@ class _WriterOption(QRadioButton):
         if self.underMouse() and not purple and self.isEnabled():
             edge = theme.qcolor("line2")
         p.setPen(QPen(edge, 1))
-        p.setBrush(theme.qcolor("pro-sub" if purple else "white"))
+        p.setBrush(theme.qcolor("pro-sub" if purple else "surface"))
         p.drawRoundedRect(rect, 10, 10)
         # The radio (16 px, CSS accent-color blue).
         dot = QRectF(12.75, 12.75, 14.5, 14.5)
         if on:
             p.setPen(QPen(theme.qcolor("blue"), 1.5))
-            p.setBrush(QColor("#ffffff"))
+            p.setBrush(theme.qcolor("input"))
             p.drawEllipse(dot)
             p.setPen(Qt.NoPen)
             p.setBrush(theme.qcolor("blue"))
             p.drawEllipse(QRectF(16.5, 16.5, 7, 7))
         else:
             p.setPen(QPen(theme.qcolor("muted"), 1.2))
-            p.setBrush(QColor("#ffffff"))
+            p.setBrush(theme.qcolor("input"))
             p.drawEllipse(dot)
         if self.hasFocus() and self._kbd:
             p.setBrush(Qt.NoBrush)
@@ -871,9 +872,8 @@ class SmartShortcut(HotkeyCaptureButton):
         # While it waits, "Press keys…" sits where the keycaps were, as an
         # empty dashed key slot.
         self.prompt_label.setFixedHeight(24)
-        self.prompt_label.setStyleSheet(
-            "QLabel { color: %s; background: %s; border: 1px dashed %s; border-radius: 6px; padding: 0px 8px; }"
-            % (theme.qss_color("blue-tx"), theme.qss_color("blue-sub"), theme.qss_color("blue-l")))
+        theme.sheet(self.prompt_label, "QLabel { color: @blue-tx; background: @blue-sub; border: 1px dashed @blue-l; "
+                    "border-radius: 6px; padding: 0px 8px; }")
 
     def _show_keys(self):
         super()._show_keys()
@@ -1279,9 +1279,13 @@ class SmartActionsPage(RailLayoutMixin, QWidget):
                 continue
             value = str(box.itemData(i) or "")
             mark, note = "", ""
-            if value and value not in SPEECH_CLOUDS and is_model(value) and self._speech_state(value) in ("missing", "failed"):
+            state = (self._speech_state(value)
+                     if value and value not in SPEECH_CLOUDS and is_model(value) else None)
+            if state in ("missing", "failed"):
                 mark = MARK_DOWNLOAD
                 note = getattr(info(value), "size", "") or ""
+            elif state == "ready":
+                mark = MARK_DOWNLOADED
             box.set_choice_mark(i, mark, note)
 
     def _speech_downloaded(self):

@@ -4,14 +4,17 @@ and the call-type marks (a tinted camera, no brand logos).
 Moved out of ui/pages/meeting_views.py so that Home's "Coming up" can draw them without importing
 the whole Meetings page code (meeting_views still imports every name from here, so its callers and
 tests see no change). Light on purpose: only Qt, the theme and the icon set.
+
+Every picture here is drawn in theme tokens and follows the light / dark look: a label or button
+showing one drawn in a token colour gets it again after a switch (_retint, a theme.on_change hook).
 """
 
 import os
 
-from PySide6.QtCore import QByteArray, QRectF, Qt
-from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen, QPixmap
+from PySide6.QtCore import QByteArray, QObject, QRectF, Qt
+from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QLabel, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 from ui import theme
 from ui.components import icons
@@ -25,6 +28,40 @@ _GLYPHS = {
                  '<path d="m3.5 3.5 17 17"/>'),
 }
 _CACHE = {}
+# cache key of a picture drawn in token colours -> a function that draws it again in the active look
+_RECIPES = {}
+_HOOK = {"owner": None}
+
+
+def _remember(pm, again):
+    """Keep how to draw ``pm`` again (it follows a switch of the look)."""
+    _RECIPES[pm.cacheKey()] = again
+    if _HOOK["owner"] is None:
+        _HOOK["owner"] = QObject()
+        theme.on_change(_HOOK["owner"], _retint)
+    return pm
+
+
+def _tokens(*colours):
+    return all(isinstance(c, str) and theme.is_token(c) for c in colours if c is not None)
+
+
+def _retint():
+    """The look changed: every label (and button icon made by glyph_icon) showing a picture from here
+    gets it again in the new colours."""
+    app = QApplication.instance()
+    if app is None or not _RECIPES:
+        return
+    for w in app.allWidgets():
+        try:
+            if isinstance(w, QLabel):
+                pm = w.pixmap()
+                if pm is not None and not pm.isNull():
+                    again = _RECIPES.get(pm.cacheKey())
+                    if again is not None:
+                        w.setPixmap(again())
+        except RuntimeError:
+            continue
 
 
 def _dpr():
@@ -43,7 +80,7 @@ def glyph(name, size=16, color="muted", sw=1.8):
         return icons.pixmap(name, size, color, sw)
     col = theme.qcolor(color) if not isinstance(color, QColor) else color
     dpr = _dpr()
-    key = ("g", name, int(size), col.rgba(), float(sw), dpr)
+    key = ("g", name, int(size), col.rgba(), float(sw), dpr, _tokens(color))
     hit = _CACHE.get(key)
     if hit is not None:
         return hit
@@ -59,7 +96,18 @@ def glyph(name, size=16, color="muted", sw=1.8):
     QSvgRenderer(QByteArray(svg.encode("utf-8"))).render(p, QRectF(0, 0, size, size))
     p.end()
     _CACHE[key] = pm
+    if _tokens(color):
+        _remember(pm, lambda: glyph(name, size, color, sw))
     return pm
+
+
+def glyph_icon(name, size=16, color="muted", sw=1.8):
+    """glyph() as a QIcon that follows the look (a button's icon)."""
+    from ui.components import icons
+    ic = QIcon(glyph(name, size, color, sw))
+    if _tokens(color):
+        icons.remember_icon(ic, lambda: glyph_icon(name, size, color, sw))
+    return ic
 
 
 def icon_label(name, size=16, color="muted", sw=1.8, parent=None):
@@ -74,7 +122,8 @@ def dot_pixmap(color, size=8, ring=None):
     """A filled dot (``ring``: (colour, width) drawn around it, e.g. the next meeting)."""
     dpr = _dpr()
     col = theme.qcolor(color)
-    key = ("dot", col.rgba(), size, str(ring), dpr)
+    ring_rgba = theme.qcolor(ring[0]).rgba() if ring else None
+    key = ("dot", col.rgba(), size, str(ring), ring_rgba, dpr, _tokens(color, ring[0] if ring else None))
     hit = _CACHE.get(key)
     if hit is not None:
         return hit
@@ -93,7 +142,18 @@ def dot_pixmap(color, size=8, ring=None):
     p.drawEllipse(QRectF(pad, pad, size, size))
     p.end()
     _CACHE[key] = pm
+    if _tokens(color, ring[0] if ring else None):
+        _remember(pm, lambda: dot_pixmap(color, size, ring))
     return pm
+
+
+def dot_icon(color, size=8, ring=None):
+    """dot_pixmap() as a QIcon that follows the look (a button's icon)."""
+    from ui.components import icons
+    ic = QIcon(dot_pixmap(color, size, ring))
+    if _tokens(color, ring[0] if ring else None):
+        icons.remember_icon(ic, lambda: dot_icon(color, size, ring))
+    return ic
 
 
 def dot_label(color, size=8, parent=None):
@@ -148,7 +208,7 @@ def calendar_label(size=16, parent=None):
 
 
 class GoogleTile(QWidget):
-    """The Google Calendar mark on a small white disc (the Connect card)."""
+    """The Google Calendar mark on a small disc of the card's surface (white in the light look)."""
 
     def __init__(self, size=40, g=20, parent=None):
         super().__init__(parent)
@@ -161,10 +221,12 @@ class GoogleTile(QWidget):
         p.setRenderHint(QPainter.Antialiasing, True)
         r = QRectF(0.5, 0.5, self._size - 1, self._size - 1)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(15, 23, 42, 14))
+        shade = theme.qcolor("shade")
+        shade.setAlpha(60 if theme.is_dark() else 14)
+        p.setBrush(shade)
         p.drawEllipse(r.translated(0, 1))
-        p.setBrush(QColor("#ffffff"))
-        p.setPen(QPen(theme.qcolor("line"), 1))
+        p.setBrush(theme.qcolor("surface"))
+        p.setPen(QPen(theme.qcolor("line2" if theme.is_dark() else "line"), 1))
         p.drawEllipse(r)
         off = (self._size - self._g) / 2.0
         p.drawPixmap(int(off), int(off), calendar_pixmap(self._g))
@@ -173,7 +235,7 @@ class GoogleTile(QWidget):
 
 # Call-type marks: a plain camera glyph tinted per service (no brand logos).
 CALL_TONES = {"Google Meet": ("ok-sub", "ok-tx"), "Zoom": ("blue-sub", "blue-tx"),
-              "Teams": ("#ede9fe", "#5b21b6"), "Webex": ("bg2", "text2")}
+              "Teams": ("teams-sub", "teams-tx"), "Webex": ("bg2", "text2")}
 
 
 def call_name(kind):
@@ -188,10 +250,10 @@ def call_name(kind):
         return "Video call" if kind == "other" else str(kind)
 
 
-def call_mark(kind, size=18):
+def call_mark_pixmap(kind, size=18):
     bg, fg = CALL_TONES.get(kind, ("bg2", "text2"))
     dpr = _dpr()
-    key = ("call", kind, size, dpr)
+    key = ("call", kind, size, dpr, theme.scheme())
     hit = _CACHE.get(key)
     if hit is None:
         hit = QPixmap(int(round(size * dpr)), int(round(size * dpr)))
@@ -200,7 +262,7 @@ def call_mark(kind, size=18):
         p = QPainter(hit)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setPen(Qt.NoPen)
-        p.setBrush(theme.qcolor("#ffffff"))
+        p.setBrush(theme.qcolor("surface"))
         p.drawRoundedRect(QRectF(0, 0, size, size), 6, 6)
         p.setBrush(theme.qcolor(bg))
         p.drawRoundedRect(QRectF(0, 0, size, size), 6, 6)
@@ -208,11 +270,17 @@ def call_mark(kind, size=18):
         p.drawPixmap(3, 3, glyph("video", g, fg, 2.0))
         p.end()
         _CACHE[key] = hit
+        _remember(hit, lambda: call_mark_pixmap(kind, size))
+    return hit
+
+
+def call_mark(kind, size=18):
+    hit = call_mark_pixmap(kind, size)
     lb = QLabel()
     lb.setPixmap(hit)
     lb.setFixedSize(size, size)
     return lb
 
 
-__all__ = ["glyph", "icon_label", "dot_pixmap", "dot_label", "google_pixmap", "google_label",
-           "GoogleTile", "CALL_TONES", "call_name", "call_mark"]
+__all__ = ["glyph", "glyph_icon", "icon_label", "dot_pixmap", "dot_icon", "dot_label", "google_pixmap",
+           "google_label", "GoogleTile", "CALL_TONES", "call_name", "call_mark", "call_mark_pixmap"]

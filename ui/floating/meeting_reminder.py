@@ -118,12 +118,28 @@ FEATURE_RECORD = "Meeting recording"
 FEATURE_ASSIST = "Live Assistance"
 RECORD_NOW = "Record now?"
 SEP = "  ·  "   # the mockup's "Google Meet  ·  Anna, David +2"
-REC_RED = "#ff3b4e"                 # the record dot (mockup rec_dot)
+REC_RED = "#ff3b4e"                 # the record dot (mockup rec_dot): the same red in both looks
 
 # Call-type marks: a plain camera glyph tinted per service (no brand logos);
-# the same tints as the Meetings page (ui/pages/meeting_views.py CALL_TONES).
+# the same tints as the Meetings page (ui/components/glyphs.py CALL_TONES).
 CALL_TONES = {"Google Meet": ("ok-sub", "ok-tx"), "Zoom": ("blue-sub", "blue-tx"),
-              "Teams": ("#ede9fe", "#5b21b6"), "Webex": ("bg2", "text2")}
+              "Teams": ("teams-sub", "teams-tx"), "Webex": ("bg2", "text2")}
+
+# The toast's glass plate, in each look: (r, g, b, alpha). Light: frosted white glass; dark: the dark
+# surface, smoked, with a faint light rim (a white sheen would read as fog on it).
+_PLATE = {
+    "light": {"tint": (241, 245, 250, 219), "solid": (241, 245, 250, 245), "glow": (255, 255, 255, 140),
+              "sheen": (255, 255, 255, 89), "rim": ((255, 255, 255, 235), (255, 255, 255, 70), (255, 255, 255, 120)),
+              "edge": (15, 23, 42, 31), "shadow": (15, 23, 42, 92)},
+    "dark": {"tint": (27, 33, 42, 224), "solid": (27, 33, 42, 248), "glow": (255, 255, 255, 14),
+             "sheen": (255, 255, 255, 10), "rim": ((255, 255, 255, 40), (255, 255, 255, 8), (255, 255, 255, 16)),
+             "edge": (148, 163, 184, 56), "shadow": (0, 0, 0, 170)},
+}
+
+
+def _plate(key):
+    v = _PLATE["dark" if theme.is_dark() else "light"][key]
+    return tuple(QColor(*c) for c in v) if isinstance(v[0], tuple) else QColor(*v)
 _GLYPHS = {
     "video": '<rect x="3" y="6.5" width="12.5" height="11" rx="2.2"/><path d="m15.5 10.6 5-2.9v8.6l-5-2.9z"/>',
     "external": ('<path d="M13.5 4.5h6v6M19.5 4.5 11 13M17.5 14v4.5a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-11'
@@ -203,7 +219,7 @@ def call_mark_pixmap(kind, size=18):
     """The call-type mark: a rounded tinted tile with the camera glyph."""
     bg, fg = CALL_TONES.get(kind, ("bg2", "text2"))
     dpr = _dpr()
-    key = ("call", kind, size, dpr)
+    key = ("call", kind, size, dpr, theme.scheme())
     hit = _CACHE.get(key)
     if hit is None:
         hit = QPixmap(int(round(size * dpr)), int(round(size * dpr)))
@@ -212,7 +228,7 @@ def call_mark_pixmap(kind, size=18):
         p = QPainter(hit)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#ffffff"))
+        p.setBrush(theme.qcolor("surface"))
         p.drawRoundedRect(QRectF(0, 0, size, size), 6, 6)
         p.setBrush(theme.qcolor(bg))
         p.drawRoundedRect(QRectF(0, 0, size, size), 6, 6)
@@ -236,7 +252,7 @@ def rec_dot_pixmap(size=10, ring=2):
         p = QPainter(hit)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#ffffff"))
+        p.setBrush(theme.qcolor("on-accent"))              # a white ring on the blue button
         p.drawEllipse(QRectF(0, 0, full, full))
         p.setBrush(QColor(REC_RED))
         p.drawEllipse(QRectF(ring, ring, size, size))
@@ -333,7 +349,7 @@ class _ContentButton(Button):
         super().__init__("", kind, "m", parent=parent, full=True)
         self.setAccessibleName(text)
         weight = 600 if kind == "primary" else 500
-        colour = "#ffffff" if kind == "primary" else theme.qss_color("text2")
+        colour = "on-accent" if kind == "primary" else "text2"
         lay = QHBoxLayout(self)
         lay.setContentsMargins(16, 0, 16, 0)
         lay.setSpacing(8)
@@ -345,7 +361,7 @@ class _ContentButton(Button):
             lay.addWidget(lead, 0, Qt.AlignVCenter)
         self.text_label = QLabel(text, self)
         self.text_label.setFont(theme.font(13.5, weight))
-        self.text_label.setStyleSheet("color: %s; background: transparent;" % colour)
+        theme.sheet(self.text_label, "color: @%s; background: transparent;" % colour)
         self.text_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         lay.addWidget(self.text_label, 0, Qt.AlignVCenter)
         self.pro_tag = ProTag("s", parent=self)
@@ -405,7 +421,8 @@ class MeetingReminder(QWidget):
         self.setAccessibleName("Meeting reminder")
         theme.load_fonts()
         self.setFont(theme.font(14))
-        self.setStyleSheet(theme.stylesheet())
+        theme.use_stylesheet(self)
+        theme.on_change(self, self._restyle)
 
         self._timer = QTimer(self)
         self._timer.setInterval(REFRESH_MS)
@@ -476,11 +493,10 @@ class MeetingReminder(QWidget):
                                             parent=self)
         # The board's rgba(255,255,255,0.78): a touch of the glass shows through.
         # (A widget's own rule beats the inherited :hover, so hover / pressed are restated.)
-        self.assist_button.setStyleSheet(
-            'QPushButton[gusan="btn"][kind="secondary"] { background: %s; }'
-            'QPushButton[gusan="btn"][kind="secondary"]:hover { background: %s; }'
-            'QPushButton[gusan="btn"][kind="secondary"]:pressed { background: %s; }'
-            % (theme.qss_color("rgba(255,255,255,0.78)"), theme.qss_color("bg"), theme.qss_color("bg2")))
+        theme.sheet(self.assist_button,
+                    'QPushButton[gusan="btn"][kind="secondary"] { background: @glass-btn; }'
+                    'QPushButton[gusan="btn"][kind="secondary"]:hover { background: @bg; }'
+                    'QPushButton[gusan="btn"][kind="secondary"]:pressed { background: @bg2; }')
         self.assist_button.clicked.connect(lambda _=False: self._on_record(True))
         btns.addWidget(self.assist_button)
         root.addLayout(btns)
@@ -489,16 +505,15 @@ class MeetingReminder(QWidget):
         foot.setContentsMargins(0, 0, 0, 0)
         foot.setSpacing(8)
         self.dismiss_button = Button("Not this one", "ghost", "s", parent=self)
-        self.dismiss_button.setStyleSheet(
-            'QPushButton[gusan="btn"][kind="ghost"] { color: %s; padding: 0px 8px; }'
-            'QPushButton[gusan="btn"][kind="ghost"]:hover { color: %s; }'
-            % (theme.qss_color("muted"), theme.qss_color("text")))
+        theme.sheet(self.dismiss_button,
+                    'QPushButton[gusan="btn"][kind="ghost"] { color: @muted; padding: 0px 8px; }'
+                    'QPushButton[gusan="btn"][kind="ghost"]:hover { color: @text; }')
         self.dismiss_button.clicked.connect(lambda _=False: self.dismiss())
         foot.addWidget(self.dismiss_button, 0, Qt.AlignVCenter)
         foot.addStretch(1)
         self.join_button = Button("Join call", "link", "s", parent=self)
         self.join_button.setLayoutDirection(Qt.RightToLeft)      # the arrow after the words
-        self.join_button.setIcon(QIcon(glyph("external", 13, "blue-tx", 2.0)))
+        self.join_button.setIcon(QIcon(glyph("external", 13, "blue-tx", 2.0)))     # (again in _restyle)
         self.join_button.setIconSize(QSize(13, 13))
         self.join_button.clicked.connect(lambda _=False: self._on_join())
         foot.addWidget(self.join_button, 0, Qt.AlignVCenter)
@@ -579,7 +594,16 @@ class MeetingReminder(QWidget):
         self._started = started
         self.when_label.set_full_text(text)
         tone = "amber-tx" if started else "blue-tx"
-        self.when_label.setStyleSheet("color: %s; background: transparent;" % theme.qss_color(tone))
+        theme.sheet(self.when_label, "color: @%s; background: transparent;" % tone)
+
+    def _restyle(self):
+        """The look changed: the pictures drawn here in its colours (the rest follows by itself)."""
+        self._shadow_key = None
+        self.join_button.setIcon(QIcon(glyph("external", 13, "blue-tx", 2.0)))
+        kind = (self._meeting or {}).get("call_type") or ""
+        if kind:
+            self.call_mark.setPixmap(call_mark_pixmap(kind, 18))
+        self.update()
 
     def refresh_account(self):
         """PRO on Record only for Free users (sign-in / plan changes)."""
@@ -850,7 +874,7 @@ class MeetingReminder(QWidget):
         p = QPainter(img)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(15, 23, 42, 92))
+        p.setBrush(_plate("shadow"))
         path = QPainterPath()
         path.addRoundedRect(QRectF(SH_SIDE + 3, SH_TOP + 7, w - 2 * SH_SIDE - 6,
                                    h - SH_TOP - SH_BOTTOM - 5), RADIUS, RADIUS)
@@ -874,28 +898,36 @@ class MeetingReminder(QWidget):
         p.setClipPath(path)
         if self._bd is not None:
             p.drawImage(self.rect(), self._bd)
-            tint = QColor(241, 245, 250, 219)                 # rgba(241,245,250,0.86) over the blur
+            tint = _plate("tint")                             # rgba(241,245,250,0.86) over the blur
         else:
-            tint = QColor(241, 245, 250, 245)                 # no blur behind: nearly solid
+            tint = _plate("solid")                            # no blur behind: nearly solid
         p.fillPath(path, tint)
+
+        def clear(c):
+            c = QColor(c)
+            c.setAlpha(0)
+            return c
+        glow_c = _plate("glow")
         glow = QRadialGradient(QPointF(plate.left() + plate.width() * 0.22, plate.top()), 240)
-        glow.setColorAt(0.0, QColor(255, 255, 255, 140))
-        glow.setColorAt(1.0, QColor(255, 255, 255, 0))
+        glow.setColorAt(0.0, glow_c)
+        glow.setColorAt(1.0, clear(glow_c))
         p.fillPath(path, QBrush(glow))
+        sheen_c = _plate("sheen")
         sheen = QLinearGradient(plate.topLeft(), QPointF(plate.left(), plate.top() + 70))
-        sheen.setColorAt(0.0, QColor(255, 255, 255, 89))
-        sheen.setColorAt(1.0, QColor(255, 255, 255, 0))
+        sheen.setColorAt(0.0, sheen_c)
+        sheen.setColorAt(1.0, clear(sheen_c))
         p.fillPath(path, QBrush(sheen))
         # Inner rim: bright at the top-left, softer at the bottom-right.
+        r0, r1, r2 = _plate("rim")
         rim = QLinearGradient(plate.topLeft(), plate.bottomRight())
-        rim.setColorAt(0.0, QColor(255, 255, 255, 235))
-        rim.setColorAt(0.5, QColor(255, 255, 255, 70))
-        rim.setColorAt(1.0, QColor(255, 255, 255, 120))
+        rim.setColorAt(0.0, r0)
+        rim.setColorAt(0.5, r1)
+        rim.setColorAt(1.0, r2)
         p.setPen(QPen(QBrush(rim), 3.0))
         p.setBrush(Qt.NoBrush)
         p.drawPath(path)
         p.restore()
-        p.setPen(QPen(QColor(15, 23, 42, 31), 1))             # rgba(15,23,42,0.12)
+        p.setPen(QPen(_plate("edge"), 1))                     # rgba(15,23,42,0.12)
         p.setBrush(Qt.NoBrush)
         p.drawPath(path)
         p.end()

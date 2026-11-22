@@ -1,12 +1,17 @@
 """Gusan stroke icons (the mockups' gusan_ds.IC set), drawn from SVG.
 
-    icons.pixmap("mic", 18, "#1d4ed8")      -> QPixmap (device-pixel sharp)
-    icons.icon("gear", 19, "#334155")       -> QIcon
+    icons.pixmap("mic", 18, "blue-tx")      -> QPixmap (device-pixel sharp)
+    icons.icon("gear", 19, "text2")         -> QIcon
     icons.logo_pixmap(30)                   -> the Gusan logo (assets/icon_512.png)
 
 24x24 viewBox, round caps and joins, stroke 1.7 by default (2 for an active
 nav item). Colours are any CSS colour or theme token name ("blue-tx").
 Rendered once per (name, size, colour, stroke, DPR) and cached.
+
+An icon drawn in a token colour follows the light / dark look by itself: its recipe is kept
+by the picture's cache key, and ui/theme.py's switch calls retint(), which gives every label,
+button, action and list item showing such a picture the same icon in the new look's colour.
+Pass a token name, not a colour looked up once ("muted", not theme.qss_color("muted")).
 """
 
 from PySide6.QtCore import QByteArray, QRectF, Qt
@@ -115,10 +120,25 @@ IC = {
     "notion": '<rect x="4" y="3.5" width="16" height="17" rx="2"/><path d="M8.5 16.5v-9l7 9v-9"/>',
     "wave": '<path d="M3 12h2M7 8v8M11 5v14M15 8v8M19 10.5v3M21 12h0"/>',
     "speaker": '<rect x="6" y="3" width="12" height="18" rx="2"/><circle cx="12" cy="14" r="3.5"/><path d="M12 7v.1"/>',
+    # Settings > General > Appearance: Match system / Light / Dark.
+    "monitor": '<rect x="3" y="4.5" width="18" height="12" rx="2"/><path d="M9 20h6M12 16.5V20"/>',
+    "moon": '<path d="M19.5 14.5A8 8 0 0 1 9.5 4.5a8 8 0 1 0 10 10z"/>',
+    # Invite friends (ui/pages/invite.py): the gift, and the share targets' small marks.
+    "gift": ('<rect x="3.5" y="8.5" width="17" height="4" rx="1"/><path d="M5 12.5V20h14v-7.5M12 8.5V20"/>'
+             '<path d="M12 8.5C10.8 5.6 7.4 4.6 6.9 6.7 6.5 8.4 9.3 8.5 12 8.5zM12 8.5c1.2-2.9 4.6-3.9 5.1-1.8'
+             '.4 1.7-2.4 1.8-5.1 1.8z"/>'),
+    "chat": '<path d="M4 18.5 5.3 15A7.5 7.5 0 1 1 8.6 18z"/>',
+    "plane": '<path d="M20.5 4 3.5 11l6.2 2.3L12 19.5z"/><path d="m20.5 4-10.8 9.3"/>',
+    "share": ('<path d="M12 15V4M8 8l4-4 4 4"/>'
+              '<path d="M6 11.5v7a1.5 1.5 0 0 0 1.5 1.5h9a1.5 1.5 0 0 0 1.5-1.5v-7"/>'),
 }
 FILLED = {"more", "play"}
 
 _CACHE = {}
+_ICONS = {}
+# cache key of a picture / an icon drawn in a token colour -> how to draw it again (retint)
+_PM_RECIPE = {}
+_IC_RECIPE = {}
 
 
 def names():
@@ -140,7 +160,12 @@ def _colour(color):
     return theme.qcolor(color or "text2")
 
 
-def svg(name, color="#334155", sw=1.7):
+def _token(color):
+    from ui import theme
+    return color if theme.is_token(color) else None
+
+
+def svg(name, color="text2", sw=1.7):
     """The icon as an SVG document (bytes) in one solid colour."""
     c = _colour(color)
     hexc = "#%02x%02x%02x" % (c.red(), c.green(), c.blue())
@@ -156,13 +181,14 @@ def svg(name, color="#334155", sw=1.7):
             % (paint, body)).encode("utf-8")
 
 
-def pixmap(name, size=18, color="#334155", sw=1.7):
+def pixmap(name, size=18, color="text2", sw=1.7):
     """A tinted, device-pixel-sharp QPixmap of icon ``name`` at ``size`` logical px."""
     if name not in IC:
         raise KeyError("unknown icon %r" % name)
     c = _colour(color)
     dpr = _dpr()
-    key = (name, int(size), c.rgba(), float(sw), dpr)
+    tok = _token(color)
+    key = (name, int(size), c.rgba(), float(sw), dpr, tok)
     hit = _CACHE.get(key)
     if hit is not None:
         return hit
@@ -175,11 +201,20 @@ def pixmap(name, size=18, color="#334155", sw=1.7):
     renderer.render(p, QRectF(0, 0, size, size))
     p.end()
     _CACHE[key] = pm
+    if tok:
+        _PM_RECIPE[pm.cacheKey()] = (name, size, tok, sw)
     return pm
 
 
-def icon(name, size=18, color="#334155", sw=1.7, active_color=None):
+def icon(name, size=18, color="text2", sw=1.7, active_color=None):
     """A QIcon; ``active_color`` adds the Active/Selected look (e.g. a checked item)."""
+    c = _colour(color)
+    a = _colour(active_color).rgba() if active_color else None
+    tok, atok = _token(color), _token(active_color) if active_color else None
+    key = (name, int(size), c.rgba(), float(sw), a, _dpr(), tok, atok)
+    hit = _ICONS.get(key)
+    if hit is not None:
+        return QIcon(hit)
     ic = QIcon()
     ic.addPixmap(pixmap(name, size, color, sw), QIcon.Normal, QIcon.Off)
     if active_color:
@@ -187,7 +222,70 @@ def icon(name, size=18, color="#334155", sw=1.7, active_color=None):
         ic.addPixmap(act, QIcon.Normal, QIcon.On)
         ic.addPixmap(act, QIcon.Active, QIcon.Off)
         ic.addPixmap(act, QIcon.Selected, QIcon.Off)
+    _ICONS[key] = ic
+    if tok or atok:
+        _IC_RECIPE[ic.cacheKey()] = (name, size, color, sw, active_color)
+    return QIcon(ic)
+
+
+def remember_icon(ic, *recipe):
+    """Keep how ``ic`` (a QIcon put together by hand from token-coloured pictures) is made:
+    ``recipe`` is a function of no arguments that makes it again in the active look."""
+    if recipe and callable(recipe[0]):
+        _IC_RECIPE[ic.cacheKey()] = recipe[0]
     return ic
+
+
+def _again(recipe):
+    if callable(recipe):
+        ic = recipe()
+        _IC_RECIPE[ic.cacheKey()] = recipe          # the next switch finds the new icon too
+        return ic
+    return icon(*recipe)
+
+
+def retint(widgets=None):
+    """The look changed: every label, button, action and list item showing an icon drawn in a token
+    colour gets it again in the new colour (ui/theme.switch calls this)."""
+    from PySide6.QtWidgets import QAbstractButton, QApplication, QComboBox, QLabel, QWidget
+    if widgets is None:
+        app = QApplication.instance()
+        widgets = app.allWidgets() if app is not None else []
+    if not (_PM_RECIPE or _IC_RECIPE):
+        return 0
+    done = 0
+    seen_actions = set()
+    for w in widgets:
+        try:
+            if isinstance(w, QLabel):
+                pm = w.pixmap()
+                if pm is not None and not pm.isNull():
+                    r = _PM_RECIPE.get(pm.cacheKey())
+                    if r is not None:
+                        w.setPixmap(pixmap(*r))
+                        done += 1
+            elif isinstance(w, QAbstractButton):
+                r = _IC_RECIPE.get(w.icon().cacheKey())
+                if r is not None:
+                    w.setIcon(_again(r))
+                    done += 1
+            elif isinstance(w, QComboBox):
+                for i in range(w.count()):
+                    r = _IC_RECIPE.get(w.itemIcon(i).cacheKey())
+                    if r is not None:
+                        w.setItemIcon(i, _again(r))
+                        done += 1
+            for a in QWidget.actions(w):        # (a widget may have an attribute named "actions")
+                if id(a) in seen_actions:
+                    continue
+                seen_actions.add(id(a))
+                r = _IC_RECIPE.get(a.icon().cacheKey())
+                if r is not None:
+                    a.setIcon(_again(r))
+                    done += 1
+        except RuntimeError:
+            continue
+    return done
 
 
 def logo_pixmap(size=30):

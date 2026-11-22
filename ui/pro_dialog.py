@@ -6,16 +6,18 @@
 from PySide6.QtCore import (QEasingCurve, QEvent, QObject, QPropertyAnimation, QRectF, QSize, Qt,
                             QTimer, Signal)
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath
-from PySide6.QtWidgets import (QDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QLayout,
-                               QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractButton, QDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel,
+                               QLayout, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 import account_actions
 import pricing_policy
+from ui import styles, theme
 
-VIOLET = "#a855f7"
-VIOLET_DARK = "#9333ea"
-INK = "#0f172a"
-MUTED = "#64748b"
+# Theme tokens (ui/theme.py): the window follows the light / dark look, also while it is open.
+VIOLET = "pro-l"          # the plan names and ticks (#a855f7 in the light look)
+VIOLET_DARK = "pro"       # the checkout button's edge and hover (#9333ea, both looks)
+INK = "ink"
+MUTED = "muted"
 
 # Each plan as its card shows it: (name, price, per, struck "was" price, one detail line, what it
 # gives, the line at the foot of the card). The full commitment / withdrawal wording is in Stripe
@@ -36,11 +38,26 @@ PLAN_ORDER = ("yearly", "monthly", "lifetime")
 DEFAULT_PLAN = "yearly"                     # what a buyer sees first, as on the website
 YEARLY_SAVING = "−38%"
 SECURE = "Secure checkout by Stripe"
+# Stripe checkout takes promotion codes for Monthly and Yearly (not for Lifetime): one small muted line says so.
+PROMO_LINE = "Have a promo code? Add it at checkout."
+PROMO_PLANS = ("monthly", "yearly")
 
 CARD_W = 284          # a plan card; the strip shows one whole and a slice of each neighbour
 CARD_GAP = 12
 DIM = 0.45            # a neighbour card's opacity
 SLIDE_MS = 260
+
+
+def _sheet(widget, template):
+    """A widget's own sheet with ``@token`` colours, kept in the active look (theme.sheet)."""
+    theme.sheet(widget, template)
+
+
+def _live_text(label, build):
+    """Rich text with a colour in it: set now and again after a look switch."""
+    label._live_text = build
+    label.setText(build())
+    theme.on_change(label, lambda: label.setText(label._live_text()))
 
 
 def _font(px, weight=QFont.Normal):
@@ -58,6 +75,7 @@ class PlanToggle(QWidget):
 
     PAD = 4
     H = 38
+    GAP = 6                               # between a plan's word and its badge
 
     def __init__(self, labels, badge_index=0, badge="", parent=None):
         super().__init__(parent)
@@ -73,18 +91,46 @@ class PlanToggle(QWidget):
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
     # geometry
+    def _f(self, px, weight):
+        """A font as the painter really draws it: QPainter resolves a font against the widget's own (its family comes
+        from the window's sheet), so it is measured resolved too - measured in one face and drawn in a wider one, the
+        words were cut ("Month") and ran under the -38% badge."""
+        return _font(px, weight).resolve(self.font())
+
+    def _word_w(self, text):
+        """The room a plan's word takes: the widest of its two weights (picked / not), with a pixel for rounding."""
+        return max(QFontMetricsF(self._f(13, wt), self).horizontalAdvance(text)
+                   for wt in (QFont.DemiBold, QFont.Medium)) + 1.0
+
     def _seg_w(self):
-        fm = QFontMetricsF(_font(13, QFont.DemiBold))
         widest = 0.0
         for i, text in enumerate(self._labels):
-            w = fm.horizontalAdvance(text)
+            w = self._word_w(text)
             if i == self._badge_index and self._badge:
-                w += 6 + self._badge_w()
+                w += self.GAP + self._badge_w()
             widest = max(widest, w)
         return widest + 22
 
     def _badge_w(self):
-        return QFontMetricsF(_font(11, QFont.Bold)).horizontalAdvance(self._badge) + 10
+        return QFontMetricsF(self._f(11, QFont.Bold), self).horizontalAdvance(self._badge) + 10
+
+    def layout_of(self, index):
+        """(word box, badge box or None) of plan ``index``, in widget pixels: the word ends GAP before the badge."""
+        seg = self._seg_w()
+        x0 = self.PAD + index * seg
+        text_w = self._word_w(self._labels[index])
+        badge = index == self._badge_index and self._badge
+        total = text_w + (self.GAP + self._badge_w() if badge else 0)
+        x = x0 + (seg - total) / 2
+        word = QRectF(x, 0, text_w, self.height())
+        if not badge:
+            return word, None
+        return word, QRectF(x + text_w + self.GAP, (self.height() - 18) / 2, self._badge_w(), 18)
+
+    def changeEvent(self, e):
+        super().changeEvent(e)
+        if e.type() in (QEvent.FontChange, QEvent.StyleChange):
+            self.updateGeometry()                     # its width follows the face it is drawn in
 
     def sizeHint(self):
         return QSize(int(self._seg_w() * len(self._labels) + 2 * self.PAD), self.H)
@@ -158,37 +204,34 @@ class PlanToggle(QWidget):
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         track = QPainterPath()
         track.addRoundedRect(r, r.height() / 2, r.height() / 2)
-        p.fillPath(track, QColor("#eef2f7"))
-        p.setPen(QColor("#e2e8f0"))
+        p.fillPath(track, theme.qcolor("pro-track"))
+        p.setPen(theme.qcolor("line"))
         p.drawPath(track)
         seg = self._seg_w()
         th = QRectF(self.PAD + self._pos * seg, self.PAD, seg, r.height() - 2 * self.PAD + 1)
         thumb = QPainterPath()
         thumb.addRoundedRect(th, th.height() / 2, th.height() / 2)
-        p.fillPath(thumb, QColor(INK))
+        p.fillPath(thumb, theme.qcolor("inv-bg"))           # ink in the light look, near-white in the dark one
         if self.hasFocus() and self._keyboard_focus:        # a ring only for the keyboard (Tab)
-            p.setPen(QColor(VIOLET))
+            p.setPen(theme.qcolor(VIOLET))
             p.drawPath(thumb)
-        fm = QFontMetricsF(_font(13, QFont.DemiBold))
+        off, on_c = theme.qcolor("text2"), theme.qcolor("inv-fg")
         for i, text in enumerate(self._labels):
             on = 1.0 - min(1.0, abs(self._pos - i))           # 1 under the thumb, 0 away from it
-            col = QColor(int(51 + (255 - 51) * on), int(65 + (255 - 65) * on), int(85 + (255 - 85) * on))
-            x0 = self.PAD + i * seg
-            text_w = fm.horizontalAdvance(text)
-            badge = i == self._badge_index and self._badge
-            total = text_w + (6 + self._badge_w() if badge else 0)
-            x = x0 + (seg - total) / 2
-            p.setFont(_font(13, QFont.DemiBold if on > 0.5 else QFont.Medium))
+            col = QColor(int(off.red() + (on_c.red() - off.red()) * on),
+                         int(off.green() + (on_c.green() - off.green()) * on),
+                         int(off.blue() + (on_c.blue() - off.blue()) * on))
+            word, br = self.layout_of(i)
+            p.setFont(self._f(13, QFont.DemiBold if on > 0.5 else QFont.Medium))
             p.setPen(col)
-            p.drawText(QRectF(x, 0, text_w + 4, self.height()), Qt.AlignLeft | Qt.AlignVCenter, text)
-            if badge:
-                bw = self._badge_w()
-                br = QRectF(x + text_w + 6, (self.height() - 18) / 2, bw, 18)
+            # Right-aligned in its box: the word ends GAP before the badge whatever face it is drawn in.
+            p.drawText(word, Qt.AlignRight | Qt.AlignVCenter | Qt.TextDontClip, text)
+            if br is not None:
                 pill = QPainterPath()
                 pill.addRoundedRect(br, 9, 9)
-                p.fillPath(pill, QColor("#166534") if on > 0.5 else QColor("#dcfce7"))
-                p.setFont(_font(11, QFont.Bold))
-                p.setPen(QColor("#bbf7d0") if on > 0.5 else QColor("#15803d"))
+                p.fillPath(pill, theme.qcolor("save-on" if on > 0.5 else "ok-sub"))
+                p.setFont(self._f(11, QFont.Bold))
+                p.setPen(theme.qcolor("save-on-tx" if on > 0.5 else "ok-tx"))
                 p.drawText(br, Qt.AlignCenter, self._badge)
         p.end()
 
@@ -212,34 +255,36 @@ class PlanCard(QFrame):
         v.setSpacing(4)
         title = QLabel(name.upper(), self)
         title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("font-size: 11px; font-weight: 800; letter-spacing: 1.5px; color: %s;%s"
-                            % (VIOLET, clear))
+        _sheet(title, "font-size: 11px; font-weight: 800; letter-spacing: 1.5px; color: @%s;%s" % (VIOLET, clear))
         v.addWidget(title)
         row = QHBoxLayout()
         row.setSpacing(8)
         row.addStretch(1)
         if was:
             w = QLabel("<s>%s</s>" % was, self)
-            w.setStyleSheet("font-size: 15px; color: #94a3b8;" + clear)
+            # struck through, quiet: faint in the light look (the 2.0 design), muted in the dark one (faint
+            # would read 3.5:1 on the dark card)
+            _sheet(w, lambda: "font-size: 15px; color: %s;%s"
+                   % (theme.qss_color("muted" if theme.is_dark() else "faint"), clear))
             row.addWidget(w, 0, Qt.AlignBottom)
         self.price_label = QLabel(price, self)
-        self.price_label.setStyleSheet("font-size: 32px; font-weight: 800; color: %s;%s" % (INK, clear))
+        _sheet(self.price_label, "font-size: 32px; font-weight: 800; color: @%s;%s" % (INK, clear))
         self.price_label.setMinimumHeight(42)        # the digits are never clipped
         row.addWidget(self.price_label, 0, Qt.AlignBottom)
         p = QLabel(per, self)
-        p.setStyleSheet("font-size: 13px; color: %s; padding-bottom: 6px;%s" % (MUTED, clear))
+        _sheet(p, "font-size: 13px; color: @%s; padding-bottom: 6px;%s" % (MUTED, clear))
         row.addWidget(p, 0, Qt.AlignBottom)
         row.addStretch(1)
         v.addLayout(row)
         d = QLabel(detail, self)
         d.setAlignment(Qt.AlignCenter)
         d.setWordWrap(True)
-        d.setStyleSheet("font-size: 12.5px; color: %s;%s" % (MUTED, clear))
+        _sheet(d, "font-size: 12.5px; color: @%s;%s" % (MUTED, clear))
         v.addWidget(d)
         # Lifetime: the spots left ("143 of 200 left"), filled in when the server answers.
         self.extra = QLabel("", self)
         self.extra.setAlignment(Qt.AlignCenter)
-        self.extra.setStyleSheet("font-size: 12.5px; font-weight: 700; color: %s;%s" % (INK, clear))
+        _sheet(self.extra, "font-size: 12.5px; font-weight: 700; color: @%s;%s" % (INK, clear))
         self.extra.hide()
         v.addWidget(self.extra)
         v.addSpacing(10)
@@ -253,10 +298,10 @@ class PlanCard(QFrame):
             r = QHBoxLayout()
             r.setSpacing(8)
             tick = QLabel("✓", ticks)
-            tick.setStyleSheet("font-size: 13px; font-weight: 800; color: %s;%s" % (VIOLET, clear))
+            _sheet(tick, "font-size: 13px; font-weight: 800; color: @%s;%s" % (VIOLET, clear))
             r.addWidget(tick, 0, Qt.AlignTop)
             lab = QLabel(text, ticks)
-            lab.setStyleSheet("font-size: 13.5px; color: %s;%s" % (INK, clear))
+            _sheet(lab, "font-size: 13.5px; color: @%s;%s" % (INK, clear))
             r.addWidget(lab, 0)
             r.addStretch(1)
             tv.addLayout(r)
@@ -269,7 +314,7 @@ class PlanCard(QFrame):
         self.foot = QLabel(foot, self)
         self.foot.setAlignment(Qt.AlignCenter)
         self.foot.setWordWrap(True)
-        self.foot.setStyleSheet("font-size: 12px; color: %s;%s" % (MUTED, clear))
+        _sheet(self.foot, "font-size: 12px; color: @%s;%s" % (MUTED, clear))
         v.addWidget(self.foot)
         v.addStretch(1)
         self.set_current(False)
@@ -281,9 +326,8 @@ class PlanCard(QFrame):
         return max(h, self.sizeHint().height(), self.minimumSizeHint().height())
 
     def set_current(self, on):
-        self.setStyleSheet(
-            "QFrame#proPlanCard { background: #ffffff; border: %s; border-radius: 16px; }"
-            % ("2px solid %s" % VIOLET if on else "1px solid #e9d5ff"))
+        _sheet(self, "QFrame#proPlanCard { background: @surface; border: %s; border-radius: 16px; }"
+               % ("2px solid @%s" % VIOLET if on else "1px solid @pro-edge"))
 
 
 class PlanStrip(QScrollArea):
@@ -403,6 +447,67 @@ class PlanStrip(QScrollArea):
         return super().eventFilter(obj, e)
 
 
+INVITE_LINE = "Or get it free: invite 3 friends"
+
+
+class InviteLine(QAbstractButton):
+    """The one quiet line at the bottom: the gift, "Or get it free: invite 3 friends" and a chevron, violet on a
+    pale violet (theme tokens, painted). It opens Invite friends."""
+
+    H = 34
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from ui import theme
+        self._font = theme.font(13, 600)
+        self.setText(INVITE_LINE)
+        self.setAccessibleName(INVITE_LINE)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.TabFocus)
+        theme.focus_ring(self)
+        self.setFixedHeight(self.H)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._hover = False
+
+    def sizeHint(self):
+        return QSize(int(QFontMetricsF(self._font).horizontalAdvance(INVITE_LINE)) + 16 + 14 + 32, self.H)
+
+    def enterEvent(self, e):
+        self._hover = True
+        self.update()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self._hover = False
+        self.update()
+        super().leaveEvent(e)
+
+    def paintEvent(self, _e):
+        from ui import theme
+        from ui.components import icons
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        bg = theme.qcolor("pro-sub")
+        if self._hover:
+            bg = theme.qcolor("pro-line")
+            bg.setAlphaF(min(1.0, bg.alphaF() * 0.45))
+        p.setPen(QColor(theme.qcolor("pro-l")) if self.property("focusVisible") else Qt.NoPen)
+        p.setBrush(bg)
+        p.drawRoundedRect(r, 9, 9)
+        tw = QFontMetricsF(self._font).horizontalAdvance(INVITE_LINE)
+        total = 16 + 8 + tw + 6 + 14
+        x = (self.width() - total) / 2.0
+        cy = self.height() / 2.0
+        colour = theme.qcolor("pro-tx")
+        p.drawPixmap(int(x), int(cy - 8), icons.pixmap("gift", 16, colour, sw=2))
+        p.setFont(self._font)
+        p.setPen(colour)
+        p.drawText(QRectF(x + 24, 0, tw + 2, self.height()), Qt.AlignLeft | Qt.AlignVCenter, INVITE_LINE)
+        p.drawPixmap(int(x + 24 + tw + 6), int(cy - 7), icons.pixmap("chev_r", 14, colour, sw=2.2))
+        p.end()
+
+
 class ProDialog(QDialog):
     """The upgrade window: pick a plan, see its price, go to Stripe checkout (after sign-in)."""
 
@@ -414,8 +519,8 @@ class ProDialog(QDialog):
         self._plan = DEFAULT_PLAN
         self.setWindowTitle("Gusan Pro")
         self.setFixedWidth(420)
-        if self.app and hasattr(self.app, "style_content"):
-            self.setStyleSheet(self.app.style_content)
+        # The 1.x sheet (ui/styles.py) in the active look, kept current when the look changes.
+        theme.sheet(self, styles.stylesheet)
         self._build(feature)
 
     def showEvent(self, event):
@@ -436,14 +541,14 @@ class ProDialog(QDialog):
 
         title = QLabel("Gusan Pro", self)
         title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("font-size: 22px; font-weight: 800; color: %s;" % INK)
+        _sheet(title, "font-size: 22px; font-weight: 800; color: @%s;" % INK)
         root.addWidget(title)
         sub = QLabel(self._feature_line(feature) if feature else
                      "Meetings, the Live Assistant, Smart Actions and fast cloud speech.", self)
         sub.setAlignment(Qt.AlignCenter)
         sub.setWordWrap(True)
         sub.setContentsMargins(side, 0, side, 0)
-        sub.setStyleSheet("font-size: 13px; color: %s;" % MUTED)
+        _sheet(sub, "font-size: 13px; color: @%s;" % MUTED)
         root.addWidget(sub)
 
         self.toggle = PlanToggle([PLANS[p][0] for p in PLAN_ORDER], badge_index=0, badge=YEARLY_SAVING,
@@ -477,26 +582,43 @@ class ProDialog(QDialog):
         self.note = QLabel("", self)
         self.note.setAlignment(Qt.AlignCenter)
         self.note.setWordWrap(True)
-        self.note.setStyleSheet("font-size: 12px; color: %s;" % MUTED)
+        _sheet(self.note, "font-size: 12px; color: @%s;" % MUTED)
         body.addWidget(self.note)
+        self.promo_note = QLabel(PROMO_LINE, self)
+        self.promo_note.setAlignment(Qt.AlignCenter)
+        self.promo_note.setWordWrap(True)
+        _sheet(self.promo_note, "font-size: 12px; color: @%s;" % MUTED)
+        keep = self.promo_note.sizePolicy()
+        keep.setRetainSizeWhenHidden(True)                      # the window doesn't jump between plans
+        self.promo_note.setSizePolicy(keep)
+        body.addWidget(self.promo_note)
         root.addLayout(body)
 
         foot = QHBoxLayout()
         foot.setSpacing(14)
         foot.addStretch(1)
-        terms = QLabel('<a href="%s" style="color: %s; text-decoration: none;">Terms</a>'
-                       % (pricing_policy.TERMS_URL, MUTED), self)
+        terms = QLabel(self)
+        _live_text(terms, lambda: '<a href="%s" style="color: %s; text-decoration: none;">Terms</a>'
+                   % (pricing_policy.TERMS_URL, theme.qss_color(MUTED)))
         terms.setOpenExternalLinks(True)
         terms.setStyleSheet("font-size: 12px;")
         foot.addWidget(terms, 0, Qt.AlignVCenter)
         later = QPushButton("Maybe later", self)
         later.setFlat(True)
         later.setCursor(Qt.PointingHandCursor)
-        later.setStyleSheet("color: %s; border: none; font-size: 13px;" % MUTED)
+        _sheet(later, "color: @%s; border: none; font-size: 13px;" % MUTED)
         later.clicked.connect(self.reject)
         foot.addWidget(later, 0, Qt.AlignVCenter)
         foot.addStretch(1)
         root.addLayout(foot)
+
+        # Invite friends: one quiet line at the very bottom (never for Pro: this window is not shown to them).
+        self.invite_line = InviteLine(self)
+        self.invite_line.clicked.connect(self._invite)
+        irow = QHBoxLayout()
+        irow.setContentsMargins(side + 8, 0, side + 8, 0)
+        irow.addWidget(self.invite_line)
+        root.addLayout(irow)
 
         self._select_plan(DEFAULT_PLAN, move=False)
         self._ask_spots()
@@ -580,15 +702,23 @@ class ProDialog(QDialog):
             # Sign in first: a subscription has to belong to an account. The violet
             # button is checkout, so this one stays the app's sign-in colour.
             self.btn_go.setText(account_actions.SIGN_IN_TO_UPGRADE)
-            self.btn_go.setStyleSheet("font-size: 15px; font-weight: 700;")
+            _sheet(self.btn_go, "font-size: 15px; font-weight: 700;")
             self.note.setText(account_actions.SIGN_IN_FIRST)
+            self.promo_note.setVisible(False)
             return
+        self.promo_note.setVisible(self._plan in PROMO_PLANS)
         self.btn_go.setText(pricing_policy.CHECKOUT_BUTTON)
-        self.btn_go.setStyleSheet(
-            "QPushButton { font-size: 15px; font-weight: 700; color: #ffffff; border-radius: 12px;"
-            " background-color: %s; border: 1px solid %s; }"
-            "QPushButton:hover { background-color: %s; }" % (VIOLET, VIOLET_DARK, VIOLET_DARK))
+        _sheet(self.btn_go,
+               "QPushButton { font-size: 15px; font-weight: 700; color: @on-accent; border-radius: 12px;"
+               " background-color: @pro-btn; border: 1px solid @%s; }"
+               "QPushButton:hover { background-color: @%s; }" % (VIOLET_DARK, VIOLET_DARK))
         self.note.setText(SECURE + ".")
+
+    def _invite(self):
+        """"Or get it free": the Invite friends page (a guest gets there too: it asks to sign in)."""
+        self.accept()
+        if self.app and hasattr(self.app, "show_main"):
+            self.app.show_main("invite")
 
     def _go(self):
         if not self.app:

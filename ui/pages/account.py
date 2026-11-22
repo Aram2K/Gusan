@@ -22,11 +22,14 @@ Integration notes for Wave 4
   sig_auth_changed -> main_win.refresh_account() then redraws this page.
 * Prices in the Free plan line are PRICE_LINE (the Pro window has its own
   copy in ui/pro_dialog.py). There is no free trial.
+* Invite friends: while the account can still join a friend's invite - any
+  time, once (ui/invite_hub.py, the "me" answer's can_join) - the side column
+  has "Got a friend's code?" with a field, Paste and Join (ui/pages/invite_join.py).
 """
 
 import logging
 
-from PySide6.QtCore import QEvent, QRectF, Qt
+from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QPainter, QPen
 from PySide6.QtWidgets import QBoxLayout, QFrame, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 
@@ -95,31 +98,9 @@ class FeatureRow(QFrame):
         if self._last:
             return
         p = QPainter(self)
-        p.setPen(QPen(theme.qcolor("rgba(15,23,42,0.06)"), 1))
+        p.setPen(QPen(theme.qcolor("hover2"), 1))
         y = self.height() - 0.5
         p.drawLine(0, int(y), self.width(), int(y))
-        p.end()
-
-
-class TriesBar(QWidget):
-    """Five segments: the Smart Action tries left (green) and used (grey)."""
-
-    def __init__(self, left, total, parent=None):
-        super().__init__(parent)
-        self._left, self._total = int(left or 0), max(1, int(total or 5))
-        self.setFixedHeight(8)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.setAccessibleName("%d of %d Smart Action tries left" % (self._left, self._total))
-
-    def paintEvent(self, _e):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
-        p.setPen(Qt.NoPen)
-        gap = 4.0
-        w = (self.width() - gap * (self._total - 1)) / float(self._total)
-        for i in range(self._total):
-            p.setBrush(theme.qcolor("ok" if i < self._left else "line"))
-            p.drawRoundedRect(QRectF(i * (w + gap), 0, w, 8), 4, 4)
         p.end()
 
 
@@ -157,6 +138,15 @@ class AccountPage(QWidget):
         self.notice_label = None
         self._notice = None             # (text, colour) kept across rebuilds, e.g. after deleting the account
         self._busy = False
+        self.join_card = None
+        self._invites = None
+        try:
+            from ui import invite_hub
+            self._invites = invite_hub.hub(main_app)
+            if self._invites is not None:
+                self._invites.changed.connect(self._on_invites)
+        except Exception:
+            logger.debug("invites unavailable on Account", exc_info=True)
         self.refresh_account()
 
     # ── building ──
@@ -188,8 +178,13 @@ class AccountPage(QWidget):
         self.plan_holder.addWidget(self.plan_card)
         self.account_card = self._account_card(self.view)
         self.side_lay.addWidget(self.account_card)
-        self.usage_card = self._usage_card(self.view)
-        self.side_lay.addWidget(self.usage_card)
+        self.join_card = None
+        hub = getattr(self, "_invites", None)
+        if hub is not None and (hub.can_join() or hub.joined_now() is not None):
+            # (after a join in this run it says "You joined ..." - the plan change redraws this page)
+            from ui.pages.invite_join import CodeJoinCard
+            self.join_card = CodeJoinCard(hub, self.side)
+            self.side_lay.addWidget(self.join_card)
         if self.view.get("buttons", {}).get("admin"):
             self.side_lay.addWidget(self._admin_card(self.view))
         self.side_lay.addStretch(1)
@@ -383,33 +378,6 @@ class AccountPage(QWidget):
             picker.say("")
             picker.refresh(avatars.PHOTO)
 
-    def _usage_card(self, v):
-        card = Card(pad=(20, 18), gap=12)
-        card.setAccessibleName("Usage")
-        eb = label("Usage", "eyebrow", card)
-        S.tint(eb, "muted")
-        card.add(eb)
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        self.tries_bar = None
-        if v.get("pro") or v.get("smart_tries_left") is None and v.get("signed_in"):
-            row.addWidget(S.text_label("Smart Actions", 14, 600, role="h3", parent=card))
-            row.addStretch(1)
-            self.usage_text = S.text_label(v.get("smart_text") or "Unlimited", 13.5, 600, color="ok-tx", parent=card)
-            row.addWidget(self.usage_text)
-            card.add(row)
-        else:
-            row.addWidget(S.text_label("Smart Action tries", 14, 600, role="h3", parent=card))
-            row.addStretch(1)
-            self.usage_text = S.text_label(v.get("smart_text") or "", 13, role="muted", parent=card)
-            row.addWidget(self.usage_text)
-            card.add(row)
-            left = v.get("smart_tries_left")
-            if left is not None:
-                self.tries_bar = TriesBar(left, v.get("smart_tries_total") or 5, card)
-                card.add(self.tries_bar)
-        return card
-
     def _admin_card(self, v):
         card = Card(pad=(20, 14), gap=10)
         card.setAccessibleName("Preview as")
@@ -442,7 +410,7 @@ class AccountPage(QWidget):
         return w
 
     def _delete_card(self):
-        box = S._Box("rgba(255,255,255,0.45)", "line", 1, 16, self.side)
+        box = S._Box("frost-45", "line", 1, 16, self.side)
         box.setAccessibleName("Delete account")
         lay = QVBoxLayout(box)
         lay.setContentsMargins(20, 16, 20, 16)
@@ -456,6 +424,16 @@ class AccountPage(QWidget):
         self.delete_note = S.text_label("Also cancels any subscription.", 12.5, role="muted", parent=box, wrap=True)
         lay.addWidget(self.delete_note)
         return box
+
+    def _on_invites(self):
+        """The invite state changed: "Got an invite?" appears once the account is known to be able to join (a
+        card already up stays until the page is drawn again - it says "You joined ..." after a join)."""
+        hub = self._invites
+        try:
+            if hub is not None and hub.can_join() and self.join_card is None and not self._busy:
+                self.refresh_account()
+        except RuntimeError:
+            pass
 
     # ── actions ──
     def _delete_account(self):

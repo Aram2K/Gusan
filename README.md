@@ -43,7 +43,7 @@ Also: mixed languages in one sentence · a dictionary for names and terms · you
 - The cloud is your choice: Gusan Cloud (Pro) or your own Google Gemini or Mistral key. Only then does audio leave your computer. On Pro, Smart Actions, meeting notes and Live Assistant answers are written in Gusan Cloud, as text, unless you pick a local AI model or turn on Privacy mode.
 - **Privacy mode** turns Gusan Cloud and your own keys off, so your audio and words stay on this computer.
 - History, meetings and transcripts are saved on your computer, in `%APPDATA%\Transcribe` (on a Mac `~/Library/Application Support/Transcribe`). API keys go in the system keyring.
-- The Live Assistant card is hidden from screen sharing on Windows 10 (2004 and later) and Windows 11, but not in Remote Desktop. On a Mac, macOS can't promise it. The chip always shows the real state: **Hidden**, **May be hidden** or **Visible**.
+- The Live Assistant card is hidden from screen sharing on Windows, but not in Remote Desktop. On a Mac, macOS can't promise it. The chip always shows the real state: **Hidden**, **May be hidden** or **Visible**.
 - Usage statistics are anonymous and can be turned off in **Settings › Privacy**.
 
 ## Free and Pro
@@ -53,7 +53,7 @@ Also: mixed languages in one sentence · a dictionary for names and terms · you
 
 ## Install
 
-### Windows 10 / 11 (64-bit)
+### Windows (64-bit)
 
 1. Download and run **[Gusan-Windows-Setup.exe](https://github.com/Aram2K/Gusan/releases/latest/download/Gusan-Windows-Setup.exe)**. If Windows says "Windows protected your PC" (the app isn't code-signed), click **More info → Run anyway**.
 2. The first time Gusan opens, the welcome window checks your computer, recommends a speech model and sets up your microphone and shortcut.
@@ -85,7 +85,7 @@ Smart Actions, meeting notes and the Live Assistant can also run on a local AI m
 
 ## Run from source
 
-Needs Python 3.11 to 3.13, Windows 10/11 or macOS, and a microphone. On a Mac, first run `xcode-select --install` and `brew install portaudio`.
+Needs Python 3.11 to 3.13, Windows or macOS, and a microphone. On a Mac, first run `xcode-select --install` and `brew install portaudio`.
 
 ```bash
 git clone https://github.com/Aram2K/Gusan.git

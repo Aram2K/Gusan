@@ -44,7 +44,7 @@ from ui.components import Button, Card, IconTile, PageHeader, Sidebar, icons, la
 logger = logging.getLogger("transcribe")
 
 ROUTES = ("home", "dictation", "smart_actions", "meetings", "live_assistant", "audio_to_text",
-          "settings", "account")
+          "settings", "account", "invite")
 
 # Pages that moved: the old route opens its new place. The Dictionary is a
 # section of Settings (ui/pages/settings.py), not a page of its own.
@@ -72,6 +72,7 @@ TITLES = {
     "audio_to_text": "Convert audio to text",
     "settings": "Settings",
     "account": "Account & plan",
+    "invite": "Invite friends",
 }
 
 DEFAULT_SIZE = (1280, 820)
@@ -111,6 +112,8 @@ def _import_page_module(route):
             import ui.pages.settings as mod
         elif route == "account":
             import ui.pages.account as mod
+        elif route == "invite":
+            import ui.pages.invite as mod
         else:
             return None
     except ModuleNotFoundError as e:
@@ -249,13 +252,23 @@ class MainWindow(QMainWindow):
         col.addWidget(self.stack, 1)
         h.addWidget(column, 1)
         self.setCentralWidget(root)
+        # Invite friends: the sidebar entry's dots follow the program's state (ui/invite_hub.py; its cache is read
+        # on a worker, the server is asked a few seconds after a sign-in is known).
+        self.invites = None
+        try:
+            from ui import invite_hub
+            self.invites = invite_hub.hub(main_app)
+            if self.invites is not None:
+                self.invites.attach_window(self)
+                self.invites.changed.connect(self._sync_invite)
+        except Exception:
+            logger.warning("Invite friends unavailable", exc_info=True)
         self.refresh_account()
 
     def _build_share_bar(self, parent):
         bar = QFrame(parent)
         bar.setObjectName("shareBar")
-        bar.setStyleSheet("QFrame#shareBar { background: %s; border: none; border-bottom: 1px solid %s; }"
-                          % (theme.qss_color("ok-sub"), theme.qss_color("ok-line")))
+        theme.sheet(bar, "QFrame#shareBar { background: @ok-sub; border: none; border-bottom: 1px solid @ok-line; }")
         bar.setAccessibleName("Hidden on screen share")
         lay = QHBoxLayout(bar)
         lay.setContentsMargins(32, 6, 24, 6)
@@ -265,7 +278,7 @@ class MainWindow(QMainWindow):
         ic.setFixedSize(15, 15)
         lay.addWidget(ic)
         text = label(SHARE_BAR_TEXT, "muted", bar)
-        text.setStyleSheet("color: %s; background: transparent;" % theme.qss_color("ok-tx"))
+        theme.sheet(text, "color: @ok-tx; background: transparent;")
         text.setToolTip(theme.plain_tip(SHARE_BAR_TIP))
         lay.addWidget(text)
         lay.addStretch(1)
@@ -385,9 +398,21 @@ class MainWindow(QMainWindow):
         """Plan badge + name in the sidebar, then every built page's refresh_account()."""
         try:
             tier, name = account_state(self.app)
-            self.sidebar.set_account(tier, name)
+            badge = ""
+            if tier == "pro":
+                try:
+                    badge = account_actions.invite_badge(getattr(self.app, "auth", None))
+                except Exception:
+                    badge = ""
+            self.sidebar.set_account(tier, name, badge)
         except Exception:
             logger.warning("Sidebar account refresh failed", exc_info=True)
+        if self.invites is not None:
+            try:
+                self.invites.on_auth_changed()          # a new account: its own invite state (cheap otherwise)
+            except Exception:
+                logger.debug("invite refresh failed", exc_info=True)
+            self._sync_invite()
         for route, page in list(self._pages.items()):
             hook = getattr(page, "refresh_account", None)
             if callable(hook):
@@ -395,6 +420,19 @@ class MainWindow(QMainWindow):
                     hook()
                 except Exception:
                     logger.warning("%s.refresh_account failed", route, exc_info=True)
+
+    def _sync_invite(self):
+        """The sidebar's invite entry: three progress dots, or READY when a free month is waiting."""
+        hub = self.invites
+        if hub is None:
+            return
+        try:
+            st = hub.sidebar_state()
+            self.sidebar.set_invite(st["counted"], st["progress"], st["ready"], st["known"], st["visible"])
+        except RuntimeError:
+            pass                                        # the window is going away
+        except Exception:
+            logger.debug("invite sidebar sync failed", exc_info=True)
 
     def on_setting_changed(self, key):
         """AppController.sig_setting_changed lands here; every built page hears it."""
@@ -428,6 +466,11 @@ class MainWindow(QMainWindow):
             settle_on_screen(self)
         except Exception:
             logger.debug("fit on screen failed", exc_info=True)
+        if self.invites is not None:
+            try:
+                self.invites.refresh_if_stale()          # a worker; at most every 30 min
+            except Exception:
+                logger.debug("invite refresh failed", exc_info=True)
         if not getattr(self, "_prebuild_started", False) and prebuild_enabled():
             self._prebuild_started = True
             QTimer.singleShot(PREBUILD_START_MS, self._prebuild_next)

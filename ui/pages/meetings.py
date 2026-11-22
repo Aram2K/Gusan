@@ -21,7 +21,10 @@ is saved, and the page fills in by itself; without it a meeting being written st
 and for a recording started from elsewhere (the calendar
 reminder, the tray) ``title=``, ``attendees=`` (list or comma string),
 ``calendar_event_id=`` to prefill the start card, plus ``record=True`` to press
-Record (Pro gate and consent included).
+Record (Pro gate and consent included) - the meeting shortcut (cfg ``meeting_hotkey``,
+Alt+M; main._on_meeting_hotkey) presses it that way. ``focus="hotkey"`` (Settings'
+shortcut list) puts the keyboard on the rail's "Shortcut" row, which changes that
+shortcut (``app.set_setting("meeting_hotkey", combo)``); its keycaps sit under Record.
 
 Integration notes for Wave 4
 ----------------------------
@@ -112,12 +115,13 @@ import re
 import time
 from datetime import datetime, timezone
 
-from PySide6.QtCore import QEvent, QPropertyAnimation, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPointF, QPropertyAnimation, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QColor, QDesktopServices, QGuiApplication, QIcon, QKeySequence, QPainter, QPen,  # noqa: F401
                            QLinearGradient, QPixmap, QRadialGradient, QShortcut)    # (QDesktopServices: tests patch openUrl through it)
 from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QComboBox, QFrame, QGraphicsOpacityEffect,
                                QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QRadioButton,
-                               QScrollArea, QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
+                               QScrollArea, QSizePolicy, QStackedWidget, QStyle, QStyleOptionFrame, QToolButton,
+                               QVBoxLayout, QWidget)
 
 import calendar_sync
 import invite_context
@@ -128,8 +132,10 @@ from ui import calendar_door, notion_sheet, theme
 # The Connect box's words moved to ui/calendar_door.py (Home's card asks the same); the names stay here.
 from ui.calendar_door import (CONNECT_BODY, CONNECT_DETAIL, CONNECT_LINK, CONNECT_TITLE,  # noqa: F401
                               EXPIRED_NOTE)
-from ui.components import (Button, Card, Chip, Divider, IconButton, PageHeader, ProTag, SettingRow,
+from ui.components import (Button, Card, Chip, Divider, IconButton, Keycaps, PageHeader, ProTag, SettingRow,
                            SettingsRail, Toggle, icons, label, row_actions)
+from ui.components.controls import keycap_labels
+from ui.components.hotkey_capture import ShortcutField
 from ui.pages import meeting_delete, meeting_speakers_ui
 from ui.pages import meeting_views as views
 from ui.pages.meeting_views import (AUDIO_MODES, LANGS, NOTICE_TEXT, UPSELL_RECORD, BgRunner, ElidedLabel,
@@ -149,6 +155,13 @@ QFrame[gusan="upRow"]:hover { background: %s; }
 """
 CONSENT_KEY = "meeting_consent_reminder"
 NOTES_KEY = "meeting_notes_model"
+# The meeting shortcut (main.DEFAULT, settings_apply.MEETING_HOTKEY): pressed anywhere it starts recording, as
+# Record does (main._on_meeting_hotkey). Its keycaps sit under Record; the rail's "Shortcut" row changes it.
+HOTKEY_KEY = "meeting_hotkey"
+SHORTCUT_TAKEN = {"hotkey": "Dictation uses %s.", "smart_actions_hotkey": "%s runs Smart Actions. Pick another.",
+                  "live_assist_hotkey": "%s opens Live Assistant. Pick another."}
+SHORTCUT_REFUSED = "Couldn't use %s."
+SHORTCUT_HINT = "Press %s anywhere to start recording"
 MANAGED = "managed"            # actions.API_MANAGED_ID
 LOCAL_DEFAULT = "qwen_tiny"    # local_llm.QWEN_TINY_ID
 
@@ -167,8 +180,15 @@ _SETTING_KEYS = {
     "captions_on", "captions_language", "captions_who", "captions_in_share", "captions_font", "captions_colors",
     "captions_size",
     "cloud_writer_model",           # engine_choice.CLOUD_WRITER_KEY: names the model under Notes written by
+    HOTKEY_KEY,                     # the keycaps under Record and the rail's Shortcut row
 }
 UPSELL_CAPTIONS = "Live captions"
+
+
+def meeting_hotkey(cfg):
+    """The meeting shortcut in config form ("alt+m"); "" when none is set."""
+    import hotkeys
+    return str((cfg or {}).get(HOTKEY_KEY, hotkeys.MEETING_DEFAULT) or "").strip().lower()
 
 
 def _now_ts():
@@ -256,7 +276,7 @@ class MeetingsPage(QWidget):
         self._view = None
         self._writing_folder = ""       # the meeting a Live Assistant Stop opened while its notes were being written
         self.setAccessibleName("Meetings")
-        self.setStyleSheet(views.page_qss() + _CALENDAR_QSS % (theme.qss_color("blue-l"), theme.qss_color("bg")))
+        theme.sheet(self, lambda: views.page_qss() + _CALENDAR_QSS % (theme.qss_color("blue-l"), theme.qss_color("bg")))
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
@@ -431,6 +451,17 @@ class MeetingsPage(QWidget):
         self.show_list()
         self._scroll_list_to_top()
 
+    def focus_shortcut(self):
+        """Settings › General's shortcut list (focus="hotkey"): the list, its "Shortcut" row in view and the
+        keyboard on that row's Change."""
+        if self._view != "list":
+            self.show_list()
+        rail = self.list_view.rail
+        holder = self._holders.get("list")
+        if holder is not None:
+            holder.ensureWidgetVisible(rail.shortcut_row)
+        rail.focus_shortcut()
+
     def _scroll_list_to_top(self):
         """The start card is at the top of the list: bring it into view."""
         holder = self._holders.get("list")
@@ -594,6 +625,8 @@ class MeetingsPage(QWidget):
         self.list_view.sync_calendar()
         if prefill and self._view == "list":
             self._scroll_list_to_top()          # a meeting was picked elsewhere (Home): its card is in view
+        if opts.get("focus") in ("hotkey", "shortcut"):
+            self.focus_shortcut()
         if opts.get("record"):
             if self._view != "list" and phase not in ("recording", "paused"):
                 self._show("list")
@@ -1026,43 +1059,45 @@ class RecordButton(QAbstractButton):
         p.setPen(Qt.NoPen)
         # the well the button sits in: darker at the top, lighter at the bottom (a dip), a faint red tint on hover
         well = QLinearGradient(0, cy0 - R, 0, cy0 + R)
-        well.setColorAt(0.0, QColor(203, 213, 225, 150))
-        well.setColorAt(0.55, QColor(226, 232, 240, 110))
-        well.setColorAt(1.0, QColor(255, 255, 255, 200))
+        well.setColorAt(0.0, theme.qcolor("rec-well-a"))
+        well.setColorAt(0.55, theme.qcolor("rec-well-b"))
+        well.setColorAt(1.0, theme.qcolor("rec-well-c"))
         p.setBrush(well)
         p.drawEllipse(QRectF(cx - R, cy0 - R, 2 * R, 2 * R))
         if hover:
-            p.setBrush(QColor(220, 38, 38, 18))
+            p.setBrush(_alpha("danger", 18))
             p.drawEllipse(QRectF(cx - R, cy0 - R, 2 * R, 2 * R))
         # the cap's shadow in the well: deep when raised, tight when pressed
         cy = cy0 + sink
         sh_off, sh_alpha = (2.0, 70) if down else (7.0, 55 if not hover else 64)
+        if theme.is_dark():
+            sh_alpha = min(255, int(sh_alpha * 2.2))          # black on the dark window needs more to show
         shadow = QRadialGradient(cx, cy + sh_off, r + 6)
-        shadow.setColorAt(0.80, QColor(15, 23, 42, sh_alpha))
-        shadow.setColorAt(1.0, QColor(15, 23, 42, 0))
+        shadow.setColorAt(0.80, _alpha("shade", sh_alpha))
+        shadow.setColorAt(1.0, _alpha("shade", 0))
         p.setBrush(shadow)
         p.drawEllipse(QRectF(cx - r - 6, cy + sh_off - r - 6, 2 * (r + 6), 2 * (r + 6)))
         # the cap: a white dome (light from above), its light flipped when pressed in
         cap = QLinearGradient(0, cy - r, 0, cy + r)
-        cap.setColorAt(0.0, QColor("#eef1f5") if down else QColor("#ffffff"))
-        cap.setColorAt(1.0, QColor("#fbfcfd") if down else QColor("#e9edf2"))
+        cap.setColorAt(0.0, theme.qcolor("rec-cap-da" if down else "rec-cap-a"))
+        cap.setColorAt(1.0, theme.qcolor("rec-cap-db" if down else "rec-cap-b"))
         p.setBrush(cap)
         p.setPen(QPen(theme.qcolor("line2"), 1))
         p.drawEllipse(QRectF(cx - r + 0.5, cy - r + 0.5, 2 * r - 1, 2 * r - 1))
         if not down:
             # a thin highlight along the top of the cap's rim
-            p.setPen(QPen(QColor(255, 255, 255, 230), 1.5))
+            p.setPen(QPen(theme.qcolor("rec-rim"), 1.5))
             p.setBrush(Qt.NoBrush)
             p.drawArc(QRectF(cx - r + 2, cy - r + 2, 2 * r - 4, 2 * r - 4), 30 * 16, 120 * 16)
         # the red dome: a glow under it, a gradient lit from the top left, a small highlight
         dr = 22.0
         p.setPen(Qt.NoPen)
         glow = QRadialGradient(cx, cy + (3 if down else 6), dr + 10)
-        glow.setColorAt(0.6, QColor(220, 38, 38, 45 if down else 70))
-        glow.setColorAt(1.0, QColor(220, 38, 38, 0))
+        glow.setColorAt(0.6, _alpha("danger", 45 if down else 70))
+        glow.setColorAt(1.0, _alpha("danger", 0))
         p.setBrush(glow)
         p.drawEllipse(QRectF(cx - dr - 10, cy + (3 if down else 6) - dr - 10, 2 * (dr + 10), 2 * (dr + 10)))
-        red = theme.qcolor("red")
+        red = theme.qcolor("danger")
         if down:
             red = red.darker(118)
         elif hover:
@@ -1074,8 +1109,8 @@ class RecordButton(QAbstractButton):
         p.setBrush(dome)
         p.drawEllipse(QRectF(cx - dr, cy - dr, 2 * dr, 2 * dr))
         spec = QRadialGradient(cx - dr * 0.25, cy - dr * 0.5, dr * 0.55)
-        spec.setColorAt(0.0, QColor(255, 255, 255, 60 if down else 120))
-        spec.setColorAt(1.0, QColor(255, 255, 255, 0))
+        spec.setColorAt(0.0, _alpha("on-accent", 60 if down else 120))     # a gloss on the red dome
+        spec.setColorAt(1.0, _alpha("on-accent", 0))
         p.setBrush(spec)
         p.drawEllipse(QRectF(cx - dr * 0.8, cy - dr * 1.05, dr * 1.1, dr * 0.9))
         if self.hasFocus() and self.property("focusVisible"):
@@ -1087,7 +1122,14 @@ class RecordButton(QAbstractButton):
 
 
 class TitleEdit(QLineEdit):
-    """The start card's title: big display text, as wide as its words."""
+    """The start card's title: big display text, as wide as its words.
+
+    A name longer than the room never loses its START (founder 2026-11-21: a calendar meeting read "opean AI
+    Championship Paris" - a QLineEdit scrolls to its cursor, and setText puts the cursor at the end). Not being
+    edited, it shows the beginning and ends in "…" (the whole name in the tooltip); edited - the pencil, a click,
+    Tab - the whole text is there from its first letter."""
+
+    H_MARGIN = 2                    # QLineEdit's own space on each side of its text
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1096,7 +1138,13 @@ class TitleEdit(QLineEdit):
         self.setFixedHeight(32)
         self.setAccessibleName("Meeting name")
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
-        self.textChanged.connect(lambda _t: self.updateGeometry())
+        self.textChanged.connect(self._on_text)
+
+    def select_all_from_start(self):
+        """Everything selected (typing replaces it), the cursor - and so the view - at the first letter."""
+        n = len(self.text())
+        if n:
+            self.setSelection(n, -n)
 
     def sizeHint(self):
         fm = self.fontMetrics()
@@ -1105,6 +1153,77 @@ class TitleEdit(QLineEdit):
 
     def minimumSizeHint(self):
         return QSize(60, 32)
+
+    # ── what shows while it is not being edited ──
+    def _text_rect(self):
+        opt = QStyleOptionFrame()
+        self.initStyleOption(opt)
+        r = self.style().subElementRect(QStyle.SE_LineEditContents, opt, self)
+        m = self.textMargins()
+        return r.adjusted(m.left() + self.H_MARGIN, m.top(), -(m.right() + self.H_MARGIN), -m.bottom())
+
+    def is_elided(self):
+        """True when the name doesn't fit and is shown cut with "…" (never while it is being edited)."""
+        text = self.text()
+        if not text or self.hasFocus():
+            return False
+        return self.fontMetrics().horizontalAdvance(text) > self._text_rect().width()
+
+    def shown_text(self):
+        """The words on screen while it is not edited: the whole name, or its beginning and "…"."""
+        if not self.is_elided():
+            return self.text()
+        return self.fontMetrics().elidedText(self.text(), Qt.ElideRight, max(0, self._text_rect().width()))
+
+    def _sync_tip(self):
+        tip = theme.plain_tip(self.text()) if self.is_elided() else ""
+        if tip != self.toolTip():
+            self.setToolTip(tip)
+
+    def _on_text(self, _t):
+        self.updateGeometry()
+        self._sync_tip()
+
+    def paintEvent(self, e):
+        if not self.is_elided():
+            super().paintEvent(e)
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.TextAntialiasing, True)
+        opt = QStyleOptionFrame()
+        self.initStyleOption(opt)
+        self.style().drawPrimitive(QStyle.PE_PanelLineEdit, opt, p, self)
+        r = self._text_rect()
+        fm = self.fontMetrics()
+        top = r.top() + (r.height() - fm.height() + 1) // 2           # where QLineEdit puts its line
+        p.setFont(self.font())
+        p.setPen(theme.qcolor("ink"))                                 # the titleEdit QSS colour
+        p.drawText(QPointF(r.left(), top + fm.ascent()), self.shown_text())
+        p.end()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._sync_tip()
+
+    def focusInEvent(self, e):
+        super().focusInEvent(e)
+        reason = e.reason()
+        if reason in (Qt.TabFocusReason, Qt.BacktabFocusReason, Qt.ShortcutFocusReason):
+            if self.hasSelectedText() and self.selectedText() == self.text():
+                self.select_all_from_start()    # Tab selects everything with the cursor at the END: the start
+        elif reason == Qt.MouseFocusReason and self.text():
+            # A click on the name as it was shown (its beginning): QLineEdit maps the click through its own
+            # scroll, last set while it was edited - from its first letter again, so the click lands where
+            # the person pointed (a synchronous paint is where QLineEdit sets that scroll).
+            self.setCursorPosition(0)
+            self.repaint()
+        self._sync_tip()
+        self.update()
+
+    def focusOutEvent(self, e):
+        super().focusOutEvent(e)
+        self._sync_tip()
+        self.update()
 
 
 class PersonChip(QPushButton):
@@ -1246,9 +1365,24 @@ class PeopleField(QFrame):
         self.input.setPlaceholderText(self._placeholder)
 
 
+def _alpha(token, alpha):
+    """A token's colour at ``alpha`` (0-255)."""
+    c = theme.qcolor(token)
+    c.setAlpha(int(alpha))
+    return c
+
+
+_COMBO_ICONS = {}
+
+
 def _combo_icon(names, width=34, size=15):
-    """Leading icons for a combo item, left-aligned on one canvas width."""
+    """Leading icons for a combo item, left-aligned on one canvas width (in the look's muted colour; a switch
+    draws them again: icons.retint)."""
     dpr = views._dpr()
+    key = (tuple(names), width, size, dpr, theme.qcolor("muted").rgba())
+    hit = _COMBO_ICONS.get(key)
+    if hit is not None:
+        return QIcon(hit)
     pm = QPixmap(int(round(width * dpr)), int(round(size * dpr)))
     pm.setDevicePixelRatio(dpr)
     pm.fill(Qt.transparent)
@@ -1258,7 +1392,9 @@ def _combo_icon(names, width=34, size=15):
         p.drawPixmap(x, 0, icons.pixmap(n, size, "muted"))
         x += size + 4
     p.end()
-    return QIcon(pm)
+    ic = icons.remember_icon(QIcon(pm), lambda: _combo_icon(names, width, size))
+    _COMBO_ICONS[key] = ic
+    return QIcon(ic)
 
 
 class ModeCombo(QComboBox):
@@ -1339,9 +1475,19 @@ class StartCard(QFrame):
         lay.setSpacing(18)
         top = QHBoxLayout()
         top.setSpacing(28)
+        rcol = QVBoxLayout()
+        rcol.setContentsMargins(0, 0, 0, 0)
+        rcol.setSpacing(8)
+        rcol.addStretch(1)
         self.record_btn = RecordButton(self)
         self.record_btn.clicked.connect(lambda: self.page.record())
-        top.addWidget(self.record_btn, 0, Qt.AlignVCenter)
+        rcol.addWidget(self.record_btn, 0, Qt.AlignHCenter)
+        # The meeting shortcut's keycaps (as on Home's tiles): the same Record from any app.
+        self.record_keys = Keycaps(parent=self)
+        self._keys_shown = None
+        rcol.addWidget(self.record_keys, 0, Qt.AlignHCenter)
+        rcol.addStretch(1)
+        top.addLayout(rcol)
 
         form = QVBoxLayout()
         form.setSpacing(14)
@@ -1476,6 +1622,21 @@ class StartCard(QFrame):
         on = bool(cfg.get(CONSENT_KEY, True))
         self.consent_divider.setVisible(on)
         self.consent_row.setVisible(on)
+        self.sync_keys(cfg)
+
+    def sync_keys(self, cfg=None):
+        """The keycaps under Record follow the meeting shortcut (none set: none shown)."""
+        hk = meeting_hotkey(self.page.cfg() if cfg is None else cfg)
+        if hk == self._keys_shown:
+            return
+        self._keys_shown = hk
+        self.record_keys.set_hotkey(hk)
+        self.record_keys.setVisible(bool(hk))
+        shown = " + ".join(keycap_labels(hk))
+        self.record_keys.setToolTip(SHORTCUT_HINT % shown if shown else "")
+        self.record_keys.setAccessibleDescription(SHORTCUT_HINT % shown if shown else "")
+        self.record_btn.setToolTip("Record a meeting (%s)" % shown if shown else "Record a meeting")
+        self.record_btn.setAccessibleDescription("Shortcut %s" % shown if shown else "")
 
     def sync_default(self, force=False):
         """Keep the default name current ('Meeting · Tue 14:30') until the user types one."""
@@ -1600,8 +1761,9 @@ class StartCard(QFrame):
         self._edited = True
 
     def _focus_title(self):
+        """The pencil: edit the name - all of it selected, shown from its first letter."""
         self.title_edit.setFocus(Qt.OtherFocusReason)
-        self.title_edit.selectAll()
+        self.title_edit.select_all_from_start()
 
     def _on_mode(self, _i):
         """This meeting only: start() gets it as audio_mode; never saved."""
@@ -1704,12 +1866,12 @@ class TimelineDot(QWidget):
         if not self._last:
             p.drawRect(QRectF(cx - 1, cy + 8, 2, self.height() - cy - 8))
         if self._next:
-            p.setBrush(QColor(59, 130, 246, 46))
+            p.setBrush(_alpha("blue-l", 46))
             p.drawEllipse(QRectF(cx - 9, cy - 9, 18, 18))
             p.setBrush(theme.qcolor("blue"))
             p.drawEllipse(QRectF(cx - 5, cy - 5, 10, 10))
         else:
-            p.setBrush(QColor("#ffffff"))
+            p.setBrush(theme.qcolor("surface"))
             p.setPen(QPen(theme.qcolor("line2"), 2))
             p.drawEllipse(QRectF(cx - 4, cy - 4, 8, 8))
         p.end()
@@ -1732,6 +1894,7 @@ class BellButton(QToolButton):
         theme.focus_ring(self)
         self.toggled.connect(lambda _on: self._paint_icon())
         self._paint_icon()
+        theme.on_change(self, self._paint_icon)
 
     def _paint_icon(self):
         on = self.isChecked()
@@ -2220,7 +2383,7 @@ class MeetingRow(QAbstractButton):
             p.drawRoundedRect(QRectF(self.rect()).adjusted(0, 1, 0, 0), 10, 10)
         if self.underMouse() or self.isDown():
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(15, 23, 42, 10 if not self.isDown() else 16))
+            p.setBrush(theme.qcolor("row-hover" if not self.isDown() else "row-press"))
             p.drawRoundedRect(QRectF(self.rect()).adjusted(0, 1, 0, 0), 10, 10)
         if not self._first:
             p.setPen(Qt.NoPen)
@@ -2242,7 +2405,7 @@ class _Square(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setPen(QPen(theme.qcolor("line2"), 1.5))
-        p.setBrush(QColor("#ffffff"))
+        p.setBrush(theme.qcolor("input"))
         p.drawRoundedRect(QRectF(0.75, 0.75, 12.5, 12.5), 4, 4)
         p.end()
 
@@ -2280,8 +2443,12 @@ class ExampleCard(Card):
             t = QLabel(self)
             t.setTextFormat(Qt.RichText)
             t.setFont(theme.font(13))
-            t.setText("<b style='color:%s'>%s</b>&nbsp; <span style='color:%s'>%s</span>"
-                      % (theme.qss_color("ink"), who, theme.qss_color("text"), text))
+
+            def words(t=t, who=who, text=text):
+                t.setText("<b style='color:%s'>%s</b>&nbsp; <span style='color:%s'>%s</span>"
+                          % (theme.qss_color("ink"), who, theme.qss_color("text"), text))
+            words()
+            theme.on_change(t, words)                         # rich text in token colours: again after a switch
             r.addWidget(t, 1, Qt.AlignVCenter)
             acts.addLayout(r)
         self.add(acts)
@@ -2318,7 +2485,7 @@ class MeetingsList(QWidget):
         self.search.setAccessibleName("Search meetings")
         self.search.setFont(theme.font(13.5))
         self.search.setFixedSize(220, 34)
-        search_act = self.search.addAction(QIcon(icons.pixmap("search", 16, "muted")), QLineEdit.LeadingPosition)
+        search_act = self.search.addAction(icons.icon("search", 16, "muted"), QLineEdit.LeadingPosition)
         search_act.setText("Search")
         self.search.setClearButtonEnabled(True)
         for b in self.search.findChildren(QToolButton):      # the line edit's own icon buttons
@@ -2733,7 +2900,7 @@ class Radio(QRadioButton):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         r = QRectF(2, 2, 16, 16)
-        p.setBrush(QColor("#ffffff"))
+        p.setBrush(theme.qcolor("input"))
         if self.isChecked():
             p.setPen(QPen(theme.qcolor("blue"), 1.6))
             p.drawEllipse(r.adjusted(0.8, 0.8, -0.8, -0.8))
@@ -2802,6 +2969,13 @@ class MeetingRail(SettingsRail):
     def __init__(self, page, parent=None):
         super().__init__("Meeting settings", icon="gear", parent=parent)
         self.page = page
+        # Shortcut (cfg meeting_hotkey, Alt+M): pressed in any app it starts recording, as Record does. Keyboard
+        # only (main._setup_meeting_hotkey registers keys); Settings › General's shortcut list links here.
+        self.shortcut = ShortcutField(meeting_hotkey(page.cfg()), accessible_name="Meeting shortcut")
+        self.shortcut.capture.captured.connect(self._on_shortcut_captured)
+        # While keys are pressed the global shortcuts must not fire (AppController.suspend_hotkeys).
+        self.shortcut.capture.capturing_changed.connect(lambda on: self.page.call("suspend_hotkeys", bool(on)))
+        self.shortcut_row = self.add_row(SettingRow("Shortcut", self.shortcut))
         # Google Calendar
         self.cal_control = QWidget()
         cl = QHBoxLayout(self.cal_control)
@@ -2963,6 +3137,36 @@ class MeetingRail(SettingsRail):
         self.sync_notion(cfg)
         self.speech.refresh()
         self.sync_captions(cfg)
+        self.sync_shortcut(cfg)
+
+    def sync_shortcut(self, cfg=None):
+        """The Shortcut row shows the meeting shortcut (never while the person is pressing new keys)."""
+        if self.shortcut.is_capturing():
+            return
+        self.shortcut.set_hotkey(meeting_hotkey(self.page.cfg() if cfg is None else cfg))
+
+    def _on_shortcut_captured(self, combo):
+        """New keys for the meeting shortcut: applied (settings_apply registers them), or refused with why - the
+        keys another shortcut has, or keys the system would not give."""
+        if self.page.set_setting(HOTKEY_KEY, combo):
+            self.shortcut.set_error("")
+            return
+        self.sync_shortcut()                            # back to what is really set
+        import hotkeys
+        from settings_apply import norm_hotkey
+        shown = " + ".join(keycap_labels(combo)) or combo
+        cfg = self.page.cfg()
+        defaults = {"hotkey": hotkeys.DICTATION_DEFAULT, "smart_actions_hotkey": hotkeys.SMART_ACTIONS_DEFAULT,
+                    "live_assist_hotkey": "ctrl+alt+a"}                # main.DEFAULT when a key is missing
+        for key, text in SHORTCUT_TAKEN.items():
+            if norm_hotkey(combo) and norm_hotkey(cfg.get(key, defaults[key])) == norm_hotkey(combo):
+                self.shortcut.set_error(text % shown)
+                return
+        self.shortcut.set_error(SHORTCUT_REFUSED % shown)
+
+    def focus_shortcut(self):
+        """Settings' shortcut list: the keyboard on the Shortcut row's Change."""
+        self.shortcut.change.setFocus(Qt.TabFocusReason)
 
     def sync_notion(self, cfg=None):
         """The Notion rows: Connect | Manage + Disconnect | Reconnect + Disconnect,

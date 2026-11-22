@@ -128,9 +128,9 @@ class TestNewConfigDefaults(unittest.TestCase):
         self.assertEqual(main.DEFAULT["hotkey_mode"], "toggle")
 
     def test_schema_version_present(self):
-        # 2 = Gusan 2.0, 3 = the Smart Actions shortcut (main._migrate_config
+        # 2 = Gusan 2.0, 3 = the Smart Actions shortcut, 4 = dark mode (main._migrate_config
         # brings 1.9.x and early 2.0 configs up).
-        self.assertEqual(main.DEFAULT["config_schema_version"], 3)
+        self.assertEqual(main.DEFAULT["config_schema_version"], 4)
 
     def test_smart_actions_defaults(self):
         self.assertEqual(main.DEFAULT["smart_actions_hotkey"], main.hotkeys.SMART_ACTIONS_DEFAULT)  # ctrl+s on a Mac

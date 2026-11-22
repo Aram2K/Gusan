@@ -748,6 +748,8 @@ def test_change_shortcut_names_the_feature_that_has_the_keys(wizard):
     assert t.shortcut_problem.text() == "Alt + S runs Smart Actions. Pick another."
     w.hotkey_captured("ctrl+alt+a")
     assert t.shortcut_problem.text() == "Ctrl + Alt + A opens Live Assistant. Pick another."
+    w.hotkey_captured("alt+m")                            # the meeting shortcut (main.DEFAULT when missing)
+    assert t.shortcut_problem.text() == "Alt + M records a meeting. Pick another."
     w.hotkey_captured("ctrl+q")
     assert t.shortcut_problem.text() == "That shortcut can’t be used. Try another."
     assert t.shortcut.hotkey() == "alt+r"

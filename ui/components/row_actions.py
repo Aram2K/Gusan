@@ -17,7 +17,7 @@ Live Assistant's past sessions look and behave the same:
 import logging
 
 from PySide6.QtCore import QEasingCurve, QEvent, QObject, QPointF, QPropertyAnimation, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen
+from PySide6.QtGui import QIcon, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel,
                                QSizePolicy, QToolButton, QWidget)
 
@@ -33,6 +33,24 @@ NARROW_BELOW = 520            # a row narrower than this keeps its icon at REST_
 ANIMATE = True                # tests switch the fade off to read the final opacity at once
 
 
+_TRASH = {}
+
+
+def trash_icon():
+    """The trash icon in its three states (muted, red under the pointer, faint when off), in the active look's
+    colours - made again by icons.retint after a switch."""
+    key = tuple(theme.qcolor(t).rgba() for t in ("muted", "red-tx", "faint"))
+    hit = _TRASH.get(key)
+    if hit is None:
+        hit = QIcon()
+        hit.addPixmap(icons.pixmap("trash", 16, "muted", sw=1.8), QIcon.Normal)
+        hit.addPixmap(icons.pixmap("trash", 16, "red-tx", sw=1.8), QIcon.Active)
+        hit.addPixmap(icons.pixmap("trash", 16, "faint", sw=1.8), QIcon.Disabled)
+        icons.remember_icon(hit, trash_icon)
+        _TRASH[key] = hit
+    return QIcon(hit)
+
+
 class TrashButton(QToolButton):
     """A 28 px trash icon. Not a Tab stop (a list of 50 rows would need 100 Tabs): the keyboard's way
     to delete is the Delete key on the row; this button is the pointer's, and a screen reader finds it
@@ -46,11 +64,7 @@ class TrashButton(QToolButton):
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.NoFocus)
         self.setAutoRaise(True)
-        ic = QIcon()
-        ic.addPixmap(icons.pixmap("trash", 16, "muted", sw=1.8), QIcon.Normal)
-        ic.addPixmap(icons.pixmap("trash", 16, "red-tx", sw=1.8), QIcon.Active)
-        ic.addPixmap(icons.pixmap("trash", 16, "faint", sw=1.8), QIcon.Disabled)
-        self.setIcon(ic)
+        self.setIcon(trash_icon())
         sp = self.sizePolicy()
         sp.setRetainSizeWhenHidden(True)             # its place stays: a row never jumps when it fades
         self.setSizePolicy(sp)
@@ -237,11 +251,11 @@ class RowCheck(QAbstractButton):
             p.setPen(QPen(theme.qcolor("blue-h"), 1.5))
             p.setBrush(theme.qcolor("blue"))
             p.drawRoundedRect(r, 5, 5)
-            p.setPen(QPen(QColor("#ffffff"), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setPen(QPen(theme.qcolor("on-accent"), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             p.drawPolyline([QPointF(4.6, 9.4), QPointF(7.6, 12.4), QPointF(13.4, 5.8)])
         else:
             p.setPen(QPen(theme.qcolor("line2"), 1.5))
-            p.setBrush(QColor("#ffffff"))
+            p.setBrush(theme.qcolor("input"))
             p.drawRoundedRect(r, 5, 5)
         p.end()
 

@@ -107,7 +107,18 @@ def wants_hint(data):
         # not read the recording again (that would replace them), so the one thing it can still
         # do is tell the people on the call apart - offered only while that is undone.
         return call_untold(data)
-    return (not speaker_labels.has_labels(text)) or call_untold(data)
+    return (not _has_speakers(data)) or call_untold(data)
+
+
+def _has_speakers(data):
+    """The transcript says who spoke - "You:", "Speaker 2:", or a speaker's name (speaker_map: a renamed speaker, the
+    one other person named from the screen)."""
+    text = (data or {}).get("transcript") or ""
+    smap = (data or {}).get("speaker_map")
+    if smap is None:
+        import speaker_map
+        smap = speaker_map.from_text(text, (data or {}).get("meta") or {})
+    return speaker_labels.has_labels(text, getattr(smap, "raw_labels", None))
 
 
 def hint_html(data):
@@ -491,7 +502,11 @@ def after_render(view):
         hint = hint_html(view.data)
         if not hint:
             return
-        from ui.pages import meeting_views
-        view.transcript.setHtml(hint + meeting_views.transcript_html(view.data.get("transcript") or ""))
+        markup = getattr(view, "transcript_markup", None)
+        if callable(markup):
+            view.transcript.setHtml(hint + markup())          # (the speakers' names as the page writes them)
+        else:
+            from ui.pages import meeting_views
+            view.transcript.setHtml(hint + meeting_views.transcript_html(view.data.get("transcript") or ""))
     except Exception:
         logger.debug("speaker suggestion failed", exc_info=True)

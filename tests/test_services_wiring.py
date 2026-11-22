@@ -61,7 +61,7 @@ class TestConfigMigration(unittest.TestCase):
         c = self._load({"language": "ru", "config_schema_version": 1, "whisper_model": "small",
                         "live_assist_language": "en", "live_assist_output_language": "en",
                         "some_1_9_key": 7})
-        self.assertEqual(c["config_schema_version"], 3)
+        self.assertEqual(c["config_schema_version"], main.CONFIG_SCHEMA_VERSION)
         self.assertEqual(c["file_language"], "ru")            # 1.9 file jobs used it
         self.assertEqual(c["live_assist_language"], "en")     # a saved choice stays
         self.assertEqual(c["some_1_9_key"], 7)                # nothing is dropped
@@ -70,8 +70,19 @@ class TestConfigMigration(unittest.TestCase):
     def test_a_config_without_a_version_is_a_1_9_one(self):
         c = self._load({"language": "multi"})
         self.assertEqual(c["file_language"], "multi")
-        self.assertEqual(c["config_schema_version"], 3)
+        self.assertEqual(c["config_schema_version"], main.CONFIG_SCHEMA_VERSION)
         self.assertEqual(c["smart_actions_hotkey"], main.hotkeys.SMART_ACTIONS_DEFAULT)  # the Smart Actions shortcut
+
+    def test_the_live_card_wears_the_apps_look_after_the_dark_mode_update(self):
+        # Schema 4: the card's old default ("light", in every config.json) becomes "system"; dark stays dark.
+        self.assertEqual(self._load({"config_schema_version": 3, "live_assist_theme": "light"})["live_assist_theme"],
+                         "system")
+        self.assertEqual(self._load({"config_schema_version": 3})["live_assist_theme"], "system")
+        self.assertEqual(self._load({"config_schema_version": 3, "live_assist_theme": "dark"})["live_assist_theme"],
+                         "dark")
+        self.assertEqual(self._load({"config_schema_version": 4, "live_assist_theme": "light"})["live_assist_theme"],
+                         "light")                                     # a pin made after the update is kept
+        self.assertEqual(main.DEFAULT["app_theme"], "system")
 
     def test_a_2_0_config_is_left_alone(self):
         c = self._load({"language": "ru", "config_schema_version": 2})
@@ -537,11 +548,12 @@ class TestSessionAndBusy(unittest.TestCase):
         app._unregister_mouse_listener = lambda: app.calls.append("unmouse")
         app._setup_assist_hotkey = lambda hk: app.calls.append(("assist", hk))
         app._release_smart_hotkey = lambda: app.calls.append("unsmart")   # the Smart Actions shortcut too
+        app._release_meeting_hotkey = lambda: app.calls.append("unmeeting")   # and the meeting one
         app.apply_tray_bindings = lambda: app.calls.append("rehook")
         cfg_before = dict(main.cfg)
         self.assertTrue(main.AppController.suspend_hotkeys(app, True))
         main.AppController.suspend_hotkeys(app, True)            # once
-        self.assertEqual(app.calls, ["unhook", "unmouse", ("assist", ""), "unsmart"])
+        self.assertEqual(app.calls, ["unhook", "unmouse", ("assist", ""), "unsmart", "unmeeting"])
         main.AppController.suspend_hotkeys(app, False)
         self.assertEqual(app.calls[-1], "rehook")
         self.assertEqual(main.cfg, cfg_before)                    # no config change
@@ -788,7 +800,7 @@ class TestSafeQuit(unittest.TestCase):
         app._run_update_on_quit = lambda: order.append("installer")
         app._flush_pending_save = lambda: order.append("settings")
         for name in ("_unregister_transient_keys", "_unregister_kbd_hotkey", "_unregister_mouse_listener",
-                     "_release_smart_hotkey"):
+                     "_release_smart_hotkey", "_release_meeting_hotkey"):
             setattr(app, name, lambda: None)
         bind(app, "quit_app", "_stop_recording_for_quit", "_stop_mic_monitor_for_quit",
              "_on_quit_event", "_on_session_ending", "_on_about_to_quit", "_release_single_instance_lock")

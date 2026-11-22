@@ -155,7 +155,8 @@ def test_the_controller_owns_the_services(ctl):
     assert ctl._is_meeting_busy() is False
     assert ctl.calendar is None                                  # no Google client in this build
     assert type(ctl.mic_monitor).__name__ == "MicMonitor"
-    assert ctl.cfg["config_schema_version"] == 3
+    import main
+    assert ctl.cfg["config_schema_version"] == main.CONFIG_SCHEMA_VERSION == 4    # 4: dark mode
     # A Smart Action's paste reaches the rich clipboard from its worker thread.
     from ui.components import clipboard as rich_clipboard
     assert rich_clipboard.installed() is True

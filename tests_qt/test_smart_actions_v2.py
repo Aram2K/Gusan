@@ -243,7 +243,7 @@ def test_a_whisper_model_not_on_disk_asks_then_downloads_and_is_saved(page_for, 
     page = page_for(app)
     combo = page.speech_combo
     assert combo.choice_mark(combo.findData("small")) == "download"        # the icon at the row's right
-    assert combo.choice_mark(combo.findData("base")) == ""                 # on disk: nothing
+    assert combo.choice_mark(combo.findData("base")) == "downloaded"       # on disk: the check
     combo.setCurrentIndex(combo.findData("small"))
     assert asked.calls == [("Download Whisper Small?",
                             "460 MB - Smart Actions will use it once it is ready.", "Download", "Not now")]
@@ -256,7 +256,7 @@ def test_a_whisper_model_not_on_disk_asks_then_downloads_and_is_saved(page_for, 
     app.downloads.finish("small")
     assert page.speech_line.text() == "Whisper Small · Local"
     assert combo.plain_text() == "Whisper Small"
-    assert combo.choice_mark(combo.findData("small")) == ""                # finished: the icon is gone
+    assert combo.choice_mark(combo.findData("small")) == "downloaded"      # finished: the check
     # On disk already: no question, no download.
     combo.setCurrentIndex(combo.findData("base"))
     assert app.downloads.started == ["small"] and len(asked.calls) == 1
@@ -292,7 +292,7 @@ def test_a_download_finishing_elsewhere_clears_the_icon(page_for):
     app.downloads.state_changed.emit("tiny", "downloading")
     assert combo.choice_mark(combo.findData("tiny")) == ""
     app.downloads.finish("tiny")
-    assert combo.choice_mark(combo.findData("tiny")) == ""
+    assert combo.choice_mark(combo.findData("tiny")) == "downloaded"     # here now: the check
     app.downloads.states["tiny"] = "missing"                               # removed in Settings
     app.downloads.state_changed.emit("tiny", "missing")
     assert combo.choice_mark(combo.findData("tiny")) == "download"

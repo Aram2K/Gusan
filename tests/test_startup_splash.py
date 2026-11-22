@@ -945,11 +945,15 @@ class TestNothingHeavyAndBundled(unittest.TestCase):
                 mods.update(a.name for a in n.names)
         # no widgets, no theme or other app module: the card process starts fast (ctypes is
         # imported inside step_down only, after 15 s, and the card process loads it for its
-        # app watch anyway)
-        self.assertEqual(mods, {"ctypes", "math", "sys", "time", "PySide6.QtCore", "PySide6.QtGui", "app_info",
-                                "startup_splash"})
+        # app watch anyway). Light or dark: config.json is read with json and Windows' setting with
+        # winreg (built in), both inside the functions that need them; os is loaded by Python itself.
+        self.assertEqual(mods, {"ctypes", "math", "os", "sys", "time", "json", "winreg", "PySide6.QtCore",
+                                "PySide6.QtGui", "app_info", "startup_splash"})
         step_down = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "step_down")
         self.assertTrue(any(isinstance(n, ast.Import) and n.names[0].name == "ctypes" for n in ast.walk(step_down)))
+        top = {a.name for n in tree.body if isinstance(n, ast.Import) for a in n.names}
+        self.assertNotIn("json", top)
+        self.assertNotIn("winreg", top)
 
 
 if __name__ == "__main__":

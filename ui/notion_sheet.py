@@ -167,9 +167,9 @@ def _run_then(fn, *args, then=None, error=None, **kwargs):
 
 # ── the mark ─────────────────────────────────────────────────────────────────
 def notion_pixmap(size):
-    """The Notion mark at ``size`` logical px: a white rounded tile with a plain
-    "N" drawn in ink (not Notion's own logo file). 48 px is the sheet's tile, 16 px
-    the Settings row's label icon."""
+    """The Notion mark at ``size`` logical px: a rounded tile of the look's surface (white in the
+    light look) with a plain "N" drawn in ink (not Notion's own logo file) - light on dark in the dark
+    look, as Notion's own mark is. 48 px is the sheet's tile, 16 px the Settings row's label icon."""
     dpr = icons._dpr()
     px = max(1, int(round(size * dpr)))
     pm = QPixmap(px, px)
@@ -178,7 +178,7 @@ def notion_pixmap(size):
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing, True)
     p.setPen(QPen(theme.qcolor("line2"), 1))
-    p.setBrush(theme.qcolor("white"))
+    p.setBrush(theme.qcolor("surface"))
     p.drawRoundedRect(QRectF(0.5, 0.5, size - 1, size - 1), size * 0.25, size * 0.25)
     # The N: a polyline in a 26 x 26 box on the 48 px tile, a bit bigger on small tiles.
     k = size / 48.0
@@ -197,6 +197,7 @@ def mark_label(size=16):
     """The mark as a QLabel (the Settings row's leading icon, the sheet's tile)."""
     lb = QLabel()
     lb.setPixmap(notion_pixmap(size))
+    theme.on_change(lb, lambda: lb.setPixmap(notion_pixmap(size)))     # drawn in the look's colours
     lb.setFixedSize(size, size)
     lb.setAccessibleName("Notion")
     lb.setAttribute(Qt.WA_TransparentForMouseEvents, True)
@@ -632,9 +633,8 @@ def ring_room(button, color):
     text starts RING px in, with the 1 px border and 4 px padding, or the 2 px ring
     and 3 px padding (so it does not move when the ring appears). The ring then
     encloses the letters instead of touching them."""
-    button.setStyleSheet('QPushButton { color: %s; padding: 0px %dpx; }'
-                         'QPushButton[focusVisible="true"] { padding: 0px %dpx; }'
-                         % (theme.qss_color(color), RING - 1, RING - 2))
+    theme.sheet(button, 'QPushButton { color: @%s; padding: 0px %dpx; }'
+                        'QPushButton[focusVisible="true"] { padding: 0px %dpx; }' % (color, RING - 1, RING - 2))
     return button
 
 
@@ -682,6 +682,17 @@ def bold_names(text):
     return "%s %s" % (head, last) if head else text
 
 
+def muted_placeholder(edit):
+    """``edit``'s placeholder in the look's muted colour - again after a switch."""
+    def put():
+        pal = edit.palette()
+        pal.setColor(QPalette.PlaceholderText, theme.qcolor("muted"))
+        edit.setPalette(pal)
+    put()
+    theme.on_change(edit, put)
+    return edit
+
+
 def _plain(html):
     """The sentence a screen reader reads: no markup, ordinary spaces."""
     return QTextDocumentFragment.fromHtml(html).toPlainText().replace(" ", " ")
@@ -693,6 +704,8 @@ def rich_label(text, px=14, weight=400, color="text2", parent=None):
     html = bold_names(text)
     lb = text_label(html, px, weight, color, wrap=True, parent=parent, rich=True)
     lb.setAccessibleName(_plain(html))
+    lb._plain_src = text
+    theme.on_change(lb, lambda: lb.setText(bold_names(lb._plain_src)))   # the bold names carry the ink colour
     return lb
 
 
@@ -711,8 +724,7 @@ class _Badge(QLabel):
         self.setFixedSize(24, 24)
         self.setAlignment(Qt.AlignCenter)
         self.setFont(theme.font(12.5, 700))
-        self.setStyleSheet("QLabel { background: %s; color: %s; border: 1px solid %s; border-radius: 12px; }"
-                           % (theme.qss_color("white"), theme.qss_color("ink"), theme.qss_color("line2")))
+        theme.sheet(self, "QLabel { background: @surface; color: @ink; border: 1px solid @line2; border-radius: 12px; }")
         self.setAccessibleName("Step %d" % n)
 
 
@@ -747,9 +759,7 @@ class SecretField(PasswordField):
         super().__init__("Integration secret", parent)
         self.label.hide()
         self.edit.setPlaceholderText(SECRET_HINT)
-        pal = self.edit.palette()                       # not the OS's grey: it is unreadable on a dark Windows
-        pal.setColor(QPalette.PlaceholderText, theme.qcolor("muted"))
-        self.edit.setPalette(pal)
+        muted_placeholder(self.edit)                    # not the OS's grey: it is unreadable on a dark Windows
 
     def _show_state(self):
         super()._show_state()
@@ -988,9 +998,7 @@ class NotionSheet(QDialog):
         self.search = QLineEdit()
         self.search.setPlaceholderText(SEARCH_LABEL)
         self.search.setAccessibleName(SEARCH_LABEL)
-        pal = self.search.palette()                     # not the OS's grey: unreadable on a dark Windows
-        pal.setColor(QPalette.PlaceholderText, theme.qcolor("muted"))
-        self.search.setPalette(pal)
+        muted_placeholder(self.search)                  # not the OS's grey: unreadable on a dark Windows
         srow.addWidget(FieldBox(self.search, height=36, parent=self.search_row))
         self.search.setFont(theme.font(13.5))
         self.search.installEventFilter(self)            # Enter searches now; it must not press "Done"
@@ -1270,6 +1278,7 @@ class NotionSheet(QDialog):
         self._held = {k: res.get(k) for k in ("mode", "token", "refresh", "workspace", "client_id")}
         plain = SHARE_BODY_OWN if res["mode"] == "own" else SHARE_BODY % APP_NAME
         html = bold_names(plain)
+        self.share_body._plain_src = plain
         self.share_body.setText(html)
         self.share_body.setAccessibleName(_plain(html))
         # Coming back from "Check again" with still nothing: say so.

@@ -25,6 +25,8 @@ IS_MAC = sys.platform == "darwin"
 # also typed into the user's text.
 DICTATION_DEFAULT = "ctrl+r" if IS_MAC else "alt+r"
 SMART_ACTIONS_DEFAULT = "ctrl+s" if IS_MAC else "alt+s"
+# Starts recording a meeting (main.DEFAULT["meeting_hotkey"]; ⌥M types "µ" on a Mac).
+MEETING_DEFAULT = "ctrl+m" if IS_MAC else "alt+m"
 
 MODIFIERS = ("ctrl", "alt", "shift", "cmd", "win", "super")
 _MAC_ORDER = ("ctrl", "alt", "shift", "cmd")            # ⌃⌥⇧⌘, Apple's order

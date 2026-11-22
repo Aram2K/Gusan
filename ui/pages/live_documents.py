@@ -36,7 +36,7 @@ import logging
 import os
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QFileDialog, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QSizePolicy,
                                QVBoxLayout, QWidget)
 
@@ -80,17 +80,17 @@ LINE_YES = "Only the parts that match a question go to %s."
 LINE_NO = "Documents stay on this computer, so cloud answers don't use them."
 LINK_NO, LINK_YES = "Don't send", "Allow"
 
-# file-type tile: kind -> (letters, ink, background)
+# file-type tile: kind -> (letters, ink, background) - theme tokens, so a tile turns with the look
 _TILES = {
-    "pdf": ("PDF", "#b91c1c", "#fee2e2"),
-    "doc": ("DOC", "#1d4ed8", "#dbeafe"),
-    "slides": ("PPT", "#92400e", "#fef3c7"),
-    "sheet": ("XLS", "#15803d", "#dcfce7"),
-    "book": ("EPUB", "#475569", "#f1f5f9"),
-    "text": ("TXT", "#475569", "#f1f5f9"),
-    "image": ("", "#0369a1", "#e0f2fe"),
-    "alert": ("", "#b45309", "#fef3c7"),
-    "info": ("", "#64748b", "#f1f5f9"),
+    "pdf": ("PDF", "red-tx", "red-sub"),
+    "doc": ("DOC", "blue-tx", "tile-doc"),
+    "slides": ("PPT", "amber-tx", "amber-sub"),
+    "sheet": ("XLS", "ok-tx", "ok-sub"),
+    "book": ("EPUB", "guest-tx", "bg2"),
+    "text": ("TXT", "guest-tx", "bg2"),
+    "image": ("", "tile-img-tx", "tile-img"),
+    "alert": ("", "tile-alert-tx", "amber-sub"),
+    "info": ("", "muted", "bg2"),
 }
 
 
@@ -180,10 +180,10 @@ class FileTile(QWidget):
         p.setRenderHint(QPainter.Antialiasing, True)
         r = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(bg))
+        p.setBrush(theme.qcolor(bg))
         p.drawRoundedRect(r, 11, 11)
         if self._kind == "image":
-            c = QColor(ink)
+            c = theme.qcolor(ink)
             p.setBrush(c)
             p.drawEllipse(QRectF(24.5, 11.5, 5, 5))                 # the sun
             hills = QPainterPath()
@@ -201,20 +201,21 @@ class FileTile(QWidget):
         else:
             f = theme.font(10.5 if len(word) < 4 else 9, 800)
             p.setFont(f)
-            p.setPen(QColor(ink))
+            p.setPen(theme.qcolor(ink))
             p.drawText(r, Qt.AlignCenter, word)
         p.end()
 
 
 _ROW_QSS = """
-QFrame#laDocRow { background: transparent; border: none; border-top: 1px solid %(line)s; }
-QFrame#laDocRow QLabel[off="true"] { color: %(faint)s; }
-QFrame#laNote { background: transparent; border: none; border-top: 1px solid %(line)s; }
+QFrame#laDocRow { background: transparent; border: none; border-top: 1px solid @line; }
+QFrame#laDocRow QLabel[off="true"] { color: @faint; }
+QFrame#laNote { background: transparent; border: none; border-top: 1px solid @line; }
 """
 
 
 def _row_qss():
-    return _ROW_QSS % {"line": theme.qss_color("line"), "faint": theme.qss_color("faint")}
+    """The rows' sheet in the look now (theme.sheet re-makes it when the look turns)."""
+    return theme.fill(_ROW_QSS)
 
 
 def _meta(info):
@@ -237,7 +238,7 @@ class DocRow(QFrame):
         super().__init__(parent)
         self.info = info
         self.setObjectName("laDocRow")
-        self.setStyleSheet(_row_qss())
+        theme.sheet(self, _ROW_QSS)
         self.setFixedHeight(self.HEIGHT)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(8, 0, 4, 0)
@@ -314,7 +315,7 @@ class NoteRow(QFrame):
         super().__init__(parent)
         self.name, self.message, self.tone = name, message, tone
         self.setObjectName("laNote")
-        self.setStyleSheet(_row_qss())
+        theme.sheet(self, _ROW_QSS)
         self.setMinimumHeight(DocRow.HEIGHT)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(8, 8, 4, 8)
@@ -384,8 +385,7 @@ class ReadingStrip(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("laReading")
-        self.setStyleSheet("QFrame#laReading { background: %s; border: 1px solid %s; border-radius: 12px; }"
-                           % (theme.qss_color("blue-sub"), theme.qss_color("blue-line")))
+        theme.sheet(self, "QFrame#laReading { background: @blue-sub; border: 1px solid @blue-line; border-radius: 12px; }")
         v = QVBoxLayout(self)
         v.setContentsMargins(14, 10, 8, 12)
         v.setSpacing(8)
@@ -435,7 +435,7 @@ class _EmptyBox(QFrame):
         self.icon.setFixedSize(40, 40)
         self.icon.setAlignment(Qt.AlignCenter)
         self.icon.setPixmap(icons.pixmap("file", 20, "muted", 1.8))
-        self.icon.setStyleSheet("background: %s; border-radius: 12px;" % theme.qss_color("bg2"))
+        theme.sheet(self.icon, "background: @bg2; border-radius: 12px;")
         self.icon.setAccessibleName("")
         lay.addWidget(self.icon, 0, Qt.AlignVCenter)
         col = QVBoxLayout()
@@ -492,7 +492,7 @@ class _DropOverlay(QWidget):
         w = p.fontMetrics().horizontalAdvance(DROP) + 40
         pill = QRectF(0, 0, w, 40)
         pill.moveCenter(QPointF(r.center().x(), min(r.center().y(), r.top() + 110)))   # in view, however long the list
-        p.setBrush(QColor("#ffffff"))
+        p.setBrush(theme.qcolor("surface"))
         p.setPen(QPen(theme.qcolor("blue-line"), 1))
         p.drawRoundedRect(pill, 20, 20)
         p.setPen(theme.qcolor("blue-tx"))
@@ -1045,9 +1045,8 @@ class ContextCard(Card):
         # The calm offer: never switches anything by itself.
         self.offer = QFrame(self)
         self.offer.setObjectName("laRuleOffer")
-        self.offer.setStyleSheet("QFrame#laRuleOffer { background: %s; border: 1px solid %s; "
-                                 "border-radius: 12px; }" % (theme.qss_color("blue-sub"),
-                                                              theme.qss_color("blue-line")))
+        theme.sheet(self.offer, "QFrame#laRuleOffer { background: @blue-sub; border: 1px solid @blue-line; "
+                                "border-radius: 12px; }")
         ol = QHBoxLayout(self.offer)
         ol.setContentsMargins(14, 8, 8, 8)
         ol.setSpacing(10)

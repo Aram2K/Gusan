@@ -94,8 +94,8 @@ import mic_monitor
 from app_info import APP_NAME
 from ui import theme
 from ui.auth_sheet import (MIN_PASSWORD, MSG_BAD_EMAIL, MSG_SHORT_PASSWORD, AuthFlow, AuthSheet, Field, GoogleButton,
-                           PasswordField, PasswordHint, brand_row, link_button, mailbox_for, svg_pixmap, terms_label,
-                           text_label, tint, valid_email)
+                           PasswordField, PasswordHint, brand_row, link_button, live_text, mailbox_for, shade,
+                           soft_shadow, svg_pixmap, terms_label, text_label, tint, valid_email)
 from ui.components import Button, Card, Chip, Divider, ProTag, WhiteCard, icons
 from ui.components.controls import keycap_labels
 from ui.components.hotkey_capture import HotkeyCaptureButton
@@ -124,21 +124,55 @@ WAVE_HEIGHTS = (12, 20, 34, 25, 46, 32, 18, 39, 52, 30, 44, 23, 34, 16, 10)
 RING_HEIGHTS = (16, 23, 34, 26, 39, 31, 18, 12, 21, 36, 29, 16, 10, 18, 31, 42, 34, 23, 13, 9, 16, 26)
 PILL_WAVE = (4, 7, 11, 15, 19, 22, 20, 17, 21, 16, 12, 9, 6, 4, 3)
 
-# The dictation bar's light glass (ui/overlay.py, gusan_ds.PILL_THEME["light"]).
-PILL_TINT = QColor(250, 250, 252, 240)
-PILL_INK = (15, 23, 42)
-PILL_REC = QColor("#E9152D")
-PILL_DONE = QColor("#16A34A")
-PILL_HAIR = QColor(15, 23, 42, 38)
-# The mockup's pressed keycap on Try it, and its illustration colours.
-LIT_FILL = QColor("#eff6ff")
-LIT_EDGE = QColor("#93c5fd")
-ENV_FLAP = QColor("#d3deec")
-ENV_BACK = QColor("#dbe4f0")
-ENV_FRONT = QColor("#eef3f9")
+# The welcome's pictures (a little desktop with a mail window and the dictation bar, the pressed keys
+# of Try it, an envelope) in each look: (r, g, b[, alpha]). Light: the 2.0 mockup's colours, the
+# dictation bar's light glass (ui/overlay.py _PALETTES["light"]). Dark: the same scenes at night - the
+# bar's smoked glass, the desktop and the envelope in the dark surfaces' greys.
+ART = {
+    "light": {
+        "pill_tint": (250, 250, 252, 240), "pill_ink": (15, 23, 42), "pill_rec": (233, 21, 45),
+        "pill_done": (22, 163, 74), "pill_hair": (15, 23, 42, 38), "pill_edge": (255, 255, 255, 230),
+        "pill_shadow": (15, 23, 42, 56),
+        "lit_fill": (239, 246, 255), "lit_edge": (147, 197, 253),
+        "env_flap": (211, 222, 236), "env_back": (219, 228, 240), "env_front": (238, 243, 249),
+        "letter": (255, 255, 255),
+        "app_a": (203, 213, 225), "app_b": (214, 222, 232),
+        "desk": (255, 255, 255, 107), "taskbar": (255, 255, 255, 184),
+    },
+    "dark": {
+        "pill_tint": (38, 43, 53, 245), "pill_ink": (255, 255, 255), "pill_rec": (255, 66, 69),
+        "pill_done": (48, 209, 88), "pill_hair": (255, 255, 255, 34), "pill_edge": (255, 255, 255, 40),
+        "pill_shadow": (0, 0, 0, 120),
+        "lit_fill": (29, 45, 74), "lit_edge": (59, 116, 240),
+        "env_flap": (44, 52, 65), "env_back": (34, 41, 52), "env_front": (27, 33, 42),
+        "letter": (41, 48, 60),
+        "app_a": (58, 66, 80), "app_b": (70, 79, 94),
+        "desk": (255, 255, 255, 10), "taskbar": (255, 255, 255, 18),
+    },
+}
+# The light glass by its old names (installer/make_wizard_art.py draws the installer's bar with them).
+PILL_TINT = QColor(*ART["light"]["pill_tint"])
+PILL_DONE = QColor(*ART["light"]["pill_done"])
+PILL_HAIR = QColor(*ART["light"]["pill_hair"])
+# Anna's avatar in the mail demo: an identity colour, the same in both looks.
 ANNA_A, ANNA_B = QColor("#f472b6"), QColor("#db2777")
-TASK_APP_A, TASK_APP_B = QColor("#cbd5e1"), QColor("#d6dee8")
 WINDOW_CTL = '<rect x="4" y="4" width="16" height="16" rx="1.5"/>'
+
+
+def art(key, alpha=None):
+    """One of the pictures' colours (ART) in the active look; ``alpha`` 0..1 replaces its own."""
+    v = ART["dark" if theme.is_dark() else "light"][key]
+    c = QColor(*v)
+    if alpha is not None:
+        c.setAlphaF(max(0.0, min(1.0, alpha)))
+    return c
+
+
+def tone(token, alpha):
+    """A token's colour at ``alpha`` (0-255): a glow, a halo, a tint."""
+    c = theme.qcolor(token)
+    c.setAlpha(int(alpha))
+    return c
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -174,6 +208,8 @@ def hotkey_refusal(cfg, combo):
         return "%s runs Smart Actions. Pick another." % shown
     if combo_n and combo_n == _norm_hotkey(cfg.get("live_assist_hotkey")):
         return "%s opens Live Assistant. Pick another." % shown
+    if combo_n and combo_n == _norm_hotkey(cfg.get("meeting_hotkey", hotkeys.MEETING_DEFAULT)):
+        return "%s records a meeting. Pick another." % shown
     return "That shortcut can’t be used. Try another."
 
 
@@ -198,7 +234,8 @@ def _run_then(fn, *args, then=None, error=None, **kwargs):
 
 
 def ink(alpha):
-    return QColor(PILL_INK[0], PILL_INK[1], PILL_INK[2], int(round(alpha * 255)))
+    """The dictation bar's glyph colour at ``alpha`` (0..1)."""
+    return art("pill_ink", alpha)
 
 
 def mailbox(email):
@@ -219,8 +256,8 @@ def _plain_link(text, px=13.5, color="muted", parent=None):
     """A quiet text button ("Skip")."""
     b = Button(text, "ghost", "m", parent=parent)
     b.setFont(theme.font(px, 600))
-    b.setStyleSheet("QPushButton { color: %s; padding: 0px 4px; background: transparent; }"
-                    "QPushButton:hover { color: %s; }" % (theme.qss_color(color), theme.qss_color("text2")))
+    theme.sheet(b, lambda: "QPushButton { color: %s; padding: 0px 4px; background: transparent; }"
+                "QPushButton:hover { color: %s; }" % (theme.qss_color(color), theme.qss_color("text2")))
     b.setAutoDefault(False)
     return b
 
@@ -228,7 +265,7 @@ def _plain_link(text, px=13.5, color="muted", parent=None):
 def _back_button(parent=None):
     b = Button("Back", "ghost", "l", parent=parent)
     b.setIcon(icons.icon("chev_l", 18, "muted"))
-    b.setStyleSheet("QPushButton { color: %s; padding: 0px 16px 0px 10px; }" % theme.qss_color("muted"))
+    theme.sheet(b, "QPushButton { color: @muted; padding: 0px 16px 0px 10px; }")
     b.setAutoDefault(False)
     return b
 
@@ -251,7 +288,7 @@ def _set_button(b, text, icon=None, kind=None):
         weight = 700 if kind == "pro" else 600
         b.setFont(theme.font(15, weight))
     if icon:
-        b.setIcon(icons.icon(icon, 18, "#ffffff"))
+        b.setIcon(icons.icon(icon, 18, "on-accent"))
         b.setIconSize(QSize(18, 18))
     else:
         b.setIcon(QIcon())
@@ -306,7 +343,7 @@ class StepDots(QWidget):
             if i == self.step:
                 p.setBrush(theme.qcolor("blue"))
             elif i < self.step:
-                p.setBrush(QColor(37, 99, 235, 89))
+                p.setBrush(tone("blue", 89))
             else:
                 p.setBrush(theme.qcolor("line2"))
             p.drawRoundedRect(QRectF(x, 0, w, 8), 4, 4)
@@ -320,25 +357,26 @@ def paint_pill(p, rect, state, t=0.0, animate=False):
     h = rect.height()
     r = h / 2.0
     p.setRenderHint(QPainter.Antialiasing, True)
-    p.setPen(QPen(PILL_HAIR, 1))
-    p.setBrush(PILL_TINT)
+    p.setPen(QPen(art("pill_hair"), 1))
+    p.setBrush(art("pill_tint"))
     body = rect.adjusted(0.5, 0.5, -0.5, -0.5)
     p.drawRoundedRect(body, r - 0.5, r - 0.5)
-    p.setPen(QPen(QColor(255, 255, 255, 230), 1))
+    p.setPen(QPen(art("pill_edge"), 1))
     p.drawLine(QPointF(body.left() + r, body.top() + 1.0), QPointF(body.right() - r, body.top() + 1.0))
     cy = rect.center().y()
     x = rect.left() + 13.0
     p.setPen(Qt.NoPen)
     if state == "recording":
-        halo = QColor(PILL_REC)
+        rec = art("pill_rec")
+        halo = QColor(rec)
         halo.setAlpha(51)
         p.setBrush(halo)
         p.drawEllipse(QPointF(x + 5, cy), 9, 9)
-        glow = QColor(PILL_REC)
+        glow = QColor(rec)
         glow.setAlpha(60)
         p.setBrush(glow)
         p.drawEllipse(QPointF(x + 5, cy), 7, 7)
-        p.setBrush(PILL_REC)
+        p.setBrush(rec)
         p.drawEllipse(QPointF(x + 5, cy), 5, 5)
         x += 10 + 10
         for i, v in enumerate(PILL_WAVE):
@@ -376,9 +414,9 @@ def paint_pill(p, rect, state, t=0.0, animate=False):
         p.setPen(ink(0.94))
         p.drawText(QRectF(x + 27, rect.top(), rect.width(), h), Qt.AlignVCenter | Qt.AlignLeft, "Transcribing")
     elif state == "pasted":
-        p.setBrush(PILL_DONE)
+        p.setBrush(art("pill_done"))
         p.drawEllipse(QRectF(x, cy - 9, 18, 18))
-        p.drawPixmap(QRectF(x + 3, cy - 6, 12, 12).toRect(), icons.pixmap("check", 12, "#ffffff", sw=2.6))
+        p.drawPixmap(QRectF(x + 3, cy - 6, 12, 12).toRect(), icons.pixmap("check", 12, "on-accent", sw=2.6))
         p.setFont(theme.font(13, 600))
         p.setPen(ink(0.94))
         p.drawText(QRectF(x + 28, rect.top(), rect.width(), h), Qt.AlignVCenter | Qt.AlignLeft, "Pasted to cursor")
@@ -415,8 +453,9 @@ class DemoPill(QWidget):
         eff = QGraphicsDropShadowEffect(self)
         eff.setBlurRadius(14)
         eff.setOffset(0, 6)
-        eff.setColor(QColor(15, 23, 42, 56))
+        eff.setColor(art("pill_shadow"))
         self.setGraphicsEffect(eff)
+        theme.on_change(self, lambda: eff.setColor(art("pill_shadow")))
         self.set_state(state)
 
     def state(self):
@@ -526,7 +565,13 @@ class MailDemo(QWidget):
         self._words = DEMO_SENTENCE.split(" ")
         self._caret_at = 0.3 + (len(self._words) - 1) * 0.14 + 0.42
         self._loop = self._caret_at + 4.2
-        self._ctl = svg_pixmap(WINDOW_CTL, 11, "muted", sw=2)
+        self._ctl = (None, None)                   # (colour, picture): the window button, drawn per look
+
+    def _ctl_pixmap(self):
+        rgba = theme.qcolor("muted").rgba()
+        if self._ctl[0] != rgba:
+            self._ctl = (rgba, svg_pixmap(WINDOW_CTL, 11, "muted", sw=2))
+        return self._ctl[1]
 
     def set_animate(self, on):
         self._animate = bool(on)
@@ -558,7 +603,7 @@ class MailDemo(QWidget):
         w, h = float(self.width()), float(self.height())
         outer = QPainterPath()
         outer.addRoundedRect(QRectF(0.5, 0.5, w - 1, h - 1), 12, 12)
-        p.fillPath(outer, QColor("#ffffff"))
+        p.fillPath(outer, theme.qcolor("surface"))
         p.save()
         p.setClipPath(outer)
         line = theme.qcolor("line")
@@ -570,7 +615,7 @@ class MailDemo(QWidget):
         x = w - 14 - 13
         p.drawPixmap(QRectF(x, 11.5, 13, 13).toRect(), icons.pixmap("x", 13, "muted", sw=2))
         x -= 16 + 11
-        p.drawPixmap(QRectF(x, 12.5, 11, 11).toRect(), self._ctl)
+        p.drawPixmap(QRectF(x, 12.5, 11, 11).toRect(), self._ctl_pixmap())
         x -= 16 + 13
         p.drawPixmap(QRectF(x, 11.5, 13, 13).toRect(), icons.pixmap("minus", 13, "muted", sw=2))
         # To / Subject
@@ -591,7 +636,7 @@ class MailDemo(QWidget):
         av = QRectF(chip.left() + 3, chip.top() + 3, 20, 20)
         p.drawEllipse(av)
         p.setFont(theme.font(9, 700))
-        p.setPen(QColor("#ffffff"))
+        p.setPen(theme.qcolor("on-accent"))
         p.drawText(av, Qt.AlignCenter, "A")
         p.setFont(f600)
         p.setPen(theme.qcolor("text"))
@@ -680,11 +725,11 @@ class HelloScreen(QWidget):
         frame = QRectF(0.5, 0.5, w - 1, h - 1)
         path = QPainterPath()
         path.addRoundedRect(frame, 20, 20)
-        p.fillPath(path, QColor(255, 255, 255, 107))
+        p.fillPath(path, art("desk"))
         p.save()
         p.setClipPath(path)
         bar = QRectF(0, h - 1 - 38, w, 38)
-        p.fillRect(bar, QColor(255, 255, 255, 184))
+        p.fillRect(bar, art("taskbar"))
         p.fillRect(QRectF(0, bar.top(), w, 1), theme.qcolor("glass-line"))
         cy = bar.center().y()
         x = (w - (15.5 + 16 + 18 + 16 + 18 + 16 + 18)) / 2.0
@@ -693,14 +738,14 @@ class HelloScreen(QWidget):
         for dx, dy in ((0, 0), (8.5, 0), (0, 8.5), (8.5, 8.5)):
             p.drawRoundedRect(QRectF(x + dx, cy - 7.75 + dy, 7, 7), 1.5, 1.5)
         x += 15.5 + 16
-        p.setBrush(TASK_APP_A)
+        p.setBrush(art("app_a"))
         p.drawRoundedRect(QRectF(x, cy - 9, 18, 18), 5, 5)
         x += 18 + 16
         p.drawPixmap(QRectF(x, cy - 11, 18, 18).toRect(), icons.pixmap("mail", 18, "blue"))
         p.setBrush(theme.qcolor("blue"))
         p.drawRoundedRect(QRectF(x + 5, cy + 10, 8, 2), 1, 1)
         x += 18 + 16
-        p.setBrush(TASK_APP_B)
+        p.setBrush(art("app_b"))
         p.drawRoundedRect(QRectF(x, cy - 9, 18, 18), 5, 5)
         f = theme.font(11, 600)
         tw = QFontMetricsF(f).horizontalAdvance(self._clock)
@@ -754,10 +799,10 @@ def _paint_pick_dot(p, center, selected, color="blue", r=11.0, check=13):
         p.setBrush(theme.qcolor(color))
         p.drawEllipse(center, r, r)
         p.drawPixmap(QRectF(center.x() - check / 2.0, center.y() - check / 2.0, check, check).toRect(),
-                     icons.pixmap("check", check, "#ffffff", sw=2.8 if check > 11 else 3))
+                     icons.pixmap("check", check, "on-accent", sw=2.8 if check > 11 else 3))
     else:
         p.setPen(QPen(theme.qcolor("line2"), 2))
-        p.setBrush(QColor("#ffffff"))
+        p.setBrush(theme.qcolor("surface"))
         p.drawEllipse(center, r - 1, r - 1)
 
 
@@ -767,7 +812,7 @@ class _Choice(QAbstractButton):
     INSET = (6, 6, 6, 6)        # left, top, right, bottom: room for the ring and its glow
     RADIUS = 16
     RING = "blue"
-    GLOW = QColor(59, 130, 246, 36)
+    GLOW = ("blue-l", 36)          # (token, alpha): the ring's glow
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -799,7 +844,7 @@ class _Choice(QAbstractButton):
         rad = self.RADIUS
         if self.isChecked():
             # CSS: a 2 px ring 1 px outside the edge, then a 4 px glow (box-shadow 0 0 0 4px).
-            p.setPen(QPen(self.GLOW, 4))
+            p.setPen(QPen(tone(*self.GLOW), 4))
             p.setBrush(Qt.NoBrush)
             p.drawRoundedRect(body.adjusted(-3, -3, 3, 3), rad + 3, rad + 3)
         p.setPen(QPen(edge, edge_w))
@@ -834,9 +879,9 @@ class _Ribbon(QWidget):
         p.setPen(QPen(theme.qcolor("blue-h"), 1))
         p.setBrush(theme.qcolor("blue"))
         p.drawRoundedRect(r, 13, 13)
-        p.drawPixmap(QRectF(10, 6.5, 13, 13).toRect(), icons.pixmap("check", 13, "#ffffff", sw=2.2))
+        p.drawPixmap(QRectF(10, 6.5, 13, 13).toRect(), icons.pixmap("check", 13, "on-accent", sw=2.2))
         p.setFont(self._font)
-        p.setPen(QColor("#ffffff"))
+        p.setPen(theme.qcolor("on-accent"))
         p.drawText(QRectF(29, 0, self.width() - 29, self.height()), Qt.AlignVCenter | Qt.AlignLeft, self.TEXT)
         p.end()
 
@@ -920,7 +965,7 @@ class ModelCard(_Choice):
     def paintEvent(self, _e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
-        self.paint_frame(p, QColor("#ffffff"), theme.qcolor("line"))
+        self.paint_frame(p, theme.qcolor("surface"), theme.qcolor("line"))
         body = self.body()
         _paint_pick_dot(p, QPointF(body.right() - 20 - 11, body.top() + 22 + 11), self.isChecked())
         p.end()
@@ -930,7 +975,7 @@ class CloudCard(_Choice):
     """Gusan Cloud (PRO): the cloud model's real name, "Fastest. Nothing to download." """
 
     RING = "pro"
-    GLOW = QColor(168, 85, 247, 41)
+    GLOW = ("pro-l", 41)
 
     def __init__(self, parent=None, side=0):
         """side: extra empty room left and right (it lines up with the model
@@ -982,7 +1027,7 @@ class CloudCard(_Choice):
     def paintEvent(self, _e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
-        self.paint_frame(p, theme.qcolor("pro-sub"), QColor(168, 85, 247, 71))
+        self.paint_frame(p, theme.qcolor("pro-sub"), tone("pro-l", 71))
         body = self.body()
         _paint_pick_dot(p, QPointF(body.right() - 20 - 11, body.top() + 19 + 11), self.isChecked(), "pro")
         p.end()
@@ -1030,17 +1075,17 @@ class SizeOption(_Choice):
     def paintEvent(self, _e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
-        self.paint_frame(p, QColor("#ffffff"), theme.qcolor("line"))
+        self.paint_frame(p, theme.qcolor("surface"), theme.qcolor("line"))
         body = self.body()
         c = QPointF(body.left() + 11 + 8, body.center().y())
         if self.isChecked():
             p.setPen(Qt.NoPen)
             p.setBrush(theme.qcolor("blue"))
             p.drawEllipse(c, 8, 8)
-            p.drawPixmap(QRectF(c.x() - 5, c.y() - 5, 10, 10).toRect(), icons.pixmap("check", 10, "#ffffff", sw=3))
+            p.drawPixmap(QRectF(c.x() - 5, c.y() - 5, 10, 10).toRect(), icons.pixmap("check", 10, "on-accent", sw=3))
         else:
             p.setPen(QPen(theme.qcolor("line2"), 2))
-            p.setBrush(QColor("#ffffff"))
+            p.setBrush(theme.qcolor("surface"))
             p.drawEllipse(c, 7, 7)
         p.end()
 
@@ -1112,7 +1157,7 @@ class DownloadChip(QFrame):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setPen(QPen(theme.qcolor("glass-line"), 1))
-        p.setBrush(QColor(255, 255, 255, 153))
+        p.setBrush(theme.qcolor("chip-glass"))
         p.drawRoundedRect(QRectF(0.5, 0.5, self.width() - 1, self.height() - 1), 16, 16)
         p.end()
 
@@ -1150,7 +1195,7 @@ class MicVisual(QWidget):
         self._level = 0.0
         self._t = 0.0
         self._static = False
-        self._mic = icons.pixmap("mic", 58, "#ffffff", sw=1.6)
+        self._mic = icons.pixmap("mic", 58, "on-accent", sw=1.6)    # white on the blue disc, in both looks
 
     def level(self):
         return self._level
@@ -1169,7 +1214,7 @@ class MicVisual(QWidget):
         p.setRenderHint(QPainter.Antialiasing, True)
         c = self.SIZE / 2.0
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(59, 130, 246, 15))
+        p.setBrush(tone("blue-l", 15))
         p.drawEllipse(QPointF(c, c), c, c)
         blue = theme.qcolor("blue-l")
         n = 44
@@ -1192,12 +1237,12 @@ class MicVisual(QWidget):
             p.restore()
         # The button: white ring, soft blue shadow, blue disc, white mic.
         g = QRadialGradient(QPointF(c, c + 16), 74 + 36)
-        g.setColorAt(0.0, QColor(37, 99, 235, 82))
-        g.setColorAt(0.62, QColor(37, 99, 235, 40))
-        g.setColorAt(1.0, QColor(37, 99, 235, 0))
+        g.setColorAt(0.0, tone("blue", 82))
+        g.setColorAt(0.62, tone("blue", 40))
+        g.setColorAt(1.0, tone("blue", 0))
         p.setBrush(QBrush(g))
         p.drawEllipse(QPointF(c, c + 16), 74 + 36, 74 + 36)
-        p.setBrush(QColor(255, 255, 255, 179))
+        p.setBrush(theme.qcolor("mic-ring"))
         p.drawEllipse(QPointF(c, c), 82, 82)
         p.setBrush(theme.qcolor("blue"))
         p.drawEllipse(QPointF(c, c), 74, 74)
@@ -1235,9 +1280,9 @@ class StatusBadge(QWidget):
         if self._kind == "ok":
             s = 19
             p.drawPixmap(QRectF(c.x() - s / 2.0, c.y() - s / 2.0, s, s).toRect(),
-                         icons.pixmap("check", s, "#ffffff", sw=2.6))
+                         icons.pixmap("check", s, "on-accent", sw=2.6))
         else:
-            p.setPen(QColor("#ffffff"))
+            p.setPen(theme.qcolor("on-accent"))
             p.setFont(theme.font(18, 800))
             p.drawText(QRectF(c.x() - r, c.y() - r, 2 * r, 2 * r), Qt.AlignCenter, "!")
         p.end()
@@ -1280,14 +1325,14 @@ class LitKeys(QWidget):
             w = self._widths[i]
             r = QRectF(x, 8 + 2, w, self.KEY)
             # box-shadow: 0 0 0 5px rgba(59,130,246,0.14), 0 8px 22px rgba(37,99,235,0.20)
-            _shadow_rects(p, r, 14, QColor(37, 99, 235, 30), spread=8, dy=6, steps=4)
-            p.setPen(QPen(QColor(59, 130, 246, 36), 5))
+            _shadow_rects(p, r, 14, tone("blue", 30), spread=8, dy=6, steps=4)
+            p.setPen(QPen(tone("blue-l", 36), 5))
             p.setBrush(Qt.NoBrush)
             p.drawRoundedRect(r.adjusted(-2.5, -2.5, 2.5, 2.5), 16.5, 16.5)
-            p.setPen(QPen(LIT_EDGE, 1))
-            p.setBrush(LIT_FILL)
+            p.setPen(QPen(art("lit_edge"), 1))
+            p.setBrush(art("lit_fill"))
             p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 14, 14)
-            p.setPen(QPen(LIT_EDGE, 1))
+            p.setPen(QPen(art("lit_edge"), 1))
             p.drawLine(QPointF(r.left() + 12, r.bottom() - 1.0), QPointF(r.right() - 12, r.bottom() - 1.0))
             p.setFont(f)
             p.setPen(theme.qcolor("blue-tx"))
@@ -1362,15 +1407,15 @@ class BigKeys(QWidget):
             w = self._widths[i]
             r = QRectF(x, y, w, self.KEY)
             # box-shadow: 0 1px 2px rgba(15,23,42,.04), 0 8px 24px rgba(15,23,42,.06)
-            _shadow_rects(p, r, 12, QColor(15, 23, 42, 16), spread=10, dy=6, steps=6)
+            _shadow_rects(p, r, 12, shade(16), spread=10, dy=6, steps=6)
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(15, 23, 42, 10))
+            p.setBrush(shade(10))
             p.drawRoundedRect(r.translated(0, 1), 12, 12)
             outer = QPainterPath()
             outer.addRoundedRect(r, 12, 12)
             p.fillPath(outer, edge)
             inner = _corner_path(r.adjusted(1, 1, -1, -4), (11, 11), (11, 11), (11, 8), (11, 8))
-            p.fillPath(inner, QColor("#ffffff"))
+            p.fillPath(inner, theme.qcolor("kbd-a"))
             p.setFont(f)
             p.setPen(theme.qcolor("ink"))
             p.drawText(r.adjusted(1, 1, -1, -4), Qt.AlignCenter, k)
@@ -1395,8 +1440,7 @@ class PracticeEdit(QTextEdit):
         super().__init__(parent)
         self.setAcceptRichText(False)
         self.setFrameShape(QFrame.NoFrame)
-        self.setStyleSheet("QTextEdit { background: transparent; border: none; padding: 0px; color: %s; }"
-                           % theme.qss_color("ink"))
+        theme.sheet(self, "QTextEdit { background: transparent; border: none; padding: 0px; color: @ink; }")
         self.setFont(theme.font(20))
         self.setTabChangesFocus(True)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -1413,7 +1457,7 @@ class PracticeEdit(QTextEdit):
             return
         cur = self.textCursor()
         fmt = QTextCharFormat()
-        fmt.setBackground(QColor(59, 130, 246, 31))
+        fmt.setBackground(tone("blue-l", 31))
         if html.strip():
             start = cur.selectionStart()
             cur.insertHtml(html)
@@ -1468,11 +1512,11 @@ class PracticeBox(QFrame):
         p.setRenderHint(QPainter.Antialiasing, True)
         g = self.G
         box = QRectF(g, g, self.width() - 2 * g, self.height() - 2 * g)
-        p.setPen(QPen(QColor(59, 130, 246, 31), 2 * g))
+        p.setPen(QPen(tone("blue-l", 31), 2 * g))
         p.setBrush(Qt.NoBrush)
         p.drawRoundedRect(box, 14, 14)
         p.setPen(QPen(theme.qcolor("blue-l"), 1.5))
-        p.setBrush(QColor("#ffffff"))
+        p.setBrush(theme.qcolor("input"))
         p.drawRoundedRect(box.adjusted(0.75, 0.75, -0.75, -0.75), 14, 14)
         p.end()
 
@@ -1485,12 +1529,7 @@ class Envelope(QWidget):
         self.setFixedSize(300, 250)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setAccessibleName("An email from %s in an envelope" % APP_NAME)
-        from PySide6.QtWidgets import QGraphicsDropShadowEffect
-        eff = QGraphicsDropShadowEffect(self)
-        eff.setBlurRadius(28)
-        eff.setOffset(0, 18)
-        eff.setColor(QColor(15, 23, 42, 26))
-        self.setGraphicsEffect(eff)
+        soft_shadow(self, 28, 18, 26)
 
     def paintEvent(self, _e):
         p = QPainter(self)
@@ -1501,19 +1540,19 @@ class Envelope(QWidget):
         flap.lineTo(150, 30)
         flap.lineTo(290, 106)
         flap.closeSubpath()
-        pen = QPen(ENV_FLAP, 6)
+        pen = QPen(art("env_flap"), 6)
         pen.setJoinStyle(Qt.RoundJoin)
         p.setPen(pen)
-        p.setBrush(ENV_FLAP)
+        p.setBrush(art("env_flap"))
         p.drawPath(flap)
         p.setPen(QPen(line2, 1))
-        p.setBrush(ENV_BACK)
+        p.setBrush(art("env_back"))
         p.drawRoundedRect(QRectF(1, 100, 298, 149), 18, 18)
         # The letter
         letter = QRectF(40, 6, 220, 186)
-        _shadow_rects(p, letter, 12, QColor(15, 23, 42, 20), spread=8, dy=6, steps=4)
+        _shadow_rects(p, letter, 12, shade(20), spread=8, dy=6, steps=4)
         p.setPen(QPen(theme.qcolor("line"), 1))
-        p.setBrush(QColor("#ffffff"))
+        p.setBrush(art("letter"))
         p.drawRoundedRect(letter.adjusted(0.5, 0.5, -0.5, -0.5), 12, 12)
         f = theme.font(14, 700, display=True)
         tw = QFontMetricsF(f).horizontalAdvance(APP_NAME)
@@ -1536,7 +1575,7 @@ class Envelope(QWidget):
         p.setBrush(theme.qcolor("blue"))
         p.drawRoundedRect(btn, 7, 7)
         p.setFont(bf)
-        p.setPen(QColor("#ffffff"))
+        p.setPen(theme.qcolor("on-accent"))
         p.drawText(btn, Qt.AlignCenter, "Confirm")
         # The front pocket
         front = QPainterPath()
@@ -1551,7 +1590,7 @@ class Envelope(QWidget):
         pen = QPen(line2, 1)
         pen.setJoinStyle(Qt.RoundJoin)
         p.setPen(pen)
-        p.setBrush(ENV_FRONT)
+        p.setBrush(art("env_front"))
         p.drawPath(front)
         p.end()
 
@@ -2496,9 +2535,9 @@ class InboxStep(_Step):
 
     def set_email(self, email):
         self._email = email or ""
-        ink_c = theme.qss_color("ink")
         safe = self._email.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        self.sent.setText('We sent a link to <b style="color: %s; font-weight: 700;">%s</b>' % (ink_c, safe))
+        live_text(self.sent, lambda: 'We sent a link to <b style="color: %s; font-weight: 700;">%s</b>'
+                  % (theme.qss_color("ink"), safe))
         self.sent.setAccessibleName("We sent a link to %s" % self._email)
         self.open_btn.setText(mailbox(self._email)[0])
         self.open_btn.setAccessibleName(self.open_btn.text())

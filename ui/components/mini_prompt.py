@@ -138,7 +138,7 @@ class MiniPrompt(QDialog):
                          Qt.Dialog | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setModal(True)
-        self.setStyleSheet(theme.stylesheet())
+        theme.use_stylesheet(self)                      # the app's sheet, kept current when the look changes
         self.setFont(theme.font(14))
         self.setWindowTitle(title)
         self.setAccessibleName(title)
@@ -156,9 +156,7 @@ class MiniPrompt(QDialog):
         self.card = QFrame(self)
         self.card.setObjectName("miniCard")
         self.card.setFixedWidth(_WIDTH)
-        self.card.setStyleSheet(
-            "QFrame#miniCard { background: %s; border: 1px solid %s; border-radius: 16px; }"
-            % (theme.qss_color("white"), theme.qss_color("line2")))
+        theme.sheet(self.card, "QFrame#miniCard { background: @popup; border: 1px solid @line2; border-radius: 16px; }")
         theme.elevate(self.card, "lg")
         outer.addWidget(self.card)
 
@@ -174,8 +172,7 @@ class MiniPrompt(QDialog):
         tile.setFixedSize(40, 40)
         tile.setAlignment(Qt.AlignCenter)
         tile.setPixmap(icons.pixmap(icon or tile_icon, 20, tile_fg, sw=2))
-        tile.setStyleSheet("QLabel { background: %s; border: none; border-radius: 12px; }"
-                           % theme.qss_color(tile_bg))
+        theme.sheet(tile, "QLabel { background: @%s; border: none; border-radius: 12px; }" % tile_bg)
         tile.setAccessibleName("")
         top.addWidget(tile, 0, Qt.AlignTop)
         text = QVBoxLayout()

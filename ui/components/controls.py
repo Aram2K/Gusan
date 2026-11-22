@@ -3,7 +3,7 @@
 import sys
 
 from PySide6.QtCore import QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QPainter, QPen
 from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QFrame, QHBoxLayout, QLabel,
                                QPushButton, QSizePolicy, QWidget)
 
@@ -70,9 +70,11 @@ class Toggle(QAbstractButton):
         kx = x0 + 1 + (18 if on else 2)
         ky = y0 + (self.TRACK_H - self.KNOB) / 2.0
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(15, 23, 42, 40))                    # 0 1px 2px rgba(15,23,42,.25)
+        shade = theme.qcolor("shade")
+        shade.setAlpha(40 if not theme.is_dark() else 90)      # 0 1px 2px rgba(15,23,42,.25)
+        p.setBrush(shade)
         p.drawEllipse(QRectF(kx, ky + 1, self.KNOB, self.KNOB))
-        p.setBrush(QColor("#ffffff"))
+        p.setBrush(theme.qcolor("knob"))
         p.drawEllipse(QRectF(kx, ky, self.KNOB, self.KNOB))
         if self.hasFocus() and getattr(self, "_kbd_focus", False):
             p.setOpacity(1.0)
@@ -163,11 +165,12 @@ class Keycaps(QWidget):
 
 
 class Segmented(QFrame):
-    """Pill segmented control. Emits ``changed(index)`` when the user picks one."""
+    """Pill segmented control. Emits ``changed(index)`` when the user picks one.
+    ``icons``: an icon name per option (ui/components/icons.py), shown before its word."""
 
     changed = Signal(int)
 
-    def __init__(self, options, selected=0, accessible_name="View", size="m", parent=None):
+    def __init__(self, options, selected=0, accessible_name="View", size="m", parent=None, icons=None):
         super().__init__(parent)
         h = 30 if size == "s" else 34
         self.setProperty("gusan", "segmented")
@@ -190,6 +193,10 @@ class Segmented(QFrame):
             b.setFocusPolicy(Qt.TabFocus)
             theme.focus_ring(b)
             b.setAccessibleName(text)
+            if icons and i < len(icons) and icons[i]:
+                from ui.components import icons as _icons
+                b.setIcon(_icons.icon(icons[i], 15, "muted", sw=1.9, active_color="blue-tx"))
+                b.setIconSize(QSize(21, 15))      # the 15 px icon centred in 21: air before the word
             self._group.addButton(b, i)
             lay.addWidget(b)
             self._buttons.append(b)

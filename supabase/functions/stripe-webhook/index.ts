@@ -17,9 +17,20 @@
 // subscription into a 12-iteration schedule. A cancel that would take effect
 // before the commitment ends is moved to the commitment end.
 //
-// A lifetime Checkout (mode=payment) grants permanent Pro on
-// checkout.session.completed. checkout.session.expired releases the
-// reservation that was holding one of the 200 spots.
+// A lifetime Checkout (mode=payment) grants permanent Pro once it is paid:
+// checkout.session.completed with payment_status "paid", or, for a payment
+// method that settles later, checkout.session.async_payment_succeeded.
+// checkout.session.expired and checkout.session.async_payment_failed release
+// the reservation that was holding one of the 200 spots. A lifetime payment
+// refunded in full (charge.refunded) or disputed (charge.dispute.created) is
+// no longer Pro: revoke_lifetime_purchase, found by its payment intent (kept at
+// grant time), or by the Checkout Session that took it for older purchases.
+//
+// Events to send to this endpoint (Stripe dashboard → Developers → Webhooks):
+//   checkout.session.completed, checkout.session.expired,
+//   checkout.session.async_payment_succeeded, checkout.session.async_payment_failed,
+//   customer.subscription.created / .updated / .deleted,
+//   charge.refunded, charge.dispute.created.
 //
 // There is no trial: checkout is created without trial_period_days, and
 // is_pro() does not treat status "trialing" as access.
@@ -138,12 +149,46 @@ async function priceFromSession(session: Stripe.Checkout.Session): Promise<Price
   return null;
 }
 
-async function grantLifetime(userId: string, sessionId: string) {
+const paymentIntentOf = (pi: string | { id?: string } | null | undefined): string | null =>
+  typeof pi === "string" ? pi : pi?.id ?? null;
+
+async function grantLifetime(userId: string, sessionId: string, paymentIntent: string | null) {
   const { error } = await supabase.rpc("grant_lifetime_purchase", {
     p_user_id: userId,
     p_session_id: sessionId,
+    p_payment_intent: paymentIntent,
   });
   if (error) throw new Error(error.message);
+}
+
+async function userForSession(session: Stripe.Checkout.Session): Promise<string | null> {
+  const userId = session.client_reference_id ?? session.metadata?.user_id ?? null;
+  if (userId) return userId;
+  return await userIdForEmail(session.customer_details?.email ?? session.customer_email ?? null);
+}
+
+/** Lifetime only when the money is in: a delayed payment method grants on async_payment_succeeded. */
+async function grantLifetimeIfPaid(session: Stripe.Checkout.Session, userId: string, price: PriceLike | null) {
+  if (planFor(price) !== "lifetime" && price?.lookup_key !== LOOKUP_LIFETIME) return;
+  if (session.payment_status !== "paid") {
+    console.log("lifetime checkout not paid yet", session.payment_status);
+    return;
+  }
+  await grantLifetime(userId, session.id, paymentIntentOf(session.payment_intent as string | { id?: string } | null));
+}
+
+/** A lifetime payment refunded in full or disputed: that purchase is released. */
+async function revokeLifetime(paymentIntent: string | null) {
+  if (!paymentIntent) return;
+  const { data, error } = await supabase.rpc("revoke_lifetime_purchase", { p_session_id: null, p_payment_intent: paymentIntent });
+  if (error) throw new Error(error.message);
+  if (data) return;
+  // Bought before the payment intent was kept: the Checkout Session that took this payment.
+  const sessions = await stripe.checkout.sessions.list({ payment_intent: paymentIntent, limit: 1 });
+  const sessionId = sessions.data[0]?.id;
+  if (!sessionId) return;
+  const { error: bySession } = await supabase.rpc("revoke_lifetime_purchase", { p_session_id: sessionId, p_payment_intent: paymentIntent });
+  if (bySession) throw new Error(bySession.message);
 }
 
 async function releaseLifetime(sessionId: string) {
@@ -245,18 +290,10 @@ Deno.serve(async (req) => {
     switch (event.type) {
       case "checkout.session.completed": {
         const session = event.data.object as Stripe.Checkout.Session;
-        let userId = session.client_reference_id ?? session.metadata?.user_id ?? null;
-        if (!userId) {
-          userId = await userIdForEmail(session.customer_details?.email ?? session.customer_email ?? null);
-        }
+        const userId = await userForSession(session);
         if (session.customer && userId) await rememberCustomer(userId, String(session.customer));
         const price = await priceFromSession(session);
-        const plan = planFor(price);
-        if (userId && (session.mode === "payment" || plan === "lifetime" || price?.lookup_key === LOOKUP_LIFETIME)) {
-          if (plan === "lifetime" || price?.lookup_key === LOOKUP_LIFETIME) {
-            await grantLifetime(userId, session.id);
-          }
-        }
+        if (userId) await grantLifetimeIfPaid(session, userId, price);
         if (userId && session.subscription) {
           let sub = await loadSubscription(String(session.subscription));
           const subPrice = sub.items.data[0]?.price as PriceLike | undefined;
@@ -277,9 +314,32 @@ Deno.serve(async (req) => {
         }
         break;
       }
-      case "checkout.session.expired": {
+      case "checkout.session.async_payment_succeeded": {
+        const session = event.data.object as Stripe.Checkout.Session;
+        const userId = await userForSession(session);
+        if (userId) await grantLifetimeIfPaid(session, userId, await priceFromSession(session));
+        break;
+      }
+      case "checkout.session.expired":
+      case "checkout.session.async_payment_failed": {
         const session = event.data.object as Stripe.Checkout.Session;
         await releaseLifetime(session.id);
+        break;
+      }
+      case "charge.refunded": {
+        const charge = event.data.object as Stripe.Charge;
+        // Only a full refund; a partial one leaves the purchase as it is.
+        if (charge.refunded) await revokeLifetime(paymentIntentOf(charge.payment_intent as string | { id?: string } | null));
+        break;
+      }
+      case "charge.dispute.created": {
+        const dispute = event.data.object as Stripe.Dispute;
+        let paymentIntent = paymentIntentOf(dispute.payment_intent as string | { id?: string } | null);
+        if (!paymentIntent && dispute.charge) {
+          const charge = await stripe.charges.retrieve(typeof dispute.charge === "string" ? dispute.charge : dispute.charge.id);
+          paymentIntent = paymentIntentOf(charge.payment_intent as string | { id?: string } | null);
+        }
+        await revokeLifetime(paymentIntent);
         break;
       }
       case "customer.subscription.created":

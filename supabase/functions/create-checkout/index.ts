@@ -11,7 +11,8 @@
 // people cannot both pass a count check. A reservation expires (default 60
 // minutes) and checkout.session.expired releases it.
 //
-// Checkout never starts a free trial.
+// Checkout never starts a free trial. Monthly and yearly checkouts accept a
+// Stripe promotion code (allow_promotion_codes); lifetime never does.
 //
 // Body: { "plan": "monthly" | "yearly" | "lifetime" }
 //       { "action": "spots" }  -> { spots_left } and does not check out
@@ -170,6 +171,9 @@ Deno.serve(async (req) => {
     cancel_url: CANCEL,
     // No trial. A card is collected up front.
     payment_method_collection: "always",
+    // Event promotion codes (Stripe dashboard → Product catalog → Coupons) for the
+    // monthly and yearly plans only; the lifetime payment session never takes one.
+    allow_promotion_codes: true,
     metadata: { user_id: user.id, lookup_key: lookup, plan },
     subscription_data: {
       // Invoice description. For yearly this is the same commitment sentence

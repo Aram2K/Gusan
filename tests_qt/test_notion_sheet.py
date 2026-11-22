@@ -1118,16 +1118,25 @@ def test_every_visible_control_has_a_name(world, make, state):
     assert sheet.height() <= ns.MAX_H and sheet.width() == ns.W
 
 
-def test_the_text_colours_are_readable_on_the_window_and_the_card():
+def _on(token, under, scheme):
+    """``token``'s colour in ``scheme`` laid over ``under``'s (a see-through token is mixed, as it is painted)."""
+    top, bottom = theme.qcolor(token, scheme), theme.qcolor(under, scheme)
+    a = top.alpha() / 255.0
+    return tuple(int(round(t * a + b * (1 - a))) for t, b in ((top.red(), bottom.red()), (top.green(), bottom.green()),
+                                                             (top.blue(), bottom.blue())))
+
+
+@pytest.mark.parametrize("scheme", ["light", "dark"])
+def test_the_text_colours_are_readable_on_the_window_and_the_card(scheme):
     for token in ns.TEXT_ON_WINDOW:
         for stop in ns.WINDOW_STOPS:
-            assert contrast(_rgb(token), _rgb(stop)) >= 4.5, (token, stop)
-    # "muted" is only for the white card
-    assert contrast(_rgb("muted"), _rgb("white")) >= 4.5
+            assert contrast(_on(token, stop, scheme), _on(stop, stop, scheme)) >= 4.5, (token, stop)
+    # "muted" is only for the card (the look's surface)
+    assert contrast(_on("muted", "surface", scheme), _on("surface", "surface", scheme)) >= 4.5
     assert "muted" not in ns.TEXT_ON_WINDOW
-    assert contrast(_rgb("white"), _rgb("blue")) >= 4.5                  # the primary button
-    assert contrast(_rgb("ok-tx"), _rgb("ok-sub")) >= 4.5                # the "Connected" chip
-    assert contrast(_rgb("text"), _rgb("white")) >= 4.5                  # the card's labels
+    assert contrast(_on("on-accent", "blue", scheme), _on("blue", "blue", scheme)) >= 4.5          # the primary button
+    assert contrast(_on("ok-tx", "surface", scheme), _on("ok-sub", "surface", scheme)) >= 4.5      # the "Connected" chip
+    assert contrast(_on("text", "surface", scheme), _on("surface", "surface", scheme)) >= 4.5      # the card's labels
 
 
 @pytest.mark.parametrize("state", STATES)

@@ -51,7 +51,7 @@ import re
 import time
 
 from PySide6.QtCore import QByteArray, QEvent, QObject, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFontMetricsF, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QFontMetricsF, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QDialog, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit,
                                QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QStyle, QStyleOptionButton,
@@ -68,10 +68,16 @@ PRIVACY_URL = "https://aibuben.xyz/privacy"
 MIN_PASSWORD = 6
 SIGNIN_RETRY_S = 8.0
 
-# Google's own button look (its sign-in branding guidelines), not theme colours.
-GOOGLE_BORDER = "#dadce0"
-GOOGLE_TEXT = "#1f1f1f"
-GOOGLE_HOVER = "#f8faff"
+# Google's own button look (its sign-in branding guidelines: the light button, and its dark one in the
+# dark look), not theme colours.
+GOOGLE_LOOKS = {
+    "light": {"fill": "#ffffff", "edge": "#dadce0", "text": "#1f1f1f", "hover": "#f8faff", "press": None},
+    "dark": {"fill": "#131314", "edge": "#8e918f", "text": "#e3e3e3", "hover": "#1c1c1f", "press": "#26262a"},
+}
+
+
+def google_look():
+    return GOOGLE_LOOKS["dark" if theme.is_dark() else "light"]
 
 # The mockup's eye (gusan_ds has no "eye" icon; the crossed one is icons "eye_off").
 EYE = ('<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/>'
@@ -130,7 +136,37 @@ def text_label(text="", px=14, weight=400, color="text", display=False, ls=None,
 
 
 def tint(widget, color):
-    widget.setStyleSheet("color: %s; background: transparent;" % theme.qss_color(color))
+    """``widget``'s words in ``color`` (a token name or CSS colour), kept in the active look."""
+    theme.sheet(widget, lambda: "color: %s; background: transparent;" % theme.qss_color(color))
+
+
+def shade(alpha):
+    """The look's shadow colour at ``alpha`` (0-255, the light look's): black and deeper in the dark look,
+    where a soft slate shadow would not show."""
+    c = theme.qcolor("shade")
+    c.setAlpha(int(alpha) if not theme.is_dark() else min(255, int(round(alpha * 2.4))))
+    return c
+
+
+def soft_shadow(widget, blur, dy, alpha):
+    """A drop shadow in the look's shade that follows a switch (blur, y offset, light-look alpha)."""
+    eff = QGraphicsDropShadowEffect(widget)
+    eff.setBlurRadius(blur)
+    eff.setOffset(0, dy)
+    eff.setColor(shade(alpha))
+    widget.setGraphicsEffect(eff)
+    theme.on_change(widget, lambda: eff.setColor(shade(alpha)))
+    return eff
+
+
+def live_text(label, build):
+    """Rich text with colours in it (``build()`` returns it): set now and again after every look switch."""
+    first = getattr(label, "_live_text", None) is None
+    label._live_text = build
+    label.setText(build())
+    if first:
+        theme.on_change(label, lambda: label.setText(label._live_text()))
+    return label
 
 
 def svg_pixmap(inner, size, color="muted", sw=1.7):
@@ -148,6 +184,12 @@ def svg_pixmap(inner, size, color="muted", sw=1.7):
     QSvgRenderer(QByteArray(doc.encode("utf-8"))).render(p, QRectF(0, 0, size, size))
     p.end()
     return pm
+
+
+def eye_icon():
+    """The open eye (the mockup's own drawing) as an icon that follows the look: it says how to draw
+    itself again, every time (icons.retint)."""
+    return icons.remember_icon(QIcon(svg_pixmap(EYE, 18, "muted")), eye_icon)
 
 
 def google_pixmap(size):
@@ -172,17 +214,19 @@ def link_button(text, px=13.5, weight=600, color="blue-tx", underline=False, par
     f.setUnderline(bool(underline))
     b.setFont(f)
     b.setFixedHeight(max(20, int(px * 1.5)))
-    b.setStyleSheet("QPushButton { color: %s; padding: 0px 1px; }" % theme.qss_color(color))
+    theme.sheet(b, lambda: "QPushButton { color: %s; padding: 0px 1px; }" % theme.qss_color(color))
     b.setAutoDefault(False)
     return b
 
 
 def terms_label(lead="By continuing you agree to the", parent=None, px=12, center=False):
     """'… the Terms and Privacy Policy.' with real links (open in the browser)."""
-    blue = theme.qss_color("blue-tx")
-    html = ('%s <a href="%s" style="color: %s;">Terms</a> and <a href="%s" style="color: %s;">Privacy Policy</a>.'
-            % (lead, TERMS_URL, blue, PRIVACY_URL, blue))
-    lb = text_label(html, px, 400, "muted", wrap=True, parent=parent, rich=True)
+    def html():
+        blue = theme.qss_color("blue-tx")
+        return ('%s <a href="%s" style="color: %s;">Terms</a> and <a href="%s" style="color: %s;">Privacy Policy</a>.'
+                % (lead, TERMS_URL, blue, PRIVACY_URL, blue))
+    lb = text_label("", px, 400, "muted", wrap=True, parent=parent, rich=True)
+    live_text(lb, html)
     lb.setOpenExternalLinks(True)
     lb.setTextInteractionFlags(Qt.TextBrowserInteraction)
     lb.setAccessibleName("By continuing you agree to the Terms and Privacy Policy.")
@@ -381,22 +425,20 @@ class GoogleButton(QPushButton):
         self.setAccessibleName(text)
         theme.focus_ring(self)
         self.setProperty("gusan", "google")
-        blue = theme.qss_color("blue-l")
-        self.setStyleSheet(
-            "QPushButton { background: #ffffff; color: %s; border: 1px solid %s; border-radius: %dpx; "
-            "padding: 0px 20px; }"
-            "QPushButton:hover { background: %s; }"
-            "QPushButton:pressed { background: %s; }"
-            "QPushButton:disabled { background: #ffffff; color: %s; }"
-            "QPushButton[focusVisible=\"true\"] { border: 2px solid %s; }"
-            % (GOOGLE_TEXT, GOOGLE_BORDER, radius, GOOGLE_HOVER, theme.qss_color("bg2"),
-               theme.qss_color("muted"), blue))
+
+        def sheet():
+            g = google_look()
+            return ("QPushButton { background: %s; color: %s; border: 1px solid %s; border-radius: %dpx; "
+                    "padding: 0px 20px; }"
+                    "QPushButton:hover { background: %s; }"
+                    "QPushButton:pressed { background: %s; }"
+                    "QPushButton:disabled { background: %s; color: %s; }"
+                    "QPushButton[focusVisible=\"true\"] { border: 2px solid %s; }"
+                    % (g["fill"], g["text"], g["edge"], radius, g["hover"], g["press"] or theme.qss_color("bg2"),
+                       g["fill"], theme.qss_color("muted"), theme.qss_color("blue-l")))
+        theme.sheet(self, sheet)
         if shadow:
-            eff = QGraphicsDropShadowEffect(self)
-            eff.setBlurRadius(24)
-            eff.setOffset(0, 8)
-            eff.setColor(QColor(15, 23, 42, 26))
-            self.setGraphicsEffect(eff)
+            soft_shadow(self, 24, 8, 26)
 
     def sizeHint(self):
         fm = QFontMetricsF(self.font())
@@ -416,7 +458,7 @@ class GoogleButton(QPushButton):
         sp.setRenderHint(QPainter.Antialiasing, True)
         sp.drawPixmap(QRectF(x, (self.height() - self._g) / 2.0, self._g, self._g).toRect(), self._gpix)
         sp.setFont(self.font())
-        sp.setPen(theme.qcolor(GOOGLE_TEXT if self.isEnabled() else "muted"))
+        sp.setPen(theme.qcolor(google_look()["text"] if self.isEnabled() else "muted"))
         sp.drawText(QRectF(x + self._g + self.GAP, 0, tw + 4, self.height()), Qt.AlignVCenter | Qt.AlignLeft,
                     self.text())
         sp.end()
@@ -441,8 +483,7 @@ class FieldBox(QFrame):
         lay.setSpacing(6)
         edit.setParent(self)
         edit.setFrame(False)
-        edit.setStyleSheet("QLineEdit { background: transparent; border: none; padding: 0px; color: %s; }"
-                           % theme.qss_color("ink"))
+        theme.sheet(edit, "QLineEdit { background: transparent; border: none; padding: 0px; color: @ink; }")
         edit.setFont(theme.font(14.5))
         edit.setMinimumHeight(height - 4)
         edit.installEventFilter(self)
@@ -471,10 +512,11 @@ class FieldBox(QFrame):
         edge = "red" if self._error else ("blue-l" if focused else "line2")
         w = 1.5 if (focused or self._error) else 1.0
         p.setPen(QPen(theme.qcolor(edge), w))
-        p.setBrush(QColor("#ffffff"))
+        p.setBrush(theme.qcolor("input"))
         p.drawRoundedRect(box.adjusted(w / 2, w / 2, -w / 2, -w / 2), 10, 10)
         if focused:
-            glow = theme.qcolor("rgba(220,38,38,0.14)" if self._error else "rgba(59,130,246,0.14)")
+            glow = theme.qcolor("red" if self._error else "blue-l")
+            glow.setAlpha(36)                                     # rgba(..., 0.14)
             p.setPen(QPen(glow, 3))
             p.setBrush(Qt.NoBrush)
             p.drawRoundedRect(box.adjusted(3, 3, -3, -3), 8.5, 8.5)
@@ -490,9 +532,12 @@ class Field(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(6)
-        opt = (' <span style="font-weight: 400; color: %s;">(optional)</span>' % theme.qss_color("muted")
-               if optional else "")
-        self.label = text_label(label_text + opt, 13, 600, "text", parent=self, rich=True)
+        def text():
+            opt = (' <span style="font-weight: 400; color: %s;">(optional)</span>' % theme.qss_color("muted")
+                   if optional else "")
+            return label_text + opt
+        self.label = text_label("", 13, 600, "text", parent=self, rich=True)
+        live_text(self.label, text)
         self.label.setFixedHeight(18)
         lay.addWidget(self.label)
         self.edit = QLineEdit(self)
@@ -541,7 +586,7 @@ class PasswordField(Field):
     def _show_state(self):
         shown = self.visible()
         name = "Hide password" if shown else "Show password"
-        self.eye.setIcon(QIcon(icons.pixmap("eye_off", 18, "muted") if shown else svg_pixmap(EYE, 18, "muted")))
+        self.eye.setIcon(icons.icon("eye_off", 18, "muted") if shown else eye_icon())
         self.eye.setAccessibleName(name)
         self.eye.setToolTip(name)
 
@@ -778,7 +823,7 @@ class AuthSheet(QDialog):
         tile.setFixedSize(56, 56)
         tile.setAlignment(Qt.AlignCenter)
         tile.setPixmap(icons.pixmap("mail", 28, "blue-tx"))
-        tile.setStyleSheet("background: %s; border-radius: 16px;" % theme.qss_color("blue-sub"))
+        theme.sheet(tile, "background: @blue-sub; border-radius: 16px;")
         v.addWidget(tile, 0, Qt.AlignLeft)
         v.addSpacing(18)
         v.addWidget(text_label("Check your inbox", 28, 700, "ink", display=True, ls=-0.56, parent=page))
@@ -937,8 +982,9 @@ class AuthSheet(QDialog):
         if action == "signup" and status == "verify":
             self._pending_email = msg or self.email_field.text().strip()
             self._pending_password = self.password_field.text()
-            self.inbox_line.setText('We sent a link to <b style="color: %s;">%s</b>'
-                                    % (theme.qss_color("ink"), _esc(self._pending_email)))
+            email = _esc(self._pending_email)
+            live_text(self.inbox_line, lambda: 'We sent a link to <b style="color: %s;">%s</b>'
+                      % (theme.qss_color("ink"), email))
             self.inbox_line.setAccessibleName("We sent a link to %s" % self._pending_email)
             self.inbox_message.hide()
             self.stack.setCurrentIndex(2)

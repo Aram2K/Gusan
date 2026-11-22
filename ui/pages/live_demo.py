@@ -58,39 +58,52 @@ ANSWER_HTML = "<b>Say:</b> “It’s ready for 14 October if we freeze features 
 ASK_PLACEHOLDER = "Ask anything about the call or your screen…"
 FOOTER = "Answered 14:31:07 · Gusan Cloud · first words 0.8s · AI can be wrong - check facts"
 
-# ── the light glass (ui/live_assist.py _THEMES["light"] and _CHIP_COLORS["light"]) ──
-INK = QColor("#0f172a")
-FAINT = QColor("#64748b")
-ACCENT = QColor("#2563eb")
-TINT_LIQUID = QColor(214, 222, 233, 165)       # over the blurred backdrop
-TINT_FLAT = QColor(206, 215, 227, 242)         # the plate where the backdrop can't be sampled
-BORDER = QColor(15, 23, 42, 40)
-FIELD = QColor(255, 255, 255, 184)             # rgba(255,255,255,0.72)
-FIELD_BORDER = QColor(15, 23, 42, 26)          # rgba(15,23,42,0.10)
-BUTTON_BORDER = QColor(15, 23, 42, 34)
-CHIPS = {   # tone -> (background, text, border)
-    "ok": ("rgba(34,197,94,0.16)", "#15803d", "rgba(34,197,94,0.45)"),
-    "red": ("rgba(239,68,68,0.14)", "#b91c1c", "rgba(239,68,68,0.45)"),
-    "amber": ("rgba(245,158,11,0.16)", "#b45309", "rgba(245,158,11,0.5)"),
+# ── the card's two looks (ui/live_assist.py _THEMES, _CHIP_COLORS, _BRAND and the paintEvent's
+# highlight, sheen and rim alphas), value for value: the page's "Card look" (Auto / Light / Dark) ──
+_GLASS = {
+    "light": dict(ink=QColor("#0f172a"), faint=QColor("#64748b"), accent=QColor("#2563eb"),
+                  tint_liquid=QColor(214, 222, 233, 165),        # over the blurred backdrop
+                  tint_flat=QColor(206, 215, 227, 242),          # the plate where the backdrop can't be sampled
+                  border=QColor(15, 23, 42, 40),
+                  field=QColor(255, 255, 255, 184),              # rgba(255,255,255,0.72)
+                  field_border=QColor(15, 23, 42, 26),           # rgba(15,23,42,0.10)
+                  button_fill=QColor(255, 255, 255, 58), button_border=QColor(15, 23, 42, 34),
+                  chips={   # tone -> (background, text, border)
+                      "ok": ("rgba(34,197,94,0.16)", "#15803d", "rgba(34,197,94,0.45)"),
+                      "red": ("rgba(239,68,68,0.14)", "#b91c1c", "rgba(239,68,68,0.45)"),
+                      "amber": ("rgba(245,158,11,0.16)", "#b45309", "rgba(245,158,11,0.5)")},
+                  spec=95, sheen=60, rim=(235, 60, 120),
+                  fill=QColor("#2563eb"), on_fill=QColor("#ffffff")),
+    "dark": dict(ink=QColor("#f8fafc"), faint=QColor("#94a3b8"), accent=QColor("#60a5fa"),
+                 tint_liquid=QColor(17, 24, 39, 160), tint_flat=QColor(15, 20, 33, 240),
+                 border=QColor(255, 255, 255, 46),
+                 field=QColor(17, 24, 39, 158),                  # rgba(17,24,39,0.62)
+                 field_border=QColor(255, 255, 255, 36),         # rgba(255,255,255,0.14)
+                 button_fill=QColor(255, 255, 255, 26), button_border=QColor(255, 255, 255, 50),
+                 chips={"ok": ("rgba(34,197,94,0.16)", "#4ade80", "rgba(34,197,94,0.45)"),
+                        "red": ("rgba(239,68,68,0.18)", "#fca5a5", "rgba(239,68,68,0.5)"),
+                        "amber": ("rgba(245,158,11,0.18)", "#fcd34d", "rgba(245,158,11,0.5)")},
+                 spec=45, sheen=26, rim=(150, 35, 70),
+                 fill=QColor("#2563eb"), on_fill=QColor("#ffffff")),
 }
-SEND_FROM, SEND_TO = QColor("#3b82f6"), QColor("#8b5cf6")
+# The same in both looks: the send disc's blue-to-violet, the stop square, the light on the glass and
+# the plain backdrop of a picture of the card on its own.
+_FIXED = {"send": ("#3b82f6", "#8b5cf6"), "stop": "#ef4444", "light": QColor(255, 255, 255), "backdrop": "#ffffff"}
 
-# Everything that changes with the card's look (the page's "Card look": Light / Dark). The names above
-# are the light glass; PALETTES holds both, as ui/live_assist.py has them (_THEMES, _CHIP_COLORS and the
-# paintEvent's highlight, sheen and rim alphas).
+# the light glass by name (what the tests and older callers read)
+INK, FAINT, ACCENT = _GLASS["light"]["ink"], _GLASS["light"]["faint"], _GLASS["light"]["accent"]
+TINT_LIQUID, TINT_FLAT = _GLASS["light"]["tint_liquid"], _GLASS["light"]["tint_flat"]
+BORDER, FIELD, FIELD_BORDER = _GLASS["light"]["border"], _GLASS["light"]["field"], _GLASS["light"]["field_border"]
+BUTTON_BORDER = _GLASS["light"]["button_border"]
+CHIPS = _GLASS["light"]["chips"]
+SEND_FROM, SEND_TO = QColor(_FIXED["send"][0]), QColor(_FIXED["send"][1])
+
+# Everything that changes with the card's look. ``fill`` / ``on_fill``: the checked Auto pill (a strong blue
+# under white words in both looks, as the real card's checked buttons).
 Palette = namedtuple("Palette", "name ink faint accent tint_liquid tint_flat border field field_border "
-                                "button_fill button_border chips spec sheen rim")
-LIGHT = Palette("light", INK, FAINT, ACCENT, TINT_LIQUID, TINT_FLAT, BORDER, FIELD, FIELD_BORDER,
-                QColor(255, 255, 255, 58), BUTTON_BORDER, CHIPS, 95, 60, (235, 60, 120))
-DARK = Palette("dark", QColor("#f8fafc"), QColor("#94a3b8"), QColor("#60a5fa"),
-               QColor(17, 24, 39, 160), QColor(15, 20, 33, 240), QColor(255, 255, 255, 46),
-               QColor(17, 24, 39, 158),                       # rgba(17,24,39,0.62)
-               QColor(255, 255, 255, 36),                     # rgba(255,255,255,0.14)
-               QColor(255, 255, 255, 26), QColor(255, 255, 255, 50),
-               {"ok": ("rgba(34,197,94,0.16)", "#4ade80", "rgba(34,197,94,0.45)"),
-                "red": ("rgba(239,68,68,0.18)", "#fca5a5", "rgba(239,68,68,0.5)"),
-                "amber": ("rgba(245,158,11,0.18)", "#fcd34d", "rgba(245,158,11,0.5)")},
-               45, 26, (150, 35, 70))
+                                "button_fill button_border chips spec sheen rim fill on_fill")
+LIGHT = Palette("light", **_GLASS["light"])
+DARK = Palette("dark", **_GLASS["dark"])
 PALETTES = {"light": LIGHT, "dark": DARK}
 
 Layout = namedtuple("Layout", "height rects texts")
@@ -254,11 +267,11 @@ def _text(p, rect, text, px, weight=400, color=INK, align=Qt.AlignVCenter | Qt.A
 def _round_button(p, rect, kind, on=False, pal=LIGHT):
     """A header / ask-row button: ui/live_assist.py _IconButton.paintEvent, on a 26 (or 34) px disc."""
     r = rect.adjusted(1.5, 1.5, -1.5, -1.5)
-    fill = pal.accent if on else pal.button_fill
+    fill = pal.fill if on else pal.button_fill
     p.setPen(QPen(fill if on else pal.button_border, 1))
     p.setBrush(fill)
     p.drawEllipse(r)
-    ink = QColor("#ffffff") if on else pal.ink
+    ink = pal.on_fill if on else pal.ink
     pen = QPen(ink, 1.6)
     pen.setCapStyle(Qt.RoundCap)
     pen.setJoinStyle(Qt.RoundJoin)
@@ -292,7 +305,7 @@ def _round_button(p, rect, kind, on=False, pal=LIGHT):
             p.drawLine(QPointF(x, y), QPointF(x, y - dy * k))
     elif kind == "stop":
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#ef4444"))
+        p.setBrush(QColor(_FIXED["stop"]))
         p.drawRoundedRect(QRectF(cx - 4.5, cy - 4.5, 9, 9), 2.2, 2.2)
 
 
@@ -314,7 +327,7 @@ def _send_button(p, rect):
     path.lineTo(QPointF(15.0, 12.0))
     path.lineTo(QPointF(3.4, 13.8))
     path.closeSubpath()
-    p.fillPath(path, QColor("#ffffff"))
+    p.fillPath(path, _FIXED["light"])
     p.restore()
 
 
@@ -365,20 +378,24 @@ def paint_plate(p, rect, backdrop=None, pal=LIGHT):
     else:
         p.fillPath(path, pal.tint_flat)
     rad = QRadialGradient(QPointF(rect.left() + 120, rect.top() + 8), rect.width() * 0.55)
-    rad.setColorAt(0.0, QColor(255, 255, 255, pal.spec))
-    rad.setColorAt(1.0, QColor(255, 255, 255, 0))
+    def lit(alpha):
+        c = QColor(_FIXED["light"])
+        c.setAlpha(alpha)
+        return c
+    rad.setColorAt(0.0, lit(pal.spec))
+    rad.setColorAt(1.0, lit(0))
     p.fillPath(path, QBrush(rad))
     sheen = QLinearGradient(rect.topLeft(), QPointF(rect.left(), rect.top() + 80))
-    sheen.setColorAt(0.0, QColor(255, 255, 255, pal.sheen))
-    sheen.setColorAt(1.0, QColor(255, 255, 255, 0))
+    sheen.setColorAt(0.0, lit(pal.sheen))
+    sheen.setColorAt(1.0, lit(0))
     p.fillPath(path, QBrush(sheen))
     p.restore()
     p.save()
     p.setClipPath(path)
     rim = QLinearGradient(rect.topLeft(), rect.bottomRight())
-    rim.setColorAt(0.0, QColor(255, 255, 255, pal.rim[0]))
-    rim.setColorAt(0.45, QColor(255, 255, 255, pal.rim[1]))
-    rim.setColorAt(1.0, QColor(255, 255, 255, pal.rim[2]))
+    rim.setColorAt(0.0, lit(pal.rim[0]))
+    rim.setColorAt(0.45, lit(pal.rim[1]))
+    rim.setColorAt(1.0, lit(pal.rim[2]))
     p.setPen(QPen(QBrush(rim), 2.0))
     p.setBrush(Qt.NoBrush)
     p.drawPath(path)
@@ -454,10 +471,10 @@ def paint_card(p, x, y, word="Hidden", tone="ok", icon="incognito", scale=CARD_S
         _box(p, b, 11, pal)
         _text(p, b, label, 12, 400, pal.ink, Qt.AlignCenter)
     auto = r["auto"]
-    p.setPen(QPen(pal.accent, 1))
-    p.setBrush(pal.accent)
+    p.setPen(QPen(pal.fill, 1))
+    p.setBrush(pal.fill)
     p.drawRoundedRect(auto.adjusted(0.5, 0.5, -0.5, -0.5), 11, 11)
-    _text(p, auto, AUTO, 12, 400, QColor("#ffffff"), Qt.AlignCenter)
+    _text(p, auto, AUTO, 12, 400, pal.on_fill, Qt.AlignCenter)
     box = r["answer"]
     _box(p, box, 10, pal)
     p.save()
@@ -480,7 +497,7 @@ def paint_card(p, x, y, word="Hidden", tone="ok", icon="incognito", scale=CARD_S
     p.restore()
 
 
-def card_pixmap(word="Hidden", tone="ok", icon="incognito", scale=CARD_SCALE, dpr=1.0, backdrop="#ffffff",
+def card_pixmap(word="Hidden", tone="ok", icon="incognito", scale=CARD_SCALE, dpr=1.0, backdrop=_FIXED["backdrop"],
                 look="light"):
     """The miniature on its own, on a transparent pixmap (for renders and tests): the glass over a
     plain backdrop of one colour, or the flat plate when ``backdrop`` is None."""

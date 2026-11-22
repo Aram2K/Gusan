@@ -1480,6 +1480,13 @@ def test_a_long_failure_sentence_is_read_in_full_and_pushes_nothing_out_of_the_w
     monkeypatch.setattr(ui.winfit, "settle_on_screen", lambda *a, **k: None)     # the offscreen screen is 800x600
     monkeypatch.setattr(ui.winfit, "fit_on_screen", lambda *a, **k: None)
     nv, _app, _folder, page = _notes_view(shell, meetings_root, **NOTION_MCP)
+    # (2.1.11) a transcript without speaker labels: no Speakers on the People card, so this meeting - it has no
+    # recording either - is no taller than the window and the page has no scroll bar. A page that scrolls (a
+    # recording's player, the speakers) is a scroll bar's width narrower at this size: that case is not this test's.
+    import os
+    with open(os.path.join(_folder, "transcript.txt"), "w", encoding="utf-8") as f:
+        f.write("Hello team.")
+    nv.reload()
     win = page.window()
     win.resize(*shell_mod.DEFAULT_SIZE)
     win.show()

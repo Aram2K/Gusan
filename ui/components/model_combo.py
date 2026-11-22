@@ -53,7 +53,7 @@ from ui import theme
 from ui.components import icons
 
 PLAIN_ROLE = Qt.UserRole + 1
-MARK_ROLE = Qt.UserRole + 2          # "" | MARK_PRO | MARK_DOWNLOAD (row marks)
+MARK_ROLE = Qt.UserRole + 2          # "" | MARK_PRO | MARK_DOWNLOAD | MARK_DOWNLOADED (row marks)
 TITLE_ROLE = Qt.UserRole + 3         # a rich row's first line (the name; the box shows it closed)
 NOTE_ROLE = Qt.UserRole + 4          # a rich row's muted second line
 TAGS_ROLE = Qt.UserRole + 5          # a rich row's chips: ("local",) / ("cloud", "pro") ...
@@ -65,6 +65,9 @@ DOTS_BELOW_ROLE = Qt.UserRole + 10   # True: the dots on a third line of their o
                                      # lists engines, too long for the dots to follow it)
 MARK_PRO = "pro"
 MARK_DOWNLOAD = "download"
+# A local model already on this computer: a check in the download icon's place, so every row's chips line up.
+MARK_DOWNLOADED = "downloaded"
+_ICON_MARKS = (MARK_DOWNLOAD, MARK_DOWNLOADED)   # (both icons span 5..19 of 24: the same blank margin)
 # Where QStandardItem keeps an item's flags. Rows are greyed out through the
 # model index, never model.item(): PySide keeps that QStandardItem wrapper
 # alive inside the model, so once clear() frees the item (a refill) the stale
@@ -80,7 +83,7 @@ _ICON_PX = 16
 _ICON_BLANK = 3       # blank margin inside the 16 px download icon (its arrow spans 5..19 of 24)
 _SCROLLBAR = 18
 
-_MARK_NOTE = {MARK_PRO: "Pro", MARK_DOWNLOAD: "not downloaded"}
+_MARK_NOTE = {MARK_PRO: "Pro", MARK_DOWNLOAD: "not downloaded", MARK_DOWNLOADED: "on this computer"}
 _CHIP_GAP = 4         # between two chips
 _HEADING_H = 26       # a group heading's height
 _ROW_H = 34           # a one-line row (the stylesheet's own item height)
@@ -119,7 +122,7 @@ class _RowDelegate(QStyledItemDelegate):
     def chip_pixmap(self, tag):
         """The pixmap of a speech tag's chip (local / cloud / pro)."""
         dpr = self._dpr()
-        hit = self._chip.get((tag, dpr))
+        hit = self._chip.get((tag, dpr, theme.scheme()))
         if hit is not None and not hit.isNull():
             return hit
         # The real chip, grabbed: it is styled by the app's stylesheet through its place under the
@@ -141,7 +144,7 @@ class _RowDelegate(QStyledItemDelegate):
             chip.deleteLater()
         finally:
             self._making = False
-        self._chip[(tag, dpr)] = pm
+        self._chip[(tag, dpr, theme.scheme())] = pm
         return pm
 
     @staticmethod
@@ -199,6 +202,8 @@ class _RowDelegate(QStyledItemDelegate):
             return self.chip_pixmap("pro")
         if mark == MARK_DOWNLOAD:
             return icons.pixmap("download", _ICON_PX, "blue-tx" if hot else "muted", sw=2)
+        if mark == MARK_DOWNLOADED:
+            return icons.pixmap("check", _ICON_PX, "ok-tx", sw=2.4)
         return None
 
     @staticmethod
@@ -353,7 +358,7 @@ class _RowDelegate(QStyledItemDelegate):
         w, h = self._logical_width(pm), self._logical_height(pm)
         r = option.rect
         x = r.right() - (_TEXT_PAD // 2 - 1) - w + 1
-        if mark == MARK_DOWNLOAD:
+        if mark in _ICON_MARKS:
             x += _ICON_BLANK            # the icon's own margin: its arrow lines up with the pill's edge
         y = r.top() + (r.height() - h) // 2
         painter.save()
@@ -402,7 +407,7 @@ class _RowDelegate(QStyledItemDelegate):
             pm = self.mark_pixmap(mark, selected or hover)
             if pm is not None:
                 w, h = self._logical_width(pm), self._logical_height(pm)
-                blank = _ICON_BLANK if mark == MARK_DOWNLOAD else 0
+                blank = _ICON_BLANK if mark in _ICON_MARKS else 0
                 x = right - w + 1 + blank
                 painter.drawPixmap(QRect(x, top_y + (top_h - h) // 2, w, h), pm)
                 right = x - _CHIP_GAP - blank
@@ -628,6 +633,8 @@ class PlainNameCombo(QComboBox):
         tip = ""
         if mark == MARK_DOWNLOAD:
             tip = "Not downloaded yet" + (" (%s)" % note if note else "")
+        elif mark == MARK_DOWNLOADED:
+            tip = "On this computer"
         elif mark == MARK_PRO:
             tip = "Pro feature"
         base = str(self.itemData(index, TIP_ROLE) or "")          # a rich row's own tooltip
@@ -725,5 +732,5 @@ def combo(box, accessible, width):
     return box
 
 
-__all__ = ["HEADING_ROLE", "MARK_DOWNLOAD", "MARK_PRO", "MARK_ROLE", "NOTE_ROLE", "PLAIN_ROLE",
+__all__ = ["HEADING_ROLE", "MARK_DOWNLOAD", "MARK_DOWNLOADED", "MARK_PRO", "MARK_ROLE", "NOTE_ROLE", "PLAIN_ROLE",
            "PlainNameCombo", "TAGS_ROLE", "TITLE_ROLE", "combo"]

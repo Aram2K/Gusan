@@ -19,10 +19,9 @@ Integration notes for Wave 4
 ----------------------------
 1. Config keys this page writes that main.DEFAULT doesn't have yet (plain keys,
    no side effect in settings_apply unless noted):
-     app_theme               "system" | "light" | "dark" (default "system").
-                             ui/theme.py only has the light tokens, so 2.0.0
-                             hides the App look row (SHOW_APP_LOOK = False);
-                             the key stays. Flip it once a dark palette exists.
+     app_theme               "system" | "light" | "dark" (default "system"):
+                             General > Appearance; settings_apply turns every
+                             open window at once (app.apply_app_theme).
      notify_when_ready       file_jobs.FILE_DEFAULTS (default True); meeting
                              notes should honour it too.
      install_updates_on_quit default True: download the update ahead
@@ -32,10 +31,11 @@ Integration notes for Wave 4
                              host API) or None for the default microphone.
    Read only: hotkey, smart_actions_hotkey (the Smart Actions page's key,
    default "alt+s" ("ctrl+s" on a Mac), "" = none set; SMART_SHORTCUT_KEYS) and
-   live_assist_hotkey, listed in that order (Dictate, Smart Actions, Live
-   Assistant). A shortcut row opens its page with focus="hotkey": Dictation
-   and Smart Actions put the keyboard focus on their shortcut control; Live
-   Assistant ignores it today (Wave 4: accept focus="hotkey" there too).
+   live_assist_hotkey, plus meeting_hotkey (default "alt+m", "ctrl+m" on a Mac;
+   MEETING_SHORTCUT_KEYS), listed as Dictate, Smart Actions, Record a meeting,
+   Live Assistant. A shortcut row opens its page with focus="hotkey": each
+   page puts the keyboard focus on its shortcut control (Meetings: the
+   "Shortcut" row of its Meeting settings).
    Removing a Whisper model that Smart Actions transcribe with
    (smart_actions_speech_model) puts that key back to "" (Same as Dictation).
 2. Services (getattr; the page degrades without them; connected at build and
@@ -93,7 +93,7 @@ import threading
 import time
 
 from PySide6.QtCore import QCoreApplication, QEvent, QRectF, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPen
+from PySide6.QtGui import QDesktopServices, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractButton, QBoxLayout, QComboBox, QDialog, QFrame,
                                QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
                                QProgressBar, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
@@ -104,13 +104,14 @@ import engine_choice
 import hardware
 import history_actions
 import hotkeys
+import invites
 import speech_hy
 import updater
 from app_info import APP_NAME, APP_VERSION
 from ui import hy_model, theme
 from ui.components import (Avatar, Button, Card, Chip, Divider, IconTile, Keycap, NavItem,
                            PageHeader, Segmented, SettingRow, Toggle, icons, label, mini_prompt)
-from ui.components.model_combo import MARK_DOWNLOAD, NOTE_ROLE, PlainNameCombo
+from ui.components.model_combo import MARK_DOWNLOAD, MARK_DOWNLOADED, NOTE_ROLE, PlainNameCombo
 from ui.components.controls import keycap_labels
 
 logger = logging.getLogger("transcribe")
@@ -128,14 +129,16 @@ _SECTION_ALIASES = {
     "account": "general", "words": "dictionary", "vocabulary": "dictionary", "replacements": "dictionary",
 }
 APP_LOOKS = (("system", "Match system"), ("light", "Light"), ("dark", "Dark"))
-# 2.0.0 is light only (ui/theme.py has no dark palette yet): the App look row
-# is hidden, and app_theme stays in the config for when it comes.
-SHOW_APP_LOOK = False
+APP_LOOK_ICONS = ("monitor", "sun", "moon")
+# General > Appearance: light, dark or the computer's choice (ui/theme.py "Light and dark").
+SHOW_APP_LOOK = True
 SMART_SHORTCUT_KEYS = ("smart_actions_hotkey",)        # ui/pages/smart_actions.py HOTKEY_KEY
+MEETING_SHORTCUT_KEYS = ("meeting_hotkey",)            # ui/pages/meetings.py HOTKEY_KEY (starts a meeting)
 # (cfg keys, icon, name, route, link text, default hotkey)
 SHORTCUTS = (
     (("hotkey",), "mic", "Dictate", "dictation", "Dictation", hotkeys.DICTATION_DEFAULT),
     (SMART_SHORTCUT_KEYS, "wand", "Smart Actions", "smart_actions", "Smart Actions", hotkeys.SMART_ACTIONS_DEFAULT),
+    (MEETING_SHORTCUT_KEYS, "people", "Record a meeting", "meetings", "Meetings", hotkeys.MEETING_DEFAULT),
     (("live_assist_hotkey",), "incognito", "Live Assistant", "live_assistant", "Live Assistant", "ctrl+alt+a"),
 )
 SMART_SPEECH_KEY = engine_choice.SMART_SPEECH_KEY      # Smart Actions' "Transcribes with"
@@ -173,7 +176,7 @@ _WATCHED = {
     "mistral_api_key", "google_api_key", "save_history", "analytics_enabled", "overlay_private",
     "live_assist_private", "install_updates_on_quit",
     "pending_update_version", "admin_tier_override",
-} | set(SMART_SHORTCUT_KEYS)
+} | set(SMART_SHORTCUT_KEYS) | set(MEETING_SHORTCUT_KEYS)
 
 
 # ── shared helpers (ui/pages/account.py uses them too) ──────────────────────
@@ -298,7 +301,11 @@ def text_label(text, px, weight=400, color=None, role=None, display=False, paren
 
 
 def tint(lb, color):
-    lb.setStyleSheet("QLabel { color: %s; }" % theme.qss_color(color))
+    """The label's words in a token colour (follows the look); color "" / None: back to its text role's."""
+    if not color:
+        theme.sheet(lb, "")
+        return lb
+    theme.sheet(lb, lambda: "QLabel { color: %s; }" % theme.qss_color(color))
     return lb
 
 
@@ -346,9 +353,8 @@ def red_button(text, size="s", parent=None):
     """The quiet destructive button: secondary with red text and a red edge."""
     b = Button(text, "secondary", size, parent=parent)
     b.setObjectName("redBtn")
-    b.setStyleSheet("QPushButton#redBtn { color: %s; border-color: %s; }"
-                    "QPushButton#redBtn:hover { background: %s; }"
-                    % (theme.qss_color("red-tx"), theme.qss_color("#fecaca"), theme.qss_color("red-sub")))
+    theme.sheet(b, "QPushButton#redBtn { color: @red-tx; border-color: @red-line; }"
+                   "QPushButton#redBtn:hover { background: @red-sub; }")
     return b
 
 
@@ -435,7 +441,7 @@ class _Painted(QAbstractButton):
 
     def box(self):
         """(background, border, border width) - tokens or CSS colours."""
-        return "rgba(255,255,255,0.72)", ("line2" if self.underMouse() else "line"), 1
+        return "frost-72", ("line2" if self.underMouse() else "line"), 1
 
     def paint_extra(self, p):
         pass
@@ -463,7 +469,7 @@ class _Painted(QAbstractButton):
 class _Box(QFrame):
     """A QFrame that paints a rounded box from tokens (bg, border, width, radius)."""
 
-    def __init__(self, bg="rgba(255,255,255,0.72)", border="line", width=1, radius=12, parent=None):
+    def __init__(self, bg="frost-72", border="line", width=1, radius=12, parent=None):
         super().__init__(parent)
         self._look = (bg, border, width, radius)
 
@@ -504,9 +510,11 @@ class BigToggle(Toggle):
         kx = x0 + 1 + (24 if on else 2)
         ky = y0 + (self.TRACK_H - self.KNOB) / 2.0
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(15, 23, 42, 40))
+        shade = theme.qcolor("shade")
+        shade.setAlpha(40 if not theme.is_dark() else 90)
+        p.setBrush(shade)
         p.drawEllipse(QRectF(kx, ky + 1, self.KNOB, self.KNOB))
-        p.setBrush(QColor("#ffffff"))
+        p.setBrush(theme.qcolor("knob"))
         p.drawEllipse(QRectF(kx, ky, self.KNOB, self.KNOB))
         if self.hasFocus() and getattr(self, "_kbd_focus", False):
             p.setOpacity(1.0)
@@ -625,8 +633,7 @@ def mid_keys(keys, parent=None):
         cap.setFixedHeight(32)
         cap.setMinimumWidth(32)
         cap.setFont(theme.font(14, 700, display=True))
-        cap.setStyleSheet("QLabel#midKey { border-radius: 8px; border-bottom: 3px solid %s; padding: 0px 10px; }"
-                          % theme.qss_color("line2"))
+        theme.sheet(cap, "QLabel#midKey { border-radius: 8px; border-bottom: 3px solid @line2; padding: 0px 10px; }")
         lay.addWidget(cap, 0, Qt.AlignVCenter)
     for ch in w.findChildren(QWidget):
         ch.setAttribute(Qt.WA_TransparentForMouseEvents, True)
@@ -637,8 +644,7 @@ def not_set_chip(parent=None):
     f = QFrame(parent)
     f.setObjectName("notSet")
     f.setFixedHeight(32)
-    f.setStyleSheet("QFrame#notSet { border: 1px dashed %s; border-radius: 8px; background: transparent; }"
-                    % theme.qss_color("line2"))
+    theme.sheet(f, "QFrame#notSet { border: 1px dashed @line2; border-radius: 8px; background: transparent; }")
     lay = QHBoxLayout(f)
     lay.setContentsMargins(12, 0, 12, 0)
     lay.setSpacing(6)
@@ -793,7 +799,7 @@ class LevelMeter(_Box):
     """The live microphone level: 26 segments and a short status."""
 
     def __init__(self, parent=None):
-        super().__init__("#ffffff", "line", 1, 8, parent)
+        super().__init__("surface", "line", 1, 8, parent)
         self.setFixedHeight(36)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setAccessibleName("Microphone level")
@@ -938,7 +944,7 @@ class GpuCard(_Box):
     remove = Signal()
 
     def __init__(self, parent=None):
-        super().__init__("rgba(255,255,255,0.72)", "line", 1, 12, parent)
+        super().__init__("frost-72", "line", 1, 12, parent)
         self.setAccessibleName("Graphics card speed-up")
         lay = QHBoxLayout(self)
         lay.setContentsMargins(14, 10, 14, 10)
@@ -1024,7 +1030,7 @@ class GpuCard(_Box):
             self.sub.setText(message)
             tint(self.sub, "red-tx")
         else:
-            self.sub.setStyleSheet("")          # back to the "model" text role's colour
+            tint(self.sub, None)                # back to the "model" text role's colour
 
     def _progress(self, pct):
         if self.progress is None:
@@ -1879,16 +1885,17 @@ class SettingsPage(QWidget):
         values = [k for k, _t in APP_LOOKS]
         cur = self.cfg.get("app_theme", "system")
         self.seg_look = Segmented([t for _k, t in APP_LOOKS], values.index(cur) if cur in values else 0,
-                                  "App look", parent=self)
+                                  "Appearance", parent=self, icons=APP_LOOK_ICONS)
         self.seg_look.changed.connect(lambda i: self._set("app_theme", values[i]))
         self.t_notify = self._toggle("notify_when_ready", "Notify me when notes or transcripts are ready", True)
-        rows = [self.row_login]
+        rows = []
         self.row_look = None
         if SHOW_APP_LOOK:
-            self.row_look = self._row("App look", self.seg_look)
+            self.row_look = self._row("Appearance", self.seg_look)
             rows.append(self.row_look)
         else:
             self.seg_look.hide()             # built (app_theme is kept), never shown
+        rows.append(self.row_login)
         rows.append(self._row("Notify me when notes or transcripts are ready", self.t_notify))
         self.row_mac_perms = None
         if IS_MAC:
@@ -2215,8 +2222,11 @@ class SettingsPage(QWidget):
             value = str(box.itemData(i) or "")
             info = info_of(value)
             mark, note = "", ""
-            if info is not None and state_of(value) in ("missing", "failed"):
+            state = state_of(value) if info is not None else None
+            if state in ("missing", "failed"):
                 mark, note = MARK_DOWNLOAD, info.size
+            elif state == "ready":
+                mark = MARK_DOWNLOADED
             box.set_choice_mark(i, mark, note)
 
     def _download_status(self, mid, info, st, ready_text):
@@ -2767,7 +2777,7 @@ class SettingsPage(QWidget):
         hero = Card(pad=(24, 20))
         hrow = QHBoxLayout()
         hrow.setSpacing(18)
-        hrow.addWidget(icon_label("shield", 32, "blue", sw=1.6, parent=hero), 0, Qt.AlignVCenter)
+        hrow.addWidget(icon_label("shield", 32, "icon-blue", sw=1.6, parent=hero), 0, Qt.AlignVCenter)
         hcol = QVBoxLayout()
         hcol.setSpacing(2)
         t = text_label("Privacy mode", 20, 600, role="h2", display=True, parent=hero)
@@ -2803,6 +2813,7 @@ class SettingsPage(QWidget):
         self.row_history = self._row("Save my history", self.t_history, hint="Kept on this computer.")
         self.row_delete = self._row("Delete all history", self.btn_delete, hint="Can’t be undone.")
         self.row_stats = self._row("Share usage statistics", self.t_stats)
+        theme.on_change(self.row_stats, self._set_stats_hint)       # the link's colour is in the HTML
         self._collect_open = False
         self._set_stats_hint()
         self.row_stats.hint_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
@@ -2810,7 +2821,12 @@ class SettingsPage(QWidget):
         self.row_stats.hint_label.linkActivated.connect(lambda _l: self._toggle_collect())
         self.row_hide = self._row("Hide from screen shares", hide, hint=self._hide_hint())
         self._prepend_icon(self.row_hide, "incognito", "ok-tx")
-        inner.addWidget(self._group([self.row_history, self.row_delete, self.row_stats, self.row_hide]))
+        # Invite friends: what an invite uses, in one plain line (no switch: it is only used by people who invite
+        # or join - invites.py).
+        self.row_invites = self._row("Invites", None, hint=invites.PRIVACY_LINE)
+        self._prepend_icon(self.row_invites, "gift", "pro-tx")
+        inner.addWidget(self._group([self.row_history, self.row_delete, self.row_stats, self.row_hide,
+                                     self.row_invites]))
         v.addLayout(inner)
 
     def _prepend_icon(self, row, icon, color):

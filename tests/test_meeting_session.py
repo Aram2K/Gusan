@@ -2682,7 +2682,8 @@ class TestNotesFirstSpeakersAfter(_SpeakerBase):
         self.assertEqual((part["audio"], part["kind"]), ("audio_part1.wav", "sources"))
         self.assertEqual(part["text"], SOURCES_ONLY)
         self.assertEqual(part["seconds"], 40.0)
-        self.assertEqual(part["segments"][0], {"s": 2.0, "e": 6.0, "t": "Hello team.", "src": "you"})
+        self.assertEqual(part["segments"][0], {"s": 2.0, "e": 6.0, "t": "Hello team.", "src": "you", "spk": "you"})
+        self.assertEqual(part["canon"], SOURCES_ONLY)                    # the block by its ids (speaker_map.py)
         self.assertEqual([x["src"] for x in part["segments"]], ["you", "them", "you", "them"])
         self.assertEqual(sorted(p.name for p in folder.glob("*.wav")),
                          ["audio_part1.wav", "audio_part1_mic.wav", "audio_part1_system.wav"])
@@ -3556,7 +3557,8 @@ class TestFinalRereadOfALiveSession(_SpeakerBase):
         self.assertIn(YOU_THEM, s._notes_in[0])                      # the notes were written from the cloud's words
         part = ms.load_segments(folder)["parts"][0]
         self.assertEqual(part["kind"], "sources")
-        self.assertEqual(part["segments"][1], {"s": 7.0, "e": 11.0, "t": "Ինչպե՞ս եք", "src": "them"})
+        self.assertEqual(part["segments"][1], {"s": 7.0, "e": 11.0, "t": "Ինչպե՞ս եք", "src": "them",
+                                               "spk": "s1"})                 # (the voice the pass found: its id)
         self.assertEqual(ms.load_meta(folder)["transcribed_with"], "cloud")      # said where the words came from
         self.assertEqual(ms.load_meta(folder)["notices"], [])
 

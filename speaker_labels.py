@@ -500,8 +500,14 @@ def speaker_names(extra=None):
     return names
 
 
-def has_labels(text):
+def has_labels(text, labels=None):
     """True when a transcript carries speaker labels ("Speaker 1:", "You:",
-    "Them:" at the start of a line)."""
+    "Them:" at the start of a line - or, with ``labels``, one of the meeting's
+    own: a renamed speaker's name, speaker_map.py)."""
     import re
-    return bool(re.search(r"(?m)^\s*(?:Speaker\s+(?:\d+|\?)|You|Them):\s", text or ""))
+    if re.search(r"(?m)^\s*(?:Speaker\s+(?:\d+|\?)|You|Them):\s", text or ""):
+        return True
+    if labels:
+        import rich_text
+        return any(rich_text.known_label(line.strip(), labels) for line in (text or "").splitlines())
+    return False

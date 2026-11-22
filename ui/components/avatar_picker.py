@@ -7,7 +7,7 @@ Each pick shows on every avatar at once (ui/components/avatars.py) and is saved 
 """
 
 from PySide6.QtCore import QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QPainter, QPen
 from PySide6.QtWidgets import QAbstractButton, QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from ui import theme
@@ -87,11 +87,13 @@ class AvatarButton(Avatar):
         p.setRenderHint(QPainter.Antialiasing, True)
         r = QRectF(0.5, 0.5, self._size - 1, self._size - 1)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(15, 23, 42, 170))
+        scrim = theme.qcolor("shade")
+        scrim.setAlpha(170)
+        p.setBrush(scrim)
         p.drawEllipse(r)
         isz = max(10, int(round(self._size * 0.4)))
         p.drawPixmap(int(round((self._size - isz) / 2.0)), int(round((self._size - isz) / 2.0)),
-                     icons.pixmap("pen", isz, "#ffffff", sw=2.0))
+                     icons.pixmap("pen", isz, "on-accent", sw=2.0))
         if self.hasFocus():
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(theme.qcolor("blue"), 2))

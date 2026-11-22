@@ -413,7 +413,7 @@ def test_tray_rows_free(tray):
         ("header", "Gusan  v" + APP_VERSION), ("open", "Open Gusan"), ("dictate", "Dictate"),
         ("meeting", "Record a meeting…"), ("assist", "Live Assistant"), ("convert", "Convert audio to text…"),
         ("recent", "Recent"), ("privacy", "Privacy mode"),
-        ("account", "aram@aibuben.xyz  ·  Free"), ("upgrade", "Upgrade to Pro…"),
+        ("account", "aram@aibuben.xyz  ·  Free"), ("upgrade", "Upgrade to Pro…"), ("invite", "Invite friends"),
         ("settings", "Settings…"), ("quit", "Quit Gusan")]
     assert tr.menu.defaultAction() is tr.actions["open"]
     assert not tr.actions["header"].isEnabled() and not tr.actions["account"].isEnabled()

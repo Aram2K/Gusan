@@ -124,6 +124,12 @@ ALLOWED_EVENTS = {
     "calendar_disconnected",
     "calendar_reminder_action",
     "calendar_meeting_started",
+    # Invite friends' funnel (no codes, links, names or ids: a fixed word each - where a link was shared, how an
+    # invite was joined, how a month was claimed).
+    "invite_page_opened",         # {"signed_in": bool}
+    "invite_link_shared",         # {"channel": "copy" | "whatsapp" | "telegram" | "email" | "x" | "linkedin" | "more"}
+    "invite_joined",              # {"source": "hint" | "paste"}
+    "invite_reward_claimed",      # {"status": "active" | "next_bill_free"}
 }
 
 _queue_lock = threading.Lock()   # guards every read-modify-write of the queue file

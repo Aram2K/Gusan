@@ -112,8 +112,8 @@ def _icon_label(name, size, color, parent=None, sw=1.7):
     return lb
 
 
-def _blend(token, over="#ffffff"):
-    """A token's colour flattened over white (rich text has no alpha)."""
+def _blend(token, over="surface"):
+    """A token's colour flattened over the card's surface (rich text has no alpha)."""
     a = theme.qcolor(token)
     b = theme.qcolor(over)
     k = a.alphaF()
@@ -245,7 +245,7 @@ def proof_html(sentence, terms):
     if not pattern:
         return html.escape(sentence)
     mark = ('<span style="background-color:%s; color:%s; font-weight:600">&nbsp;%%s&nbsp;</span>'
-            % (_blend("rgba(59,130,246,0.14)"), theme.qss_color("blue-tx")))
+            % (_blend("mark-sub"), theme.qss_color("blue-tx")))
     out, pos = [], 0
     for m in re.finditer(r"(?<!\w)(?:%s)(?!\w)" % pattern, sentence):
         out.append(html.escape(sentence[pos:m.start()]))
@@ -361,8 +361,7 @@ class WordChip(QFrame):
         super().__init__(parent)
         self.word = word
         self.setObjectName("wordChip")
-        self.setStyleSheet("QFrame#wordChip { background: #ffffff; border: 1px solid %s; border-radius: 16px; }"
-                           % theme.qss_color("line2"))
+        theme.sheet(self, "QFrame#wordChip { background: @surface; border: 1px solid @line2; border-radius: 16px; }")
         self.setFixedHeight(32)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         lay = QHBoxLayout(self)
@@ -388,8 +387,7 @@ class _ListRow(QFrame):
         super().__init__(parent)
         self.setObjectName("dictRow")
         if top_border:
-            self.setStyleSheet("QFrame#dictRow { border: none; border-top: 1px solid %s; }"
-                               % theme.qss_color("line"))
+            theme.sheet(self, "QFrame#dictRow { border: none; border-top: 1px solid @line; }")
         self.setFixedHeight(height)
         self.lay = QHBoxLayout(self)
         self.lay.setContentsMargins(0, 0, 0, 0)
@@ -444,12 +442,11 @@ class MoreButton(QPushButton):
         self.setFocusPolicy(Qt.TabFocus)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         theme.focus_ring(self)
-        self.setStyleSheet(
-            "QPushButton#moreRow { background: %s; border: 1px solid %s; border-radius: 12px; text-align: left; }"
-            "QPushButton#moreRow:hover { background: #ffffff; }"
-            "QPushButton#moreRow[focusVisible=\"true\"] { border: 2px solid %s; }"
-            % (theme.qss_color("rgba(255,255,255,0.55)"), theme.qss_color("glass-line"),
-               theme.qss_color("blue-l")))
+        theme.sheet(self,
+                    "QPushButton#moreRow { background: @frost-55; border: 1px solid @glass-line; border-radius: 12px; "
+                    "text-align: left; }"
+                    "QPushButton#moreRow:hover { background: @surface; }"
+                    "QPushButton#moreRow[focusVisible=\"true\"] { border: 2px solid @blue-l; }")
         lay = QHBoxLayout(self)
         lay.setContentsMargins(18, 0, 18, 0)
         lay.setSpacing(10)
@@ -542,8 +539,7 @@ class DictionaryPage(QWidget):
         add.setSpacing(8)
         field = QFrame(card)
         field.setObjectName("wordField")
-        field.setStyleSheet("QFrame#wordField { background: #ffffff; border: 1px solid %s; border-radius: 10px; }"
-                            % theme.qss_color("blue-line"))
+        theme.sheet(field, "QFrame#wordField { background: @input; border: 1px solid @blue-line; border-radius: 10px; }")
         field.setFixedHeight(44)
         fl = QHBoxLayout(field)
         fl.setContentsMargins(14, 0, 14, 0)
@@ -576,15 +572,14 @@ class DictionaryPage(QWidget):
 
         self.proof_row = QFrame(card)
         self.proof_row.setObjectName("proofRow")
-        self.proof_row.setStyleSheet(
-            "QFrame#proofRow { background: %s; border: 1px dashed %s; border-radius: 10px; }"
-            % (theme.qss_color("rgba(255,255,255,0.65)"), theme.qss_color("line2")))
+        theme.sheet(self.proof_row, "QFrame#proofRow { background: @frost-65; border: 1px dashed @line2; border-radius: 10px; }")
         pr = QHBoxLayout(self.proof_row)
         pr.setContentsMargins(14, 9, 14, 9)
         pr.setSpacing(8)
         pr.addWidget(_icon_label("check_circle", 16, "ok", self.proof_row))
         pr.addWidget(_text("Now spelled right:", "muted", 12.5, 400, self.proof_row))
         self.proof_label = _text("", "label", 13.5, 400, self.proof_row, wrap=True)
+        theme.on_change(self.proof_label, lambda: self._show_proof(words(_cfg(self.app))))     # marks are HTML
         self.proof_label.setTextFormat(Qt.RichText)
         # Wraps in a narrow window instead of being cut mid-word.
         self.proof_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
@@ -794,9 +789,9 @@ class DictionaryPage(QWidget):
         self.replace_count.setText(str(len(pairs)))
         self.replace_count.setVisible(bool(pairs))
         # The hairline above the add row only separates it from rows.
-        self.replace_add.setStyleSheet(
-            "QFrame#replaceAdd { border: none; border-top: 1px solid %s; }" % theme.qss_color("line")
-            if pairs else "QFrame#replaceAdd { border: none; }")
+        theme.sheet(self.replace_add,
+                    "QFrame#replaceAdd { border: none; border-top: 1px solid @line; }"
+                    if pairs else "QFrame#replaceAdd { border: none; }")
         self.replace_add.layout().setContentsMargins(0, 12 if pairs else 0, 0, 0)
         return True
 

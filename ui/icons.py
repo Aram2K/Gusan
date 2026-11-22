@@ -2,6 +2,9 @@
 
 Painted with QPainter (not font glyphs) so they render identically on every
 Windows install - same reasoning as the feedback thumbnails' remove badge.
+
+A colour left out is the look's slate grey (theme token "guest-tx"), read when
+the icon is drawn - so it follows the light / dark look (the cache is per colour).
 """
 
 import os
@@ -12,8 +15,16 @@ from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 
 _ICON_CACHE = {}
 
-_SLATE = QColor("#475569")
-SLATE = _SLATE          # public alias: the app's standard icon grey
+
+def slate():
+    """The app's standard icon grey in the active look (theme token "guest-tx")."""
+    from ui import theme
+    return theme.qcolor("guest-tx")
+
+
+def _col(color):
+    """``color`` as a QColor; None is the look's slate grey."""
+    return slate() if color is None else QColor(color)
 
 # Qt draws a combo-box item's icon hard against its text. There is no styleable
 # icon-to-text gap, so the space is baked into the pixmap as a transparent
@@ -118,8 +129,9 @@ def _painted_glyph_pixmap(kind, size, color):
     return pm
 
 
-def draw_mode_glyph(painter, kind, rect, color=_SLATE):
+def draw_mode_glyph(painter, kind, rect, color=None):
     """Paint one meeting-mode glyph into ``rect``. Unknown kinds draw nothing."""
+    color = _col(color)
     size = int(round(max(rect.width(), rect.height())))
     pm = _glyph_pixmap(kind, size, color)          # drop-in PNG, if present
     if pm is None and kind in ("mic", "speaker"):
@@ -167,13 +179,14 @@ def _painter(pm):
     return p
 
 
-def _draw_mic(p, rect, color=_SLATE):
+def _draw_mic(p, rect, color=None):
     """Classic mic: solid capsule, open U cradle, stem, base bar.
 
     Geometry deliberately stops at 90% height with margins all round - at the
     ~14-18 px this renders at, anything touching the box edge looks cut off,
     and an over-round cradle hugging the capsule reads as a flower.
     """
+    color = _col(color)
     s = min(rect.width(), rect.height())
     x0 = rect.x() + (rect.width() - s) / 2
     y0 = rect.y() + (rect.height() - s) / 2
@@ -208,8 +221,9 @@ def _draw_mic(p, rect, color=_SLATE):
     p.drawLine(QPointF(cx - s * 0.16, base_y), QPointF(cx + s * 0.16, base_y))
 
 
-def _draw_speaker(p, rect, color=_SLATE):
+def _draw_speaker(p, rect, color=None):
     """Speaker: box + cone + two sound arcs."""
+    color = _col(color)
     w = rect.width()
     h = rect.height()
     x0 = rect.x()
@@ -246,14 +260,16 @@ def _draw_speaker(p, rect, color=_SLATE):
         p.drawArc(QRectF(cx - r, cy - r, 2 * r, 2 * r), -50 * 16, 100 * 16)
 
 
-def _text_pill_icon(text, bg, fg="#ffffff", width=44, height=20):
+def _text_pill_icon(text, bg, fg=None, width=44, height=20):
     """Small colored pill with short uppercase text, for marking dropdown items.
 
     Rendered at the screen's native resolution (see :func:`_new_pixmap`) and
     drawn at exactly ``width`` x ``height``, so there is no rescale anywhere in
     the path and the text stays sharp.
     """
-    key = ("pill", text, bg, width, height, _dpr())
+    from ui import theme
+    fg = theme.qcolor("on-accent") if fg is None else QColor(fg)
+    key = ("pill", text, bg, fg.rgba(), width, height, _dpr())
     if key in _ICON_CACHE:
         return _ICON_CACHE[key]
     pm = _new_pixmap(width, height)
@@ -265,7 +281,7 @@ def _text_pill_icon(text, bg, fg="#ffffff", width=44, height=20):
     f.setBold(True)
     f.setPixelSize(max(9, int(height * 0.55)))
     p.setFont(f)
-    p.setPen(QColor(fg))
+    p.setPen(fg)
     p.drawText(QRectF(0, 0, width, height), Qt.AlignCenter, text)
     p.end()
     icon = QIcon(pm)
@@ -293,10 +309,10 @@ def _color_key(color):
     return QColor(color).name(QColor.HexArgb)
 
 
-def eye_icon(open_=True, size=22, color=_SLATE):
+def eye_icon(open_=True, size=22, color=None):
     """Eye for password fields: open (click to reveal) or slashed (click to hide).
     Cached per colour too (a green and an amber chip used to share one icon)."""
-    color = QColor(color)
+    color = _col(color)
     key = ("eye", bool(open_), size, _color_key(color), _dpr())
     if key in _ICON_CACHE:
         return _ICON_CACHE[key]
@@ -344,10 +360,11 @@ def _incognito_path():
     return path
 
 
-def incognito_pixmap(size=16, color=_SLATE, stroke=1.8):
+def incognito_pixmap(size=16, color=None, stroke=1.8):
     """The incognito mark as a device-pixel-sharp QPixmap of ``size`` logical
     px in one colour. ``stroke`` is in the 24-unit drawing (1.8 = the mockups'
     chip). Cached per size, colour, stroke and screen scale."""
+    color = _col(color)
     key = ("incognito-pm", int(size), _color_key(color), float(stroke), _dpr())
     if key in _ICON_CACHE:
         return _ICON_CACHE[key]
@@ -367,9 +384,10 @@ def incognito_pixmap(size=16, color=_SLATE, stroke=1.8):
     return pm
 
 
-def incognito_icon(size=16, color=_SLATE, stroke=1.8):
+def incognito_icon(size=16, color=None, stroke=1.8):
     """Incognito (hat + glasses): "hidden on screen share" - the Live Assistant
     card's green Hidden chip. Cached per size and colour (and stroke, scale)."""
+    color = _col(color)
     key = ("incognito", int(size), _color_key(color), float(stroke), _dpr())
     if key in _ICON_CACHE:
         return _ICON_CACHE[key]
@@ -381,7 +399,7 @@ def incognito_icon(size=16, color=_SLATE, stroke=1.8):
 def meeting_mode_icon(mode, size=32):
     """Icon for a meeting capture mode: 'smart_meeting' (mic + speaker),
     'default_mic' (mic only), 'system_only' (speaker only)."""
-    key = (mode, size)
+    key = (mode, size, slate().rgba())
     if key in _ICON_CACHE:
         return _ICON_CACHE[key]
     # Wider than tall: the glyphs occupy the leading square, the remainder is a

@@ -368,7 +368,7 @@ _RETIRED = {"settings.py", "history.py", "meeting_detail.py", "meetings.py", "on
             "shiny_tabs.py", "mode_combo.py", "file_transcribe.py"}
 # Kept identifiers that are whole string literals: (file, literal).
 _KEPT = {("storage.py", "Transcribe"), ("autostart.py", "Transcribe"), ("autostart.py", "Transcribe.lnk"),
-         ("gpu_accel.py", "Transcribe")}
+         ("gpu_accel.py", "Transcribe"), ("splash_window.py", "Transcribe")}   # (the card reads the data folder's config)
 
 
 def _app_modules():

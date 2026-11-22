@@ -44,6 +44,12 @@ edited or sent on (Notion, Word), and "Them" can not be mapped to one person whe
 voices were found (an action owner "Them" is whoever on the call). Rewrite notes reads the
 labelled transcript afterwards.
 
+Speaker ids (Gusan 2.1.11, speaker_map.py): every label is an id ("you", "them", "sN"); the steps
+here make their blocks with the canonical labels (``Outcome.canonical``) and the names they know
+(``Outcome.auto_names``), and whoever writes transcript.txt puts the meeting's names in - a name the
+person set on the People card is never overwritten, and the background pass finds its block by the
+ids even after "You" or "Them" were renamed while it waited.
+
 Nothing here raises, and nothing is silent: every way this can end without
 labels comes back as an Outcome with a ``reason`` code and a plain ``notice``
 sentence for the meeting's notices, and logs one line with the reason (INFO for the
@@ -58,6 +64,7 @@ import diarization
 import meeting_store
 import rich_text
 import speaker_labels
+import speaker_map
 import voice_prints
 
 logger = logging.getLogger("transcribe")
@@ -152,6 +159,11 @@ class Outcome:
         self.call_seconds = 0.0  # how long the call spoke (the "Them" segments added up)
         self.units = 0           # voice prints the call's speech was cut into (name_the_call)
         self.shares = []         # each voice's share of the call's speech, biggest first (for the log)
+        # Speaker ids (speaker_map.py, 2.1.11): ``canonical`` is ``texts`` with the canonical labels only ("You",
+        # "Them", "Speaker N" - every voice its number), ``auto_names`` {id: name} the names this step put in (the
+        # one-name rule's); each segment of ``parts`` carries its id as "sid".
+        self.canonical = []
+        self.auto_names = {}
 
     @property
     def text(self):
@@ -299,22 +311,36 @@ def _render(d, labeled_parts, names, out, call_name=""):
     ``call_name``: the one other person the meeting has, read off the call's screen (meeting_session._call_name).
     When the call's sound held exactly ONE voice besides "You" (a mic + system sound meeting, or the call's sound
     alone), that voice is called by it instead of "Speaker 1". With two or more voices nobody is named: which is
-    which would be a guess."""
-    base = speaker_labels.speaker_names(names) if out.mode in ("sources", "call") else dict(names or {})
+    which would be a guess.
+
+    Speaker ids (2.1.11): every voice is numbered first ("Speaker N" = id "sN", speaker_map.py) - ``out.canonical``
+    - and the names this step knows (``names``, the one other person's) are ``out.auto_names`` {id: name}; ``texts``
+    are the canonical ones with those names put in. Each labelled segment carries its id ("sid")."""
+    base = speaker_labels.speaker_names() if out.mode in ("sources", "call") else {}
     flat = [seg for ls in labeled_parts for seg in ls]
-    label_map = d.speaker_label_map(flat, names=base)
+    label_map = d.speaker_label_map(flat, names=base)          # every voice told apart: "Speaker N", in spoken order
     found = len(label_map)
+    canon = dict(label_map)
+    canon.update(base)
+    for seg in flat:
+        seg["sid"] = speaker_map.id_of_canonical(canon.get(seg.get("speaker"), "Speaker ?")) or speaker_map.UNKNOWN
+    auto = {}
+    for spk, name in (names or {}).items():                  # (a later step's names: {diarization id: name})
+        sid, name = speaker_map.id_of_canonical(canon.get(spk, "")), speaker_map.clean_name(name)
+        if sid and name:
+            auto[sid] = name
     lone = _lone_name(call_name) if (found == 1 and out.mode in ("sources", "call")) else ""
     if lone:
-        base[next(iter(label_map))] = lone          # (the pass found one person on the call: its name)
-        label_map = d.speaker_label_map(flat, names=base)
-    all_names = dict(label_map)
-    all_names.update(base)
+        auto[speaker_map.id_of_canonical(next(iter(label_map.values())))] = lone   # (one person on the call: its name)
     out.parts = labeled_parts
-    out.texts = [d.build_speaker_transcript(ls, names=all_names).strip() for ls in labeled_parts]
+    out.canonical = [d.build_speaker_transcript(ls, names=canon).strip() for ls in labeled_parts]
+    out.auto_names = auto
+    labels = {sid: name for sid, name in auto.items()}
+    out.texts = [speaker_map.relabel_canonical(t, labels) for t in out.canonical]
     out.speakers = found
     if not any(out.texts):
         out.texts = []
+        out.canonical = []
         return False
     return True
 
@@ -933,11 +959,27 @@ def _record_notice(folder, notice, concluded, found=0):
     meeting_store.update_meta(folder, **fields)
 
 
+def _entry_canon(entry):
+    """The block of a segments.json part with the canonical labels ("canon", 2.1.11; before that "text", which was
+    the You / Them block as written at Stop - canonical too while it is still to be done)."""
+    return str(entry.get("canon") or entry.get("text") or "")
+
+
 def _finish_pass(folder, data, used, out):
     """After name_the_call: replace the transcript (one atomic write), then
-    segments.json and the meeting's notices. Returns a PassResult."""
+    segments.json and the meeting's notices. Returns a PassResult.
+
+    Under speaker_map.LOCK (a rename on the People card waits): each part's block is found in transcript.txt by its
+    ids - the canonical block kept at Stop with the names the meeting has NOW ("Them" the person renamed is found
+    under that name) - and the new block gets the names speaker_map.decide gives (a name the person set is never
+    overwritten; a name given to "Them" goes to Speaker 1 when the call held exactly that one voice)."""
     if out.cancelled or not Path(folder).is_dir():       # (a deleted meeting is nothing to finish)
         return PassResult(PassResult.CANCELLED, R_CANCELLED)
+    with speaker_map.LOCK:
+        return _finish_pass_locked(folder, data, used, out)
+
+
+def _finish_pass_locked(folder, data, used, out):
     if not _saved_transcript(folder).strip():
         # The transcript went while the names were worked out (a delete that could not finish
         # because a file was held open): nothing to name, and nothing of the meeting's text may
@@ -947,19 +989,38 @@ def _finish_pass(folder, data, used, out):
         _record_notice(folder, out.notice, concluded=False)        # why, and how to try again
         return PassResult(PassResult.FAILED, out.reason, out.notice)
     changed = False
+    names = None
     if out.texts:
         # Read again just before writing: nothing else may have changed it meanwhile.
         now = _saved_transcript(folder)
-        for entry, block in zip(used, out.texts):
-            old, new = str(entry["text"]), (block or "").strip()
-            if new and new != old and now.count(old) == 1:
+        meta = meeting_store.load_meta(folder)
+        canon = list(out.canonical) if len(out.canonical) == len(out.texts) else list(out.texts)
+        names = speaker_map.decide(meta, speaker_map.ids_in(canon), out.auto_names,
+                                   one_voice=out.speakers == 1)
+        was = speaker_map.current_labels(meta)
+        labels = {sid: name for sid, (name, _by) in names.items()}
+        wrote = False
+        for k, (entry, block) in enumerate(zip(used, canon)):
+            block = (block or "").strip()
+            if not block or block == _entry_canon(entry).strip():
+                continue                                  # nobody told apart in this part: it stays as it is
+            old = speaker_map.relabel_canonical(_entry_canon(entry), was)
+            new = speaker_map.relabel_canonical(block, labels)
+            if now.count(old) != 1:
+                continue
+            if new != old:                                # (the same words when "Them", named, is that one voice)
                 now = now.replace(old, new, 1)
-                entry["text"] = new
-                changed = True
-        if changed and not _write_transcript_patiently(folder, now):
+                wrote = True
+            entry["text"], entry["canon"] = new, block
+            _keep_ids(entry, out.parts[k] if k < len(out.parts) else None)
+            changed = True
+        if wrote and not _write_transcript_patiently(folder, now):
             logger.warning("Speaker names: transcript.txt of %s could not be replaced; it stays "
                            "You / Them", Path(folder).name)
             return PassResult(PassResult.FAILED, R_ERROR)
+        if changed and names != speaker_map.stored(meta):
+            if meeting_store.edit_meta(folder, lambda _m: speaker_map._names_fields(names)) is None:
+                logger.warning("Speaker names: the names of %s could not be kept", Path(folder).name)
     if out.texts and out.speakers > 0 and not changed:
         # People were told apart but the transcript is no longer what the pass worked from (it was
         # rewritten while the minutes went by): nothing was replaced, so nothing is said to have
@@ -977,14 +1038,28 @@ def _finish_pass(folder, data, used, out):
                       out.reason, out.notice, out.speakers)
 
 
-def _pending_parts(data, current):
+def _keep_ids(entry, labelled):
+    """Each segment of a segments.json part gets the id of the voice the pass put it on ("spk"), when the pass's
+    labelled segments are the part's own, one for one."""
+    segs = [s for s in (entry.get("segments") or []) if isinstance(s, dict)]
+    if not labelled or len(segs) != len(labelled):
+        return
+    for seg, got in zip(segs, labelled):
+        sid = got.get("sid") if isinstance(got, dict) else None
+        if speaker_map.is_sid(sid):
+            seg["spk"] = sid
+
+
+def _pending_parts(data, current, labels=None):
     """The segments.json parts a pass still has to do: not done, with their segments, and whose block is
     still in the transcript exactly once (a rewrite or another run may have changed it since: never
-    replace what is not exactly this)."""
+    replace what is not exactly this). ``labels``: {id: label} of the names the meeting has (a "Them" the
+    person renamed is looked for under its name)."""
     entries = [e for e in ((data or {}).get("parts") or [])
                if isinstance(e, dict) and not e.get("done") and e.get("text")
                and isinstance(e.get("segments"), list) and e.get("kind") in ("sources", "call")]
-    return [e for e in entries if current.count(str(e["text"])) == 1]
+    return [e for e in entries
+            if current.count(speaker_map.relabel_canonical(_entry_canon(e), labels or {})) == 1]
 
 
 def refinable(folder):
@@ -996,7 +1071,8 @@ def refinable(folder):
         folder = Path(folder)
         if not folder.is_dir():
             return []
-        entries = _pending_parts(meeting_store.load_segments(folder), _saved_transcript(folder))
+        entries = _pending_parts(meeting_store.load_segments(folder), _saved_transcript(folder),
+                                 speaker_map.current_labels(meeting_store.load_meta(folder)))
         return [e for e in entries if _call_sound_path(folder, e) is not None]
     except Exception:
         logger.debug("refinable failed", exc_info=True)
@@ -1061,7 +1137,7 @@ def refine_meeting(folder, *, privacy=False, status=None, should_cancel=None, na
             return bool((ask() if ask is not None else False) or not folder.is_dir())
         data = meeting_store.load_segments(folder)
         current = _saved_transcript(folder)
-        entries = _pending_parts(data, current)
+        entries = _pending_parts(data, current, speaker_map.current_labels(meeting_store.load_meta(folder)))
         if not entries:
             return PassResult(PassResult.NOTHING)
         used, parts = [], []

@@ -10,7 +10,7 @@ The card never takes the keyboard (the person keeps typing where they were); it 
 Action, or after two minutes untouched.
 """
 from PySide6.QtCore import QPoint, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QGuiApplication
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout,
                                QWidget)
 
@@ -51,6 +51,13 @@ def sources_line(sources):
     return "Sources \u00b7 " + " \u00b7 ".join(links)
 
 
+def _shadow_colour():
+    """The card's shadow: the look's shade, deeper in the dark look (a dark card on a dark screen)."""
+    c = theme.qcolor("shade")
+    c.setAlpha(120 if theme.is_dark() else 46)
+    return c
+
+
 def heading(kind):
     """The card's one line: what happened, in plain words."""
     if kind == KIND_COPIED:
@@ -70,13 +77,13 @@ class AnswerCard(QWidget):
         outer.setContentsMargins(SHADOW, SHADOW - 6, SHADOW, SHADOW + 6)
         self.card = QFrame(self)
         self.card.setObjectName("answerCard")
-        self.card.setStyleSheet("QFrame#answerCard { background: %s; border: 1px solid %s; border-radius: 16px; }"
-                                % (theme.qss_color("white"), theme.qss_color("line")))
+        theme.sheet(self.card, "QFrame#answerCard { background: @popup; border: 1px solid @line; border-radius: 16px; }")
         shadow = QGraphicsDropShadowEffect(self.card)
         shadow.setBlurRadius(28)
         shadow.setOffset(0, 6)
-        shadow.setColor(QColor(15, 23, 42, 46))
+        shadow.setColor(_shadow_colour())
         self.card.setGraphicsEffect(shadow)
+        self._shadow = shadow
         outer.addWidget(self.card)
 
         lay = QVBoxLayout(self.card)
@@ -89,7 +96,7 @@ class AnswerCard(QWidget):
         head.addWidget(self.mark, 0, Qt.AlignVCenter)
         self.title = QLabel("", self.card)
         self.title.setFont(theme.font(13.5, 600))
-        self.title.setStyleSheet("color: %s; background: transparent;" % theme.qss_color("ink"))
+        theme.sheet(self.title, "color: @ink; background: transparent;")
         head.addWidget(self.title, 1, Qt.AlignVCenter)
         self.close_button = IconButton("x", "Close", size=28, icon_size=15, color="muted", parent=self.card)
         self.close_button.setFocusPolicy(Qt.NoFocus)
@@ -108,7 +115,7 @@ class AnswerCard(QWidget):
         self.body.setAccessibleName("Result")
         self.body.setFont(theme.font(13.5))
         self.body.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        self.body.setStyleSheet("QLabel { background: transparent; color: %s; padding: 0px; }" % theme.qss_color("text"))
+        theme.sheet(self.body, "QLabel { background: transparent; color: @text; padding: 0px; }")
         self.scroll = QScrollArea(self.card)
         self.scroll.setWidget(self.body)
         self.scroll.setWidgetResizable(True)
@@ -132,7 +139,7 @@ class AnswerCard(QWidget):
         self.sources.setFocusPolicy(Qt.NoFocus)
         self.sources.setFont(theme.font(12))
         self.sources.setAccessibleName("Web sources")
-        self.sources.setStyleSheet("QLabel { color: %s; background: transparent; }" % theme.qss_color("muted"))
+        theme.sheet(self.sources, "QLabel { color: @muted; background: transparent; }")
         self.sources.hide()
         lay.addWidget(self.sources)
 
@@ -148,6 +155,8 @@ class AnswerCard(QWidget):
 
         self._text = ""
         self._kind = KIND_ANSWER
+        self._sources = ()
+        theme.on_change(self, self._restyle)
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
         self._hide_timer.timeout.connect(self.hide)
@@ -164,22 +173,18 @@ class AnswerCard(QWidget):
         """Show ``text`` (Markdown, rendered); ``kind``: KIND_ANSWER or KIND_COPIED; ``near``: the pill, to sit above."""
         self._text = str(text or "")
         self._kind = kind if kind in (KIND_ANSWER, KIND_COPIED) else KIND_ANSWER
+        self._sources = tuple(sources or ())
         self.title.setText(heading(self._kind))
-        icon_name, color = ("check", "ok") if self._kind == KIND_COPIED else ("sparkle", "blue")
-        self.mark.setPixmap(icons.pixmap(icon_name, 18, theme.qss_color(color)))
+        icon_name, color = ("check", "ok") if self._kind == KIND_COPIED else ("sparkle", "icon-blue")
+        self.mark.setPixmap(icons.pixmap(icon_name, 18, color))
         self._copy_again()
-        # The same type as every AI answer in the app (Ask about this meeting): 13.5 px, 21 px lines, its colours.
-        html = rich_text.qt_html(rich_text.answer_text(self._text), {
-            "text": theme.qss_color("text"), "muted": theme.qss_color("muted"), "head": theme.qss_color("ink"),
-            "code_bg": theme.qss_color("bg2"), "item_gap": "3px"})
-        self.body.setText("<div style='line-height:21px'>%s</div>" % html)
+        self._render()
         text_h = self.body.heightForWidth(BODY_W)
         if text_h > MAX_TEXT_H:                                 # it scrolls: the bar takes some of the width
             text_h = MAX_TEXT_H
         self.scroll.setFixedHeight(max(20, text_h))
         self.scroll.verticalScrollBar().setValue(0)
-        links = sources_line(sources)
-        self.sources.setText(links)
+        links = self.sources.text()
         self.sources.setVisible(bool(links))
         self.setMinimumHeight(0)                                # forget the last text's height before measuring
         self.setMaximumHeight(16777215)
@@ -195,15 +200,30 @@ class AnswerCard(QWidget):
     def copy(self):
         QGuiApplication.clipboard().setText(self._text)
         self.copy_button.setText("Copied")
-        self.copy_button.setIcon(icons.icon("check", 15, theme.qss_color("ok")))
+        self.copy_button.setIcon(icons.icon("check", 15, "ok"))
         self.copy_button.setAccessibleName("Copied")
         self._copied_timer.start(COPIED_MS)
         self._hide_timer.start(HIDE_AFTER_MS)
 
     # ── inside ──
+    def _render(self):
+        """The text and its sources as rich text, in the active look's colours (again after a switch)."""
+        # The same type as every AI answer in the app (Ask about this meeting): 13.5 px, 21 px lines, its colours.
+        html = rich_text.qt_html(rich_text.answer_text(self._text), {
+            "text": theme.qss_color("text"), "muted": theme.qss_color("muted"), "head": theme.qss_color("ink"),
+            "code_bg": theme.qss_color("bg2"), "item_gap": "3px"})
+        self.body.setText("<div style='line-height:21px'>%s</div>" % html)
+        self.sources.setText(sources_line(self._sources))
+
+    def _restyle(self):
+        """The look changed: the shadow and the rich text (their colours are written into them)."""
+        self._shadow.setColor(_shadow_colour())
+        if self._text:
+            self._render()
+
     def _copy_again(self):
         self.copy_button.setText("Copy")
-        self.copy_button.setIcon(icons.icon("copy", 15, theme.qss_color("text2")))
+        self.copy_button.setIcon(icons.icon("copy", 15, "text2"))
         self.copy_button.setIconSize(QSize(15, 15))
         self.copy_button.setAccessibleName("Copy")
 

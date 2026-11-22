@@ -1,6 +1,7 @@
 """Page furniture: PageHeader, and the right-hand SettingsRail with SettingRows."""
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, QSize, Qt
+from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from ui import theme
@@ -9,12 +10,71 @@ from ui.components.badges import ProTag
 from ui.components.surfaces import label
 
 
+class ElidedTitle(QLabel):
+    """One line of plain text that shows its BEGINNING and ends in "…" when the room is shorter (the whole text
+    in the tooltip) - never cut at the start, and never wider than its room (a long meeting name from a
+    calendar invite pushed the page past the window). ``text()`` is the whole text; ``shown_text()`` what is
+    drawn. A text role (ui/theme.py ROLES) gives the font, the stylesheet the colour."""
+
+    def __init__(self, text="", role="title", parent=None):
+        super().__init__(parent)
+        self.setTextFormat(Qt.PlainText)            # before the first text: a calendar title is never markup
+        if role:
+            theme.set_role(self, role)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.setText(text)
+
+    def setText(self, text):                                    # noqa: N802 (Qt name)
+        text = str(text or "")
+        super().setText(text)
+        self.setAccessibleName(text)
+        self._sync_tip()
+
+    def minimumSizeHint(self):
+        return QSize(16, super().minimumSizeHint().height())
+
+    def is_elided(self):
+        text = self.text()
+        return bool(text) and self.fontMetrics().horizontalAdvance(text) > self.contentsRect().width()
+
+    def shown_text(self):
+        if not self.is_elided():
+            return self.text()
+        return self.fontMetrics().elidedText(self.text(), Qt.ElideRight, max(0, self.contentsRect().width()))
+
+    def _sync_tip(self):
+        tip = theme.plain_tip(self.text()) if self.is_elided() else ""
+        if tip != self.toolTip():
+            self.setToolTip(tip)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._sync_tip()
+
+    def changeEvent(self, e):
+        super().changeEvent(e)
+        if e.type() in (QEvent.FontChange, QEvent.StyleChange, QEvent.ContentsRectChange):
+            self._sync_tip()
+
+    def paintEvent(self, e):
+        if not self.is_elided():
+            super().paintEvent(e)
+            return
+        p = QPainter(self)
+        self.style().drawItemText(p, self.contentsRect(), int(self.alignment()), self.palette(), self.isEnabled(),
+                                  self.shown_text(), self.foregroundRole())
+        p.end()
+
+
 class PageHeader(QWidget):
     """Title row of every page (padding 28 32 20): optional eyebrow, the title
     (display face 28/34 bold) with an optional trailing widget, an optional
-    one-line sub, and actions on the right, bottom-aligned."""
+    one-line sub, and actions on the right, bottom-aligned. ``elide_title``: a
+    title from outside (a meeting's name) ends in "…" when it doesn't fit
+    (ElidedTitle) instead of widening the page."""
 
-    def __init__(self, title, sub=None, actions=(), eyebrow=None, title_trail=None, parent=None):
+    def __init__(self, title, sub=None, actions=(), eyebrow=None, title_trail=None, parent=None,
+                 elide_title=False):
         super().__init__(parent)
         self.setProperty("gusan", "pageHeader")
         root = QHBoxLayout(self)
@@ -31,7 +91,10 @@ class PageHeader(QWidget):
         trow = QHBoxLayout()
         trow.setContentsMargins(0, 0, 0, 0)
         trow.setSpacing(10)
-        self.title_label = label(title, "title", self)
+        if elide_title:
+            self.title_label = ElidedTitle(title, "title", self)
+        else:
+            self.title_label = label(title, "title", self)
         # Plain text: the live meeting's title and people come from a calendar
         # invite, and a QLabel would read markup in them (an <img> loads a file).
         self.title_label.setTextFormat(Qt.PlainText)
@@ -39,7 +102,7 @@ class PageHeader(QWidget):
         # CSS line-height 34px: the face's own line (~37 px at 28 px) would
         # push the header, and every page under it, 3 px lower than the mockup.
         self.title_label.setFixedHeight(34)
-        trow.addWidget(self.title_label, 0, Qt.AlignVCenter)
+        trow.addWidget(self.title_label, 0, Qt.AlignVCenter)     # (an elided one shrinks below its words' width)
         self.title_trail = title_trail
         if title_trail is not None:
             title_trail.setParent(self)

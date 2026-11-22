@@ -220,14 +220,14 @@ def test_the_row_in_every_picker(live_build, page_for, audio_build, hy_listed):
     assert att.model_combo.row_note(att.model_combo.findData(HY)) == NOTE
 
 
-def test_once_it_is_here_the_row_loses_the_size_and_the_icon(live_build, hy_listed):
+def test_once_it_is_here_the_row_loses_the_size_and_shows_the_check(live_build, hy_listed):
     hy_listed["ready"] = True
     page, app = live_build("pro")
     app.downloads = HyDownloads(hy="ready")
     page.speech.refresh()
     box = page.speech.combo
     i = box.findData(HY)
-    assert box.row_note(i) == NOTE_READY and box.choice_mark(i) == ""
+    assert box.row_note(i) == NOTE_READY and box.choice_mark(i) == "downloaded"
 
 
 def test_the_row_says_it_is_armenian_only_in_its_tooltip_and_credits_nvidia(live_build, hy_listed):

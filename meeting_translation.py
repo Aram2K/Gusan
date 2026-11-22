@@ -48,29 +48,41 @@ def language_name(code):
     return next((name for c, name in captions.LANGUAGES if c and c == code), str(code or ""))
 
 
-def rows(text):
+def rows(text, labels=None):
     """The saved transcript as the pages show it: [(label, body, marker)] - the speaker on the first paragraph of
     a turn, a long turn packed into readable paragraphs, ``marker`` True for a '- Resumed at 11:20 -' line. (The one
-    reading of transcript.txt: ui.pages.meeting_views.transcript_rows is this.)"""
+    reading of transcript.txt: ui.pages.meeting_views.transcript_rows is this.) ``labels``: the meeting's speaker
+    labels (speaker_map: any name is a label)."""
     out = []
     for line in (text or "").splitlines():
         if not line.strip():
             continue
-        for i, para in enumerate(rich_text.transcript_paragraphs(line)):
+        for i, para in enumerate(rich_text.transcript_paragraphs(line, labels=labels)):
             if rich_text.is_marker(para):
                 out.append(("", para, True))
             elif i == 0:
-                label, body = rich_text.split_speaker(para)
+                label, body = rich_text.split_speaker(para, labels)
                 out.append((label, body, False))
             else:
                 out.append(("", para, False))
     return out
 
 
-def paragraphs(text):
+def speaker_labels_of(folder, transcript):
+    """The speaker labels of a saved meeting's transcript (speaker_map), [] when it can't be read."""
+    try:
+        import meeting_store
+        import speaker_map
+        return list(speaker_map.from_text(transcript, meeting_store.load_meta(folder)).raw_labels)
+    except Exception:
+        logger.debug("speaker labels not read", exc_info=True)
+        return []
+
+
+def paragraphs(text, labels=None):
     """What of a saved transcript is translated: each paragraph's words, once, in order."""
     out, seen = [], set()
-    for _label, body, marker in rows(text):
+    for _label, body, marker in rows(text, labels):
         if marker or not body.strip() or body in seen:
             continue
         seen.add(body)
@@ -204,7 +216,7 @@ def translate_saved(folder, language, translate, transcript=None, workers=WORKER
                 transcript = f.read()
         except OSError:
             return 0
-    todo = paragraphs(transcript)[:MAX_PARAGRAPHS]
+    todo = paragraphs(transcript, speaker_labels_of(folder, transcript))[:MAX_PARAGRAPHS]
     old = load(folder)
     done = dict(old["lines"]) if old and old["language"] == language else {}
     done = {k: v for k, v in done.items() if k in set(todo)}
@@ -238,4 +250,4 @@ def translate_saved(folder, language, translate, transcript=None, workers=WORKER
 
 
 __all__ = ["CONTEXT", "FILE", "MAX_PARAGRAPHS", "Translator", "WORKERS", "language_name", "load", "paragraphs",
-           "rows", "save", "target", "translate_saved"]
+           "rows", "save", "speaker_labels_of", "target", "translate_saved"]

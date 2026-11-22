@@ -245,7 +245,7 @@ def test_home_builds_for_every_plan(home_page, tier):
     assert page.lang_chip.text() == "Detect language"
     assert page.model_chip.accessibleName() == "Balanced · Whisper Small"
     assert page.where_chip.text() == "On this computer"
-    assert page.tile_meeting.sub_text() == "AI notetaker"
+    assert page.tile_meeting.sub.text() == "Alt + M"                  # the meeting shortcut, like Dictate's
     assert page.tile_live.sub.text() == "Ctrl + Alt + A"            # its shortcut, like Smart Actions
     assert len(page.shown_rows()) == 6                     # the mockup's six
     assert not _names_missing(page)

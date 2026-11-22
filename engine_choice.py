@@ -336,7 +336,7 @@ def _whisper_rows(group=GROUP_THIS_COMPUTER):
     """The Whisper models, as rows: the real name (Whisper Small), LOCAL, and the plain word
     (Balanced) under it."""
     return [speech_row(mid, info.real, "local", group, note=info.plain, model=info.real, plain=info.plain,
-                       speed=info.speed, accuracy=info.accuracy)
+                       speed=hardware.speed_here(mid), accuracy=info.accuracy)       # (speed: this computer's)
             for mid, info in hardware.MODEL_INFO.items()]
 
 

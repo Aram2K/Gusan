@@ -150,6 +150,14 @@ def live_hotkey(app):
     return str(cfg_of(app).get("live_assist_hotkey", LIVE_HOTKEY_DEFAULT) or "").strip()
 
 
+MEETING_HOTKEY_DEFAULT = hotkeys.MEETING_DEFAULT             # main.DEFAULT["meeting_hotkey"]
+
+
+def meeting_hotkey(app):
+    """The meeting shortcut (starts recording a meeting); "" when none is set."""
+    return str(cfg_of(app).get("meeting_hotkey", MEETING_HOTKEY_DEFAULT) or "").strip()
+
+
 def go(widget, app, route, **opts):
     """Open ``route`` in the main window (or through app.show_main)."""
     win = widget.window() if widget is not None else None
@@ -248,8 +256,8 @@ def connect_signals(owner, specs):
 
 
 def colored(lbl, token):
-    """Text colour from a theme token (QSS on the label only)."""
-    lbl.setStyleSheet("color: %s; background: transparent;" % theme.qss_color(token))
+    """Text colour from a theme token (QSS on the label only; it follows the look)."""
+    theme.sheet(lbl, lambda: "color: %s; background: transparent;" % theme.qss_color(token))
     return lbl
 
 
@@ -659,8 +667,8 @@ class BigKeycap(QWidget):
         p.drawRoundedRect(r, self._radius, self._radius)
         inner = QRectF(1, 1, self.width() - 2, self.height() - 1 - self._bottom)
         g = QLinearGradient(inner.topLeft(), inner.bottomLeft())
-        g.setColorAt(0, theme.qcolor("white"))
-        g.setColorAt(1, theme.qcolor("bg"))
+        g.setColorAt(0, theme.qcolor("kbd-a"))
+        g.setColorAt(1, theme.qcolor("cap-b"))
         p.setBrush(g)
         p.drawRoundedRect(inner, self._radius - 1, self._radius - 1)
         p.setFont(self._font)
@@ -690,8 +698,9 @@ class HeroKeys(QWidget):
         eff = QGraphicsDropShadowEffect(self)
         eff.setBlurRadius(30)
         eff.setOffset(0, 12)
-        eff.setColor(theme.qcolor("rgba(15,23,42,0.12)"))
+        eff.setColor(theme.qcolor("cap-shadow"))
         self.setGraphicsEffect(eff)
+        theme.on_change(self, lambda: eff.setColor(theme.qcolor("cap-shadow")))
         self.set_hotkey(hotkey)
 
     @staticmethod
@@ -1085,9 +1094,9 @@ class NextChip(QAbstractButton):
         r = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
         focus = self.hasFocus() and self.property("focusVisible")
         p.setPen(QPen(theme.qcolor("blue-l" if focus else "glass-line"), 2 if focus else 1))
-        p.setBrush(theme.qcolor("rgba(255,255,255,0.6)" if not self.underMouse() else "rgba(255,255,255,0.9)"))
+        p.setBrush(theme.qcolor("frost-60" if not self.underMouse() else "frost-90"))
         p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
-        p.drawPixmap(12, (self.height() - 16) // 2, icons.pixmap("bell", 16, "blue"))
+        p.drawPixmap(12, (self.height() - 16) // 2, icons.pixmap("bell", 16, "icon-blue"))
         w_next, title, w_title, tail, w_tail = self._parts()
         x = 12 + 16 + 8
         for text, font, token, w in ((self.prefix(), self._f_muted, "muted", w_next),
@@ -1160,8 +1169,8 @@ class _Hairline(QWidget):
         p.end()
 
 
-KIND_ICON = {"dictation": ("mic", "blue"), "smart": ("wand", "pro"), "meeting": ("people", "meet"),
-             "audio": ("wave", "blue")}
+KIND_ICON = {"dictation": ("mic", "icon-blue"), "smart": ("wand", "icon-pro"), "meeting": ("people", "meet"),
+             "audio": ("wave", "icon-blue")}
 
 
 class RecentRow(_Hairline):
@@ -1175,7 +1184,7 @@ class RecentRow(_Hairline):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(8, 0 if first else 1, 8, 0)
         lay.setSpacing(14)
-        name, tok = KIND_ICON.get(item["kind"], ("text", "blue"))
+        name, tok = KIND_ICON.get(item["kind"], ("text", "icon-blue"))
         ic = QLabel(self)
         ic.setPixmap(icons.pixmap(name, 18, tok))
         ic.setFixedWidth(18)
@@ -1290,9 +1299,11 @@ class HomePage(QWidget):
 
         self._connect_services()
         self._update_hero()
+        self._update_meeting_tile()
         self._update_live_tile()
         self._update_next()
         self._render_list()
+        theme.on_change(self, self._update_hero)          # the model chip's muted words are HTML
         QTimer.singleShot(0, self._first_load)
 
     # ── building ──
@@ -1308,14 +1319,13 @@ class HomePage(QWidget):
         note = QWidget(self)
         note.setObjectName("renameNote")
         note.setAttribute(Qt.WA_StyledBackground, True)
-        note.setStyleSheet("#renameNote { background: %s; border: 1px solid %s; border-radius: 10px; }"
-                           % (theme.qss_color("blue-sub"), theme.qss_color("blue-line")))
+        theme.sheet(note, "#renameNote { background: @blue-sub; border: 1px solid @blue-line; border-radius: 10px; }")
         note.setAccessibleName(RENAME_NOTE)
         h = QHBoxLayout(note)
         h.setContentsMargins(12, 6, 6, 6)
         h.setSpacing(10)
         ic = QLabel(note)
-        ic.setPixmap(icons.icon("info", 16, "blue-tx").pixmap(16, 16))
+        ic.setPixmap(icons.pixmap("info", 16, "blue-tx"))
         h.addWidget(ic, 0, Qt.AlignVCenter)
         self.rename_note_text = text_label(RENAME_NOTE, 13, 400, "text2", parent=note)
         self.rename_note_text.setWordWrap(True)
@@ -1377,13 +1387,16 @@ class HomePage(QWidget):
             return lb
 
         dict_keys = KeysOrText(cfg_of(self.app).get("hotkey", hotkeys.DICTATION_DEFAULT))
-        self.tile_dictate = Tile(icon("mic", "blue"), "Dictate", dict_keys)
+        self.tile_dictate = Tile(icon("mic", "icon-blue"), "Dictate", dict_keys)
         # D7: the Smart Actions shortcut's keycaps, like the Dictate tile.
         smart_keys = KeysOrText(smart_hotkey(self.app), empty_text="Set shortcut")
-        self.tile_smart = Tile(icon("wand", "pro"), "Smart Actions", smart_keys)
+        self.tile_smart = Tile(icon("wand", "icon-pro"), "Smart Actions", smart_keys)
         # One colour per feature: Dictate blue, Smart Actions violet, meetings
         # orange, Live Assistant green.
-        self.tile_meeting = Tile(icon("people", "meet"), "Record a meeting", "AI notetaker")
+        # The meeting shortcut's keycaps, like Dictate's ("AI notetaker" moved to the tooltip).
+        meeting_keys = KeysOrText(meeting_hotkey(self.app), empty_text="Set shortcut")
+        self.tile_meeting = Tile(icon("people", "meet"), "Record a meeting", meeting_keys)
+        self.tile_meeting.setToolTip("Record a meeting · AI notetaker")
         live_keys = KeysOrText(live_hotkey(self.app), empty_text="Set shortcut")
         self.tile_live = Tile(icon("incognito", "live"), "Live Assistant", live_keys)
         headphones = QLabel("\U0001F3A7")
@@ -1575,6 +1588,14 @@ class HomePage(QWidget):
         if ic is not None:
             ic.setPixmap(icons.pixmap(name, 13, "text2", sw=2))
 
+    def _update_meeting_tile(self):
+        """The Record a meeting tile's keycaps follow meeting_hotkey."""
+        try:
+            self.tile_meeting.sub.set_hotkey(meeting_hotkey(self.app))
+            self.tile_meeting.set_sub_text(self.tile_meeting.sub.text())
+        except Exception:
+            logger.debug("Record a meeting tile update failed", exc_info=True)
+
     def _update_live_tile(self):
         """The Live Assistant tile's keycaps follow live_assist_hotkey."""
         try:
@@ -1746,6 +1767,7 @@ class HomePage(QWidget):
     def on_open(self, **opts):
         self._connect_services()                # a service created after the page (once each)
         self._update_hero()
+        self._update_meeting_tile()
         self._update_live_tile()
         self._update_next()
         if self.upcoming is not None:
@@ -1762,6 +1784,8 @@ class HomePage(QWidget):
             self._update_smart_tile()
         if key == "live_assist_hotkey":
             self._update_live_tile()
+        if key == "meeting_hotkey":
+            self._update_meeting_tile()
         if key in ("save_history", "privacy_mode"):
             self.refresh()
         if key.startswith("calendar"):

@@ -24,7 +24,7 @@ Integration notes for Wave 4 (Gusan 2.0; this module is the card, not the page)
       set_private(on)        live_assist_private   (Hide from screen share)
       set_auto_answer(on)    live_assist_auto_answer
       set_screen_auto(on)    live_assist_screen_auto (Let it see my screen)
-      set_theme(name)        live_assist_theme ("light" | "dark")
+      set_theme(name)        live_assist_theme ("system" = the app's own look | "light" | "dark")
       set_context(text)      live_assist_context (Context: who you are, what calls are about, or a rule)
       set_opacity(value)     live_assist_opacity (0.55-1.0)
       reset_position()       live_assist_pos -> None, back to the default spot
@@ -178,6 +178,9 @@ EXPANDED_W, EXPANDED_H = CARD_W + 2 * SHADOW, 560 + 2 * SHADOW
 COMPACT_W, COMPACT_H = CARD_W + 2 * SHADOW, 52 + 2 * SHADOW
 SAMPLE_MS_REST, SAMPLE_MS_DRAG = 150, 40
 
+# The card's own two looks: every colour it paints, per look. live_assist_theme "system" (the default)
+# wears the one that matches the app's (ui/theme.py scheme(): light or dark, Settings > Appearance) and
+# turns with it; "light" / "dark" pin one (the card's own light/dark button pins).
 _THEMES = {
     "light": {
         # Cool slate rather than milky white: darker glass, and what's behind
@@ -189,6 +192,20 @@ _THEMES = {
         "text": "#0f172a", "muted": "#475569", "faint": "#64748b",
         "card": "rgba(255,255,255,0.72)", "card_border": "rgba(15,23,42,0.10)",
         "accent": "#2563eb", "spec": 95,
+        # A fill that carries white words (a checked button, Done, the scope tag): strong in both looks.
+        "fill": "#2563eb", "on_fill": "#ffffff",
+        # The round glass buttons (theme / collapse / close ...).
+        "btn": QColor(255, 255, 255, 58), "btn_hover": QColor(255, 255, 255, 92),
+        "btn_border": QColor(15, 23, 42, 34),
+        "knob": "#ffffff", "stop": "#ef4444",
+        "veil_pill": QColor(255, 255, 255, 235),      # "Drop files to add"
+        # The glass: its shadow, the light on it (white, at a strength per look).
+        "shadow": QColor(15, 23, 42, 120),
+        "light": QColor(255, 255, 255), "sheen": 60, "rim": (235, 60, 120), "glow": 34,
+        "pro_line": "rgba(255,255,255,0.7)",          # the PRO pill's rim
+        "clip_hover": "rgba(37,99,235,0.14)",
+        "code_bg": "rgba(15,23,42,0.08)",             # a code block in an answer
+        "tip_bg": "#0f172a", "tip_fg": "#f8fafc", "tip_line": "rgba(255,255,255,0.18)",
     },
     "dark": {
         "tint_liquid": QColor(17, 24, 39, 160),
@@ -198,8 +215,49 @@ _THEMES = {
         "text": "#f8fafc", "muted": "#cbd5e1", "faint": "#94a3b8",
         "card": "rgba(17,24,39,0.62)", "card_border": "rgba(255,255,255,0.14)",
         "accent": "#60a5fa", "spec": 45,
+        # White on the light accent (#60a5fa) read 2.5:1: the fills under white words stay strong.
+        "fill": "#2563eb", "on_fill": "#ffffff",
+        "btn": QColor(255, 255, 255, 26), "btn_hover": QColor(255, 255, 255, 46),
+        "btn_border": QColor(255, 255, 255, 50),
+        "knob": "#ffffff", "stop": "#ef4444",
+        "veil_pill": QColor(15, 20, 33, 235),
+        "shadow": QColor(15, 23, 42, 170),
+        "light": QColor(255, 255, 255), "sheen": 26, "rim": (150, 35, 70), "glow": 34,
+        "pro_line": "rgba(255,255,255,0.45)",
+        "clip_hover": "rgba(96,165,250,0.18)",
+        "code_bg": "rgba(255,255,255,0.10)",
+        "tip_bg": "#0f172a", "tip_fg": "#f8fafc", "tip_line": "rgba(255,255,255,0.18)",
     },
 }
+LOOKS = ("system", "light", "dark")
+
+# The card's brand fills, the same in both looks: the send button, Start and the PRO pill.
+_BRAND = {
+    "send": ("#3b82f6", "#8b5cf6"), "send_h": ("#2563eb", "#7c3aed"), "send_off": "#94a3b8",
+    "start": ("#3b82f6", "#6366f1"), "start_h": ("#2563eb", "#4f46e5"), "pro": ("#a855f7", "#7e22ce"),
+    "on": "#ffffff",
+}
+
+# Drawn OVER a screenshot (the attached image, the crop view): the same on either look - what is under
+# them is a picture of the screen, not the card.
+_OVER_IMAGE = {
+    "edge": QColor(15, 23, 42, 60), "badge": QColor(15, 23, 42, 200), "badge_x": QColor(255, 255, 255),
+    "dim": QColor(8, 12, 20, 130), "selection": QColor(96, 165, 250), "frame": QColor(15, 23, 42, 70),
+}
+
+# A picture sent as JPEG has no transparency: what was transparent becomes this.
+_JPEG_MATTE = QColor(255, 255, 255)
+
+
+def resolve_look(name):
+    """The card look a live_assist_theme value shows now: "light" or "dark" ("system": the app's)."""
+    if name in ("light", "dark"):
+        return name
+    try:
+        from ui import theme
+        return theme.scheme()
+    except Exception:
+        return "light"
 
 # Settings that change who transcribes the call (the line and the hint under the live transcript).
 HEAR_KEYS = frozenset({"live_assist_speech_model", "live_assist_language", "language", "mix_languages",
@@ -367,12 +425,13 @@ def _looks_like_capture_hole(small_img, black_max=12, band_frac=0.14):
         return False
 
 
-_CODE_CSS = ("pre, code { font-family: 'Cascadia Mono', Consolas, 'Courier New', monospace; "
-             "font-size: 12px; } pre { background: rgba(15,23,42,0.08); border-radius: 6px; "
-             "padding: 6px; }")
+def _code_css(look="light"):
+    return ("pre, code { font-family: 'Cascadia Mono', Consolas, 'Courier New', monospace; "
+            "font-size: 12px; } pre { background: %s; border-radius: 6px; "
+            "padding: 6px; }" % _THEMES.get(look, _THEMES["light"])["code_bg"])
 
 
-def render_markdown(text_edit, md):
+def render_markdown(text_edit, md, look="light"):
     """Show Markdown in a QTextEdit with monospace, boxed code blocks. Qt's
     setMarkdown has no styling hook, so the document is converted to HTML
     first and re-set with a default stylesheet for pre/code.
@@ -383,7 +442,7 @@ def render_markdown(text_edit, md):
     answer box refuses every resource anyway (_AnswerEdit)."""
     try:
         doc = text_edit.document()
-        doc.setDefaultStyleSheet(_CODE_CSS)
+        doc.setDefaultStyleSheet(_code_css(look))
         doc.setMarkdown(safe_answer_markdown(md))
         html = doc.toHtml()
         text_edit.setHtml(html)
@@ -403,7 +462,7 @@ def jpeg_b64(img, max_w=1600, quality=80):
     if isinstance(img, QImage) and img.hasAlphaChannel():
         # JPEG has no alpha: transparent areas would turn black.
         flat = QImage(img.size(), QImage.Format_RGB32)
-        flat.fill(QColor("#ffffff"))
+        flat.fill(_JPEG_MATTE)
         p = QPainter(flat)
         p.drawImage(0, 0, img)
         p.end()
@@ -437,7 +496,7 @@ def screen_to_capture(overlay_screen):
         return overlay_screen or QApplication.primaryScreen()
 
 
-def _send_icon(size=18, color="#ffffff"):
+def _send_icon(size=18, color=None):
     """A chat-style send icon (paper plane pointing right), painted as a path
     so it's crisp at any DPI."""
     scale = 3                                   # draw big, let Qt scale down smoothly
@@ -453,13 +512,13 @@ def _send_icon(size=18, color="#ffffff"):
     path.lineTo(QPointF(15.0, 12.0))
     path.lineTo(QPointF(3.4, 13.8))
     path.closeSubpath()
-    p.fillPath(path, QColor(color))
+    p.fillPath(path, QColor(color or _BRAND["on"]))
     p.end()
     pm.setDevicePixelRatio(scale)
     return QIcon(pm)
 
 
-def _lock_pixmap(size=12, color="#2563eb"):
+def _lock_pixmap(size=12, color=None):
     """A small padlock - the session context is locked in - painted as a path
     so it's crisp at any DPI."""
     scale = 3
@@ -468,6 +527,7 @@ def _lock_pixmap(size=12, color="#2563eb"):
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing, True)
     p.scale(size * scale / 24.0, size * scale / 24.0)
+    color = color or _THEMES["light"]["accent"]
     pen = QPen(QColor(color), 2.6)
     pen.setCapStyle(Qt.RoundCap)
     p.setPen(pen)
@@ -539,19 +599,18 @@ class _IconButton(QPushButton):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         r = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
-        light = self._theme is _THEMES["light"]
         on = self.isCheckable() and self.isChecked()
+        t = self._theme
         if on:
-            fill = QColor(self._theme["accent"])
+            fill = QColor(t["fill"])
             border = fill
         else:
-            fill = QColor(255, 255, 255, (92 if self._hover else 58) if light
-                          else (46 if self._hover else 26))
-            border = QColor(15, 23, 42, 34) if light else QColor(255, 255, 255, 50)
+            fill = QColor(t["btn_hover"] if self._hover else t["btn"])
+            border = QColor(t["btn_border"])
         p.setPen(QPen(border, 1))
         p.setBrush(fill)
         p.drawEllipse(r)
-        ink = QColor("#ffffff") if on else QColor(self._theme["text"])
+        ink = QColor(t["on_fill"]) if on else QColor(t["text"])
         pen = QPen(ink, 1.6)
         pen.setCapStyle(Qt.RoundCap)
         pen.setJoinStyle(Qt.RoundJoin)
@@ -588,7 +647,7 @@ class _IconButton(QPushButton):
         elif self._kind == "stop":
             # Red rounded square - the universal "stop recording".
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor("#ef4444"))
+            p.setBrush(QColor(t["stop"]))
             p.drawRoundedRect(QRectF(cx - 4.5, cy - 4.5, 9, 9), 2.2, 2.2)
 
 
@@ -699,15 +758,15 @@ class _ImageChip(QPushButton):
         if not self._thumb.isNull():
             p.drawPixmap(r.toRect(), self._thumb)
         p.setClipping(False)
-        p.setPen(QPen(QColor(15, 23, 42, 60), 1))
+        p.setPen(QPen(_OVER_IMAGE["edge"], 1))
         p.setBrush(Qt.NoBrush)
         p.drawRoundedRect(r, 8, 8)
         # The remove badge, top right.
         badge = QRectF(r.right() - 13, r.top() + 1, 12, 12)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(15, 23, 42, 200))
+        p.setBrush(_OVER_IMAGE["badge"])
         p.drawEllipse(badge)
-        pen = QPen(QColor("#ffffff"), 1.4)
+        pen = QPen(_OVER_IMAGE["badge_x"], 1.4)
         pen.setCapStyle(Qt.RoundCap)
         p.setPen(pen)
         c = badge.center()
@@ -851,13 +910,13 @@ class _CropView(QWidget):
             outside = QPainterPath()
             outside.addRect(t)
             outside.addRect(sel)                          # odd-even fill: a hole
-            p.fillPath(outside, QColor(8, 12, 20, 130))
+            p.fillPath(outside, _OVER_IMAGE["dim"])
             p.setClipping(False)
-            p.setPen(QPen(QColor("#60a5fa"), 2))
+            p.setPen(QPen(_OVER_IMAGE["selection"], 2))
             p.setBrush(Qt.NoBrush)
             p.drawRect(sel)
         p.setClipping(False)
-        p.setPen(QPen(QColor(15, 23, 42, 70), 1))
+        p.setPen(QPen(_OVER_IMAGE["frame"], 1))
         p.setBrush(Qt.NoBrush)
         p.drawRoundedRect(t, 8, 8)
 
@@ -1085,7 +1144,7 @@ class _Switch(QPushButton):
         p.drawRoundedRect(track, self.TRACK_H / 2.0, self.TRACK_H / 2.0)
         d = self.TRACK_H - 4
         x = track.right() - d - 2 if on else track.left() + 2
-        p.setBrush(QColor("#ffffff"))
+        p.setBrush(QColor(t["knob"]))
         p.drawEllipse(QRectF(x, track.top() + 2, d, d))
         if self.hasFocus():
             ring = QPen(QColor(t["accent"]), 1.4)
@@ -1119,10 +1178,12 @@ class _DropVeil(QWidget):
     def __init__(self, parent):
         super().__init__(parent)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self._accent = QColor(_THEMES["light"]["accent"])
+        self._t = _THEMES["light"]
+        self._accent = QColor(self._t["accent"])
         self.hide()
 
     def set_theme(self, t):
+        self._t = t
         self._accent = QColor(t["accent"])
         self.update()
 
@@ -1145,7 +1206,7 @@ class _DropVeil(QWidget):
         p.setFont(f)
         pill = QRectF(0, 0, p.fontMetrics().horizontalAdvance(DOC_DROP) + 40, 38)
         pill.moveCenter(r.center())
-        p.setBrush(QColor(255, 255, 255, 235))
+        p.setBrush(self._t["veil_pill"])
         p.setPen(QPen(self._accent, 1))
         p.drawRoundedRect(pill, 19, 19)
         p.setPen(self._accent)
@@ -1214,9 +1275,10 @@ class LiveAssistOverlay(QWidget):
         self.app = main_app
         cfg = self.app.cfg if self.app else {}
         self._hide = None                  # the chip's HideStatus (hide_state())
-        self._theme_name = cfg.get("live_assist_theme", "light")
-        if self._theme_name not in _THEMES:
-            self._theme_name = "light"
+        # The preference ("system" | "light" | "dark"); _look() is what it shows now.
+        self._theme_name = cfg.get("live_assist_theme", "system")
+        if self._theme_name not in LOOKS:
+            self._theme_name = "system"
         self._private = bool(cfg.get("live_assist_private", True))
         # Auto = answer the moment someone asks a question (on by default: an
         # instant companion is the point of the feature).
@@ -1334,7 +1396,13 @@ class LiveAssistOverlay(QWidget):
         if QApplication.instance():
             QApplication.instance().installEventFilter(self._popup_privacy)
         self._richify_tooltips()
+        self._shown_md = None              # the answer on show as Markdown (re-drawn when the look turns)
         self._apply_theme()
+        try:
+            from ui import theme as app_theme
+            app_theme.manager().changed.connect(self._on_app_look)     # "system": turn with the app
+        except Exception:
+            logger.debug("Live Assistant: no app look to follow", exc_info=True)
         self._on_rules_changed()           # the chip, the offer and the answer area as the saved context says
 
         pos = cfg.get("live_assist_pos")
@@ -1805,16 +1873,35 @@ class LiveAssistOverlay(QWidget):
                 w.setToolTip(f"<p style='white-space:normal'>{html_mod.escape(tip)}</p>")
 
     # ── theme / glass ──
+    def _look(self):
+        """The look the card shows now: its pin, or the app's ("system")."""
+        return resolve_look(self._theme_name)
+
+    def _on_app_look(self, _name=None):
+        """The app turned light or dark: a card that follows it turns too (no restart)."""
+        if self._theme_name not in ("light", "dark"):
+            self._apply_theme()
+            self._apply_glass()
+
+    def _show_answer_md(self, md):
+        """The answer box shows ``md`` (Markdown) in the card's look; kept to re-draw it when the look turns."""
+        self._shown_md = md
+        render_markdown(self.txt_suggestion, md, self._look())
+        self._shown_plain = self.txt_suggestion.toPlainText()
+
     def _apply_theme(self):
-        t = _THEMES[self._theme_name]
+        look = self._look()
+        t = _THEMES[look]
+        b = _BRAND
         accent = t["accent"]
-        ok_bg, ok_fg, ok_line = chip_colors("ok", self._theme_name)
+        ok_bg, ok_fg, ok_line = chip_colors("ok", look)
         # The PRO pill (ProTag's purple glass): a lighter rim on dark glass.
-        pro_line = "rgba(255,255,255,0.45)" if self._theme_name == "dark" else "rgba(255,255,255,0.7)"
+        pro_line = t["pro_line"]
+        fill, on_fill = t["fill"], t["on_fill"]
         self.setStyleSheet(f"""
             QLabel {{ color: {t['text']}; background: transparent; font-size: 12px; }}
             QToolTip {{
-                background-color: #0f172a; color: #f8fafc; border: 1px solid rgba(255,255,255,0.18);
+                background-color: {t['tip_bg']}; color: {t['tip_fg']}; border: 1px solid {t['tip_line']};
                 border-radius: 6px; padding: 6px 9px; font-size: 12px;
             }}
             QLabel#laNow {{ font-size: 13px; color: {t['text']}; }}
@@ -1831,27 +1918,27 @@ class LiveAssistOverlay(QWidget):
                 border-radius: 11px; color: {t['text']}; padding: 2px 11px; font-size: 12px;
             }}
             QPushButton:hover {{ border-color: {accent}; }}
-            QPushButton:checked {{ background: {accent}; color: white; border-color: {accent}; }}
+            QPushButton:checked {{ background: {fill}; color: {on_fill}; border-color: {fill}; }}
             QPushButton#laSuggest {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #3b82f6, stop:1 #8b5cf6);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {b['send'][0]}, stop:1 {b['send'][1]});
                 border: none; padding: 0; border-radius: 17px;
             }}
             QPushButton#laSuggest:hover {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #2563eb, stop:1 #7c3aed);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {b['send_h'][0]}, stop:1 {b['send_h'][1]});
             }}
-            QPushButton#laSuggest:disabled {{ background: #94a3b8; }}
+            QPushButton#laSuggest:disabled {{ background: {b['send_off']}; }}
             QPushButton#laStart {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3b82f6, stop:1 #6366f1);
-                color: white; font-weight: 700; border: none; border-radius: 11px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {b['start'][0]}, stop:1 {b['start'][1]});
+                color: {b['on']}; font-weight: 700; border: none; border-radius: 11px;
                 padding: 3px 16px; font-size: 12px;
             }}
             QPushButton#laStart:hover {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2563eb, stop:1 #4f46e5);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {b['start_h'][0]}, stop:1 {b['start_h'][1]});
             }}
             QLabel#laPro {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #a855f7, stop:1 #7e22ce);
-                color: #ffffff; border: 1px solid {pro_line}; border-radius: 9px;
+                    stop:0 {b['pro'][0]}, stop:1 {b['pro'][1]});
+                color: {b['on']}; border: 1px solid {pro_line}; border-radius: 9px;
                 padding: 0px 8px; font-size: 10px; font-weight: 700;
             }}
             QLabel#laTimer {{
@@ -1877,7 +1964,7 @@ class LiveAssistOverlay(QWidget):
                 border-radius: 10px; color: {t['text']}; font-size: 12.5px; padding: 4px;
             }}
             QPushButton#laCtxDone {{
-                background: {accent}; color: white; border-color: {accent}; font-weight: 600;
+                background: {fill}; color: {on_fill}; border-color: {fill}; font-weight: 600;
             }}
             QPushButton#laDocs {{
                 background: {t['card']}; border: 1px solid {t['card_border']};
@@ -1891,14 +1978,14 @@ class LiveAssistOverlay(QWidget):
                 border: 1px solid {t['card_border']}; border-radius: 8px; padding: 0px 7px;
             }}
             QLabel#laCtxScope[on="true"] {{
-                color: white; background: {accent}; border-color: {accent};
+                color: {on_fill}; background: {fill}; border-color: {fill};
             }}
             QFrame#laRuleOffer {{
                 background: {t['card']}; border: 1px solid {accent}; border-radius: 9px;
             }}
             QLabel#laRuleOfferText {{ color: {t['text']}; font-size: 11.5px; }}
             QPushButton#laClip {{ background: transparent; border: none; padding: 0; }}
-            QPushButton#laClip:hover {{ background: rgba(37,99,235,0.14); border-radius: 8px; }}
+            QPushButton#laClip:hover {{ background: {t['clip_hover']}; border-radius: 8px; }}
         """)
         self.drop_veil.set_theme(t)
         self.btn_rules.set_theme(t)
@@ -1922,10 +2009,15 @@ class LiveAssistOverlay(QWidget):
         self._refresh_private_chip()
         self._refresh_live_controls()
         self._refresh_docs_chip()        # its little icon wears the theme's ink
+        if self._shown_md is not None and self.txt_suggestion.toPlainText() == getattr(self, "_shown_plain", None):
+            self._show_answer_md(self._shown_md)      # its code blocks wear the look
+        if self.rules_active():
+            self._render_feed()
         self.update()
 
     def _toggle_theme(self):
-        self.set_theme("dark" if self._theme_name == "light" else "light")
+        """The card's light/dark button: pins the other look than the one on show."""
+        self.set_theme("light" if self._look() == "dark" else "dark")
 
     # ── public settings (the Live Assistant page, Settings, the card itself) ──
     def _store(self, key, value):
@@ -1953,8 +2045,9 @@ class LiveAssistOverlay(QWidget):
         return True
 
     def set_theme(self, name):
-        """Card look: "light" or "dark" (anything else is light)."""
-        name = name if name in _THEMES else "light"
+        """Card look: "system" (the app's own, light or dark), "light" or "dark" (anything else
+        is "system")."""
+        name = name if name in LOOKS else "system"
         if name != self._theme_name:
             self._theme_name = name
             self._apply_theme()
@@ -2023,7 +2116,7 @@ class LiveAssistOverlay(QWidget):
         cfg = self.app.cfg
         try:
             if key == "live_assist_theme":
-                self.set_theme(cfg.get(key, "light"))
+                self.set_theme(cfg.get(key, "system"))
             elif key == "live_assist_private":
                 if bool(cfg.get(key, True)) != self._private:
                     self.set_private(cfg.get(key, True))
@@ -2155,7 +2248,7 @@ class LiveAssistOverlay(QWidget):
             partial = mac and not supported and bool(excluded or self._mac_partial)
         st = hide_status(self._private, excluded=excluded, partial=partial,
                          supported=supported, remote=remote, mac=mac)
-        bg, fg, border = chip_colors(st.tone, self._theme_name)
+        bg, fg, border = chip_colors(st.tone, self._look())
         try:
             from ui.icons import eye_icon, incognito_icon
             # The incognito mark while hidden, an eye (slashed: maybe) otherwise.
@@ -2337,7 +2430,7 @@ class LiveAssistOverlay(QWidget):
         inner = QPainterPath()
         inner.addRoundedRect(card.adjusted(edge, edge, -edge, -edge),
                              max(2.0, RADIUS - edge * 0.6), max(2.0, RADIUS - edge * 0.6))
-        mp.fillPath(outer.subtracted(inner), QColor(255, 255, 255, 255))
+        mp.fillPath(outer.subtracted(inner), _THEMES["light"]["light"])           # (a mask: only its alpha counts)
         mp.end()
         small = mask.scaled(max(1, w // 6), max(1, h // 6), Qt.IgnoreAspectRatio,
                             Qt.SmoothTransformation)
@@ -2358,7 +2451,9 @@ class LiveAssistOverlay(QWidget):
         rp.end()
 
         glow = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
-        glow.fill(QColor(255, 255, 255, 34))
+        glow_ink = QColor(_THEMES[self._look()]["light"])
+        glow_ink.setAlpha(_THEMES[self._look()]["glow"])
+        glow.fill(glow_ink)
         gp = QPainter(glow)
         gp.setCompositionMode(QPainter.CompositionMode_DestinationIn)
         gp.drawImage(0, 0, mask)
@@ -2388,7 +2483,7 @@ class LiveAssistOverlay(QWidget):
         paint the card silhouette, then down/up-scale it - the same cheap
         blur as the backdrop. Rings of strokes showed their steps at the
         corners; this doesn't."""
-        key = (self.width(), self.height(), self._theme_name)
+        key = (self.width(), self.height(), self._look())
         if getattr(self, "_shadow_key", None) == key:
             return self._shadow_img
         w, h = self.width(), self.height()
@@ -2397,7 +2492,7 @@ class LiveAssistOverlay(QWidget):
         p = QPainter(img)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(15, 23, 42, 120 if self._theme_name == "light" else 170))
+        p.setBrush(_THEMES[self._look()]["shadow"])
         sp = QPainterPath()
         sp.addRoundedRect(QRectF(SHADOW + 2, SHADOW + 7, w - 2 * SHADOW - 4, h - 2 * SHADOW - 4),
                           RADIUS, RADIUS)
@@ -2410,7 +2505,7 @@ class LiveAssistOverlay(QWidget):
         return self._shadow_img
 
     def paintEvent(self, event):
-        t = _THEMES[self._theme_name]
+        t = _THEMES[self._look()]
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setRenderHint(QPainter.SmoothPixmapTransform, True)
@@ -2436,14 +2531,18 @@ class LiveAssistOverlay(QWidget):
         else:
             p.fillPath(path, t["tint_blur"] if self._blur_mode else t["tint_flat"])
         # Specular: a radial highlight that follows the cursor.
+        def lit(alpha):
+            c = QColor(t["light"])
+            c.setAlpha(alpha)
+            return c
         rad = QRadialGradient(self._spec_pos, card.width() * 0.55)
-        rad.setColorAt(0.0, QColor(255, 255, 255, t["spec"]))
-        rad.setColorAt(1.0, QColor(255, 255, 255, 0))
+        rad.setColorAt(0.0, lit(t["spec"]))
+        rad.setColorAt(1.0, lit(0))
         p.fillPath(path, QBrush(rad))
         # Top sheen.
         sheen = QLinearGradient(card.topLeft(), QPointF(card.left(), card.top() + 80))
-        sheen.setColorAt(0.0, QColor(255, 255, 255, 60 if self._theme_name == "light" else 26))
-        sheen.setColorAt(1.0, QColor(255, 255, 255, 0))
+        sheen.setColorAt(0.0, lit(t["sheen"]))
+        sheen.setColorAt(1.0, lit(0))
         p.fillPath(path, QBrush(sheen))
         p.restore()
 
@@ -2453,10 +2552,10 @@ class LiveAssistOverlay(QWidget):
         p.save()
         p.setClipPath(path)
         rim = QLinearGradient(card.topLeft(), card.bottomRight())
-        light = self._theme_name == "light"
-        rim.setColorAt(0.0, QColor(255, 255, 255, 235 if light else 150))
-        rim.setColorAt(0.45, QColor(255, 255, 255, 60 if light else 35))
-        rim.setColorAt(1.0, QColor(255, 255, 255, 120 if light else 70))
+        r0, r1, r2 = t["rim"]
+        rim.setColorAt(0.0, lit(r0))
+        rim.setColorAt(0.45, lit(r1))
+        rim.setColorAt(1.0, lit(r2))
         p.setPen(QPen(QBrush(rim), 2.0))
         p.setBrush(Qt.NoBrush)
         p.drawPath(path)
@@ -2577,7 +2676,7 @@ class LiveAssistOverlay(QWidget):
         everything = self.rules_active()
         chip.lock.setVisible(locked)
         if locked:
-            chip.lock.setPixmap(_lock_pixmap(12, _THEMES[self._theme_name]["accent"]))
+            chip.lock.setPixmap(_lock_pixmap(12, _THEMES[self._look()]["accent"]))
         chip.tag.setVisible(bool(ctx))
         chip.tag.setText("LOCKED IN" if locked else "CONTEXT")
         chip.text.setText(" ".join(ctx.split())[:300] if ctx else CONTEXT_EMPTY)
@@ -3232,7 +3331,7 @@ class LiveAssistOverlay(QWidget):
                 chip.style().polish(chip)
             try:
                 from ui.components import icons as comp_icons
-                t = _THEMES[self._theme_name]
+                t = _THEMES[self._look()]
                 chip.setIcon(comp_icons.icon("file", 13, t["muted"] if active else t["faint"], 1.9))
                 chip.setIconSize(QSize(13, 13))
             except Exception:
@@ -3290,7 +3389,7 @@ class LiveAssistOverlay(QWidget):
                 # "Look in:" / "File name:" words came out white on the light panel (1:1). The app's own
                 # sheet on the dialog wins over the inherited one (a widget's own sheet always does).
                 from ui import theme
-                dlg.setStyleSheet(theme.stylesheet())
+                theme.use_stylesheet(dlg)
             except Exception:
                 logger.debug("Live Assistant: couldn't style the file picker", exc_info=True)
             try:
@@ -3553,7 +3652,7 @@ class LiveAssistOverlay(QWidget):
         position stays where the reader left it."""
         if not self.rules_active():
             return
-        t = _THEMES[self._theme_name]
+        t = _THEMES[self._look()]
         sb = self.txt_feed.verticalScrollBar()
         keep = sb.value()
         self.txt_feed.setHtml(live_rules.feed_html(
@@ -4176,7 +4275,7 @@ class LiveAssistOverlay(QWidget):
         if not self._suggesting or gen != self._gen:
             return          # the answer ended or a newer question took over
         self._stream_rendered_at = time.monotonic()
-        render_markdown(self.txt_suggestion, streaming_markdown(text))
+        self._show_answer_md(streaming_markdown(text))
         sb = self.txt_suggestion.verticalScrollBar()
         sb.setValue(sb.maximum())
 
@@ -4218,7 +4317,7 @@ class LiveAssistOverlay(QWidget):
             if sent_image is not None and not self._image_b64:
                 self._attach_image(sent_image)
             return
-        render_markdown(self.txt_suggestion, text.strip() or "(no answer)")
+        self._show_answer_md(text.strip() or "(no answer)")
         if text.strip():
             doc_gen, doc_words = getattr(self, "_doc_foot", (None, ""))
             from_docs = bool(FOOT_DOCS_USED in (doc_words or "") and (gen is None or doc_gen == gen))

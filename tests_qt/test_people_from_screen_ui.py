@@ -56,13 +56,25 @@ def test_a_name_read_off_the_screen_is_a_row_like_the_others_and_you_is_still_yo
     win, page, card, session, app = build("pro", f)
     nv = page.notes_view
     assert nv.people_card.isVisibleTo(nv)
-    assert names(nv) == ["Anna Petrosyan", "Aram"]                  # the user's own row last: the app knows their name
-    anna, me = person_rows(nv)
-    assert [w.text() for w in anna.findChildren(QLabel) if w.text() == "You"] == []
-    assert [w.text() for w in me.findChildren(QLabel) if w.text() == "You"] == ["You"]
+    # (2.1.11) the transcript says "You": the user's own row is in Speakers ("Aram (You)"), not again below
+    assert names(nv) == ["Anna Petrosyan"]
+    (anna,) = person_rows(nv)
+    me = next(r for r in nv.speaker_rows if r.sid == "you")
+    assert me.who.full_text() == "Aram" and me.you_tag.text() == "(You)"
+    assert [w.text() for w in anna.findChildren(QLabel) if w.text() in ("You", "(You)")] == []
     assert anna.who.full_text() == "Anna Petrosyan" and anna.who.textFormat() == Qt.PlainText
     from ui.pages.meeting_views import Faces
     assert anna.findChild(Faces).accessibleName() == "Anna Petrosyan"
+    assert anna.remove_btn is not None
+
+
+def test_without_speakers_the_users_own_row_is_last(build, meetings_root):
+    f = card_with(meetings_root, ["Anna Petrosyan"], screen=["Anna Petrosyan"], transcript="We talked about the launch.")
+    win, page, card, session, app = build("pro", f)
+    nv = page.notes_view
+    assert names(nv) == ["Anna Petrosyan", "Aram"]                  # the user's own row last: the app knows their name
+    anna, me = person_rows(nv)
+    assert [w.text() for w in me.findChildren(QLabel) if w.text() == "You"] == ["You"]
     assert me.remove_btn is None                                    # nobody takes themselves off
     assert anna.remove_btn is not None
 
@@ -70,8 +82,8 @@ def test_a_name_read_off_the_screen_is_a_row_like_the_others_and_you_is_still_yo
 def test_only_a_name_the_screen_read_has_the_remove_control(build, meetings_root):
     f = card_with(meetings_root, ["Anna Petrosyan", "Bob Lee"], screen=["Bob Lee"])
     win, page, card, session, app = build("pro", f)
-    anna, bob, me = person_rows(page.notes_view)
-    assert (anna.remove_btn, me.remove_btn) == (None, None)         # the invite's people are not touched here
+    anna, bob = person_rows(page.notes_view)                         # (the user is in Speakers)
+    assert anna.remove_btn is None                                  # the invite's people are not touched here
     assert bob.remove_btn is not None
     assert bob.remove_btn.accessibleName() == "Remove Bob Lee from People"
 
@@ -79,7 +91,7 @@ def test_only_a_name_the_screen_read_has_the_remove_control(build, meetings_root
 def test_a_meeting_from_before_has_no_remove_control(build, meetings_root):
     f = make_meeting(meetings_root, attendees="Anna Petrosyan")      # (no attendees_screen: nothing was read from a screen)
     win, page, card, session, app = build("pro", f)
-    assert [r.remove_btn for r in person_rows(page.notes_view)] == [None, None]
+    assert [r.remove_btn for r in person_rows(page.notes_view)] == [None]
 
 
 def test_the_remove_control_is_quiet_until_the_pointer_or_the_keyboard_is_on_the_row(build, meetings_root):
@@ -112,11 +124,11 @@ def test_the_remove_control_is_in_the_tab_order_and_works_with_the_keyboard(buil
     btn.setFocus(Qt.TabFocusReason)
     QTest.keyClick(btn, Qt.Key_Space)                               # the keyboard's way: Space (Enter on a focused button too)
     _pump()
-    assert names(nv) == ["Bob Lee", "Aram"]
+    assert names(nv) == ["Bob Lee"]                                 # (the user is in Speakers)
     nv_btn = person_rows(nv)[0].remove_btn
     nv_btn.click()
     _pump()
-    assert names(nv) == ["Aram"]
+    assert names(nv) == []
 
 
 def test_removing_a_name_takes_it_off_for_good(build, meetings_root):
@@ -125,14 +137,14 @@ def test_removing_a_name_takes_it_off_for_good(build, meetings_root):
     nv = page.notes_view
     person_rows(nv)[0].remove_btn.click()
     _pump()
-    assert names(nv) == ["Bob Lee", "Aram"]
+    assert names(nv) == ["Bob Lee"]
     meta = meeting_store.load_meta(f)
     assert meta["attendees"] == "Bob Lee" and meta["attendees_list"] == ["Bob Lee"]
     assert meta["attendees_screen"] == ["Bob Lee"]
     assert meta["attendees_removed"] == ["Anna Petrosyan"]           # kept: the screen is not trusted for her again
     nv.reload()
     _pump()
-    assert names(nv) == ["Bob Lee", "Aram"]
+    assert names(nv) == ["Bob Lee"]
     shown = " ".join(w.text() for w in nv.findChildren(QLabel) if w.isVisibleTo(nv))
     assert "Anna Petrosyan" not in shown and "Bob Lee" in shown                              # not in the header line either
 
@@ -148,7 +160,7 @@ def test_the_meeting_page_asks_the_session_to_forget_the_person_when_it_can(buil
     person_rows(nv)[0].remove_btn.click()
     _pump()
     assert session.forgotten == [("Anna Petrosyan", str(f))]
-    assert names(nv) == ["Aram"]
+    assert names(nv) == []
 
 
 def test_a_removal_that_could_not_be_written_changes_nothing_on_the_page(build, meetings_root, monkeypatch):
@@ -157,7 +169,7 @@ def test_a_removal_that_could_not_be_written_changes_nothing_on_the_page(build, 
     monkeypatch.setattr(meeting_store, "forget_person", lambda folder, name: None)
     person_rows(page.notes_view)[0].remove_btn.click()
     _pump()
-    assert names(page.notes_view) == ["Anna Petrosyan", "Aram"]
+    assert names(page.notes_view) == ["Anna Petrosyan"]
 
 
 def test_a_long_name_ends_in_dots_and_stays_in_the_card(build, meetings_root):

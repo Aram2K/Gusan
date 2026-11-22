@@ -204,7 +204,7 @@ class UpdatePanel(QWidget):
             self._dot.set_color(dot)
         st = self._status
         self._say(st, status)
-        st.setStyleSheet("QLabel { color: %s; }" % theme.qss_color(colour))
+        theme.sheet(st, "QLabel { color: @%s; }" % colour)
         st.setAccessibleDescription(status)
         self._say(self.lbl_detail, detail)
         self._say(self.lbl_note, note)

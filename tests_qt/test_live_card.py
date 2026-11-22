@@ -488,6 +488,48 @@ def test_chip_and_timer_follow_the_theme(card):
     assert "#15803d" not in c.styleSheet()
 
 
+def test_by_default_the_card_wears_the_apps_look_and_turns_with_it(card):
+    """live_assist_theme "system" (the default, and what an old "light" became): the card is light or dark with
+    Gusan, switched live with the card open; a pinned look stays; the card's own button pins the other one."""
+    from ui import theme
+    from ui.live_assist import _THEMES
+    c, app = card()
+    pinned, _ = card(live_assist_theme="light")
+    try:
+        assert c._theme_name == "system" and c._look() == "light"
+        assert "color: %s;" % _THEMES["light"]["text"] in c.styleSheet()
+        theme.switch("dark")
+        assert c._look() == "dark"
+        assert "color: %s;" % _THEMES["dark"]["text"] in c.styleSheet()          # its words, near white
+        assert "color: #4ade80;" in c.btn_private.styleSheet()                   # the Hidden chip's bright green
+        assert pinned._look() == "light" and "color: %s;" % _THEMES["light"]["text"] in pinned.styleSheet()
+        # A checked button (Auto) keeps a strong blue under its white words in the dark look (4.5:1 and more).
+        assert "QPushButton:checked { background: %s; color: %s;" % (_THEMES["dark"]["fill"],
+                                                                     _THEMES["dark"]["on_fill"]) in \
+            " ".join(c.styleSheet().split())
+        c.btn_theme.click()                                    # the card's own button: pins the other look
+        assert c._theme_name == "light" and app.cfg["live_assist_theme"] == "light" and c._look() == "light"
+    finally:
+        theme.switch("light")
+
+
+def test_an_answers_code_block_follows_the_look(card):
+    from ui import theme
+    from ui.live_assist import _THEMES
+    c, _ = card()
+    try:
+        c._show_answer_md("Run this:\n\n```\nx = 1\n```")
+        assert _THEMES["light"]["code_bg"] in c.txt_suggestion.document().defaultStyleSheet()
+        theme.switch("dark")
+        assert _THEMES["dark"]["code_bg"] in c.txt_suggestion.document().defaultStyleSheet()
+        assert "x = 1" in c.txt_suggestion.toPlainText()                        # the same answer, re-drawn
+        c.txt_suggestion.setPlainText("Thinking…")                               # not an answer: left alone
+        theme.switch("light")
+        assert c.txt_suggestion.toPlainText() == "Thinking…"
+    finally:
+        theme.switch("light")
+
+
 def test_hide_status_changed_fires_on_a_new_state_only(card):
     c, _ = card()
     got = _recorder(c.hide_status_changed)

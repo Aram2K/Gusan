@@ -50,7 +50,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 from ui import theme  # noqa: E402
 
 app = QApplication.instance() or QApplication([])
-theme.install_light_scheme(app)
+theme.install_scheme(app, "light")
 theme.load_fonts()
 
 from ui.components import icons  # noqa: E402

@@ -127,6 +127,7 @@ def _announce(widget):
 
 
 def _colors():
+    """An answer's colours in the active look (rich_text.qt_html; an answer is drawn again after a switch)."""
     return {"text": theme.qss_color("text"), "muted": theme.qss_color("muted"), "head": theme.qss_color("ink"),
             "code_bg": theme.qss_color("bg2"), "item_gap": "3px"}
 
@@ -233,9 +234,19 @@ class _AnswerRow(QWidget):
         self._copied.setInterval(COPIED_MS)
         self._copied.timeout.connect(lambda: self.copy_btn.setText("Copy"))
         self.setAccessibleName("Answer")
+        self._shown = ("", False)
+        theme.on_change(self, self._on_theme)
+
+    def _on_theme(self):
+        """The look changed: the words carry the look's colours, and a link's colour is taken when its text is
+        read - both are drawn again."""
+        self.set_text(*self._shown)
+        if self.sources.text():
+            self.sources.setText(self.sources.text())
 
     # the words
     def set_text(self, md, streaming=False):
+        self._shown = (md, streaming)
         self.body.setText(views.with_line_height(
             rich_text.qt_html(rich_text.answer_text(md, streaming=streaming), _colors()), 21))
         self.body.setVisible(bool(str(md or "").strip()))
@@ -314,7 +325,7 @@ class ChatCard(Card):
         self.view = view                                                       # go through its off-screen pixmap
         self.page = view.page
         self.setAccessibleName(TITLE)
-        self.setStyleSheet(_qss())
+        theme.sheet(self, _qss)
         self._bg = views.BgRunner(self)
         self._bridge = _Bridge(self)
         self._bridge.partial.connect(self._on_partial)

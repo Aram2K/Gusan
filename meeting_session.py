@@ -224,6 +224,15 @@ People from the screen (people_from_screen.py)
     screen is where that name came from (``_call_name``, people_from_screen.lone_other): "Speaker 1" becomes that
     name; with two or more other names, or a name only typed in or on an invite, nothing is guessed and the labels
     stay as they were.
+Speaker ids and names (Gusan 2.1.11, speaker_map.py)
+  * Every label of transcript.txt stands for an id ("you", "them", "s1".."sN"); meta keeps the names
+    (``speaker_names``, ``speaker_name_by``: "user" / "screen" / "calendar" / "auto"). Every speaker step writes its
+    blocks from the ids and the names (``_named_texts`` -> speaker_map.settle: Stop, an interrupted meeting, Identify
+    speakers; the background pass in meeting_speakers._finish_pass) and never overwrites a name the person set; the
+    segments in segments.json carry their id ("spk") and each part its block with the canonical labels ("canon").
+  * ``rename_speaker(folder, id, name)`` is the People card's rename (refused while this very meeting is recorded or
+    written); the notes are not rewritten by it - the page offers "Update notes with these names" (meta
+    ``speaker_names_changed``, cleared by the next notes written).
 """
 import importlib.util
 import json
@@ -246,6 +255,7 @@ import meeting_titles
 import people_from_screen
 import rich_text
 import speaker_followup
+import speaker_map
 import speech_langs
 import storage
 import telemetry
@@ -323,6 +333,22 @@ CLOUD_WORDS_KEPT = ("This meeting was transcribed in the cloud. Reading the reco
                     "computer would replace those words, so they were left as they are.")
 # A device that stopped delivering sound: a tray hint from this long on (seconds).
 QUIET_HINT_SEC = 180.0
+# Only the call silent (the microphone hears someone): a hint from this long on, once a meeting.
+CALL_QUIET_HINT_SEC = 180.0
+# Every full hour of recording: "Still recording · 1 h" (main.AppController.show_still_recording).
+HOUR_S = 3600.0
+# What the meeting says when its devices change (audio_follow, AudioRecorder.device_events):
+# kind -> (title with {name}, line, icon).
+DEVICE_NOTICES = {
+    "mic": ("Switched to {name}", "Your microphone for this meeting", "mic"),
+    "call": ("Switched to {name}", "The call's sound for this meeting", "speaker"),
+    "mic_lost": ("Microphone disconnected", "Recording goes on. Connect a microphone to be heard again.", "mic"),
+    "call_lost": ("The call's sound stopped", "Recording goes on. Gusan follows your next speakers or headphones.",
+                  "speaker"),
+}
+CALL_QUIET_NOTICE = ("No sound from the call",
+                     "It may be playing on another device. Make it the default output in sound settings.",
+                     "speaker")
 
 _SIGNALS = (
     # name, Qt argument types
@@ -509,6 +535,82 @@ def pending_notes_folders():
         if meeting_store.load_meta(folder).get(META_NOTES_PENDING):
             out.append(str(folder))
     return out
+
+
+def recover_interrupted(skip=()):
+    """Startup, on a worker: a meeting part the app never finished (closed by force, a crash, a restart
+    mid-call) is still on disk as it was written while recorded (meeting_spool). It becomes the
+    meeting's recording (audio_partN.wav and its two tracks), and the meeting's notes are queued like
+    the ones a Quit leaves (meta notes_pending -> AppController._write_pending_notes ->
+    write_pending_notes): a NEW meeting has no transcript.txt, so its recording is read again, labelled
+    and its notes written (_recover_then_notes); a continued one gets the lost part's live words after
+    its transcript. ``skip``: folders in use. Returns the folders recovered."""
+    import meeting_spool
+    skip = {os.path.normcase(os.path.abspath(str(s))) for s in skip if s}
+    out = []
+    try:
+        folders = [p for p in meeting_store.meetings_dir().iterdir() if p.is_dir()]
+    except Exception:
+        return out
+    for folder in sorted(folders):
+        if os.path.normcase(os.path.abspath(str(folder))) in skip or meeting_spool.is_active(folder):
+            continue
+        parts = meeting_spool.leftover_parts(folder)
+        if not parts:
+            continue
+        discarded = (folder / meeting_store.DISCARDED_CHUNKS).exists()
+        recovered = []
+        for part in parts:
+            info = meeting_spool.load_info(part)
+            before = meeting_spool.wav_frames(part) if part.is_file() else -1
+            path = meeting_spool.recover_part(part, keep_existing=True)
+            if path is None:
+                continue
+            if discarded:
+                logger.info("A discarded meeting's part was left on disk: removed (%s)", folder.name)
+                try:
+                    if before < 0:
+                        path.unlink()
+                        for kind in meeting_store.TRACK_KINDS:
+                            meeting_store.track_path(path, kind).unlink(missing_ok=True)
+                except OSError:
+                    pass
+                continue
+            if before < 0 or meeting_spool.wav_frames(path) > before:
+                recovered.append((path, info))
+        if recovered:
+            try:
+                _mark_recovered(folder, recovered)
+                out.append(str(folder))
+            except Exception:
+                logger.warning("Recovering the meeting in %s failed", folder.name, exc_info=True)
+    return out
+
+
+def _mark_recovered(folder, recovered):
+    """Meta (and, for a continued meeting, its transcript) of a meeting whose lost part was recovered."""
+    import meeting_spool
+    meta = meeting_store.load_meta(folder)
+    seconds = sum(s or 0 for s in meeting_store.part_seconds([p for p, _info in recovered]))
+    prior = max(int((info or {}).get("prior_sec") or 0) for _p, info in recovered)
+    fields = {META_NOTES_PENDING: True, "seen": False, "duration_sec": prior + int(round(seconds))}
+    if meeting_store.has_transcript_file(folder):
+        # A continued meeting: its transcript, then what was said live in the part that was lost.
+        live = " ".join(str(r.get("t") or "").strip() for p, _info in recovered
+                        for r in meeting_spool.load_pieces(p)).strip()
+        if live:
+            old = meeting_store.load_transcript(folder).strip()
+            try:
+                stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(recovered[0][0].stat().st_mtime))
+            except OSError:
+                stamp = time.strftime("%Y-%m-%d %H:%M")
+            meeting_store.write_transcript(folder, "%s\n\n— Resumed %s —\n\n%s" % (old, stamp, live))
+        notices = [str(n) for n in (meta.get("notices") or []) if n] if isinstance(meta.get("notices"), list) else []
+        if QUIT_NOTICE not in notices:
+            notices.append(QUIT_NOTICE)
+        fields["notices"] = notices
+    meeting_store.update_meta(folder, **fields)
+    logger.info("Recovered an interrupted meeting (%s, %.0f s); its notes are written next", folder.name, seconds)
 
 
 def default_engine(pro, downloaded=None):
@@ -1101,6 +1203,21 @@ class MeetingCore:
         # What a continued meeting's my_notes.md held: Abort puts it back.
         self._my_notes_at_start = self._my_notes_draft
         self._record_started_at = time.time()
+        # The hourly "Still recording" reminder and the hints about the devices start over.
+        self._hours_told = 0
+        self._call_quiet_hinted = False
+
+        # The devices the computer uses now, when PortAudio's list is from before they came (a headset
+        # connected after Gusan started: the call plays there) - AppController.rescan_audio_devices.
+        rescan = getattr(app, "rescan_audio_devices", None)
+        if callable(rescan):
+            try:
+                rescan()
+            except Exception:
+                logger.debug("Listing the audio devices again failed", exc_info=True)
+        # This part is written to disk while it is recorded (meeting_spool): a meeting the app never
+        # finishes keeps its sound.
+        self._spool = self._new_spool(rec)
 
         # Start recording - guard against device-open failures (busy mic, no
         # loopback device, driver errors) so a failure never crashes the app or
@@ -1130,6 +1247,7 @@ class MeetingCore:
                     pass                       # never a recording failure
         except Exception as e:
             self._restore_recorder_callbacks()
+            self._drop_spool()
             self.state = STATE_IDLE
             self._record_started_at = None
             self._clear_resume_state()
@@ -1489,6 +1607,7 @@ class MeetingCore:
                     pass
             rec.stop_recording()
             self._restore_recorder_callbacks()
+            self._drop_spool()                  # nothing of a discarded part stays on disk
         self._reset()
         if discarded:
             meeting_store.mark_discarded(discarded)
@@ -1861,6 +1980,8 @@ class MeetingCore:
         if self.state != STATE_RECORDING or not self._record_started_at or self.paused:
             return False
         self._watch_sound()
+        self._watch_devices()
+        self._watch_hours(now)
         now = time.time() if now is None else now
         grown = len(self._live_text) - self._summary_len_at_last
         # Not during a Live Assistance session: nothing shows the recap there,
@@ -1900,6 +2021,110 @@ class MeetingCore:
                 self._quiet_hinted = False
         except Exception:
             logger.debug("sound watch failed", exc_info=True)
+
+    def _watch_devices(self):
+        """Recording, about once a second: what the meeting's devices did (main.AudioRecorder.device_events,
+        audio_follow) - a short notice in the Gusan window ("Switched to ..."), and once a meeting a hint
+        when only the call went quiet while the microphone kept hearing someone (it may play on a
+        device that isn't the default). Never raises."""
+        try:
+            rec = getattr(self.app, "recorder", None) if self.app else None
+            events = rec.device_events() if callable(getattr(rec, "device_events", None)) else []
+            for kind, name in events or ():
+                notice = DEVICE_NOTICES.get(kind)
+                if notice is None:
+                    continue
+                title, text, icon = notice
+                logger.info("Meeting: %s (%s)", title.format(name=name or "?"), kind)
+                if kind in ("mic", "call"):
+                    self._call_quiet_hinted = False          # a new device: the call may be heard now
+                self._notice(title.format(name=name or "another device"), text, icon)
+            quiet = rec.call_quiet_seconds() if callable(getattr(rec, "call_quiet_seconds", None)) else 0.0
+            if float(quiet or 0.0) >= CALL_QUIET_HINT_SEC and not getattr(self, "_call_quiet_hinted", False):
+                self._call_quiet_hinted = True
+                logger.info("Meeting: no sound from the call for %.0f s while the microphone hears someone", quiet)
+                if not self._notice(*CALL_QUIET_NOTICE):
+                    hint = getattr(self.app, "show_tray_hint", None)
+                    if callable(hint):
+                        hint(CALL_QUIET_NOTICE[0], CALL_QUIET_NOTICE[1])
+        except Exception:
+            logger.debug("device watch failed", exc_info=True)
+
+    def _notice(self, title, text, icon="info"):
+        """A short notice about the recording in the Gusan window (AppController.show_meeting_notice).
+        True when it showed."""
+        show = getattr(self.app, "show_meeting_notice", None) if self.app else None
+        if not callable(show):
+            return False
+        try:
+            return bool(show(title, text, icon))
+        except Exception:
+            logger.debug("meeting notice failed", exc_info=True)
+            return False
+
+    def _watch_hours(self, now=None):
+        """Recording, about once a second: every full hour of recording (pauses not counted) the app
+        says "Still recording · 1 h" (2 h ...) with Stop and Keep recording - a card and a system
+        notification (AppController.show_still_recording). Keep recording = nothing until the next full
+        hour. True when it asked."""
+        if self.state != STATE_RECORDING or self.paused:
+            return False
+        hours = int(self.elapsed_sec(now) // HOUR_S)
+        if hours < 1 or hours <= getattr(self, "_hours_told", 0):
+            return False
+        self._hours_told = hours
+        logger.info("Meeting: still recording after %d h", hours)
+        show = getattr(self.app, "show_still_recording", None) if self.app else None
+        if callable(show):
+            try:
+                show(hours, self._meeting_title)
+            except Exception:
+                logger.warning("The still-recording reminder failed", exc_info=True)
+        return True
+
+    # ── the part on disk while it is recorded (meeting_spool) ──
+    def _new_spool(self, rec):
+        """This part's copy on disk, handed to the recorder for the take (None when it can't be made:
+        the meeting is then saved at Stop only, as before)."""
+        try:
+            import meeting_spool
+            part = meeting_store.next_audio_part_path(self._meeting_dir)
+            spool = meeting_spool.MeetingSpool(self._meeting_dir, part,
+                                               prior_sec=int(self._resume_prior_duration or 0))
+            rec.meeting_spool = spool
+            self._spool_part = None
+            return spool
+        except Exception:
+            logger.warning("The meeting can't be saved while it is recorded", exc_info=True)
+            return None
+
+    def _drop_spool(self):
+        """The part is saved (or thrown away): the copy written while recording goes."""
+        spool, self._spool = getattr(self, "_spool", None), None
+        rec = getattr(self.app, "recorder", None) if self.app else None
+        if rec is not None and spool is not None and getattr(rec, "meeting_spool", None) is spool:
+            rec.meeting_spool = None
+        if spool is not None:
+            try:
+                spool.discard()
+            except Exception:
+                logger.debug("removing the meeting's copy on disk failed", exc_info=True)
+
+    def _spool_as_part(self):
+        """Saving the part from memory failed: the copy written while recording becomes the part (with its
+        two tracks). Its path, or None."""
+        spool, self._spool = getattr(self, "_spool", None), None
+        if spool is None:
+            return None
+        try:
+            path = spool.finalize()
+        except Exception:
+            logger.warning("The meeting's copy on disk could not be kept", exc_info=True)
+            return None
+        if path is not None:
+            self._spool_part = str(path)
+            logger.info("Meeting: the part was kept from its copy on disk")
+        return path
 
     def _live_engine(self):
         """A REAL engine for live features (no rule-based): the configured
@@ -1962,6 +2187,8 @@ class MeetingCore:
                 return path
         except Exception as e:
             logger.warning("Could not save meeting audio: %s", e)
+            # The copy written while recording (meeting_spool) becomes the part instead.
+            return self._spool_as_part()
         return None
 
     def _save_recording_tracks(self, part_path):
@@ -1972,6 +2199,9 @@ class MeetingCore:
         never half: a failed second file removes the first. True when saved."""
         if part_path is None:
             return False
+        if getattr(self, "_spool_part", None) == str(part_path):
+            # the part came from the copy on disk (_spool_as_part): its tracks with it
+            return all(meeting_store.track_file(part_path, k) is not None for k in meeting_store.TRACK_KINDS)
         rec = getattr(self.app, "recorder", None) if self.app else None
         getter = getattr(rec, "get_full_audio_tracks", None)
         if not callable(getter):
@@ -2090,6 +2320,7 @@ class MeetingCore:
             # memory, these files are for the names that come after the notes
             # (the call's own sound) and for labelling the meeting again later.
             self._tracks_saved = self._save_recording_tracks(part_path)
+            self._drop_spool()                      # saved: the copy written while recording goes
             self._emit_status("Finalizing transcript…")
             rec = self.app.recorder
             prior = self._resume_prior
@@ -2324,9 +2555,27 @@ class MeetingCore:
         self._labels_from_pieces = bool(reader is not None and out.texts)
         if out.notice and not meeting_speakers.is_benign(out.reason):
             self._add_notice(out.notice)
+        text = (self._named_texts(out) or [""])[0]           # a continued meeting keeps its speakers' names
         if notes_first and out.texts and out.parts:
-            self._sources_part = self._segments_entry(part_path, out, len(audio) / float(diarization.SAMPLE_RATE))
-        return out.text
+            self._sources_part = self._segments_entry(part_path, out, len(audio) / float(diarization.SAMPLE_RATE),
+                                                      text=text)
+        return text
+
+    def _named_texts(self, out, folder=None):
+        """The texts of a speaker step (an Outcome) as they are written: their canonical labels with the names the
+        meeting has (speaker_map.settle - a name the person set stays on its speaker; the one-name rule's name is
+        kept in meta). The step's own texts when it has no canonical ones or something fails."""
+        texts = list(getattr(out, "texts", None) or [])
+        canon = list(getattr(out, "canonical", None) or [])
+        if not texts or len(canon) != len(texts):
+            return texts
+        one = getattr(out, "speakers", 0) == 1 and getattr(out, "mode", "") in ("sources", "call")
+        try:
+            return speaker_map.settle(folder or self._meeting_dir, canon, getattr(out, "auto_names", None) or {},
+                                      one_voice=one)
+        except Exception:
+            logger.warning("The speakers' names could not be put in the transcript", exc_info=True)
+            return texts
 
     @staticmethod
     def _speech_report(rec):
@@ -2475,23 +2724,30 @@ class MeetingCore:
         return None, model
 
     @staticmethod
-    def _segments_entry(part_path, out, seconds):
+    def _segments_entry(part_path, out, seconds, text=None):
         """The segments.json entry of the part the fast speaker step just labelled:
-        compact start / end / text / source per segment, and the part's block of
-        transcript.txt (what the background pass replaces)."""
+        compact start / end / text / source / speaker id per segment, and the part's block of
+        transcript.txt (what the background pass replaces): ``text`` as written, "canon" with the
+        canonical labels (the pass finds the block by its ids, speaker_map.py)."""
         segments = []
         for seg in (out.parts[0] if out.parts else []):
-            text = str(seg.get("text") or "").strip()
-            if not text:
+            words = str(seg.get("text") or "").strip()
+            if not words:
                 continue
             try:
                 start, end = round(float(seg.get("start", 0.0)), 2), round(float(seg.get("end", 0.0)), 2)
             except (TypeError, ValueError):
                 continue
-            segments.append({"s": start, "e": end, "t": text,
-                             "src": "you" if seg.get("source") == "you" else "them"})
-        return {"audio": Path(part_path).name, "kind": out.mode, "seconds": round(float(seconds), 2),
-                "text": out.text.strip(), "done": False, "segments": segments}
+            src = "you" if seg.get("source") == "you" else "them"
+            sid = seg.get("sid")
+            segments.append({"s": start, "e": end, "t": words, "src": src,
+                             "spk": sid if speaker_map.is_sid(sid) else src})
+        canon = list(getattr(out, "canonical", None) or [])
+        entry = {"audio": Path(part_path).name, "kind": out.mode, "seconds": round(float(seconds), 2),
+                 "text": (out.text if text is None else text).strip(), "done": False, "segments": segments}
+        if canon:
+            entry["canon"] = canon[0].strip()
+        return entry
 
     def _keep_segments(self):
         """Worker, right after transcript.txt: save this part's segments (added to
@@ -2686,7 +2942,8 @@ class MeetingCore:
             except Exception:
                 logger.warning("Could not save meeting artifacts", exc_info=True)
             self._write_meta(**self._result_meta(
-                notes_engine=used, notes_engine_label=engine_label(used, self._cfg()), notes_error=None))
+                notes_engine=used, notes_engine_label=engine_label(used, self._cfg()), notes_error=None,
+                **{speaker_map.CHANGED_KEY: None}))          # (the notes have the speakers' names now)
             self._notes_saved.set()
             self._name_meeting(notes, engine, engine_config, used)
             self._save_history_entry(notes)
@@ -2974,6 +3231,24 @@ class MeetingCore:
         (the meetings keep their You / Them transcript)."""
         self._followup.shutdown()
 
+    def rename_speaker(self, folder, sid, name):
+        """The People card renames one speaker of a saved meeting (speaker_map.rename): every line of that voice in
+        transcript.txt gets the new label in one atomic write and the name is kept in meta.json ("" = back to
+        "Speaker N"). Refused while this very meeting is recorded or its transcript or notes are being written (the
+        run would write its own text over it); a background speaker pass may be waiting or working - it finds its
+        block by the ids. The meeting this session still holds takes the new transcript (Rewrite notes, a Retry and
+        the chat read it). Any thread: disk work. Returns speaker_map.Rename."""
+        if self.is_busy and self._meeting_dir is not None and self._same_dir(folder, self._meeting_dir):
+            return speaker_map.Rename.refused(speaker_map.R_BUSY)
+        result = speaker_map.rename(folder, sid, name)
+        try:
+            if (result.ok and self._meeting_dir is not None and self._same_dir(folder, self._meeting_dir)
+                    and self.state in (STATE_DONE, STATE_IDLE) and (self._final_transcript or "").strip()):
+                self._final_transcript = (result.text or "").strip() or self._final_transcript
+        except Exception:
+            logger.debug("the session's copy of the transcript was not refreshed", exc_info=True)
+        return result
+
     # ── retry / rewrite ──
     def retry_notes(self, engine=None, folder=None, persist=False):
         """Rewrite only the notes from the saved transcript (no re-record) with
@@ -3130,7 +3405,11 @@ class MeetingCore:
         self._transcript_pending = str(folder or "")
         try:
             self._drop_speaker_notices()
-            if meeting_store.load_meta(folder).get("transcribed_with") == TRANSCRIBED_CLOUD:
+            cloud = meeting_store.load_meta(folder).get("transcribed_with") == TRANSCRIBED_CLOUD
+            # A cloud session the app never finished kept its live pieces with the recording
+            # (meeting_spool): they are the segments, so its words stay and still get their labels.
+            reader = self._saved_pieces_reader(folder) if cloud else None
+            if cloud and reader is None:
                 # A Live Assistant session whose words came from a cloud engine: they are all
                 # there is of a good text (for Armenian, local Whisper gives a much worse one).
                 self._add_notice(RECOVERED_CLOUD_NOTICE)
@@ -3141,10 +3420,10 @@ class MeetingCore:
                     self.app.recorder, self._saved_parts(folder), language=self._decode_language(),
                     privacy=bool(self._cfg().get("privacy_mode")), status=self._emit_status,
                     names=self._speaker_names, **self._call_kw(),
-                    **self._saved_speech_kwargs(folder))
+                    **dict(self._saved_speech_kwargs(folder), **({"reader": reader} if reader else {})))
                 self._add_notice(out.notice)
                 if out.texts:
-                    text = self._join_parts(out.texts)
+                    text = self._join_parts(self._named_texts(out, folder))
         except Exception as e:
             logger.warning("Finishing the interrupted meeting from its recording failed: %s", e,
                            exc_info=True)
@@ -3157,6 +3436,21 @@ class MeetingCore:
             else:
                 logger.warning("Could not save the recovered transcript of %s", folder)
         self._summarize_and_finish()
+
+    @staticmethod
+    def _saved_pieces_reader(folder):
+        """The live pieces saved with a meeting's one part while it was recorded (meeting_spool), as a
+        build_transcript reader - or None (more than one part, none saved, or one without a place)."""
+        try:
+            import meeting_spool
+            parts = meeting_store.audio_parts(folder)
+            segments = meeting_spool.piece_segments(parts[0]) if len(parts) == 1 else None
+        except Exception:
+            return None
+        if not segments:
+            return None
+        kept = [dict(seg) for seg in segments]
+        return lambda audio, **_kw: [dict(seg) for seg in kept]
 
     def identify_speakers(self, folder):
         """Add speaker labels to a saved meeting: its recording is read again (the
@@ -3297,7 +3591,7 @@ class MeetingCore:
                 logger.info("Identify speakers cancelled; %s is unchanged", folder)
                 self._remove_backup(backup)
             elif out.texts:
-                text = self._join_parts(out.texts, old_text)
+                text = self._join_parts(self._named_texts(out, folder), old_text)
                 if not meeting_store.write_transcript(folder, text):
                     raise OSError("could not write transcript.txt")
                 self._remove_backup(backup)
@@ -3490,6 +3784,7 @@ class MeetingCore:
         # Last, so a slow disk never costs the recording or the transcript: the
         # two sources apart (the next launch's speaker labels can use them).
         self._save_recording_tracks(part_path)
+        self._drop_spool()                          # saved: the copy written while recording goes
         self._restore_recorder_callbacks()
         self.state = STATE_IDLE
         self.paused = False

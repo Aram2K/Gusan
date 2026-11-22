@@ -20,12 +20,17 @@ from PySide6.QtWidgets import QAbstractButton, QButtonGroup, QComboBox, QHBoxLay
 
 import captions
 
-ACCENT = "#2563eb"                    # theme TOKENS "blue"
+ACCENT = "blue"                       # theme token: the picked dot's ring, the slider's filled part
 SAVE_AFTER_MS = 150                   # the size is saved once the slider rests
 DOT = 22                              # px: a colour dot's button (the dot itself is DOT_FILL across)
 DOT_FILL = 14
-DOT_EDGE = QColor(100, 116, 139)      # its thin edge (white must show on the white card)
+DOT_EDGE = "muted"                    # theme token: its thin edge (white must show on the light card, black on the dark)
 HANDLE = 18                           # px: the slider's round handle, edge included
+
+
+def _qc(token):
+    from ui import theme
+    return theme.qcolor(token)
 
 
 class FontCombo(QComboBox):
@@ -90,11 +95,11 @@ class _Dot(QAbstractButton):
         p.setBrush(QColor(*me))
         p.drawPie(r, -90 * 16, 180 * 16)                            # the right half
         p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(DOT_EDGE, 1.0))
+        p.setPen(QPen(_qc(DOT_EDGE), 1.0))
         p.drawEllipse(r)
         if self.isChecked() or self.hasFocus():
             ring = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
-            p.setPen(QPen(QColor(ACCENT), 2.0 if self.isChecked() else 1.0,
+            p.setPen(QPen(_qc(ACCENT), 2.0 if self.isChecked() else 1.0,
                           Qt.SolidLine if self.isChecked() else Qt.DotLine))
             p.drawEllipse(ring)
         p.end()
@@ -146,20 +151,16 @@ class ColorDots(QWidget):
 
 
 def _slider_style():
-    try:
-        from ui import theme
-        t = theme.TOKENS
-        line, blue, white = t["line2"], t["blue"], t["white"]
-    except Exception:
-        line, blue, white = "#cbd5e1", ACCENT, "#ffffff"
-    return f"""
-QSlider::groove:horizontal {{ height: 4px; border-radius: 2px; background: {line}; }}
-QSlider::sub-page:horizontal {{ height: 4px; border-radius: 2px; background: {blue}; }}
-QSlider::add-page:horizontal {{ height: 4px; border-radius: 2px; background: {line}; }}
+    """The slider's sheet in the app's look now (the theme's colours; re-made when the look turns)."""
+    from ui import theme
+    return theme.fill(f"""
+QSlider::groove:horizontal {{ height: 4px; border-radius: 2px; background: @line2; }}
+QSlider::sub-page:horizontal {{ height: 4px; border-radius: 2px; background: @{ACCENT}; }}
+QSlider::add-page:horizontal {{ height: 4px; border-radius: 2px; background: @line2; }}
 QSlider::handle:horizontal {{ width: {HANDLE - 4}px; margin: -{(HANDLE - 4) // 2}px 0; border-radius: {HANDLE // 2}px;
-                              background: {white}; border: 2px solid {blue}; }}
+                              background: @knob; border: 2px solid @{ACCENT}; }}
 QSlider:focus {{ outline: none; }}
-"""
+""")
 
 
 class SizeSlider(QWidget):
@@ -192,7 +193,8 @@ class SizeSlider(QWidget):
         self.slider.setFocusPolicy(Qt.StrongFocus)
         self.slider.setCursor(Qt.PointingHandCursor)
         self.slider.setAccessibleName("Caption size")
-        self.slider.setStyleSheet(_slider_style())
+        from ui import theme
+        theme.sheet(self.slider, _slider_style)
         # Room for the whole handle: it stands HANDLE px tall around a 4 px groove, and a slider's own height is less
         # (founder 2026-11-14: "the slider is ... broken and cut a bit" - its top and bottom were clipped).
         self.slider.setFixedHeight(HANDLE + 6)

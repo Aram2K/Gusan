@@ -49,8 +49,7 @@ class _Chip(QLabel):
         self.setAlignment(Qt.AlignCenter)
         self.setFixedHeight(18)
         self.setContentsMargins(7, 0, 7, 0)
-        self.setStyleSheet("QLabel { color: %s; background: %s; border-radius: 9px; }"
-                           % (theme.qss_color(family + "-tx"), theme.qss_color(family + "-sub")))
+        theme.sheet(self, "QLabel { color: @%s-tx; background: @%s-sub; border-radius: 9px; }" % (family, family))
 
 
 class _Item(QWidget):
@@ -67,7 +66,7 @@ class _Item(QWidget):
         tile.setFixedSize(34, 34)
         tile.setAlignment(Qt.AlignCenter)
         tile.setPixmap(icons.pixmap(icon, 18, family + "-tx", sw=2.0))
-        tile.setStyleSheet("QLabel { background: %s; border-radius: 10px; }" % theme.qss_color(family + "-sub"))
+        theme.sheet(tile, "QLabel { background: @%s-sub; border-radius: 10px; }" % family)
         lay.addWidget(tile, 0, Qt.AlignTop)
         col = QVBoxLayout()
         col.setContentsMargins(0, 0, 0, 0)

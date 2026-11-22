@@ -48,7 +48,7 @@ class TestChipStates(unittest.TestCase):
         self.assertEqual(rdp.headline, "Can't hide in Remote Desktop")
         self.assertEqual(old.headline, "Can't hide on this computer")
         if sys.platform == "win32":
-            self.assertIn("Windows 10 (version 2004)", old.tip)
+            self.assertIn("a newer version of Windows", old.tip)
 
     def test_macos_is_may_be_hidden_never_a_promise(self):
         for macos26, caveat in ((False, "doesn't guarantee"), (True, "Not yet verified on macOS 26")):

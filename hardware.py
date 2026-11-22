@@ -454,11 +454,70 @@ def snapshot(cfg=None, probe_gpu=True, platform=None) -> HardwareSnapshot:
         state = gpu_state(cfg)
     else:
         gname, discrete, state = "", False, None
-    return HardwareSnapshot(
+    snap = HardwareSnapshot(
         cpu_name=cpu, cores=cores, ram_gb=round(ram, 2), ram_display_gb=display_ram_gb(ram),
         gpu_name=gname, gpu_discrete=discrete, gpu_state=state, platform=platform,
         recommended=recommend_model(ram, cores, state, platform),
     )
+    note_machine(snap)
+    return snap
+
+
+# ── Speed dots that fit THIS computer ─────────────────────────────────────────
+# The founder (2026-11-21): the speed in the model lists follows the computer - a strong one, or
+# one with a GPU, runs the big models fast or instantly. MODEL_INFO.speed is the speed on a
+# middling processor (6-7 cores, no GPU). speed_here() moves it for the computer the last snapshot
+# saw (model_manager takes one on a worker at start-up); before any snapshot it is the table's.
+# Accuracy never changes. The Armenian model has no dots.
+SPEED_ON_GPU = {"tiny": 5, "base": 5, "small": 5, "medium": 4, "large-v3-turbo": 5, "large-v3": 4}
+STRONG_CPU_CORES = 8       # physical cores: a dot faster for the bigger models
+WEAK_CPU_CORES = 4         # physical cores or fewer: a dot slower for them
+
+
+def note_machine(snap):
+    """Remember what the speed dots need from a snapshot. A snapshot that did not probe the GPU
+    (gpu_state None) never replaces one that did."""
+    try:
+        import platform as _platform
+        arm_mac = snap.platform == "darwin" and _platform.machine().lower() in ("arm64", "aarch64")
+    except Exception:
+        arm_mac = False
+    profile = {"cores": int(snap.cores or 0), "ram_gb": int(snap.ram_display_gb or 0),
+               "gpu": runs_on_gpu(snap.gpu_state, platform=snap.platform) if snap.gpu_state else None,
+               "arm_mac": arm_mac}
+    with _cache_lock:
+        old = _cache.get("speed_profile")
+        if old is not None and old.get("gpu") is not None and profile["gpu"] is None:
+            profile["gpu"] = old["gpu"]
+        _cache["speed_profile"] = profile
+
+
+def speed_profile():
+    with _cache_lock:
+        p = _cache.get("speed_profile")
+        return dict(p) if p else None
+
+
+def speed_here(model_id, profile=None):
+    """The 1-5 speed dots of a speech model on this computer (see above)."""
+    info = MODEL_INFO.get(model_id)
+    if info is None:
+        return 0
+    base = int(info.speed or 0)
+    p = profile if profile is not None else speed_profile()
+    if not p or not base:
+        return base
+    ram = int(p.get("ram_gb") or 0)
+    if ram and info.memory_gb and ram < info.memory_gb:
+        return 1                                   # not enough memory: it will crawl
+    if p.get("gpu"):
+        return SPEED_ON_GPU.get(model_id, base)
+    cores = int(p.get("cores") or 0)
+    if p.get("arm_mac") or cores >= STRONG_CPU_CORES:
+        return min(5, base + 1) if base <= 4 else base
+    if 0 < cores <= WEAK_CPU_CORES:
+        return max(1, base - 1) if base <= 4 else base
+    return base
 
 
 # ── Cache (the CPU and the adapters can't change while the app runs) ─────────

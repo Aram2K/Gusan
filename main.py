@@ -301,7 +301,8 @@ DEFAULT = {
     "live_assist_hotkey": "ctrl+alt+a",
     "live_assist_private": True,     # excluded from screen capture
     "live_assist_opacity": 0.96,
-    "live_assist_theme": "light",
+    # The card's look: "system" wears Gusan's own (light or dark, Settings > Appearance), or pin "light" / "dark".
+    "live_assist_theme": "system",
     # Answer automatically when someone asks a question. A new key on purpose:
     # 1.9.0 stored "live_assist_auto": false (its periodic refresh, off by
     # default) in every config.json, which would keep this off after updating.
@@ -371,11 +372,14 @@ DEFAULT = {
     # The Smart Actions shortcut: one take runs as a Smart Action (Control+S
     # on a Mac). "" = not set (Alt+S was another shortcut's at migration).
     "smart_actions_hotkey": SMART_ACTIONS_HOTKEY_DEFAULT,
+    # The meeting shortcut (Alt+M; Control+M on a Mac): starts recording a meeting as the Meetings page's
+    # Record button does - while one records it opens that meeting. "" = not set (_heal_meeting_hotkey).
+    "meeting_hotkey": hotkeys.MEETING_DEFAULT,
     # What transcribes a Smart Action: "" = same as Dictation | "cloud" =
     # Gusan Cloud (Pro, never in Privacy mode) | a Whisper id (hardware.MODEL_INFO).
     "smart_actions_speech_model": "",
     "smart_actions_web_search": False,      # Smart Actions may look current facts up (Gusan Cloud, Linkup) - off until turned on
-    "app_theme": "system",               # Settings > General > App look (row hidden in 2.0: light only)
+    "app_theme": "system",               # Settings > General > Appearance: "system" (the computer's) | "light" | "dark"
     "install_updates_on_quit": True,      # download a found update, run it at Quit
     # One quiet line on Home for 1.x upgraders ("Transcribe is now Gusan…"):
     # set by _migrate_config, cleared once Home has shown it (or it was closed).
@@ -394,8 +398,9 @@ DEFAULT = {
     "cloud_writer_model": "",
     "managed_speech_profile": "fast",
     # Bumped when the config shape changes in a way that needs migration
-    # (_migrate_config). 2 = Gusan 2.0; 3 = the Smart Actions shortcut (Alt+S).
-    "config_schema_version": 3,
+    # (_migrate_config). 2 = Gusan 2.0; 3 = the Smart Actions shortcut (Alt+S); 4 = dark mode (the Live
+    # Assistant card wears the app's look).
+    "config_schema_version": 4,
 }
 
 CONFIG_SCHEMA_VERSION = DEFAULT["config_schema_version"]
@@ -433,7 +438,27 @@ def _migrate_config(loaded, on_disk):
                      settings_apply.norm_hotkey(loaded.get("live_assist_hotkey"))}
             loaded["smart_actions_hotkey"] = ("" if SMART_ACTIONS_HOTKEY_DEFAULT in taken
                                               else SMART_ACTIONS_HOTKEY_DEFAULT)
+    if version < 4:
+        # Dark mode: the Live Assistant card wears the app's look. Its old default ("light", written into every
+        # config.json) becomes "system"; a card somebody turned dark stays dark.
+        if str(on_disk.get("live_assist_theme", "light") or "light").lower() == "light":
+            loaded["live_assist_theme"] = "system"
     loaded["config_schema_version"] = CONFIG_SCHEMA_VERSION
+
+
+# The other global shortcuts: the meeting one never shares their keys.
+_OTHER_HOTKEY_KEYS = ("hotkey", "live_assist_hotkey", "smart_actions_hotkey")
+
+
+def _heal_meeting_hotkey(loaded, on_disk):
+    """A config from before the meeting shortcut (2.1.11) gets Alt+M - unless another shortcut already has
+    those keys: then none ("", Settings and the Meetings page say "Set shortcut"). A shortcut the person
+    picked or cleared is kept. Every load (no schema step): the key is on disk from the first save on."""
+    if "meeting_hotkey" in on_disk:
+        return
+    taken = {settings_apply.norm_hotkey(loaded.get(k)) for k in _OTHER_HOTKEY_KEYS}
+    if settings_apply.norm_hotkey(loaded.get("meeting_hotkey")) in taken:
+        loaded["meeting_hotkey"] = ""
 
 storage.migrate_legacy_file(LEGACY_CONFIG_PATH, CONFIG_PATH)
 
@@ -608,6 +633,7 @@ def load_config():
         data = {}
     loaded = {**DEFAULT, **data}
     _migrate_config(loaded, data)
+    _heal_meeting_hotkey(loaded, data)
     # Every load (not a schema step: a current file must be healed too) - the 2.1.2 test builds' Gladia picks.
     import engine_choice
     engine_choice.heal_speech_settings(loaded)
@@ -1379,6 +1405,21 @@ class AudioRecorder:
         self._tick_at = 0.0
         self._dead_logged = False
         self._chunk_failures = 0
+        # self.audio is used (a take opens its streams) or replaced (rescan_devices / a meeting that follows a
+        # new device: _reinit_audio) one at a time. The app's mic check shares it (AppController sets
+        # mic_monitor): PortAudio is never made anew while that has a stream open.
+        self._pa_life = threading.RLock()
+        self.mic_monitor = None
+        # on_devices_moved({old index: new index}): PortAudio listed the devices again and microphones
+        # moved (the one picked in Settings follows). Any thread.
+        self.on_devices_moved = None
+        # A meeting (audio_follow.MeetingDevices): its microphone and the call follow the computer's
+        # devices. None for dictation.
+        self._devices = None
+        # A meeting part written to disk while it is recorded (meeting_spool.MeetingSpool): the session
+        # hands it over in meeting_spool before start_recording; the take keeps it as _spool.
+        self.meeting_spool = None
+        self._spool = None
 
     def set_paused(self, paused):
         """Pause or resume a meeting recording. Only a flag: the record thread
@@ -1999,12 +2040,294 @@ class AudioRecorder:
         read_n = max(cfg["chunk_size"], min(avail, sr * 2))
         return stream.read(read_n, exception_on_overflow=False)
 
+    # ── the computer's sound devices (Gusan 2.1.11: meetings follow them) ──
+    def _meeting_mic_index(self):
+        """A meeting's microphone: the one picked in Settings (its PortAudio index) when one is picked and
+        PortAudio lists it as a microphone now - else None, the default one."""
+        picked = cfg.get("input_device_index")
+        if isinstance(picked, bool) or picked in (None, "", "default", "default_mic", "smart_meeting",
+                                                  "system_only"):
+            return None
+        try:
+            idx = int(picked)
+            info = self.audio.get_device_info_by_index(idx)
+            if int(info.get("maxInputChannels") or 0) <= 0 or info.get("isLoopbackDevice"):
+                return None
+            return idx
+        except Exception:
+            return None
+
+    def _open_meeting_mic(self, args, mic_index):
+        """Open a meeting's microphone on ``mic_index`` - the default one when that is None or won't open
+        (``_mic_index_used`` says which)."""
+        self._mic_index_used = None
+        if mic_index is None:
+            return self.audio.open(**args)
+        try:
+            stream = self.audio.open(**dict(args, input_device_index=mic_index))
+            self._mic_index_used = mic_index
+            return stream
+        except Exception as e:
+            logger.warning("Meeting: the microphone picked in Settings wouldn't open (%s) - the default one", e)
+            return self.audio.open(**args)
+
+    @staticmethod
+    def _microphones(pa):
+        """[(index, name)] of the Settings microphone list on ``pa`` ([] when it can't be read)."""
+        try:
+            import mic_monitor
+            return list(mic_monitor.list_input_devices(pa))
+        except Exception:
+            return []
+
+    def _replace_pa(self, monitor=None):
+        """Let go of PortAudio and make a new one (its own list of devices and defaults). The caller holds
+        _pa_life (and the mic check's lock) and knows no stream is open. Returns {old: new} indices of
+        the microphones that moved."""
+        old = self.audio
+        before = AudioRecorder._microphones(old)
+        try:
+            old.terminate()
+        except Exception:
+            logger.debug("Audio devices: letting go of PortAudio failed", exc_info=True)
+        new, last = None, None
+        for _attempt in range(3):
+            try:
+                new = pyaudio.PyAudio()
+                break
+            except Exception as e:                  # (never seen; once more after a moment)
+                last = e
+                time.sleep(0.2)
+        if new is None:
+            raise last
+        self.audio = new
+        if monitor is not None and getattr(monitor, "_pa", None) is old:
+            monitor._pa = new                       # (the mic check shares it)
+        after = AudioRecorder._microphones(new)
+        index_of = {}
+        for i, name in after:
+            index_of.setdefault(name, i)
+        moved = {i: index_of[name] for i, name in before if name in index_of and index_of[name] != i}
+        logger.info("Audio devices: listed again (%d microphones, %d moved)", len(after), len(moved))
+        return moved
+
+    def _tell_moved(self, moved):
+        cb = getattr(self, "on_devices_moved", None)
+        if moved and callable(cb):
+            try:
+                cb(moved)
+            except Exception:
+                logger.debug("on_devices_moved failed", exc_info=True)
+
+    def _monitor_busy(self, monitor=None):
+        mon = getattr(self, "mic_monitor", None) if monitor is None else monitor
+        if mon is None:
+            return False
+        try:
+            return bool(mon.is_running() or getattr(mon, "_stream", None) is not None)
+        except Exception:
+            return True
+
+    def rescan_devices(self, monitor=None):
+        """Before a meeting: PortAudio keeps the devices it found when it started, so a headset or a mic
+        that came after that stays unseen (and a meeting records the default of back then). This makes
+        PortAudio anew - never while a take's streams may be open or the mic check runs (PortAudio closing
+        under a stream is a native crash). Returns {old index: new index} of the microphones that moved,
+        or None when it did nothing. Any thread (~0.25 s)."""
+        monitor = getattr(self, "mic_monitor", None) if monitor is None else monitor
+        life = getattr(self, "_pa_life", None)
+        mon_lock = getattr(monitor, "_pa_lock", None) if monitor is not None else None
+        for lock in (life, mon_lock):
+            if lock is not None:
+                lock.acquire()
+        try:
+            thread = getattr(self, "_record_thread", None)
+            if self.recording or (thread is not None and thread.is_alive()):
+                return None
+            if AudioRecorder._monitor_busy(self, monitor):
+                return None
+            moved = AudioRecorder._replace_pa(self, monitor)
+        finally:
+            for lock in (mon_lock, life):
+                if lock is not None:
+                    lock.release()
+        AudioRecorder._tell_moved(self, moved)
+        return moved
+
+    def _can_reinit_audio(self):
+        """May a meeting make PortAudio anew now? Only a real PortAudio, and never while the mic check has
+        a stream open (the meeting closes its own first)."""
+        try:
+            real = isinstance(self.audio, pyaudio.PyAudio)
+        except TypeError:
+            real = False
+        return bool(real and not AudioRecorder._monitor_busy(self))
+
+    def _reinit_audio(self):
+        """Record thread, a meeting's streams closed (audio_follow.MeetingDevices): a new PortAudio, so a
+        device plugged in mid-meeting can be opened. True when done."""
+        monitor = getattr(self, "mic_monitor", None)
+        mon_lock = getattr(monitor, "_pa_lock", None) if monitor is not None else None
+        life = getattr(self, "_pa_life", None)
+        if life is not None and not life.acquire(timeout=1.0):
+            return False
+        moved = None
+        try:
+            if mon_lock is not None and not mon_lock.acquire(timeout=0.5):
+                return False
+            try:
+                if not AudioRecorder._can_reinit_audio(self):
+                    return False
+                moved = AudioRecorder._replace_pa(self, monitor)
+            finally:
+                if mon_lock is not None:
+                    mon_lock.release()
+        except Exception:
+            logger.warning("Audio devices: PortAudio could not be made anew", exc_info=True)
+            return False
+        finally:
+            if life is not None:
+                life.release()
+        AudioRecorder._tell_moved(self, moved)
+        return True
+
+    def devices_changed(self, also_default=True):
+        """Has a device come since PortAudio listed them (a headset, a USB mic) - or, with ``also_default``,
+        is the computer's default microphone or output no longer PortAudio's? Windows: WinMM's live list
+        by name (a few ms); a Mac: Core Audio's defaults and device count. False when it can't be told."""
+        import audio_follow
+        live = audio_follow.system_state()
+        if not live:
+            return False
+        life = getattr(self, "_pa_life", None)
+        try:
+            if life is not None:
+                life.acquire()
+            try:
+                pa = self.audio
+                known_in, known_out, count = [], [], 0
+                mme = None
+                if sys.platform == "win32":
+                    mme = pa.get_host_api_info_by_type(pyaudio.paMME)["index"]
+                for i in range(int(pa.get_device_count())):
+                    d = pa.get_device_info_by_index(i)
+                    count += 1
+                    if mme is not None and d.get("hostApi") != mme:
+                        continue
+                    if int(d.get("maxInputChannels") or 0) > 0:
+                        known_in.append(audio_follow.name_key(audio_follow.device_name(d)))
+                    if int(d.get("maxOutputChannels") or 0) > 0:
+                        known_out.append(audio_follow.name_key(audio_follow.device_name(d)))
+                defaults = ((audio_follow.device_name(pa.get_default_input_device_info()),
+                             audio_follow.device_name(pa.get_default_output_device_info()))
+                            if also_default else None)
+            finally:
+                if life is not None:
+                    life.release()
+        except Exception:
+            logger.debug("Audio devices: PortAudio's list could not be read", exc_info=True)
+            return False
+        if "ins" in live:
+            for now, known in ((live.get("ins") or (), known_in), (live.get("outs") or (), known_out)):
+                new = [n for n in now if not any(audio_follow.same_device(n, k) for k in known)]
+                if new:
+                    logger.info("Audio devices: %d came after PortAudio listed them", len(new))
+                    return True
+        elif "count" in live and live.get("count") and int(live["count"]) != count:
+            logger.info("Audio devices: the Mac has %s devices, PortAudio listed %d", live["count"], count)
+            return True
+        if defaults is not None:
+            for preferred, default in ((live.get("in"), defaults[0]), (live.get("out"), defaults[1])):
+                if preferred and default and not audio_follow.same_device(preferred, default):
+                    logger.info("Audio devices: the computer's default changed since PortAudio listed them")
+                    return True
+        return False
+
+    def device_events(self):
+        """What the meeting's devices did since the last call: [(kind, device name)] - kind "mic" / "call"
+        (switched to it), "mic_lost" / "call_lost". Any thread."""
+        devs = getattr(self, "_devices", None)
+        try:
+            return devs.take_events() if devs is not None else []
+        except Exception:
+            return []
+
+    def call_quiet_seconds(self):
+        """How long the call has made no sound while the microphone heard someone (0 when unknown)."""
+        devs = getattr(self, "_devices", None)
+        try:
+            return float(devs.call_quiet_sec()) if devs is not None else 0.0
+        except Exception:
+            return 0.0
+
+    def _follow_devices(self, capture_mode, is_loopback, mic_index):
+        """A meeting's streams become audio_follow's stream look-alikes, so the microphone and the call
+        follow the computer's devices (and a microphone that goes away never ends the recording). The
+        raw streams stay when anything here fails."""
+        self._devices = None
+        if not getattr(self, "follow_devices", True):
+            return
+        watch = None
+        try:
+            import audio_follow
+            try:
+                real = isinstance(self.audio, pyaudio.PyAudio)
+            except TypeError:
+                real = False
+            if real and sys.platform in ("win32", "darwin"):
+                watch = audio_follow.DeviceWatch()
+            settings_mic = ""
+            if mic_index is not None:
+                try:
+                    settings_mic = audio_follow.device_name(self.audio.get_device_info_by_index(mic_index))
+                except Exception:
+                    settings_mic = ""
+            devs = audio_follow.MeetingDevices(
+                lambda: self.audio, pyaudio.paFloat32, chunk=cfg["chunk_size"], watch=watch,
+                can_reinit=lambda: AudioRecorder._can_reinit_audio(self),
+                reinit=lambda: AudioRecorder._reinit_audio(self), settings_mic=settings_mic)
+            mic_raw = self.mic_stream if is_loopback else self.stream
+            mic_name = settings_mic
+            if mic_raw is not None and not mic_name:
+                mic_name = audio_follow.default_input_name(self.audio)
+            if is_loopback:
+                loop_name = getattr(self, "_loopback_name", "") or ""
+                call = devs.call_input(self.stream, self._loopback_rate, self._loopback_channels, loop_name)
+                mic = devs.mic_input(mic_raw, cfg["sample_rate"], 1, mic_name) if mic_raw is not None else None
+                self.stream, self.mic_stream = call, mic
+                # the call now comes as 16 kHz mono (_loopback_to_mono16k passes it through)
+                self._loopback_rate, self._loopback_channels = cfg["sample_rate"], 1
+            else:
+                self.stream = devs.mic_input(mic_raw, cfg["sample_rate"], 1, mic_name)
+            self._devices = devs
+        except Exception:
+            logger.warning("Meeting: following the sound devices is off for this meeting", exc_info=True)
+            if watch is not None:
+                watch.stop()
+            self._devices = None
+
+    def _spool_piece(self, spool, idx, text, lang):
+        """A transcribed live piece goes to the meeting's part on disk: where it sits, its words, its
+        You / Them energy (a meeting that is never finished keeps them - meeting_spool)."""
+        try:
+            sr = float(cfg["sample_rate"])
+            with self._chunk_lock:
+                span = (getattr(self, "_chunk_spans", None) or {}).get(idx)
+                src = (getattr(self, "_chunk_sources", None) or {}).get(idx)
+            spool.add_piece(idx, span[0] / sr if span else None, span[1] / sr if span else None, text,
+                            lang or "", src[0] if src else None, src[1] if src else None)
+        except Exception:
+            logger.debug("A live piece was not saved with the recording", exc_info=True)
+
     def start_recording(self, capture_mode=None, language=None, speech=None):
         """``speech``: (backend, model[, cloud]) THIS take transcribes with - a Smart
         Action's own pick (engine_choice.smart_speech_session) or a Live Assistant
         session's (live_speech_session; ``cloud`` is its Gusan Cloud profile, "fast" or "best",
         or - for your own Google key - its Gemini model); None = the global cfg backend /
         whisper_model."""
+        life = getattr(self, "_pa_life", None)      # (never while rescan_devices replaces self.audio)
+        if life is not None:
+            life.acquire()
         try:
             self._start_recording_impl(capture_mode, language, speech)
         except BaseException:
@@ -2012,6 +2335,9 @@ class AudioRecorder:
             # idle sweep would never free the speech model again.
             self.recording = False
             raise
+        finally:
+            if life is not None:
+                life.release()
 
     def _start_recording_impl(self, capture_mode=None, language=None, speech=None):
         self.recording = True
@@ -2033,6 +2359,9 @@ class AudioRecorder:
         self._capture_mode = capture_mode
         self._loopback_peak = 0.0
         self.paused = False
+        # A meeting's part on disk (meeting_spool), handed over by the session for THIS take only.
+        spool, self.meeting_spool, self._spool = getattr(self, "meeting_spool", None), None, None
+        self._devices = None
         with self._chunk_lock:
             self._chunk_frames     = []
             self._chunk_results    = {}
@@ -2087,6 +2416,9 @@ class AudioRecorder:
         self._loopback_channels = 1
 
         actual_device_index = None
+        # A meeting's microphone: the one picked in Settings when there is one (else the default).
+        mic_index = None
+        self._loopback_name = ""
 
         if capture_mode in ("smart_meeting", "system_only"):
             discovered = self._find_default_loopback_device()
@@ -2097,14 +2429,18 @@ class AudioRecorder:
                     dev_info = self.audio.get_device_info_by_index(actual_device_index)
                     self._loopback_rate = int(dev_info.get("defaultSampleRate", 48000))
                     self._loopback_channels = int(dev_info.get("maxInputChannels", 2))
+                    name = dev_info.get("name", "")
+                    self._loopback_name = (name.decode("utf-8", errors="ignore") if isinstance(name, bytes)
+                                           else str(name or ""))
                 except Exception as e:
                     logger.warning("Could not query loopback device rate/channels: %s", e)
                     self._loopback_rate = 48000
                     self._loopback_channels = 2
             else:
                 logger.warning("System-audio capture selected but no loopback device discovered. Recording default microphone only.")
+                actual_device_index = mic_index = AudioRecorder._meeting_mic_index(self)
         elif capture_mode in ("default_mic", "default"):
-            actual_device_index = None
+            actual_device_index = mic_index = AudioRecorder._meeting_mic_index(self)
         else:
             # Dictation / legacy: input_device_index may name a specific input
             # device. Meeting-mode sentinels left over in this key are treated as
@@ -2126,7 +2462,11 @@ class AudioRecorder:
             open_args["channels"] = self._loopback_channels
             open_args["frames_per_buffer"] = int(cfg["chunk_size"] * (self._loopback_rate / cfg["sample_rate"]))
             
-        self.stream = self.audio.open(**open_args)
+        if mic_index is not None:
+            self.stream = AudioRecorder._open_meeting_mic(
+                self, {k: v for k, v in open_args.items() if k != "input_device_index"}, mic_index)
+        else:
+            self.stream = self.audio.open(**open_args)
 
         # If primary stream is a loopback, open a secondary stream for the default
         # microphone - but only in smart_meeting mode. "system_only" deliberately
@@ -2140,7 +2480,8 @@ class AudioRecorder:
                     "input": True,
                     "frames_per_buffer": cfg["chunk_size"],
                 }
-                self.mic_stream = self.audio.open(**mic_args)
+                mic_index = AudioRecorder._meeting_mic_index(self)
+                self.mic_stream = AudioRecorder._open_meeting_mic(self, mic_args, mic_index)
                 logger.info("Successfully opened secondary default mic stream to mix with loopback!")
             except Exception as me:
                 logger.warning("Could not open secondary mic stream: %s", me)
@@ -2155,6 +2496,16 @@ class AudioRecorder:
             self._dead_logged = False
             if is_loopback and self.mic_stream is not None:
                 self._tracks = recorder_tracks.DualTrackBuffer(self._full_audio_max)
+            # The microphone and the call follow the computer's devices (audio_follow); the part is
+            # written to disk while it is recorded (meeting_spool).
+            AudioRecorder._follow_devices(self, capture_mode, is_loopback,
+                                          getattr(self, "_mic_index_used", None) if mic_index is not None else None)
+            if spool is not None:
+                try:
+                    if spool.begin(two_tracks=self._tracks is not None, mode=capture_mode):
+                        self._spool = spool
+                except Exception:
+                    logger.warning("The meeting can't be saved while it is recorded", exc_info=True)
 
         self.stop_requested = False
         self._got_audio = False
@@ -2297,6 +2648,12 @@ class AudioRecorder:
             self._record_loop(is_loopback, stream, mic_stream)
         finally:
             self._drain_and_close_streams(is_loopback, stream, mic_stream)
+            spool = getattr(self, "_spool", None)
+            if spool is not None:
+                try:
+                    spool.close()            # what is left goes to disk (the session keeps or removes it)
+                except Exception:
+                    logger.debug("closing the meeting's part on disk failed", exc_info=True)
 
     def _drain_and_close_streams(self, is_loopback, stream, mic_stream):
         """Pull any tail audio still in PortAudio's buffers, then close the
@@ -2388,6 +2745,10 @@ class AudioRecorder:
         src_mic_e = 0.0
         src_call_e = 0.0
         was_paused = False
+        # A meeting's part on disk (meeting_spool) gets every read that is kept; the call's outputs
+        # changed (audio_follow: ``switches``) - its sound waiting to be mixed is from before.
+        spool = getattr(self, "_spool", None)
+        call_switches = getattr(stream, "switches", 0)
         # System sound only: a silent loopback delivers no frames at all, so
         # the meters get one zero reading when it goes quiet (not a frozen bar).
         call_quiet = False
@@ -2466,6 +2827,9 @@ class AudioRecorder:
                     arr_mic = np.frombuffer(mic_data, dtype=np.float32)
                     loop_chunk = self._read_available_loopback(stream)
                     mic_part, call_part = arr_mic, loop_chunk
+                    if getattr(stream, "switches", 0) != call_switches:
+                        call_switches = getattr(stream, "switches", 0)
+                        loop_fifo = loop_fifo[:0]
                     if len(loop_chunk) > 0:
                         loop_fifo = np.concatenate([loop_fifo, loop_chunk])
                         # Clock-drift safety valve only - generous, because
@@ -2612,11 +2976,13 @@ class AudioRecorder:
 
                 vad_buf.append(data)
                 tracks = getattr(self, "_tracks", None)
+                kept = False
                 with self._chunk_lock:
                     self._chunk_frames.append(data)
                     # Retain the full wall-clock track (post-meeting diarization)
                     # until the memory cap, then stop growing it.
                     if not self._full_audio_truncated:
+                        kept = True
                         if tracks is not None and two_sources and mic_part is not None:
                             # Mic + system sound: keep the two sources apart
                             # (the same memory as the mix); get_full_audio()
@@ -2627,6 +2993,8 @@ class AudioRecorder:
                         self._full_audio_len += len(arr)
                         if self._full_audio_len > self._full_audio_max:
                             self._full_audio_truncated = True
+                if kept and spool is not None and len(arr):
+                    spool.add(arr, mic_part if two_sources else None, sys_used, mix_n)
 
                 if is_speech:
                     speech_sec  += this_dur
@@ -2706,6 +3074,9 @@ class AudioRecorder:
                     for i in range(self._chunk_idx)
                     if i in self._chunk_results and self._chunk_results[i]
                 )
+            spool = getattr(self, "_spool", None)
+            if spool is not None and text:
+                AudioRecorder._spool_piece(self, spool, idx, text, lang)
             if self.on_partial and partial:
                 self.on_partial(partial)
             if lang and not lang.startswith("!") and self.on_lang_detected:
@@ -4163,7 +4534,30 @@ class AudioRecorder:
                 self.mic_stream.close()
             except Exception:
                 pass
-        self.audio.terminate()
+        life = getattr(self, "_pa_life", None)      # (not while rescan_devices replaces it)
+        if life is not None and life.acquire(timeout=2.0):
+            try:
+                self.audio.terminate()
+            finally:
+                life.release()
+        else:
+            self.audio.terminate()
+
+def _mac_notification(title, message, run=None):
+    """macOS: a Notification Center banner through AppleScript (the fallback when the menu bar icon
+    can't show one). Never raises; True when it was handed over."""
+    import subprocess
+
+    def quoted(text):
+        return '"' + str(text or "").replace("\\", "\\\\").replace('"', '\\"') + '"'
+    script = "display notification %s with title %s" % (quoted(message), quoted(title))
+    try:
+        (run or subprocess.run)(["osascript", "-e", script], timeout=5, check=False, capture_output=True)
+        return True
+    except Exception:
+        logger.debug("The macOS notification didn't show", exc_info=True)
+        return False
+
 
 # ── Dynamic Pillow Tray Icon Generator ───────────────────────────────────────
 def make_icon(color="#3b82f6", size=64):
@@ -4280,6 +4674,7 @@ class AppController(QObject):
     sig_hotkey = Signal()
     sig_assist_hotkey = Signal()
     sig_smart_hotkey = Signal()         # the Smart Actions shortcut (one dictation as a Smart Action)
+    sig_meeting_hotkey = Signal()       # the meeting shortcut (start recording a meeting)
     sig_enter = Signal()
     sig_escape = Signal()
     sig_update_available = Signal(str)  # tag of newer version
@@ -4366,17 +4761,8 @@ class AppController(QObject):
         except Exception:
             logger.debug("could not reset meeting_audio_mode", exc_info=True)
 
-        # Load stylesheet. Resolve the checkbox tick asset to an absolute path
-        # so it renders regardless of the process working directory (packaged
-        # builds and autostart can launch from an arbitrary CWD).
-        from ui.styles import STYLESHEET
-        _check_svg = resource_path("assets", "check.svg").replace("\\", "/")
-        _chevron_svg = resource_path("assets", "chevron.svg").replace("\\", "/")
-        self.style_content = (
-            STYLESHEET
-            .replace('url("assets/check.svg")', f'url("{_check_svg}")')
-            .replace('url("assets/chevron.svg")', f'url("{_chevron_svg}")')
-        )
+        # (The 1.x stylesheet is no longer built here: style_content makes it in the active look when
+        # one of its two windows asks - see the property below.)
 
         # Setup pure business Audio Recorder
         self.recorder = AudioRecorder()
@@ -4399,6 +4785,9 @@ class AppController(QObject):
         # action the take it started runs (_start / _stop_impl).
         self._registered_smart_hotkey = None
         self._smart_listener = None
+        # The meeting shortcut (meeting_hotkey): its registration (Windows) or listener (pynput).
+        self._registered_meeting_hotkey = None
+        self._meeting_listener = None
         self._smart_next = False
         self._oneshot_action = None
         # A Smart take transcribed with its own speech model: load Dictation's
@@ -4473,6 +4862,10 @@ class AppController(QObject):
         except Exception:
             logger.warning("Microphone check unavailable", exc_info=True)
             self.mic_monitor = None
+        # PortAudio is made anew (a device plugged in since it started) only while the mic check has no
+        # stream open, and the microphone picked in Settings follows its new index.
+        self.recorder.mic_monitor = self.mic_monitor
+        self.recorder.on_devices_moved = self._on_devices_moved
         self.calendar = None                 # calendar_service.CalendarService when configured
         self._reminder = None                # the calendar reminder toast, once shown
 
@@ -4502,6 +4895,8 @@ class AppController(QObject):
         self._setup_assist_hotkey(self.cfg.get("live_assist_hotkey", ""))
         self.sig_smart_hotkey.connect(self._on_smart_hotkey, Qt.QueuedConnection)
         self._setup_smart_hotkey(self.cfg.get("smart_actions_hotkey", ""))
+        self.sig_meeting_hotkey.connect(self._on_meeting_hotkey, Qt.QueuedConnection)
+        self._setup_meeting_hotkey(self.cfg.get("meeting_hotkey", ""))
         self.sig_enter.connect(self._on_enter, Qt.QueuedConnection)
         self.sig_escape.connect(self._on_escape, Qt.QueuedConnection)
         self.sig_update_available.connect(self._prompt_update, Qt.QueuedConnection)
@@ -4555,6 +4950,11 @@ class AppController(QObject):
         # Qt just hiding the windows (GusanApplication.event).
         if hasattr(self.qapp, "quit_filter"):
             self.qapp.quit_filter = self._on_quit_event
+        # A meeting the app never finished (closed by force, crashed, restarted mid-call): its part on
+        # disk becomes its recording now, and its notes are written with the pending ones below.
+        self._still_card = None
+        threading.Thread(target=self._recover_interrupted_meetings, daemon=True,
+                         name="gusan-recover").start()
         # Meeting notes a Quit left for later: written once startup work is done.
         self._pending_notes_queue = []
         QTimer.singleShot(PENDING_NOTES_DELAY_MS, self._write_pending_notes)
@@ -4943,6 +5343,9 @@ class AppController(QObject):
             self._build_tray_menu()
         except Exception:
             logger.debug("tray rebuild failed", exc_info=True)
+        # Invite friends (ui/invite_hub.py): its state follows the account. Made here - on the first auth answer,
+        # after the start - not at start-up; the tray's row follows its changes.
+        AppController._invites_follow_auth(self)
         # The Gusan window: sidebar plan badge + every built page (Settings
         # re-reads the API keys here, so an account switch shows the new
         # account's keys).
@@ -4952,6 +5355,27 @@ class AppController(QObject):
                 mw.refresh_account()
             except Exception:
                 logger.debug("main window account refresh failed", exc_info=True)
+
+    def _invites_follow_auth(self):
+        """The invite hub hears the auth change (a new account reads its own cached state and asks the server a
+        few seconds later; a plan change re-draws). Quiet when it fails."""
+        try:
+            from ui import invite_hub
+            hub = invite_hub.existing(self)
+            if hub is None:
+                if not getattr(getattr(self, "auth", None), "is_authenticated", False) is True:
+                    return                      # a guest: nothing to follow until someone signs in
+                hub = invite_hub.hub(self)
+            if hub is None:
+                return
+            hub.on_auth_changed()
+            tm = getattr(self, "tray_menu", None)
+            if tm is not None and getattr(self, "_invite_tray_hooked", None) is not tm:
+                hub.changed.connect(tm.refresh_invite)
+                self._invite_tray_hooked = tm
+                tm.refresh_invite()
+        except Exception:
+            logger.debug("invite hub refresh failed", exc_info=True)
 
     def start_google_login(self):
         def _run():
@@ -6063,6 +6487,19 @@ class AppController(QObject):
         else:
             self._update_failed(info)
 
+    @property
+    def style_content(self):
+        """The 1.x stylesheet (ui/styles.py) in the active light / dark look, its pictures' paths resolved:
+        the Pro window and the macOS permissions guide wear it (theme.sheet keeps it current there)."""
+        from ui import styles
+        return styles.stylesheet()
+
+    def apply_app_theme(self):
+        """Settings > General > Appearance (app_theme) changed: every open window turns light or dark now
+        (ui/theme.py switch: no restart)."""
+        from ui import theme
+        theme.set_preference(self.cfg.get("app_theme", "system"))
+
     def _on_own_setting_changed(self, key):
         """sig_setting_changed for the controller's own services."""
         if key == "install_updates_on_quit" and self.cfg.get(key, True):
@@ -6509,26 +6946,31 @@ class AppController(QObject):
         dlg.setWindowTitle(f"Let {APP_NAME} work on your Mac")
         dlg.setAttribute(Qt.WA_DeleteOnClose, True)
         dlg.setMinimumWidth(460)
-        if hasattr(self, "style_content"):
-            dlg.setStyleSheet(self.style_content)
+        from ui import styles, theme
+        theme.sheet(dlg, styles.stylesheet)              # the 1.x sheet, in the active look (and after a switch)
         lay = QVBoxLayout(dlg)
         lay.setContentsMargins(24, 20, 24, 20)
         lay.setSpacing(12)
         title = QLabel(f"Let {APP_NAME} work on your Mac", dlg)
-        title.setStyleSheet("font-size: 17px; font-weight: 700; color: #0f172a;")
+        theme.sheet(title, "font-size: 17px; font-weight: 700; color: @ink;")
         lay.addWidget(title)
         sub = QLabel(
             f"macOS asks you to switch these on once. Click <b>Turn on</b>: System Settings opens "
             f"with {who} already in the list. Flip its switch, then come back here.", dlg)
         sub.setWordWrap(True)
-        sub.setStyleSheet("color: #475569;")
+        theme.sheet(sub, "color: @text3;")
         lay.addWidget(sub)
+
+        def why_text(lb, name, why):
+            lb.setText(f"<b>{name}</b><br><span style='color:{theme.qss_color('muted')}'>{why}</span>")
 
         chips, buttons = {}, {}
         for key, name, why in rows_spec:
             row = QHBoxLayout()
             row.setSpacing(10)
-            txt = QLabel(f"<b>{name}</b><br><span style='color:#64748b'>{why}</span>", dlg)
+            txt = QLabel(dlg)
+            why_text(txt, name, why)
+            theme.on_change(txt, lambda lb=txt, n=name, w=why: why_text(lb, n, w))
             txt.setWordWrap(True)
             row.addWidget(txt, 1)
             chip = QLabel(dlg)
@@ -6566,13 +7008,13 @@ class AppController(QObject):
                 on = st.get(key)
                 if on is True:
                     chips[key].setText("✓ On")
-                    chips[key].setStyleSheet(CHIP + "color: #15803d; background: #dcfce7;")
+                    theme.sheet(chips[key], CHIP + "color: @ok-tx; background: @ok-sub;")
                 elif on is False:
                     chips[key].setText("Off")
-                    chips[key].setStyleSheet(CHIP + "color: #b91c1c; background: #fee2e2;")
+                    theme.sheet(chips[key], CHIP + "color: @red-tx; background: @red-sub;")
                 else:
                     chips[key].setText("Not on yet")
-                    chips[key].setStyleSheet(CHIP + "color: #475569; background: #f1f5f9;")
+                    theme.sheet(chips[key], CHIP + "color: @text3; background: @bg2;")
                 buttons[key].setVisible(on is not True)
             last = state["last"]
             if last is not None:
@@ -6589,16 +7031,16 @@ class AppController(QObject):
                                  "then open them again so macOS applies the change.")
                 else:
                     note.setText(f"Almost done: restart {APP_NAME} so macOS applies the change.")
-                note.setStyleSheet("color: #b45309;")
+                theme.sheet(note, "color: @warn-tx;")
             elif not P.missing(st):
                 note.setText(f"All set. Press {self._hotkey_text()} in any app to dictate.")
-                note.setStyleSheet("color: #15803d; font-weight: 600;")
+                theme.sheet(note, "color: @ok-tx; font-weight: 600;")
             elif blocked:
                 note.setText("Until Accessibility and Input Monitoring are on, the shortcut does nothing.")
-                note.setStyleSheet("color: #64748b;")
+                theme.sheet(note, "color: @muted;")
             else:
                 note.setText(f"The microphone is asked for the first time {APP_NAME} records.")
-                note.setStyleSheet("color: #64748b;")
+                theme.sheet(note, "color: @muted;")
             restart.setVisible(state["needs_restart"] and not from_source)
             done.setText("Done" if not P.missing(st) or state["needs_restart"] else "Later")
 
@@ -6914,6 +7356,71 @@ class AppController(QObject):
         finally:
             self._smart_next = False
 
+    def _release_meeting_hotkey(self):
+        hk = getattr(self, "_registered_meeting_hotkey", None)
+        if hk is not None:
+            try:
+                AppController._remove_win_hotkey(self, hk)
+            except Exception:
+                pass
+            self._registered_meeting_hotkey = None
+        listener = getattr(self, "_meeting_listener", None)
+        if listener is not None:
+            try:
+                listener.stop()
+            except Exception:
+                pass
+            self._meeting_listener = None
+
+    def _setup_meeting_hotkey(self, hotkey):
+        """Fourth global hotkey, the meeting shortcut (default Alt+M, Control+M on a Mac): starts recording a
+        meeting (_on_meeting_hotkey). Keyboard only, never on the dictation's, the Live Assistant's or the Smart
+        Actions' keys; kept apart from them like the Smart Actions one. True when it registered."""
+        self._release_meeting_hotkey()
+        hotkey = settings_apply.norm_hotkey(hotkey)
+        taken = {settings_apply.norm_hotkey(self.cfg.get(k)) for k in _OTHER_HOTKEY_KEYS}
+        if (not hotkey or hotkey in taken or hotkey.startswith("mouse:")
+                or hotkeys.is_bare_typing_key(hotkey)):
+            return False
+        try:
+            if sys.platform == "win32":
+                AppController._add_win_hotkey(self, hotkey, lambda: self.sig_meeting_hotkey.emit())
+                self._registered_meeting_hotkey = hotkey
+            else:
+                from pynput import keyboard as pynput_keyboard
+                hotkeys.prepare_pynput_listeners()
+                listener = pynput_keyboard.GlobalHotKeys({
+                    self._to_pynput_hotkey(hotkey): lambda: self.sig_meeting_hotkey.emit(),
+                })
+                listener.daemon = True
+                listener.start()
+                self._meeting_listener = listener
+            logger.info("Registered meeting hotkey: %s", hotkey)
+            return True
+        except Exception as e:
+            logger.warning("Could not register meeting hotkey %s: %s", hotkey, e)
+            return False
+
+    def _on_meeting_hotkey(self):
+        """GUI thread: the meeting shortcut. Starts recording a meeting exactly as the Meetings page's Record
+        button does (MeetingsPage.record through on_open(record=True)): the start card's name, people, Record
+        from and language, the one-time recording notice and every check the button runs. The window comes up
+        on Meetings first (the notice needs it on screen; the live view follows). While a meeting records -
+        paused included, a Live Assistant session too - it opens Meetings on that meeting: never stops it."""
+        if getattr(self, "_hotkeys_suspended", False) is True:
+            return                  # a shortcut is being captured (a late hook event)
+        if getattr(self, "_quitting", False):
+            return
+        s = getattr(self, "meeting_session", None)
+        if s is not None and getattr(s, "phase", "idle") in ("recording", "paused"):
+            logger.info("[main] meeting shortcut: a meeting is recording - opening it")
+            self.show_main("meetings", view="live")
+            return
+        logger.info("[main] meeting shortcut: Record")
+        win = self.show_main("meetings")
+        if win is not None:
+            win.open("meetings", record=True)
+
     def _ensure_live_assist(self):
         """The Live Assistant card (ui/live_assist.py), built on first use and
         fed from the meeting session's live pipeline."""
@@ -6968,6 +7475,7 @@ class AppController(QObject):
             self._unregister_mouse_listener()
             self._setup_assist_hotkey("")          # releases it, registers nothing
             self._release_smart_hotkey()
+            self._release_meeting_hotkey()
         else:
             self.apply_tray_bindings()
         return True
@@ -7010,6 +7518,7 @@ class AppController(QObject):
         # of letting both fire on one keypress.
         self._setup_assist_hotkey(self.cfg.get("live_assist_hotkey", ""))
         self._setup_smart_hotkey(self.cfg.get("smart_actions_hotkey", ""))
+        self._setup_meeting_hotkey(self.cfg.get("meeting_hotkey", ""))
 
     # ── Event Callbacks ──
     def _on_levels(self, levels):
@@ -8303,6 +8812,7 @@ class AppController(QObject):
         self._unregister_kbd_hotkey()
         self._unregister_mouse_listener()
         self._release_smart_hotkey()
+        self._release_meeting_hotkey()
         self._recorder_down = True
         self.recorder.shutdown()
         self.qapp.quit()
@@ -8729,6 +9239,140 @@ class AppController(QObject):
         self.show_tray_hint("Record this meeting?", f"{title} is starting.",
                             on_click=lambda: self.show_main("meetings"))
 
+    # ── meetings: the computer's devices, a meeting never finished, the hourly reminder (2.1.11) ──
+    def _on_devices_moved(self, moved):
+        """PortAudio listed the devices again (any thread): the microphone picked in Settings keeps
+        pointing at the same device."""
+        def apply():
+            cur = self.cfg.get("input_device_index")
+            if isinstance(cur, str) and cur.isdigit():
+                cur = int(cur)
+            if isinstance(cur, int) and not isinstance(cur, bool) and cur in moved:
+                self.cfg["input_device_index"] = moved[cur]
+                logger.info("Audio devices: the microphone picked in Settings moved (%s -> %s)", cur, moved[cur])
+                self.schedule_config_save()
+        self._run_on_gui(apply)
+
+    def rescan_audio_devices(self, also_default=True):
+        """Before a meeting opens its devices: when a device came since PortAudio listed them (a headset,
+        a USB mic) - or the computer's default is no longer PortAudio's - PortAudio lists them again
+        (AudioRecorder.rescan_devices). Never during a take or the mic check. Returns {old: new} indices
+        that moved, or None when nothing was listed again."""
+        rec = getattr(self, "recorder", None)
+        if rec is None or not callable(getattr(rec, "rescan_devices", None)):
+            return None
+        try:
+            if not rec.devices_changed(also_default=also_default):
+                return None
+            return rec.rescan_devices(getattr(self, "mic_monitor", None))
+        except Exception:
+            logger.warning("Audio devices: listing them again failed", exc_info=True)
+            return None
+
+    def _recover_interrupted_meetings(self):
+        """Startup, on a worker: a meeting part still on disk from a run that never finished it becomes
+        that meeting's recording, and its notes are queued (meeting_session.recover_interrupted)."""
+        try:
+            import meeting_session
+            s = getattr(self, "meeting_session", None)
+            active = s.active_dir() if s is not None else None
+            found = meeting_session.recover_interrupted(skip=[active] if active else [])
+        except Exception:
+            logger.warning("Recovering an interrupted meeting failed", exc_info=True)
+            return
+        if found:
+            self._run_on_gui(self.notify_history_changed)
+
+    def show_meeting_notice(self, title, text="", icon="info"):
+        """A short notice about the meeting being recorded ("Switched to ..."): a toast in the Gusan
+        window while it is on screen. False when nothing showed it."""
+        win = getattr(self, "main_win", None)
+        try:
+            if win is None or not win.isVisible() or win.isMinimized():
+                return False
+            from ui.components import celebrate
+            celebrate.show_toast(win, title, text, icon=icon)
+            return True
+        except Exception:
+            logger.debug("The meeting notice didn't show", exc_info=True)
+            return False
+
+    def system_notify(self, title, message, on_click=None):
+        """A notification that is seen with Gusan's window hidden: the tray icon's on Windows (the
+        Action Center keeps it), on a Mac a Notification Center banner - through the tray icon, or
+        AppleScript's when the menu bar icon can't show messages."""
+        if sys.platform == "darwin":
+            try:
+                usable = QSystemTrayIcon.isSystemTrayAvailable() and QSystemTrayIcon.supportsMessages()
+            except Exception:
+                usable = False
+            if not usable or getattr(self, "tray_icon", None) is None:
+                threading.Thread(target=_mac_notification, args=(title, message), daemon=True,
+                                 name="gusan-notify").start()
+                return True
+        try:
+            self.show_tray_hint(title, message, on_click=on_click)
+            return True
+        except Exception:
+            logger.debug("The notification didn't show", exc_info=True)
+            return False
+
+    def show_still_recording(self, hours, title=""):
+        """Every full hour of a meeting's recording (meeting_session._watch_hours): the "Still recording
+        · 1 h" card with Stop and Keep recording, and a system notification for a hidden window."""
+        hours = max(1, int(hours))
+        heading = "Still recording · %d h" % hours
+        try:
+            tray = getattr(self, "tray_icon", None)
+            self._ensure_still_card().show_hours(hours, title, anchor=tray.geometry() if tray is not None else None)
+        except Exception:
+            logger.warning("The still-recording card didn't show", exc_info=True)
+        body = ("%s is still being recorded." % title) if title else "Your meeting is still being recorded."
+        self.system_notify(heading, body + " Stop it or keep recording.", on_click=self._front_still_card)
+
+    def _ensure_still_card(self):
+        card = getattr(self, "_still_card", None)
+        if card is None:
+            from ui.floating.still_recording import StillRecordingCard
+            card = StillRecordingCard(main_app=self)
+            card.stop_clicked.connect(self._on_still_stop)
+            card.keep_clicked.connect(self._on_still_keep)
+            self.sig_setting_changed.connect(card.on_setting_changed)
+            s = getattr(self, "meeting_session", None)
+            if s is not None:
+                s.state_changed.connect(self._on_session_state_for_still)
+            self._still_card = card
+        return card
+
+    def _on_session_state_for_still(self, state):
+        """The meeting stopped (any way): the card goes."""
+        card = getattr(self, "_still_card", None)
+        if card is not None and state not in ("recording", "paused"):
+            try:
+                card.hide_card()
+            except RuntimeError:
+                pass
+
+    def _front_still_card(self):
+        """The notification was clicked: the card takes the keyboard (Stop / Keep recording)."""
+        card = getattr(self, "_still_card", None)
+        try:
+            if card is not None and card.isVisible():
+                card.take_focus()
+                return
+        except RuntimeError:
+            pass
+        self.show_main("meetings")
+
+    def _on_still_stop(self):
+        s = getattr(self, "meeting_session", None)
+        if s is not None and getattr(s, "state", "") == "recording":
+            logger.info("Meeting: stopped from the still-recording card")
+            s.stop()
+
+    def _on_still_keep(self):
+        logger.info("Meeting: kept recording (asked again at the next full hour)")
+
     def _ensure_reminder(self):
         """The one reminder toast, built the first time a meeting is due."""
         toast = getattr(self, "_reminder", None)
@@ -9095,14 +9739,14 @@ def main():
     # the data folder stays "Transcribe" - see storage.py.)
     qapp.setApplicationName(APP_NAME)
     qapp.setQuitOnLastWindowClosed(False) # Tray-resident background app constraint!
-    # One light look whatever the OS is set to: the Fusion style and an explicit light palette,
-    # before any window (a pop-up used to take its panel from a dark OS and its words from our
-    # stylesheet). The title bars stay the OS's. See ui/theme.py, "One light look".
+    # Light or dark (app_theme: the computer's choice by default): the Fusion style and an explicit
+    # palette from the chosen token set, before any window (a pop-up used to take its panel from a
+    # dark OS and its words from our stylesheet). See ui/theme.py, "Light and dark".
     try:
-        from ui.theme import install_light_scheme
-        install_light_scheme(qapp)
+        from ui.theme import install_scheme
+        install_scheme(qapp, cfg.get("app_theme", "system"))
     except Exception as e:
-        logging.warning("Could not set the light palette: %s", e)
+        logging.warning("Could not set the colour scheme: %s", e)
     # Every dropdown's list as one clean card: Windows 11 rounds the list window itself (ui/popup_corners.py).
     try:
         from ui import popup_corners

@@ -43,6 +43,7 @@ import invite_context
 import meeting_session
 import meeting_store
 import rich_text
+import speaker_map
 import speech_langs
 
 logger = logging.getLogger("transcribe")
@@ -230,7 +231,7 @@ def _is_short(line):
     return len(line) < DISTINCT_CHARS and len(line.split()) < DISTINCT_WORDS
 
 
-def time_marked(transcript, segments_doc, line_gap=TIME_GAP, inner_gap=TIME_GAP_INSIDE):
+def time_marked(transcript, segments_doc, line_gap=TIME_GAP, inner_gap=TIME_GAP_INSIDE, labels=None):
     """(the transcript with "[mm:ss]" marks, ok). Each line of the saved transcript is matched, word for word, to
     the segments segments.json kept (consecutive segments of one speaker make one line; the names that come after
     the notes only changed the labels, never the words) and gets the clock time of its first segment at the start
@@ -238,7 +239,8 @@ def time_marked(transcript, segments_doc, line_gap=TIME_GAP, inner_gap=TIME_GAP_
     mark. A line that does not match gets no mark and the marks stop until a "— Resumed —" line (never a wrong
     time); a line is looked for up to RESYNC segments ahead of where the last one ended (a segment the saved
     text dropped). A short line that fits two places in that look-ahead ("Yes.") gets no mark: it could be either.
-    ``ok``: every line matched. Without segments the transcript comes back as it is, (…, False)."""
+    ``ok``: every line matched. Without segments the transcript comes back as it is, (…, False). ``labels``: the
+    meeting's speaker labels (speaker_map: a renamed speaker's name is a label like "Speaker 1")."""
     segs, firsts = _flatten(segments_doc)
     if not segs:
         return transcript or "", False
@@ -259,7 +261,7 @@ def time_marked(transcript, segments_doc, line_gap=TIME_GAP, inner_gap=TIME_GAP_
         elif after_marker:
             starts = [f for f in firsts if f >= j]
         after_marker = False
-        label_body = rich_text.split_speaker(s)
+        label_body = rich_text.split_speaker(s, labels)
         tries = [label_body] + ([("", s)] if label_body[0] else [])
         hit = None
         for k in starts:
@@ -312,14 +314,15 @@ class Material:
     transcript: str = ""
     segments: object = None
     transcript_file: bool = False       # transcript.txt is on disk (else only the live pieces are)
-    labelled: bool = False              # the transcript says who spoke (You / Them / Speaker N)
+    labelled: bool = False              # the transcript says who spoke (You / Them / Speaker N / a name)
     me: str = ""                        # the recorder's first name (the notes call "You" by it); "" when unknown
+    labels: list = field(default_factory=list)      # the speakers' labels as transcript.txt writes them (speaker_map)
     _marked: object = None
 
     def marked(self):
         """(transcript with time marks, ok) - worked out once."""
         if self._marked is None:
-            self._marked = time_marked(self.transcript, self.segments)
+            self._marked = time_marked(self.transcript, self.segments, labels=self.labels)
         return self._marked
 
 
@@ -334,6 +337,7 @@ def load_material(folder):
     except (TypeError, ValueError):
         duration = 0
     transcript = meeting_store.load_transcript(folder)
+    labels = list(speaker_map.from_text(transcript, meta).raw_labels)      # (a renamed speaker's name is a label)
     return Material(
         folder=str(folder), title=str(meta.get("title") or ""), people=list(people),
         agenda=str(meta.get("agenda") or ""), language=str(meta.get("language") or ""),
@@ -341,7 +345,7 @@ def load_material(folder):
         notes=meeting_store.load_notes(folder), my_notes=meeting_store.load_my_notes(folder),
         transcript=transcript, segments=meeting_store.load_segments(folder),
         transcript_file=meeting_store.has_transcript_file(folder),
-        labelled=bool(_LABELLED_RE.search(transcript)))
+        labelled=bool(labels) or bool(_LABELLED_RE.search(transcript)), labels=labels)
 
 
 # ── the prompt ───────────────────────────────────────────────────────────────

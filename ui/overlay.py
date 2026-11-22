@@ -29,8 +29,8 @@ typing):
   out keeps its own words.
 * Glass that adapts to what is behind it, as Apple's does ("auto", the
   default): frosted light glass over bright content, smoked dark glass over
-  dark content, picked per dictation; the system light/dark theme when there
-  is no backdrop to look at. A blurred LIVE sample of what is behind, a tint
+  dark content, picked per dictation; Gusan's own look (light or dark,
+  Settings > Appearance - ui/theme.py) when there is no backdrop to look at. A blurred LIVE sample of what is behind, a tint
   that gets denser where the glyphs need it, a crisp one-pixel edge and a
   soft shadow - nothing hazy.
 * Live, because a snapshot goes stale: whatever moves behind the capsule, or
@@ -209,15 +209,23 @@ _PALETTES = {
 }
 
 AUTO_LIGHT_LUMA = 0.62         # "auto": light glass above this backdrop brightness
+# The white of a highlight, a tick or a "!" on a coloured badge: the same on both glasses.
 _WHITE = QColor(255, 255, 255)
 
 
+def _white(alpha=255):
+    c = QColor(_WHITE)
+    c.setAlpha(alpha)
+    return c
+
+
 def _system_prefers_light():
-    """The OS light/dark app theme (Qt reads it on Windows and macOS)."""
+    """Gusan's own look (ui/theme.py: the app_theme setting, or the OS it follows) is light."""
     try:
-        return QApplication.styleHints().colorScheme() == Qt.ColorScheme.Light
+        from ui import theme
+        return theme.scheme() == "light"
     except Exception:
-        return False
+        return True
 
 
 def _native_windows():
@@ -407,6 +415,11 @@ class Overlay(QWidget):
         self._waiting = False             # shown, but invisible until the first sample
         self._shown_at = 0.0
         self._theme = "dark"
+        try:
+            from ui import theme as app_theme
+            app_theme.manager().changed.connect(self._on_app_look)   # "auto" with no sample: the app's look
+        except Exception:
+            logger.debug("overlay: no app look to follow", exc_info=True)
         self._dpr = 1.0
         self._glass_cache = {}            # composed glass per capsule size / sample
         self._sprites = {}                # static content pieces
@@ -1129,6 +1142,10 @@ class Overlay(QWidget):
         self._theme = self._pick_theme()
         self.update()
 
+    def _on_app_look(self, _name=None):
+        """Gusan turned light or dark (ui/theme.py): a bar on screen re-picks its glass."""
+        self.apply_prefs()
+
     def _pick_theme(self):
         """"dark" / "light" pin the glass; anything else is "auto" (the
         default): light over bright content, dark over dark - or the system
@@ -1138,7 +1155,7 @@ class Overlay(QWidget):
             return pref
         if self._bd_luma is not None:
             return "light" if self._bd_luma > AUTO_LIGHT_LUMA else "dark"
-        return "light" if _system_prefers_light() else "dark"
+        return "light" if _system_prefers_light() else "dark"         # no sample: the app's look
 
     def _image(self, w, h):
         """A transparent image covering w x h logical px at device resolution."""
@@ -1229,8 +1246,8 @@ class Overlay(QWidget):
         # top, where the light comes from) and a hairline outside it.
         top_a, bottom_a = pal["edge"]
         edge = QLinearGradient(rect.topLeft(), rect.bottomLeft())
-        edge.setColorAt(0.0, QColor(255, 255, 255, top_a))
-        edge.setColorAt(1.0, QColor(255, 255, 255, bottom_a))
+        edge.setColorAt(0.0, _white(top_a))
+        edge.setColorAt(1.0, _white(bottom_a))
         px = 1.0 / d
         inner = QPainterPath()
         inner.addRoundedRect(rect.adjusted(px * 1.5, px * 1.5, -px * 1.5, -px * 1.5),
@@ -2011,7 +2028,7 @@ class Overlay(QWidget):
             check = QPainterPath(a)
             check.lineTo(b)
             check.lineTo(e)
-            p.setPen(QPen(QColor(255, 255, 255), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setPen(QPen(_white(), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             p.setBrush(Qt.NoBrush)
             if prog >= 1.0:
                 p.drawPath(check)
@@ -2034,10 +2051,10 @@ class Overlay(QWidget):
             sp.setPen(Qt.NoPen)
             sp.setBrush(QColor(pal["err"]))
             sp.drawEllipse(QPointF(10, 10), 9.5, 9.5)
-            sp.setPen(QPen(QColor(255, 255, 255), 2.2, Qt.SolidLine, Qt.RoundCap))
+            sp.setPen(QPen(_white(), 2.2, Qt.SolidLine, Qt.RoundCap))
             sp.drawLine(QPointF(10, 5.6), QPointF(10, 10.6))
             sp.setPen(Qt.NoPen)
-            sp.setBrush(QColor(255, 255, 255))
+            sp.setBrush(_white())
             sp.drawEllipse(QPointF(10, 14.2), 1.25, 1.25)
 
         self._blit(p, c.x() - 10.0, cy - 10.0, self._sprite(("err-badge", pal["err"]), 20, 20, draw_badge))

@@ -33,6 +33,16 @@ TIER_GUEST = "guest"
 TIER_FREE = "free"
 TIER_PRO = "pro"
 
+# my_entitlement's plan when Pro comes only from Invite friends (a claimed month, or a friend's 2 weeks): is_pro is
+# true, so the tier is TIER_PRO like any Pro; current_period_end is when it ends (no renewal, no Stripe portal).
+PLAN_INVITE = "invite"
+
+
+def is_invite_plan(auth):
+    """True when this account's Pro comes only from invites (my_entitlement plan "invite")."""
+    return bool(auth is not None and getattr(auth, "is_pro", False)
+                and str(getattr(auth, "plan", None) or "").lower() == PLAN_INVITE)
+
 # Admin status is now server-authoritative (profiles.is_admin, set only via SQL)
 # and delivered through the my_entitlement RPC as auth.is_admin. There is NO admin
 # email in the client source, so editing the open-source app can't make anyone an

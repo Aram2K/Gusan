@@ -1,10 +1,16 @@
-# Premium Light Mode Stylesheet for Transcribe PySide6 Overhaul
+"""The 1.x stylesheet, still worn by the two small windows built on it: the Pro window (ui/pro_dialog.py)
+and the macOS permissions guide (main.py). Its colours are ui/theme.py tokens (``@token``), so it follows
+the light / dark look like everything else: ``stylesheet()`` is the sheet in the active look, and a window
+that wears it sets it with ``theme.sheet(window, styles.stylesheet)`` (kept current after a switch).
 
-STYLESHEET = """
+Only the rules those two windows use are kept (the 1.x cards, tabs, lists, badges and drop zone went with
+the 1.x windows). ``STYLESHEET`` (the sheet in the active look) is kept for old callers."""
+
+TEMPLATE = """
 /* Global Styles */
 QWidget {
-    background-color: #f8fafc;
-    color: #1e293b;
+    background-color: @bg;
+    color: @text;
     font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, "Outfit", "Inter", Roboto, sans-serif;
     font-size: 13px;
 }
@@ -12,42 +18,7 @@ QWidget {
 /* Main Window and Dialogs - soft gradient backdrop gives the glass panels depth */
 QMainWindow, QDialog {
     background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 #eaf0f8, stop:0.5 #f4f7fb, stop:1 #e7eef7);
-}
-
-/* Card / Group Panel Frames - frosted "liquid glass": translucent gradient fill
-   with a subtle highlight border so panels read as layered glass. */
-QFrame#cardFrame {
-    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 rgba(255, 255, 255, 230), stop:1 rgba(241, 245, 249, 195));
-    border: 1px solid rgba(203, 213, 225, 140);
-    border-radius: 16px;
-}
-QFrame#cardFrame:disabled {
-    background-color: rgba(248, 250, 252, 160);
-    border-color: rgba(203, 213, 225, 110);
-}
-QFrame#activeCardFrame {
-    background-color: #ffffff;
-    border: 2px solid #3b82f6;
-    border-radius: 12px;
-}
-QFrame#activeCardFrame:disabled {
-    background-color: #f8fafc;
-    border-color: #cbd5e1;
-}
-QFrame#overlayCard {
-    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 rgba(255, 255, 255, 225), stop:1 rgba(248, 250, 252, 195));
-    border: 1px solid rgba(255, 255, 255, 210);
-    border-radius: 20px;
-}
-/* Pro account card - warm frosted glass with a faint gold edge */
-QFrame#glassCard {
-    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 rgba(255, 251, 235, 230), stop:1 rgba(254, 243, 199, 170));
-    border: 1px solid rgba(245, 158, 11, 90);
-    border-radius: 16px;
+        stop:0 @window-a, stop:0.5 @window-b, stop:1 @window-c);
 }
 
 /* Labels */
@@ -55,114 +26,90 @@ QLabel {
     background: transparent;
 }
 QLabel:disabled {
-    color: #94a3b8;
-}
-QLabel#titleLabel {
-    font-size: 20px;
-    font-weight: bold;
-    color: #0f172a;
-}
-QLabel#titleLabel:disabled {
-    color: #94a3b8;
-}
-QLabel#subtitleLabel {
-    font-size: 12px;
-    color: #64748b;
-}
-QLabel#subtitleLabel:disabled {
-    color: #cbd5e1;
-}
-QLabel#badgeLabel {
-    background-color: rgba(59, 130, 246, 15);
-    color: #1d4ed8;
-    border: 1px solid rgba(59, 130, 246, 50);
-    border-radius: 4px;
-    font-size: 11px;
-    font-weight: bold;
-    padding: 2px 6px;
+    color: @faint;
 }
 
 /* Buttons */
 QPushButton {
-    background-color: #ffffff;
-    color: #334155;
-    border: 1px solid #cbd5e1;
+    background-color: @surface;
+    color: @text2;
+    border: 1px solid @line2;
     border-radius: 8px;
     padding: 8px 16px;
     font-weight: 500;
 }
 QPushButton:hover {
-    background-color: #f8fafc;
-    border-color: #3b82f6;
-    color: #1e293b;
+    background-color: @bg;
+    border-color: @blue-l;
+    color: @text;
 }
 QPushButton:pressed {
-    background-color: #f1f5f9;
+    background-color: @bg2;
 }
 QPushButton:disabled {
-    background-color: #f1f5f9;
-    color: #94a3b8;
-    border-color: #e2e8f0;
+    background-color: @bg2;
+    color: @faint;
+    border-color: @line;
 }
 
 /* Primary Accent Buttons */
 QPushButton#primaryButton {
-    background-color: #3b82f6;
-    color: #ffffff;
-    border: 1px solid #2563eb;
+    background-color: @cta;
+    color: @on-accent;
+    border: 1px solid @cta-line;
 }
 QPushButton#primaryButton:hover {
-    background-color: #2563eb;
-    border-color: #60a5fa;
+    background-color: @cta-h;
+    border-color: @cta-hl;
 }
 QPushButton#primaryButton:pressed {
-    background-color: #1d4ed8;
+    background-color: @cta-p;
 }
 QPushButton#primaryButton:disabled {
-    background-color: rgba(59, 130, 246, 40);
-    color: rgba(255, 255, 255, 180);
+    background-color: @cta-off;
+    color: @cta-off-tx;
     border-color: transparent;
 }
 
 /* Input Fields */
 QLineEdit, QTextEdit, QPlainTextEdit {
-    background-color: #ffffff;
-    color: #0f172a;
-    border: 1px solid #cbd5e1;
+    background-color: @input;
+    color: @ink;
+    border: 1px solid @line2;
     border-radius: 8px;
     padding: 8px 12px;
-    selection-background-color: #2563eb;
-    selection-color: #ffffff;
+    selection-background-color: @blue;
+    selection-color: @on-accent;
 }
 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {
-    border: 1px solid #3b82f6;
-    background-color: #ffffff;
+    border: 1px solid @blue-l;
+    background-color: @input;
 }
 QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled {
-    background-color: #f1f5f9;
-    color: #94a3b8;
-    border-color: #e2e8f0;
+    background-color: @bg2;
+    color: @faint;
+    border-color: @line;
 }
 
 /* Combobox (Dropdown) - Fully Custom Styled to Fix Windows Glitches */
 QComboBox {
-    background-color: #ffffff;
-    border: 1px solid #cbd5e1;
+    background-color: @input;
+    border: 1px solid @line2;
     border-radius: 8px;
     padding: 8px 36px 8px 12px;
     min-width: 120px;
-    color: #1e293b;
+    color: @text;
 }
 QComboBox:hover {
-    border-color: #3b82f6;
+    border-color: @blue-l;
 }
 QComboBox:focus {
-    border-color: #3b82f6;
+    border-color: @blue-l;
 }
 QComboBox:disabled {
-    background-color: #f1f5f9;
-    color: #94a3b8;
-    border-color: #e2e8f0;
+    background-color: @bg2;
+    color: @faint;
+    border-color: @line;
 }
 QComboBox::drop-down {
     subcontrol-origin: padding;
@@ -188,18 +135,18 @@ QComboBox {
    corners and draws the border. The list inside has no border or rounding of its own - a rounded card inside the
    square window showed square corners and a square shadow around it. */
 QComboBoxPrivateContainer {
-    background: #ffffff;
-    border: 1px solid #d5dce6;
+    background: @popup;
+    border: 1px solid @popup-line;
 }
 QComboBox QAbstractItemView {
-    background-color: #ffffff;
+    background-color: @popup;
     border: none;
     border-radius: 0px;
-    selection-background-color: #eef4ff;
-    selection-color: #1d4ed8;
+    selection-background-color: @sel-sub;
+    selection-color: @blue-tx;
     outline: 0;
     padding: 4px;
-    color: #1e293b;
+    color: @text;
 }
 QComboBox QAbstractItemView::item {
     min-height: 26px;           /* 34 px with the padding: the same rows as the model pickers */
@@ -207,12 +154,12 @@ QComboBox QAbstractItemView::item {
     border-radius: 6px;
 }
 QComboBox QAbstractItemView::item:selected {
-    background-color: #eef4ff;
-    color: #1d4ed8;
+    background-color: @sel-sub;
+    color: @blue-tx;
 }
 QComboBox QAbstractItemView::item:hover {
-    background-color: #f1f5f9;
-    color: #0f172a;
+    background-color: @bg2;
+    color: @ink;
 }
 
 /* Scroll areas - visible scrollbars for long settings panels */
@@ -221,211 +168,102 @@ QScrollArea {
     border: none;
 }
 QScrollBar:vertical {
-    background: #f1f5f9;
+    background: @bg2;
     width: 10px;
     margin: 2px;
     border-radius: 5px;
 }
 QScrollBar::handle:vertical {
-    background: #94a3b8;
+    background: @faint;
     min-height: 28px;
     border-radius: 5px;
 }
 QScrollBar::handle:vertical:hover {
-    background: #64748b;
+    background: @muted;
 }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
     height: 0;
 }
 
-/* Tab Widget and Bar */
-QTabWidget::pane {
-    border: 1px solid #e2e8f0;
-    border-radius: 12px;
-    background-color: #ffffff;
-    top: -1px;
-}
-QTabBar::tab {
-    background-color: transparent;
-    color: #64748b;
-    padding: 10px 20px;
-    border-bottom: 2px solid transparent;
-    font-weight: 500;
-}
-QTabBar::tab:hover {
-    color: #0f172a;
-}
-QTabBar::tab:selected {
-    color: #3b82f6;
-    border-bottom: 2px solid #3b82f6;
-}
-
-/* Progress Bar */
-QProgressBar {
-    background-color: #f1f5f9;
-    border: 1px solid #e2e8f0;
-    border-radius: 6px;
-    text-align: center;
-    color: #1e293b;
-    font-weight: bold;
-}
-QProgressBar::chunk {
-    background-color: QLinearGradient(x1: 0, y1: 0, x2: 1, y2: 0, stop: 0 #3b82f6, stop: 1 #60a5fa);
-    border-radius: 5px;
-}
-
 /* Scrollbars */
 QScrollBar:vertical {
-    background-color: #f8fafc;
+    background-color: @bg;
     width: 8px;
     margin: 0px;
 }
 QScrollBar::handle:vertical {
-    background-color: #cbd5e1;
+    background-color: @line2;
     min-height: 20px;
     border-radius: 4px;
 }
 QScrollBar::handle:vertical:hover {
-    background-color: #3b82f6;
+    background-color: @blue-l;
 }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
     height: 0px;
 }
 QScrollBar:horizontal {
-    background-color: #f8fafc;
+    background-color: @bg;
     height: 8px;
     margin: 0px;
 }
 QScrollBar::handle:horizontal {
-    background-color: #cbd5e1;
+    background-color: @line2;
     min-width: 20px;
     border-radius: 4px;
 }
 QScrollBar::handle:horizontal:hover {
-    background-color: #3b82f6;
+    background-color: @blue-l;
 }
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
     width: 0px;
 }
 
-/* Lists */
-QListWidget {
-    background-color: #ffffff;
-    border: 1px solid #cbd5e1;
-    border-radius: 8px;
-    padding: 4px;
-}
-QListWidget::item {
-    padding: 8px 12px;
-    border-radius: 6px;
-    margin-bottom: 2px;
-    color: #334155;
-}
-QListWidget::item:hover {
-    background-color: #f1f5f9;
-    color: #0f172a;
-}
-QListWidget::item:selected {
-    background-color: #2563eb;
-    color: #ffffff;
-}
-
 /* Checkboxes */
 QCheckBox {
     spacing: 8px;
-    color: #334155;
+    color: @text2;
     font-weight: 500;
 }
 QCheckBox::indicator {
     width: 18px;
     height: 18px;
-    border: 1.5px solid #cbd5e1;
+    border: 1.5px solid @line2;
     border-radius: 6px;
-    background-color: #ffffff;
+    background-color: @input;
 }
 QCheckBox::indicator:hover {
-    border-color: #3b82f6;
-    background-color: #f8fafc;
+    border-color: @blue-l;
+    background-color: @bg;
 }
 QCheckBox::indicator:checked {
-    border-color: #3b82f6;
-    background-color: #3b82f6;
+    border-color: @cta;
+    background-color: @cta;
     image: url("assets/check.svg");
 }
 QCheckBox::indicator:checked:hover {
-    border-color: #2563eb;
-    background-color: #2563eb;
+    border-color: @cta-h;
+    background-color: @cta-h;
 }
 QCheckBox::indicator:disabled {
-    background-color: #f1f5f9;
-    border-color: #e2e8f0;
-}
-
-/* ── Tier pills ───────────────────────────────────────────────────────────── */
-/* PRO - purple glass pill. */
-QLabel#proBadge {
-    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 rgba(168, 85, 247, 235), stop:1 rgba(126, 34, 206, 235));
-    color: #ffffff;
-    border: 1px solid rgba(255, 255, 255, 150);
-    border-radius: 9px;
-    font-size: 11px;
-    font-weight: bold;
-    padding: 2px 10px;
-}
-/* FREE - green pill. */
-QLabel#freeBadge {
-    background-color: rgba(34, 197, 94, 45);
-    color: #15803d;
-    border: 1px solid rgba(34, 197, 94, 120);
-    border-radius: 9px;
-    font-size: 11px;
-    font-weight: bold;
-    padding: 2px 10px;
-}
-/* GUEST - neutral gray pill. */
-QLabel#guestBadge {
-    background-color: rgba(148, 163, 184, 45);
-    color: #475569;
-    border: 1px solid rgba(148, 163, 184, 90);
-    border-radius: 9px;
-    font-size: 11px;
-    font-weight: bold;
-    padding: 2px 10px;
-}
-
-/* Hero call-to-action: the one shiny button per screen (Transcribe Files). */
-QPushButton#heroButton {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                                stop:0 #3b82f6, stop:1 #8b5cf6);
-    color: #ffffff;
-    font-size: 14px;
-    font-weight: bold;
-    border: none;
-    border-radius: 10px;
-    padding: 10px 22px;
-}
-QPushButton#heroButton:hover {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                                stop:0 #2563eb, stop:1 #7c3aed);
-}
-QPushButton#heroButton:pressed {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                                stop:0 #1d4ed8, stop:1 #6d28d9);
-}
-QPushButton#heroButton:disabled {
-    background: #cbd5e1;
-    color: #f8fafc;
-}
-
-/* File drop zone on the Transcribe Files tab. */
-QFrame#dropZone {
-    background-color: rgba(59, 130, 246, 14);
-    border: 2px dashed #93c5fd;
-    border-radius: 12px;
-}
-QFrame#dropZone:hover {
-    background-color: rgba(59, 130, 246, 28);
-    border-color: #3b82f6;
+    background-color: @bg2;
+    border-color: @line;
 }
 """
+
+
+def stylesheet():
+    """The 1.x sheet in the active look, its pictures' paths resolved (any working folder)."""
+    from app_info import resource_path
+    from ui import theme
+    check = resource_path("assets", "check.svg").replace("\\", "/")
+    chevron = resource_path("assets", "chevron_dark.svg" if theme.is_dark() else "chevron.svg").replace("\\", "/")
+    return (theme.fill(TEMPLATE)
+            .replace('url("assets/check.svg")', 'url("%s")' % check)
+            .replace('url("assets/chevron.svg")', 'url("%s")' % chevron))
+
+
+def __getattr__(name):
+    if name == "STYLESHEET":
+        return stylesheet()
+    raise AttributeError(name)

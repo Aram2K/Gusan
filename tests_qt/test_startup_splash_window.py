@@ -1,5 +1,5 @@
-"""The loading card's window (splash_window.py), offscreen: its look is the app's one
-light look whatever the OS is set to, it sits where the app's window opens, at every
+"""The loading card's window (splash_window.py), offscreen: its look is the app's - light or
+dark, as the app_theme setting and the computer say, never Qt's palette - it sits where the app's window opens, at every
 display scale, and the real card process starts, ends on the app's word and goes
 with the app. Nothing is shown on a screen: QT_QPA_PLATFORM=offscreen (tests_qt/conftest.py).
 """
@@ -36,12 +36,12 @@ def _lerp(a, b, f):
     return tuple(a[i] + (b[i] - a[i]) * f for i in range(len(a)))
 
 
-# ── The look: fixed light tokens ─────────────────────────────────────────────
+# ── The look: the theme's light and dark tokens ──────────────────────────────
 def test_the_colours_are_the_themes_tokens():
-    from ui.theme import TOKENS, qcolor
+    from ui.theme import LIGHT, qcolor
 
-    def rgb(name):
-        c = qcolor(name)
+    def rgb(name, look="light"):
+        c = qcolor(name, look)
         return (c.red(), c.green(), c.blue())
     assert sw.INK == rgb("ink")
     assert sw.MUTED == rgb("muted")
@@ -49,8 +49,55 @@ def test_the_colours_are_the_themes_tokens():
     assert sw.BLUE_L == rgb("blue-l")
     assert sw.GLASS_TOP[:3] == rgb("glass-a")          # the plate is the glass tokens' colours, denser
     assert sw.GLASS_BOTTOM[:3] == rgb("glass-b")
-    assert sw.GLASS_TOP[3] > qcolor("glass-a").alpha() and sw.GLASS_BOTTOM[3] > qcolor("glass-b").alpha()
-    assert TOKENS["ink"] == "#0f172a"
+    assert sw.GLASS_TOP[3] > qcolor("glass-a", "light").alpha() and sw.GLASS_BOTTOM[3] > qcolor("glass-b", "light").alpha()
+    assert LIGHT["ink"] == "#0f172a"
+    dark = sw.LOOKS["dark"]
+    for key, token in (("ink", "ink"), ("muted", "muted"), ("blue", "blue"), ("blue_l", "blue-l")):
+        assert dark[key] == rgb(token, "dark"), key
+
+
+def _plate_lum(img, x=80, y=290):
+    c = img.pixelColor(x, y)
+    return (c.red() + c.green() + c.blue()) / 3.0, c.alpha()
+
+
+def test_the_dark_card_is_dark_glass_with_light_words(qapp):
+    img = sw.render(sw.SplashArt(look="dark"), 2.0)
+    for x, y in ((80, 290), (280, 290), (80, 70), (280, 70)):
+        c = img.pixelColor(x, y)
+        assert max(c.red(), c.green(), c.blue()) <= 60 and c.alpha() >= 236, (x, y, c.getRgb())   # dark, opaque
+        assert min(c.red(), c.green(), c.blue()) >= 14                                            # never pure black
+    # the name is the dark look's ink: the brightest pixels of its line are near-white, far from the plate
+    word = [img.pixelColor(x, y) for x in range(130, 230) for y in range(int(sw.WORD_CY) - 12, int(sw.WORD_CY) + 12)]
+    brightest = max(word, key=lambda c: c.red() + c.green() + c.blue())
+    assert min(brightest.red(), brightest.green(), brightest.blue()) >= 200, brightest.getRgb()
+    light = sw.render(sw.SplashArt(look="light"), 2.0)
+    assert _plate_lum(light)[0] > 236 and _plate_lum(img)[0] < 60
+
+
+def test_the_look_is_the_settings_then_the_computers(qapp, tmp_path):
+    assert sw.pick_look("light", os_dark=True) == "light"
+    assert sw.pick_look("dark", os_dark=False) == "dark"
+    assert sw.pick_look("system", os_dark=True) == "dark"
+    assert sw.pick_look("system", os_dark=False) == "light"
+    cfg = tmp_path / "config.json"
+    for stored, want in (("dark", "dark"), ("light", "light"), ("system", "system"), ("purple", "system")):
+        cfg.write_text(json.dumps({"app_theme": stored, "hotkey": "alt+r"}), encoding="utf-8")
+        assert sw.config_theme(str(cfg)) == want
+    assert sw.config_theme(str(tmp_path / "missing.json")) == "system"            # a first start: the OS decides
+    cfg.write_text("{not json", encoding="utf-8")
+    assert sw.config_theme(str(cfg)) == "system"
+    # the folder is storage's own, without importing it
+    import storage
+    assert sw.DATA_DIR_NAME == storage.APP_DIR_NAME
+    assert sw._data_dir(env={"TRANSCRIBE_APP_DATA_DIR": str(tmp_path)}) == str(tmp_path)
+    assert sw._data_dir(env={"APPDATA": "C:/Users/x/AppData/Roaming"}, platform="win32") == \
+        os.path.join("C:/Users/x/AppData/Roaming", storage.APP_DIR_NAME)
+    assert os.path.normcase(sw._data_dir()) == os.path.normcase(str(storage.app_data_dir()))
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"app_theme": "dark"}), encoding="utf-8")
+    with mock.patch.dict(os.environ, {"TRANSCRIBE_APP_DATA_DIR": str(tmp_path)}):
+        assert sw.pick_look() == "dark"
 
 
 def test_the_card_is_light_glass_with_the_tokens_colours(qapp):
@@ -65,7 +112,8 @@ def test_the_card_is_light_glass_with_the_tokens_colours(qapp):
         assert min(got.red(), got.green(), got.blue()) >= 236          # light, never grey or dark
 
 
-def test_a_dark_os_changes_nothing(qapp):
+def test_qts_palette_changes_nothing(qapp):
+    """The card's look is chosen (pick_look), never taken from the palette Qt got from the OS."""
     qapp.setPalette(os_light_palette())
     light = sw.render(sw.SplashArt(), 2.0)
     qapp.setPalette(os_dark_palette())

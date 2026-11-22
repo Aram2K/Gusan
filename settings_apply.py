@@ -23,6 +23,12 @@ Side effects
                          rolled back when it can't register); refused when it
                          equals the dictation or Live Assistant hotkey (and
                          those two are refused when they equal it)
+    meeting_hotkey       the meeting shortcut (default Alt+M; starts recording a
+                         meeting): re-register it (app._setup_meeting_hotkey;
+                         rolled back when it can't register); refused when it
+                         equals any of the three above, a mouse button or a
+                         lone typing key (and those three are refused when they
+                         equal it)
     smart_actions_speech_model   what transcribes a Smart Action: "" (same as
                          Dictation), "cloud" (Gusan Cloud; refused in Privacy
                          mode - Pro is checked when a take starts) or a
@@ -48,6 +54,8 @@ Side effects
                          what the OS really has (autostart.is_registered)
     backend, whisper_model   preload the local speech model
     overlay_theme, overlay_private   restyle the dictation bar if it is showing
+    app_theme            "system" | "light" | "dark" (anything else is refused):
+                         app.apply_app_theme() turns every open window now
     live_assist_private  apply to an open Live Assistant card
     everything else      just written and saved
 
@@ -63,6 +71,7 @@ logger = logging.getLogger("transcribe")
 HOTKEY = "hotkey"
 ASSIST_HOTKEY = "live_assist_hotkey"
 SMART_HOTKEY = "smart_actions_hotkey"   # ui/pages/smart_actions.py HOTKEY_KEY
+MEETING_HOTKEY = "meeting_hotkey"       # ui/pages/meetings.py HOTKEY_KEY
 SMART_SPEECH = "smart_actions_speech_model"   # engine_choice.SMART_SPEECH_KEY
 SMART_SPEECH_CLOUD = "cloud"                   # engine_choice.SMART_SPEECH_CLOUD
 SMART_SPEECH_CLOUDS = ("cloud", "cloud:best")  # engine_choice.SMART_SPEECH_CLOUD_PROFILES: Fast, Best accuracy
@@ -77,6 +86,8 @@ PRIVACY = "privacy_mode"
 LAUNCH_AT_LOGIN = "launch_at_login"     # autostart.CFG_KEY (never in DEFAULT)
 PRELOAD_KEYS = ("backend", "whisper_model")
 OVERLAY_KEYS = ("overlay_theme", "overlay_private")
+APP_THEME = "app_theme"                 # ui/theme.py PREFERENCES
+APP_THEMES = ("system", "light", "dark")
 LIVE_ASSIST_PRIVATE = "live_assist_private"
 
 # Keys a page must never write: account state the controller owns.
@@ -156,13 +167,15 @@ def apply(app, updates, autostart_mod=None):
     results = {}
     changed = []
     wrote = False
-    want = {"hotkey": False, "assist": False, "smart": False, "preload": False, "overlay": False,
-            "la_private": False}
+    want = {"hotkey": False, "assist": False, "smart": False, "meeting": False, "preload": False,
+            "overlay": False, "la_private": False, "app_theme": False}
     old_hotkey = cfg.get(HOTKEY)
     old_assist = cfg.get(ASSIST_HOTKEY, "")
     old_smart = cfg.get(SMART_HOTKEY, "")
+    old_meeting = cfg.get(MEETING_HOTKEY, "")
     updates = dict(updates)
     smart_after = norm_hotkey(updates.get(SMART_HOTKEY, cfg.get(SMART_HOTKEY)))
+    meeting_after = norm_hotkey(updates.get(MEETING_HOTKEY, cfg.get(MEETING_HOTKEY)))
     # Privacy first: it decides whether a cloud backend in the same call is allowed.
     items = sorted(updates.items(), key=lambda kv: kv[0] != PRIVACY)
 
@@ -217,15 +230,24 @@ def apply(app, updates, autostart_mod=None):
         if key == ASSIST_HOTKEY:
             value = norm_hotkey(value)
             dictation = norm_hotkey(updates.get(HOTKEY, cfg.get(HOTKEY)))
-            if value and (value == dictation or value == smart_after
+            if value and (value == dictation or value == smart_after or value == meeting_after
                           or hotkeys.is_bare_typing_key(value)):
-                results[key] = False            # would fire with dictation / Smart Actions / while typing
+                results[key] = False            # would fire with dictation / Smart Actions / a meeting / while typing
                 continue
 
         if key == SMART_HOTKEY:
             value = norm_hotkey(value)
             taken = (norm_hotkey(updates.get(HOTKEY, cfg.get(HOTKEY))),
-                     norm_hotkey(updates.get(ASSIST_HOTKEY, cfg.get(ASSIST_HOTKEY))))
+                     norm_hotkey(updates.get(ASSIST_HOTKEY, cfg.get(ASSIST_HOTKEY))), meeting_after)
+            if value and (value in taken or value.startswith("mouse:")
+                          or hotkeys.is_bare_typing_key(value)):
+                results[key] = False            # another shortcut's keys / not a key combo
+                continue
+
+        if key == MEETING_HOTKEY:
+            value = norm_hotkey(value)
+            taken = (norm_hotkey(updates.get(HOTKEY, cfg.get(HOTKEY))),
+                     norm_hotkey(updates.get(ASSIST_HOTKEY, cfg.get(ASSIST_HOTKEY))), smart_after)
             if value and (value in taken or value.startswith("mouse:")
                           or hotkeys.is_bare_typing_key(value)):
                 results[key] = False            # another shortcut's keys / not a key combo
@@ -249,6 +271,12 @@ def apply(app, updates, autostart_mod=None):
                 results[key] = False            # unknown, or a cloud model in Privacy mode
                 continue
 
+        if key == APP_THEME:
+            value = str(value or "").strip().lower()
+            if value not in APP_THEMES:
+                results[key] = False            # not a look the app has
+                continue
+
         if key in SPEECH_LANGUAGE_KEYS:
             value = _language_value(key, value)
             if value is None:
@@ -261,10 +289,11 @@ def apply(app, updates, autostart_mod=None):
                 results[key] = False            # a lone typing key would fire while you type
                 continue
             assist = norm_hotkey(updates.get(ASSIST_HOTKEY, cfg.get(ASSIST_HOTKEY)))
-            if (assist and value == assist) or (smart_after and value == smart_after):
-                # Taking the Live Assistant's (or Smart Actions') key would
-                # silently unbind it (their setup refuses a clash): change
-                # that one first.
+            if ((assist and value == assist) or (smart_after and value == smart_after)
+                    or (meeting_after and value == meeting_after)):
+                # Taking the Live Assistant's (or Smart Actions', or the
+                # meeting's) key would silently unbind it (their setup
+                # refuses a clash): change that one first.
                 results[key] = False
                 continue
 
@@ -281,18 +310,27 @@ def apply(app, updates, autostart_mod=None):
             want["assist"] = True
         elif key == SMART_HOTKEY:
             want["smart"] = True
+        elif key == MEETING_HOTKEY:
+            want["meeting"] = True
         if key in PRELOAD_KEYS:
             want["preload"] = True
         if key in OVERLAY_KEYS:
             want["overlay"] = True
         if key == LIVE_ASSIST_PRIVATE:
             want["la_private"] = True
+        if key == APP_THEME:
+            want["app_theme"] = True
 
     # ── side effects, once each ──
     def register_assist():
         ok, reg = _try("live_assist_hotkey", app._setup_assist_hotkey, cfg.get(ASSIST_HOTKEY, ""))
         return bool(ok and (reg or not cfg.get(ASSIST_HOTKEY)))
 
+    meeting_fn = getattr(app, "_setup_meeting_hotkey", None)
+    any_other = want["hotkey"] or want["assist"] or want["smart"]
+    if callable(meeting_fn) and want["meeting"] and any_other:
+        # Keys trading places in one call: the meeting's old keys are let go before another shortcut takes them.
+        _try("meeting_hotkey release", meeting_fn, "")
     if want["hotkey"]:
         if old_assist and norm_hotkey(cfg[HOTKEY]) == norm_hotkey(old_assist):
             # A swap (dictation takes the Live Assistant's old key): free that
@@ -334,12 +372,28 @@ def apply(app, updates, autostart_mod=None):
                 _try("smart_actions_hotkey rollback", smart_fn, old_smart)
                 if SMART_HOTKEY in changed:
                     changed.remove(SMART_HOTKEY)
+    if callable(meeting_fn) and (any_other or want["meeting"]):
+        # The meeting shortcut never shares keys with the other three: registered again after any of them changed.
+        ok, reg = _try("meeting_hotkey", meeting_fn, cfg.get(MEETING_HOTKEY, ""))
+        meeting_ok = bool(ok and (reg or not cfg.get(MEETING_HOTKEY)))
+        if want["meeting"]:
+            results[MEETING_HOTKEY] = meeting_ok
+            if not meeting_ok:
+                # Couldn't register: keep the meeting shortcut that worked.
+                cfg[MEETING_HOTKEY] = old_meeting
+                _try("meeting_hotkey rollback", meeting_fn, old_meeting)
+                if MEETING_HOTKEY in changed:
+                    changed.remove(MEETING_HOTKEY)
     if want["preload"]:
         _try("preload", app._preload_speech_model)
     if want["overlay"]:
         fn = getattr(getattr(app, "overlay", None), "apply_prefs", None)
         if callable(fn):
             _try("overlay", fn)
+    if want["app_theme"]:
+        fn = getattr(app, "apply_app_theme", None)
+        if callable(fn):
+            _try("app_theme", fn)
     if want["la_private"]:
         la = getattr(app, "live_assist", None)
         fn = getattr(la, "set_private", None)

@@ -14,7 +14,8 @@ Integration notes for Wave 4
   ("guest" | "free" | "pro"), badge ("GUEST" | "FREE" | "PRO"), pro, plan,
   plan_label ("Monthly" | "Annual" | "Trial" | "Admin" | "Free" | ""),
   on_trial, trial_days_left,   plan_line ("Annual · renews 4 Oct 2027",
-  "Annual · ends 4 Oct 2027", "Yearly · committed until 4 Oct 2027", "Free"),
+  "Annual · ends 4 Oct 2027", "Yearly · committed until 4 Oct 2027", "Free",
+  and "Pro · until 18 Dec 2026" when Pro comes only from invites - plan "invite"),
   smart_tries_left / smart_tries_total / smart_text ("Unlimited",
   "Sign in to use them"), is_admin, admin_tier, and buttons
   {sign_in, sign_out, upgrade, manage, delete, admin}.
@@ -54,6 +55,7 @@ FEEDBACK_MAX_IMAGE_BYTES = 6_000_000
 _PLAN_LABELS = {
     "monthly": "Monthly", "annual": "Annual", "yearly": "Yearly",
     "lifetime": "Lifetime", "admin": "Admin",
+    "invite": "Pro",            # Pro from Invite friends only (a claimed month, a friend's 2 weeks)
 }
 
 # ── what a guest (and anyone else) is called and offered: ONE place ──────────
@@ -98,6 +100,17 @@ def trial_days_left(auth, now=None):
     return max(0, math.ceil((end - now).total_seconds() / 86400.0))
 
 
+def invite_badge(auth, now=None):
+    """The sidebar's pill when Pro comes only from invites (my_entitlement plan "invite"): "Pro · 14 days" -
+    the days left, rounded up; "" for any other plan (the plain PRO pill)."""
+    if not entitlements.is_invite_plan(auth):
+        return ""
+    days = trial_days_left(auth, now)
+    if days <= 0:
+        return ""
+    return "Pro · %d day%s" % (days, "" if days == 1 else "s")
+
+
 def plan_label(plan):
     return _PLAN_LABELS.get(str(plan or "").lower(), "")
 
@@ -115,6 +128,10 @@ def _plan_line(auth, pro, signed_in, on_trial, days, plan):
         return "Admin"
     if plan == "lifetime":
         return "Lifetime"
+    if plan == entitlements.PLAN_INVITE:
+        # Pro from invites only: no renewal, no portal - it simply ends.
+        when = format_date(getattr(auth, "period_end", None))
+        return f"Pro · until {when}" if when else "Pro"
     commitment = format_date(getattr(auth, "commitment_ends_at", None))
     cancels = format_date(getattr(auth, "cancels_at", None)) if getattr(auth, "cancels_at", None) else ""
     if plan == "yearly" and commitment:
