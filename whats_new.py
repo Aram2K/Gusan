@@ -28,6 +28,22 @@ KINDS = {
 }
 
 NOTES = (
+    ("2.1.11", (
+        ("new", "Dark mode",
+         "Gusan follows your computer's light or dark look. Pick one yourself in Settings."),
+        ("new", "Invite friends",
+         "Share your link or code: a friend gets 2 weeks of Pro, and every 3 who join give you a month."),
+        ("new", "Speaker names in meetings",
+         "Notes show who spoke, by name or as Speaker 1, 2, 3. Rename a speaker and every line follows."),
+        ("new", "Meetings follow your headset",
+         "Plug in a headset or a microphone mid-call and Gusan records from it right away."),
+        ("new", "Alt+M starts a meeting",
+         "Start recording a meeting from anywhere (Ctrl+M on a Mac)."),
+        ("better", "Saved while you record",
+         "If Gusan closes mid-call, the recording is kept and its notes are written when it opens again."),
+        ("better", "Still recording?",
+         "After every hour of a meeting, Gusan asks whether to keep recording."),
+    )),
     ("2.1.10", (
         ("better", "Quicker everywhere",
          "Pages and cloud requests open sooner, and Gusan holds much less memory."),
