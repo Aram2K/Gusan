@@ -70,9 +70,13 @@ def newest_definition(name):
 
 
 class TestMigrationShape(unittest.TestCase):
-    def test_the_file_names_sort_last_and_their_prefixes_are_unique(self):
+    def test_the_file_names_sort_after_the_older_ones_and_their_prefixes_are_unique(self):
+        # The two run one after the other, after every migration before them (later ones, like
+        # 202611280001_cloud_meetings.sql, come after both).
         names = sorted(p.name for p in MIGRATIONS.glob("*.sql"))
-        self.assertEqual(names[-2:], [SQL_PATH.name, HARD_PATH.name])
+        at = names.index(SQL_PATH.name)
+        self.assertEqual(names[at:at + 2], [SQL_PATH.name, HARD_PATH.name])
+        self.assertTrue(all(n < "202611180001" for n in names[:at]))
         for path in (SQL_PATH, HARD_PATH):
             prefix = path.name.split("_")[0]
             self.assertEqual([n for n in names if n.startswith(prefix + "_")], [path.name])

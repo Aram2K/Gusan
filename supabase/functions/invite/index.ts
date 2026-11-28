@@ -51,6 +51,7 @@
 // and info / visit carry none.
 
 import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { assistantRefusal, isAssistantToken } from "../_shared/assistant_token.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
@@ -371,6 +372,8 @@ async function visit(req: Request, body: Record<string, unknown>): Promise<Respo
 
 async function signedIn(req: Request, action: string, body: Record<string, unknown>): Promise<Response> {
   const authHeader = req.headers.get("Authorization") ?? "";
+  // An AI assistant's token (the Gusan connector) may only read meetings, never act here.
+  if (isAssistantToken(authHeader)) return assistantRefusal(cors);
   if (!authHeader.startsWith("Bearer ")) return json({ error: "unauthorized" }, 401);
   const db = service();
   if (!ANON_KEY || !SUPABASE_URL || !db) return json({ error: "server_misconfigured" }, 503);

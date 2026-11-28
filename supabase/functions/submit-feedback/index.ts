@@ -14,6 +14,7 @@
 // Deploy with verify_jwt=false; we validate the token via auth.getUser().
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { assistantRefusal, isAssistantToken } from "../_shared/assistant_token.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
@@ -46,6 +47,8 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
 
   const authHeader = req.headers.get("Authorization") ?? "";
+  // An AI assistant's token (the Gusan connector) may only read meetings, never act here.
+  if (isAssistantToken(authHeader)) return assistantRefusal(cors);
   if (!authHeader.startsWith("Bearer ")) return json({ error: "unauthorized" }, 401);
 
   const supa = createClient(SUPABASE_URL, ANON_KEY, {
